@@ -220,6 +220,7 @@ impl From<ExecutionError> for WebError {
             | ExecutionError::ApprovalInvalidated { .. }
             | ExecutionError::ReconciliationUnresolvable { .. }
             | ExecutionError::ReconciliationNotResolvable { .. }
+            | ExecutionError::SettlementRecoveryUnavailable { .. }
             | ExecutionError::ModeTransitionForbidden { .. } => Self::Conflict(error.to_string()),
             ExecutionError::ReconciliationResolveInvalid { .. } => {
                 Self::BadRequest(error.to_string())

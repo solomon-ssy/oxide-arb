@@ -803,7 +803,8 @@ pg_enum! {
     }
 }
 
-wire_enum! {
+pg_enum! {
+    type_name = "qp_exit_settlement_mode",
     /// Deterministic layer compared by one parity event.
     pub enum FeatureParityStage {
         Selection => "selection",
@@ -817,7 +818,8 @@ wire_enum! {
     }
 }
 
-wire_enum! {
+pg_enum! {
+    type_name = "qp_redeem_policy",
     /// Row-level result recorded in the parity event fact stream.
     pub enum FeatureParityEventStatus {
         Matched => "matched",
@@ -1238,7 +1240,8 @@ pg_enum! {
     }
 }
 
-wire_enum! {
+pg_enum! {
+    type_name = "qp_exit_settlement_mode",
     /// Whether an open lot should leave the market before resolution or be held
     /// until the CTF payout vector is available.
     @derive(Default)
@@ -1251,7 +1254,8 @@ wire_enum! {
     }
 }
 
-wire_enum! {
+pg_enum! {
+    type_name = "qp_redeem_policy",
     /// Whether a resolved hold-to-resolution lot is redeemed by the system or
     /// left for an operator.
     @derive(Default)
@@ -1269,10 +1273,9 @@ pg_enum! {
     /// Polymarket wallet shape used by money-moving on-chain actions.
     ///
     /// Drives both the venue signature type and the on-chain settlement route. An
-    /// EOA signs and pays gas directly (funder == signer). A Polymarket Proxy or
-    /// Gnosis Safe holds the collateral/positions and is driven by the EOA signer
-    /// through the gasless relayer; the funder is the CREATE2-derived proxy/safe
-    /// address controlled by the signer EOA.
+    /// EOA signs and pays gas directly (funder == signer). Polymarket Proxy,
+    /// Gnosis Safe, and Deposit Wallet contracts hold collateral/positions and
+    /// are driven through the gasless relayer by their controlling signer.
     @derive(Default, schemars::JsonSchema)
     pub enum ExecutionWalletKind {
         /// Externally owned account; signer address must equal funder address.
@@ -1284,6 +1287,9 @@ pg_enum! {
         /// Gnosis Safe (1-of-1, browser-wallet users); funder is the CREATE2-
         /// derived Safe address controlled by the EOA owner.
         GnosisSafe => "gnosis_safe",
+        /// Official Deposit Wallet; funder is the deterministic current
+        /// `BeaconProxy` wallet and CLOB orders use `Poly1271`.
+        DepositWallet => "deposit_wallet",
     }
 }
 

@@ -6,7 +6,7 @@ mod public_read_smoke;
 use std::{
     env, fs,
     fs::{File, OpenOptions, Permissions},
-    io::{BufReader, Read, Write},
+    io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::ExitCode,
@@ -14,28 +14,21 @@ use std::{
 };
 
 use anyhow::{Context, Error, Result, bail};
-use async_trait::async_trait;
-use blake3::Hasher;
 use chrono::{DateTime, Duration, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use quant_pivot_allocator as _;
-use quant_pivot_error::QuantResult;
 use quant_pivot_migration::{
-    acquire_lifecycle_lease, apply_under_lifecycle_lease, inspect_preproduction_postgres,
-    plan as plan_postgres_migrations, release_lifecycle_lease, reset_preproduction_postgres,
+    acquire_schema_mutation_lease, apply_under_schema_mutation_lease,
+    inspect_preproduction_postgres, plan as plan_postgres_migrations,
+    release_schema_mutation_lease, reset_preproduction_postgres,
 };
 use quant_pivot_models::{
-    config::{ClickHouseConfig, CompiledBuildIdentity, DeployConfig, PostgresConfig},
-    domain::{
-        api::{ConfigApiContractSchema, ResearchModelApiContractSchema},
-        governance::NewProductionEvidence,
-        ports::{LifecycleSchemaVerificationPort, VerifiedSchemaFingerprints},
-    },
-    enums::runtime_config::{PolicyActorKind, ProductionEvidenceKind},
+    config::{ClickHouseConfig, DeployConfig, PostgresConfig},
+    domain::api::{ConfigApiContractSchema, ResearchModelApiContractSchema},
     hashing::CanonicalDigest,
-    runtime_config::DecisionPolicySnapshot,
+    runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
     security::hash_password,
-    types::{ArtifactUri, ContentHash, PreproductionResetNonce, ProductionEvidenceId},
+    types::{ContentHash, PreproductionResetNonce},
 };
 use quant_pivot_repository::{
     postgres::{
@@ -52,7 +45,6 @@ use quant_pivot_storage::{
         render_schema_manifest as render_clickhouse_schema_manifest,
         reset_preproduction_database as reset_clickhouse_preproduction_database, verify_schema,
     },
-    evidence::FileProductionEvidenceVerifier,
     postgres::{
         PostgresPool,
         migration::{
@@ -64,11 +56,10 @@ use quant_pivot_storage::{
 };
 use quant_pivot_system_tests::{performance::PerformanceProfile, production_stack};
 use rustls::crypto::aws_lc_rs;
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
 use testcontainers::{ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
-use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -139,9 +130,6 @@ enum Commands {
         #[arg(long, default_value = "schema/api/research-model-v1.schema.json")]
         output: PathBuf,
     },
-    /// Record content-addressed WORM evidence for the irreversible production seal.
-    #[command(name = "production-evidence")]
-    ProductionEvidence(ProductionEvidenceArgs),
     /// Plan, apply, or verify the exact preproduction clean-boot reset scope.
     #[command(name = "preproduction-reset")]
     PreproductionReset {
@@ -220,39 +208,6 @@ struct ProductionStackServeArgs {
 struct ProductionStackVerifyArgs {
     #[arg(long, default_value_t = 2)]
     runs: u16,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum ProductionEvidenceKindArg {
-    BackupRestore,
-    ProtectedConfigEndToEnd,
-}
-
-impl From<ProductionEvidenceKindArg> for ProductionEvidenceKind {
-    fn from(value: ProductionEvidenceKindArg) -> Self {
-        match value {
-            ProductionEvidenceKindArg::BackupRestore => Self::BackupRestore,
-            ProductionEvidenceKindArg::ProtectedConfigEndToEnd => Self::ProtectedConfigEndToEnd,
-        }
-    }
-}
-
-#[derive(Args)]
-struct ProductionEvidenceArgs {
-    #[command(flatten)]
-    config: ConfigDirArgs,
-    #[arg(long, value_enum)]
-    kind: ProductionEvidenceKindArg,
-    /// Completed backup/restore or protected-E2E evidence bundle to content-address.
-    #[arg(long)]
-    artifact_file: PathBuf,
-    /// Immutable evidence store directory shared with the sealed deployment.
-    #[arg(long, default_value = ".local/production-evidence")]
-    evidence_dir: PathBuf,
-    #[arg(long)]
-    reason: String,
-    #[arg(long)]
-    actor_label: String,
 }
 
 #[derive(Subcommand)]
@@ -417,7 +372,6 @@ async fn run() -> Result<()> {
         }
         Commands::ConfigApiSchema { output } => write_config_api_schema(&output),
         Commands::ResearchModelApiSchema { output } => write_research_model_api_schema(&output),
-        Commands::ProductionEvidence(args) => record_production_evidence(args).await,
         Commands::PreproductionReset { command } => preproduction_reset(command).await,
     }
 }
@@ -452,172 +406,6 @@ fn write_research_model_api_schema(output: &PathBuf) -> Result<()> {
     fs::write(output, rendered).with_context(|| format!("write {}", output.display()))?;
     println!("generated {}", output.display());
     Ok(())
-}
-
-struct XtaskLiveSchemaVerification<'a> {
-    postgres: &'a PostgresPool,
-    clickhouse: &'a ClickHousePool,
-}
-
-#[async_trait]
-impl LifecycleSchemaVerificationPort for XtaskLiveSchemaVerification<'_> {
-    async fn verify_live(&self) -> QuantResult<VerifiedSchemaFingerprints> {
-        let (postgres, clickhouse) = tokio::try_join!(
-            verify_postgres_schema(self.postgres.connection()),
-            self.clickhouse.verify_schema(),
-        )?;
-        Ok(VerifiedSchemaFingerprints {
-            postgres_schema_fingerprint: postgres.schema_fingerprint,
-            clickhouse_schema_fingerprint: clickhouse.schema_fingerprint,
-        })
-    }
-}
-
-async fn record_production_evidence(args: ProductionEvidenceArgs) -> Result<()> {
-    if args.reason.trim().is_empty() || args.actor_label.trim().is_empty() {
-        bail!("production evidence requires non-empty --reason and --actor-label");
-    }
-    let config_dir = args
-        .config
-        .config_dir
-        .to_str()
-        .context("production evidence config directory is not valid UTF-8")?;
-    let deploy = DeployConfig::load(config_dir).context("load runtime deploy config")?;
-    let build_identity =
-        CompiledBuildIdentity::compiled().context("load compiled build identity")?;
-    if !build_identity.clean {
-        bail!("production evidence can only be recorded by a clean compiled Git artifact");
-    }
-
-    let postgres = PostgresPool::connect_existing(&deploy.db.postgres)
-        .await
-        .context("connect configured PostgreSQL identity")?;
-    let clickhouse = ClickHousePool::connect(&deploy.db.clickhouse)
-        .await
-        .context("connect configured ClickHouse identity")?;
-    let schema_verification = XtaskLiveSchemaVerification {
-        postgres: &postgres,
-        clickhouse: &clickhouse,
-    };
-    let live_schema = schema_verification
-        .verify_live()
-        .await
-        .context("verify live PG/CH schema")?;
-    let repository = PgPolicyRepository::new(postgres.connection().clone());
-    let bundle = repository
-        .load_current_bundle()
-        .await
-        .context("load DB-authoritative active policy bundle")?
-        .context("cannot record production evidence without an active policy bundle")?;
-    let (artifact_uri, evidence_hash) =
-        persist_evidence_artifact(&args.artifact_file, &args.evidence_dir)?;
-    let lease = acquire_lifecycle_lease(&deploy.db.postgres)
-        .await
-        .context("acquire production-evidence lifecycle lease")?;
-    let record_result = tokio::select! {
-      result = repository.record_production_evidence(
-            NewProductionEvidence {
-                production_evidence_id: ProductionEvidenceId::from_v7(),
-                kind: args.kind.into(),
-                artifact_uri,
-                evidence_hash,
-                build_commit: build_identity.build_commit,
-                postgres_schema_fingerprint: live_schema.postgres_schema_fingerprint,
-                clickhouse_schema_fingerprint: live_schema.clickhouse_schema_fingerprint,
-                policy_bundle_generation: bundle.generation,
-                decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
-                policy_bundle_hash: bundle.snapshot_hash,
-                recorded_by_kind: PolicyActorKind::Operator,
-                recorded_by_user_id: None,
-                recorded_by_label: args.actor_label,
-                reason: args.reason,
-                observed_at: Utc::now(),
-            },
-            &schema_verification,
-            &FileProductionEvidenceVerifier,
-        ) => result.map_err(anyhow::Error::from),
-      () = lease.cancelled() => Err(anyhow::anyhow!(
-          "canonical PostgreSQL lifecycle lease was lost while recording production evidence"
-      )),
-    };
-    let active_result = lease.ensure_active().map_err(Error::from);
-    let release_result = release_lifecycle_lease(lease).await.map_err(Error::from);
-    let recorded = match (record_result, active_result, release_result) {
-        (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => {
-            return Err(error.context("record exact production evidence under lifecycle lease"));
-        }
-        (Ok(recorded), Ok(()), Ok(())) => recorded,
-    };
-    println!(
-        "production evidence recorded: id={} kind={} hash={} artifact={}",
-        recorded.production_evidence_id,
-        recorded.kind.as_str(),
-        recorded.evidence_hash,
-        recorded.artifact_uri,
-    );
-    postgres.close().await;
-    Ok(())
-}
-
-fn persist_evidence_artifact(
-    source: &Path,
-    evidence_dir: &Path,
-) -> Result<(ArtifactUri, ContentHash)> {
-    let source_metadata = fs::symlink_metadata(source)
-        .with_context(|| format!("inspect evidence source {}", source.display()))?;
-    if !source_metadata.is_file() || source_metadata.file_type().is_symlink() {
-        bail!("evidence source must be a regular non-symlink file");
-    }
-    let source_hash = hash_file(source)?;
-    fs::create_dir_all(evidence_dir)
-        .with_context(|| format!("create evidence directory {}", evidence_dir.display()))?;
-    let destination = evidence_dir.join(format!("{}.evidence", source_hash.hex()));
-    if destination.exists() {
-        if hash_file(&destination)? != source_hash {
-            bail!(
-                "existing content-addressed evidence artifact {} has the wrong hash",
-                destination.display()
-            );
-        }
-    } else {
-        fs::copy(source, &destination).with_context(|| {
-            format!(
-                "copy evidence {} to {}",
-                source.display(),
-                destination.display()
-            )
-        })?;
-        if hash_file(&destination)? != source_hash {
-            fs::remove_file(&destination)
-                .with_context(|| format!("remove torn evidence copy {}", destination.display()))?;
-            bail!("evidence source changed while it was being content-addressed");
-        }
-    }
-    fs::set_permissions(&destination, Permissions::from_mode(0o444))
-        .with_context(|| format!("seal evidence artifact {} read-only", destination.display()))?;
-    let canonical = fs::canonicalize(&destination)
-        .with_context(|| format!("canonicalize evidence artifact {}", destination.display()))?;
-    let uri = Url::from_file_path(&canonical)
-        .map_err(|()| anyhow::anyhow!("evidence artifact path cannot be represented as file://"))?;
-    let artifact_uri = ArtifactUri::parse(uri.to_string()).context("validate evidence URI")?;
-    Ok((artifact_uri, source_hash))
-}
-
-fn hash_file(path: &Path) -> Result<ContentHash> {
-    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = Hasher::new();
-    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .with_context(|| format!("read {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
 }
 
 const RESET_JOURNAL_FORMAT_VERSION: u32 = 2;
@@ -801,15 +589,15 @@ async fn preproduction_reset_apply(args: PreproductionResetApplyArgs) -> Result<
         bail!("PostgreSQL target still has active connections");
     }
 
-    let lease = acquire_lifecycle_lease(&deploy.db.postgres)
+    let lease = acquire_schema_mutation_lease(&deploy.db.postgres)
         .await
-        .context("acquire reset lifecycle lease")?;
+        .context("acquire reset schema mutation lease")?;
     let locked_inventory = reset_inventory(&deploy).await?;
     if locked_inventory != journal.inventory || locked_inventory.postgres_connection_count != 0 {
-        release_lifecycle_lease(lease)
+        release_schema_mutation_lease(lease)
             .await
-            .context("release reset lifecycle lease after stale plan")?;
-        bail!("reset target changed while acquiring the lifecycle lease; create a new plan");
+            .context("release reset schema mutation lease after stale plan")?;
+        bail!("reset target changed while acquiring the schema mutation lease; create a new plan");
     }
     transition_reset_journal(&args.journal_file, &mut journal, ResetStage::Applying)?;
 
@@ -843,7 +631,7 @@ async fn preproduction_reset_apply(args: PreproductionResetApplyArgs) -> Result<
         let postgres = PostgresPool::connect_schema(&deploy.db.postgres)
             .await
             .context("connect recreated PostgreSQL database")?;
-        apply_under_lifecycle_lease(postgres.connection(), &lease)
+        apply_under_schema_mutation_lease(postgres.connection(), &lease)
             .await
             .context("apply unique PostgreSQL boot migration")?;
         let bootstrap_admin_password_hash = bootstrap_admin_password_hash()?;
@@ -853,18 +641,11 @@ async fn preproduction_reset_apply(args: PreproductionResetApplyArgs) -> Result<
         )
         .await
         .context("finalize recreated PostgreSQL schema")?;
-        PgModelRegistryRepository::new(postgres.connection().clone())
-            .ensure_builtin_research_profiles()
-            .await
-            .context("seed immutable research profile artifacts")?;
-        let policy_repository = PgPolicyRepository::new(postgres.connection().clone());
-        let policy_bundle = ensure_default_policy_bundle(
-            &policy_repository,
-            "quant-pivot-xtask",
+        let policy_bundle = ensure_postgres_boot_domain_facts(
+            postgres.connection(),
             "guarded preproduction clean boot",
         )
-        .await
-        .context("seed canonical six-resource policy bundle")?;
+        .await?;
         let postgres_status = verify_postgres_schema(postgres.connection())
             .await
             .context("verify recreated PostgreSQL schema")?;
@@ -907,12 +688,12 @@ async fn preproduction_reset_apply(args: PreproductionResetApplyArgs) -> Result<
         Ok::<(), anyhow::Error>(())
       } => result,
       () = lease.cancelled() => Err(anyhow::anyhow!(
-          "canonical PostgreSQL lifecycle lease was lost during reset"
+          "canonical PostgreSQL schema mutation lease was lost during reset"
       )),
     };
-    let release_result = release_lifecycle_lease(lease)
+    let release_result = release_schema_mutation_lease(lease)
         .await
-        .context("release reset lifecycle lease");
+        .context("release reset schema mutation lease");
     match (mutation_result, release_result) {
         (Err(error), _) | (Ok(()), Err(error)) => {
             mark_reset_journal_failed(&args.journal_file, &mut journal)?;
@@ -932,19 +713,19 @@ async fn preproduction_reset_verify(args: PreproductionResetVerifyArgs) -> Resul
     let deploy = load_reset_deploy(&args.config)?;
     let journal = read_reset_journal(&args.journal_file)?;
     validate_completed_reset_journal(&journal, &deploy, args.operation_id)?;
-    let lease = acquire_lifecycle_lease(&deploy.db.postgres)
+    let lease = acquire_schema_mutation_lease(&deploy.db.postgres)
         .await
-        .context("acquire reset verification lifecycle lease")?;
+        .context("acquire reset verification schema mutation lease")?;
     let verification_result = tokio::select! {
         result = preproduction_reset_verify_under_lease(&deploy) => result,
         () = lease.cancelled() => Err(anyhow::anyhow!(
-            "canonical PostgreSQL lifecycle lease was lost during reset verification"
+            "canonical PostgreSQL schema mutation lease was lost during reset verification"
         )),
     };
     let active_result = lease.ensure_active().map_err(Error::from);
-    let release_result = release_lifecycle_lease(lease)
+    let release_result = release_schema_mutation_lease(lease)
         .await
-        .context("release reset verification lifecycle lease");
+        .context("release reset verification schema mutation lease");
     match (verification_result, active_result, release_result) {
         (Err(error), _, _) | (Ok(()), Err(error), _) | (Ok(()), Ok(()), Err(error)) => Err(error),
         (Ok(()), Ok(()), Ok(())) => {
@@ -955,12 +736,6 @@ async fn preproduction_reset_verify(args: PreproductionResetVerifyArgs) -> Resul
 }
 
 async fn preproduction_reset_verify_under_lease(deploy: &DeployConfig) -> Result<()> {
-    let inventory = inspect_preproduction_postgres(&deploy.db.postgres)
-        .await
-        .context("inspect PostgreSQL reset target")?;
-    if inventory.production_baseline_exists {
-        bail!("production baseline exists; this environment is not resettable");
-    }
     let postgres = PostgresPool::connect_existing(&deploy.db.postgres)
         .await
         .context("connect configured PostgreSQL identity")?;
@@ -1036,7 +811,12 @@ fn load_reset_deploy(args: &ConfigDirArgs) -> Result<DeployConfig> {
         .config_dir
         .to_str()
         .context("preproduction reset config directory is not valid UTF-8")?;
-    DeployConfig::load_for_migration(config_dir).context("load reset deploy config")
+    let deploy =
+        DeployConfig::load_for_migration(config_dir).context("load reset deploy config")?;
+    if !deploy.deployment.permits_destructive_reset() {
+        bail!("destructive fresh-boot reset is forbidden in the production environment");
+    }
+    Ok(deploy)
 }
 
 async fn reset_inventory(deploy: &DeployConfig) -> Result<ResetObjectInventory> {
@@ -1067,9 +847,6 @@ async fn reset_inventory(deploy: &DeployConfig) -> Result<ResetObjectInventory> 
                 .map_err(anyhow::Error::from)
         },
     )?;
-    if postgres.production_baseline_exists {
-        bail!("production baseline exists; preproduction reset is forbidden");
-    }
     Ok(ResetObjectInventory {
         postgres_database_exists: postgres.database_exists,
         postgres_object_count: postgres.object_count,
@@ -1336,66 +1113,26 @@ async fn postgres_schema(command: PostgresSchemaCommand) -> Result<()> {
             pool.close().await;
             Ok(())
         }
-        PostgresSchemaCommand::Apply(_) => {
-            let bootstrap_admin_password_hash = bootstrap_admin_password_hash()?;
-            let pool = PostgresPool::connect_schema(&deploy.db.postgres)
-                .await
-                .context("connect PostgreSQL schema identity")?;
-            let lease = acquire_lifecycle_lease(&deploy.db.postgres)
-                .await
-                .context("acquire PostgreSQL deployment lifecycle lease")?;
-            let deployment_result = tokio::select! {
-                result = async {
-                    apply_under_lifecycle_lease(pool.connection(), &lease)
-                        .await
-                        .context("apply audited SeaORM PostgreSQL migrations")?;
-                    finalize_schema_deployment(pool.connection(), &bootstrap_admin_password_hash)
-                        .await
-                        .context("finalize PostgreSQL schema deployment")
-                } => result,
-                () = lease.cancelled() => Err(anyhow::anyhow!(
-                    "canonical PostgreSQL lifecycle lease was lost during schema deployment"
-                )),
-            };
-            let active_result = lease.ensure_active().map_err(Error::from);
-            let release_result = release_lifecycle_lease(lease)
-                .await
-                .context("release PostgreSQL deployment lifecycle lease");
-            let status = match (deployment_result, active_result, release_result) {
-                (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => {
-                    return Err(error);
-                }
-                (Ok(status), Ok(()), Ok(())) => status,
-            };
-            println!(
-                "PostgreSQL schema deployed: version={}, migrations={}, tables={}, indexes={}",
-                status.current_version,
-                status.migration_count,
-                status.required_table_count,
-                status.required_index_count
-            );
-            pool.close().await;
-            Ok(())
-        }
+        PostgresSchemaCommand::Apply(_) => apply_postgres_schema(&deploy).await,
         PostgresSchemaCommand::Verify(_) => {
             let pool = PostgresPool::connect_existing(&deploy.db.postgres)
                 .await
                 .context("connect configured PostgreSQL identity")?;
-            let lease = acquire_lifecycle_lease(&deploy.db.postgres)
+            let lease = acquire_schema_mutation_lease(&deploy.db.postgres)
                 .await
-                .context("acquire PostgreSQL verification lifecycle lease")?;
+                .context("acquire PostgreSQL verification schema mutation lease")?;
             let verification_result = tokio::select! {
                 result = verify_postgres_schema(pool.connection()) => {
                     result.context("verify PostgreSQL schema")
                 }
                 () = lease.cancelled() => Err(anyhow::anyhow!(
-                    "canonical PostgreSQL lifecycle lease was lost during schema verification"
+                    "canonical PostgreSQL schema mutation lease was lost during schema verification"
                 )),
             };
             let active_result = lease.ensure_active().map_err(Error::from);
-            let release_result = release_lifecycle_lease(lease)
+            let release_result = release_schema_mutation_lease(lease)
                 .await
-                .context("release PostgreSQL verification lifecycle lease");
+                .context("release PostgreSQL verification schema mutation lease");
             let status = match (verification_result, active_result, release_result) {
                 (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => {
                     return Err(error);
@@ -1438,6 +1175,78 @@ async fn postgres_schema(command: PostgresSchemaCommand) -> Result<()> {
     }
 }
 
+async fn apply_postgres_schema(deploy: &DeployConfig) -> Result<()> {
+    let bootstrap_admin_password_hash = bootstrap_admin_password_hash()?;
+    let pool = PostgresPool::connect_schema(&deploy.db.postgres)
+        .await
+        .context("connect PostgreSQL schema identity")?;
+    let lease = acquire_schema_mutation_lease(&deploy.db.postgres)
+        .await
+        .context("acquire PostgreSQL deployment schema mutation lease")?;
+    let deployment_result = tokio::select! {
+        result = async {
+            apply_under_schema_mutation_lease(pool.connection(), &lease)
+                .await
+                .context("apply audited SeaORM PostgreSQL migrations")?;
+            let status =
+                finalize_schema_deployment(pool.connection(), &bootstrap_admin_password_hash)
+                    .await
+                    .context("finalize PostgreSQL schema deployment")?;
+            let policy_bundle = ensure_postgres_boot_domain_facts(
+                pool.connection(),
+                "canonical fresh PostgreSQL deployment",
+            )
+            .await?;
+            Ok::<_, Error>((status, policy_bundle))
+        } => result,
+        () = lease.cancelled() => Err(anyhow::anyhow!(
+            "canonical PostgreSQL schema mutation lease was lost during schema deployment"
+        )),
+    };
+    let active_result = lease.ensure_active().map_err(Error::from);
+    let release_result = release_schema_mutation_lease(lease)
+        .await
+        .context("release PostgreSQL deployment schema mutation lease");
+    let (status, policy_bundle) = match (deployment_result, active_result, release_result) {
+        (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => {
+            return Err(error);
+        }
+        (Ok(deployment), Ok(()), Ok(())) => deployment,
+    };
+    println!(
+        "PostgreSQL schema deployed: version={}, migrations={}, tables={}, indexes={}",
+        status.current_version,
+        status.migration_count,
+        status.required_table_count,
+        status.required_index_count
+    );
+    println!(
+        "Policy bundle deployed: generation={}, snapshot_id={}, snapshot_hash={}",
+        policy_bundle.generation,
+        policy_bundle.decision_policy_snapshot_id,
+        policy_bundle.snapshot_hash
+    );
+    pool.close().await;
+    Ok(())
+}
+
+async fn ensure_postgres_boot_domain_facts(
+    db: &DatabaseConnection,
+    reason: &str,
+) -> Result<ActivePolicyBundle> {
+    PgModelRegistryRepository::new(db.clone())
+        .ensure_builtin_research_profiles()
+        .await
+        .context("seed immutable research profile artifacts")?;
+    ensure_default_policy_bundle(
+        &PgPolicyRepository::new(db.clone()),
+        "quant-pivot-xtask",
+        reason,
+    )
+    .await
+    .context("seed canonical six-resource policy bundle")
+}
+
 async fn generate_clean_postgres_manifest() -> Result<()> {
     const DATABASE: &str = "quant_pivot_manifest_codegen";
 
@@ -1472,12 +1281,12 @@ async fn generate_clean_postgres_manifest() -> Result<()> {
     let bootstrap_password = Zeroizing::new(Uuid::now_v7().to_string());
     let bootstrap_password_hash =
         hash_password(bootstrap_password.as_str()).context("hash disposable bootstrap password")?;
-    let lease = acquire_lifecycle_lease(&config)
+    let lease = acquire_schema_mutation_lease(&config)
         .await
-        .context("acquire disposable manifest lifecycle lease")?;
+        .context("acquire disposable manifest schema mutation lease")?;
     let manifest_result = tokio::select! {
         result = async {
-            apply_under_lifecycle_lease(pool.connection(), &lease)
+            apply_under_schema_mutation_lease(pool.connection(), &lease)
                 .await
                 .context("apply migrations to disposable PostgreSQL manifest database")?;
             generate_disposable_schema_manifest(pool.connection(), &bootstrap_password_hash)
@@ -1485,13 +1294,13 @@ async fn generate_clean_postgres_manifest() -> Result<()> {
                 .context("generate disposable PostgreSQL semantic manifest")
         } => result,
         () = lease.cancelled() => Err(anyhow::anyhow!(
-            "canonical PostgreSQL lifecycle lease was lost during manifest generation"
+            "canonical PostgreSQL schema mutation lease was lost during manifest generation"
         )),
     };
     let active_result = lease.ensure_active().map_err(Error::from);
-    let release_result = release_lifecycle_lease(lease)
+    let release_result = release_schema_mutation_lease(lease)
         .await
-        .context("release disposable manifest lifecycle lease");
+        .context("release disposable manifest schema mutation lease");
     let manifest = match (manifest_result, active_result, release_result) {
         (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => {
             return Err(error);
@@ -1546,23 +1355,13 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
         &command,
         ClickHouseSchemaCommand::ApplyOnline(_) | ClickHouseSchemaCommand::ApplyOffline(_)
     );
-    let lifecycle_lease =
+    let schema_mutation_lease =
         if mutates_schema || matches!(&command, ClickHouseSchemaCommand::Verify(_)) {
-            let lease = acquire_lifecycle_lease(&deploy.db.postgres)
-                .await
-                .context("acquire cross-system lifecycle lease")?;
-            if mutates_schema {
-                let postgres_inventory = inspect_preproduction_postgres(&deploy.db.postgres)
+            Some(
+                acquire_schema_mutation_lease(&deploy.db.postgres)
                     .await
-                    .context("inspect production baseline under lifecycle lease")?;
-                if postgres_inventory.production_baseline_exists {
-                    release_lifecycle_lease(lease)
-                        .await
-                        .context("release lifecycle lease after frozen-baseline denial")?;
-                    bail!("production baseline is frozen; ClickHouse schema mutation is forbidden");
-                }
-            }
-            Some(lease)
+                    .context("acquire cross-system schema mutation lease")?,
+            )
         } else {
             None
         };
@@ -1587,18 +1386,18 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
             Ok(())
         }
         ClickHouseSchemaCommand::ApplyOnline(_) => {
-            let status_result = if let Some(lease) = lifecycle_lease.as_ref() {
+            let status_result = if let Some(lease) = schema_mutation_lease.as_ref() {
                 tokio::select! {
                 result = apply_online_schema_migrations(config) => {
                     result.context("deploy ClickHouse schema")
                 }
                 () = lease.cancelled() => Err(anyhow::anyhow!(
-                    "canonical PostgreSQL lifecycle lease was lost during ClickHouse migration"
+                    "canonical PostgreSQL schema mutation lease was lost during ClickHouse migration"
                 )),
                 }
             } else {
                 Err(anyhow::anyhow!(
-                    "ClickHouse mutation lifecycle lease is absent"
+                    "ClickHouse schema mutation lease is absent"
                 ))
             };
             status_result.map(|status| {
@@ -1609,18 +1408,18 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
             })
         }
         ClickHouseSchemaCommand::ApplyOffline(_) => {
-            let status_result = if let Some(lease) = lifecycle_lease.as_ref() {
+            let status_result = if let Some(lease) = schema_mutation_lease.as_ref() {
                 tokio::select! {
                 result = apply_offline_schema_migrations(config) => {
                     result.context("deploy offline ClickHouse schema")
                 }
                 () = lease.cancelled() => Err(anyhow::anyhow!(
-                    "canonical PostgreSQL lifecycle lease was lost during offline ClickHouse migration"
+                    "canonical PostgreSQL schema mutation lease was lost during offline ClickHouse migration"
                 )),
                 }
             } else {
                 Err(anyhow::anyhow!(
-                    "ClickHouse mutation lifecycle lease is absent"
+                    "ClickHouse schema mutation lease is absent"
                 ))
             };
             status_result.map(|status| {
@@ -1631,16 +1430,16 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
             })
         }
         ClickHouseSchemaCommand::Verify(_) => {
-            let status_result = if let Some(lease) = lifecycle_lease.as_ref() {
+            let status_result = if let Some(lease) = schema_mutation_lease.as_ref() {
                 tokio::select! {
                     result = verify_schema(config) => result.context("verify ClickHouse schema"),
                     () = lease.cancelled() => Err(anyhow::anyhow!(
-                        "canonical PostgreSQL lifecycle lease was lost during ClickHouse verification"
+                        "canonical PostgreSQL schema mutation lease was lost during ClickHouse verification"
                     )),
                 }
             } else {
                 Err(anyhow::anyhow!(
-                    "ClickHouse verification lifecycle lease is absent"
+                    "ClickHouse verification schema mutation lease is absent"
                 ))
             };
             status_result.map(|status| {
@@ -1665,13 +1464,13 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
             Ok(())
         }
     };
-    let active_result = lifecycle_lease
+    let active_result = schema_mutation_lease
         .as_ref()
         .map_or(Ok(()), |lease| lease.ensure_active().map_err(Error::from));
-    let release_result = match lifecycle_lease {
-        Some(lease) => release_lifecycle_lease(lease)
+    let release_result = match schema_mutation_lease {
+        Some(lease) => release_schema_mutation_lease(lease)
             .await
-            .context("release cross-system lifecycle lease"),
+            .context("release cross-system schema mutation lease"),
         None => Ok(()),
     };
     match (result, active_result, release_result) {

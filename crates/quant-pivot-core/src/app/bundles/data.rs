@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::InfraBundle;
 use crate::{
+    execution::settlement_discovery_wake::SettlementDiscoveryWake,
     governance::{LinkageResolverDeps, LinkageResolverService},
     ingest::{
         book_store::BookStore,
@@ -57,6 +58,7 @@ pub struct DataBundleDeps<'a> {
     pub infra: &'a InfraBundle,
     pub runtime: &'a DecisionPolicySnapshot,
     pub events: &'a CoreEventPublisher,
+    pub settlement_discovery_wake: &'a SettlementDiscoveryWake,
 }
 
 /// Polymarket data ingest subsystem: books, catalog, pipeline, and quality gates.
@@ -82,6 +84,8 @@ pub struct DataBundle {
     pub pit_source: Arc<dyn PointInTimeSnapshotSource>,
     /// Best-effort nudge when pipeline status changes (web readiness).
     pub status_nudge: SystemStatusNudge,
+    /// Coalesced hint shared with the durable settlement discovery worker.
+    pub settlement_discovery_wake: SettlementDiscoveryWake,
 }
 
 impl DataBundle {
@@ -208,6 +212,7 @@ impl DataBundle {
             data_quality,
             pit_source,
             status_nudge,
+            settlement_discovery_wake: deps.settlement_discovery_wake.clone(),
         })
     }
 }
@@ -281,6 +286,7 @@ fn assemble_gamma_service(
             .websocket
             .engine_subscription_window_hours,
         linkage_resolver: Some(Arc::clone(linkage_resolver)),
+        settlement_discovery_wake: deps.settlement_discovery_wake.clone(),
     }));
     (gamma_service, ws_subscription)
 }

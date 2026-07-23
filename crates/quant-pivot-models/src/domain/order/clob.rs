@@ -8,7 +8,10 @@ use crate::{
         common::{OrderType, Side},
         execution::VenueOrderStatus,
     },
-    types::{MarketId, OrderId, Price, Shares, TokenId, VenueOrderAmount},
+    types::{
+        EvmTransactionHash, MarketId, OrderId, Price, Shares, TokenId, VenueOrderAmount,
+        VenueTradeId,
+    },
 };
 
 /// Outbound CLOB order submission request.
@@ -29,7 +32,8 @@ pub struct OrderRequest {
 pub struct OrderResponse {
     pub order_id: OrderId,
     pub status: VenueOrderStatus,
-    pub tx_hash: Option<String>,
+    pub trade_ids: Vec<VenueTradeId>,
+    pub transaction_hashes: Vec<EvmTransactionHash>,
     pub filled_shares: Shares,
     pub avg_fill_price: Option<Price>,
     pub submitted_at: DateTime<Utc>,

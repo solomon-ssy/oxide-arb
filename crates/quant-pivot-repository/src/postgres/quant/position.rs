@@ -36,7 +36,10 @@ use quant_pivot_models::{
         execution::{ExecutionOrderPhase, PositionLedgerState},
         quant::ExecutionOrderState,
     },
-    types::{MarketId, OrderIntentId, PositionId, Price, RecommendationId, Shares, TokenId, Usd},
+    types::{
+        ExecutionAccountId, MarketId, OrderIntentId, PositionId, Price, RecommendationId, Shares,
+        TokenId, Usd,
+    },
 };
 use rust_decimal::Decimal;
 use sea_orm::{
@@ -186,12 +189,14 @@ impl PositionRepository for PgPositionRepository {
             .map(|rows| rows.into_iter().map(Into::into).collect())
     }
 
-    async fn find_open_by_market(
+    async fn find_open_by_market_account(
         &self,
         market_id: &MarketId,
+        execution_account_id: &ExecutionAccountId,
     ) -> Result<Vec<PositionInfo>, StorageError> {
         Entity::find()
             .filter(Column::MarketId.eq(market_id.clone()))
+            .filter(Column::ExecutionAccountId.eq(*execution_account_id))
             .filter(Column::State.is_in(OPEN_STATES))
             .all(&self.db)
             .await
@@ -292,6 +297,20 @@ pub async fn apply_fill(
             "position fill must have positive shares and non-negative cost",
         ));
     }
+    let intent = QuantOrderIntentEntity::find_by_id(fill.order_intent_id)
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| error::not_found(QUANT_ORDER_INTENT, fill.order_intent_id))?;
+    if intent.execution_account_id != fill.execution_account_id {
+        return Err(error::invariant_violation(
+            Some(QUANT_POSITION),
+            format!(
+                "position fill execution account does not match intent {}",
+                fill.order_intent_id
+            ),
+        ));
+    }
 
     let existing = Entity::find()
         .filter(Column::OrderIntentId.eq(fill.order_intent_id))
@@ -309,6 +328,7 @@ pub async fn apply_fill(
             NewPosition {
                 position_id: PositionId::from_v7(),
                 order_intent_id: fill.order_intent_id,
+                execution_account_id: fill.execution_account_id,
                 token_id: fill.token_id,
                 market_id: fill.market_id,
                 event_id: fill.event_id,
@@ -336,6 +356,15 @@ pub async fn apply_fill(
             QUANT_POSITION,
             Some(&row.order_intent_id),
             "cannot apply fill to closed position lot",
+        ));
+    }
+    if row.execution_account_id != fill.execution_account_id {
+        return Err(error::invariant_violation(
+            Some(QUANT_POSITION),
+            format!(
+                "position fill execution account mismatch for intent {}",
+                fill.order_intent_id
+            ),
         ));
     }
 

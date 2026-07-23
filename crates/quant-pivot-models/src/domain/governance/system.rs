@@ -13,30 +13,24 @@ use crate::{
         },
         ports::runtime_control::CatalogState,
     },
-    entities::{
-        policy_activation, policy_approval, policy_profile_artifact, policy_revision,
-        system_production_baseline, system_production_evidence, system_runtime_state,
-    },
+    entities::{policy_activation, policy_approval, policy_profile_artifact, policy_revision},
     enums::{
         execution::KillSwitchState,
         quant::QuantRuntimeMode,
         runtime_config::{
             ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActivationKind,
-            PolicyActorKind, PolicyApprovalDecision, PolicyRevisionStatus, ProductionEvidenceKind,
-            ProfileArtifactKind,
+            PolicyActorKind, PolicyApprovalDecision, PolicyRevisionStatus, ProfileArtifactKind,
         },
-        system::{BootstrapPhase, ShutdownStage},
+        system::ShutdownStage,
     },
     runtime_config::{
         ActivePolicyBundle, DecisionPolicySnapshot, DecisionPolicySnapshotDocument, PolicyDocument,
         PolicyProfileDocument, PolicyValidationEvidence, PolicyValidationSubject,
-        ProductionSealEvidence,
     },
     types::{
-        ArtifactUri, AuditEventId, BootstrapTransitionId, BuildCommitHash, ContentHash,
-        DecisionPolicySnapshotId, DeploymentEnvironment, PolicyActivationId, PolicyApprovalId,
-        PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId, ProductionBaselineId,
-        ProductionEvidenceId, ProfileArtifactId, RoleCode, SchemaVersion, UserId,
+        AuditEventId, ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyApprovalId,
+        PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId, ProfileArtifactId,
+        SchemaVersion, UserId,
     },
 };
 
@@ -52,7 +46,7 @@ pub struct SystemStatus {
     pub operational_phase: OperationalPhase,
     /// CLOB websocket market-data readiness snapshot.
     pub market_data: MarketDataConnectivity,
-    /// Operational kill-switch projection (real `system_kill_switch` state).
+    /// Kill-switch projection from the atomic runtime-control snapshot.
     pub kill_switch: KillSwitchView,
     /// Lightweight auto-execution recovery playbook summary.
     pub execution_recovery: ExecutionRecoverySummary,
@@ -159,8 +153,9 @@ impl SystemStatus {
                 },
             },
             kill_switch: KillSwitchView {
-                state: KillSwitchState::ReportOnlyForced,
-                requires_operator_ack: true,
+                state: KillSwitchState::Closed,
+                requires_operator_ack: false,
+                revision: 0,
                 last_reason: "authoritative control state is not loaded".to_owned(),
                 changed_by: "system".to_owned(),
                 changed_at: Utc::now(),
@@ -168,8 +163,8 @@ impl SystemStatus {
             execution_recovery: ExecutionRecoverySummary {
                 has_unresolvable_reconciliation: false,
                 unresolvable_count: 0,
-                kill_switch_requires_ack: true,
-                kill_switch_state: KillSwitchState::ReportOnlyForced,
+                kill_switch_requires_ack: false,
+                kill_switch_state: KillSwitchState::Closed,
                 quant_runtime_mode,
                 auto_execution_blocked: false,
                 next_steps: Vec::new(),
@@ -523,211 +518,4 @@ pub struct PolicyActivationCommit {
     pub activation: PolicyActivationInfo,
     pub bundle: ActivePolicyBundle,
     pub outcome: PolicyActivationOutcome,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
-#[sea_orm(entity = "crate::entities::system_production_baseline::Entity")]
-pub struct ProductionBaselineInfo {
-    pub production_baseline_id: ProductionBaselineId,
-    pub environment: DeploymentEnvironment,
-    pub sealed_at: DateTime<Utc>,
-    pub sealed_by_kind: PolicyActorKind,
-    pub sealed_by_user_id: Option<UserId>,
-    pub sealed_by_label: String,
-    pub build_commit: BuildCommitHash,
-    pub postgres_schema_fingerprint: ContentHash,
-    pub clickhouse_schema_fingerprint: ContentHash,
-    pub policy_bundle_generation: PolicyBundleGeneration,
-    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    pub policy_bundle_hash: ContentHash,
-    pub lifecycle_policy_hash: ContentHash,
-    pub evidence: ProductionSealEvidence,
-    pub created_at: DateTime<Utc>,
-}
-
-info_from_model!(
-    ProductionBaselineInfo,
-    system_production_baseline::Model,
-    {
-        production_baseline_id,
-        environment,
-        sealed_at,
-        sealed_by_kind,
-        sealed_by_user_id,
-        sealed_by_label,
-        build_commit,
-        postgres_schema_fingerprint,
-        clickhouse_schema_fingerprint,
-        policy_bundle_generation,
-        decision_policy_snapshot_id,
-        policy_bundle_hash,
-        lifecycle_policy_hash,
-        evidence,
-        created_at,
-    }
-);
-
-#[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::system_production_baseline::ActiveModel")]
-pub struct NewProductionBaseline {
-    pub production_baseline_id: ProductionBaselineId,
-    pub environment: DeploymentEnvironment,
-    pub sealed_at: DateTime<Utc>,
-    pub sealed_by_kind: PolicyActorKind,
-    pub sealed_by_user_id: Option<UserId>,
-    pub sealed_by_label: String,
-    pub build_commit: BuildCommitHash,
-    pub postgres_schema_fingerprint: ContentHash,
-    pub clickhouse_schema_fingerprint: ContentHash,
-    pub policy_bundle_generation: PolicyBundleGeneration,
-    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    pub policy_bundle_hash: ContentHash,
-    pub lifecycle_policy_hash: ContentHash,
-    pub evidence: ProductionSealEvidence,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
-#[sea_orm(entity = "crate::entities::system_production_evidence::Entity")]
-pub struct ProductionEvidenceInfo {
-    pub production_evidence_id: ProductionEvidenceId,
-    pub kind: ProductionEvidenceKind,
-    pub artifact_uri: ArtifactUri,
-    pub evidence_hash: ContentHash,
-    pub build_commit: BuildCommitHash,
-    pub postgres_schema_fingerprint: ContentHash,
-    pub clickhouse_schema_fingerprint: ContentHash,
-    pub policy_bundle_generation: PolicyBundleGeneration,
-    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    pub policy_bundle_hash: ContentHash,
-    pub recorded_by_kind: PolicyActorKind,
-    pub recorded_by_user_id: Option<UserId>,
-    pub recorded_by_label: String,
-    pub reason: String,
-    pub observed_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
-}
-
-info_from_model!(
-    ProductionEvidenceInfo,
-    system_production_evidence::Model,
-    {
-        production_evidence_id,
-        kind,
-        artifact_uri,
-        evidence_hash,
-        build_commit,
-        postgres_schema_fingerprint,
-        clickhouse_schema_fingerprint,
-        policy_bundle_generation,
-        decision_policy_snapshot_id,
-        policy_bundle_hash,
-        recorded_by_kind,
-        recorded_by_user_id,
-        recorded_by_label,
-        reason,
-        observed_at,
-        created_at,
-    }
-);
-
-#[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::system_production_evidence::ActiveModel")]
-pub struct NewProductionEvidence {
-    pub production_evidence_id: ProductionEvidenceId,
-    pub kind: ProductionEvidenceKind,
-    pub artifact_uri: ArtifactUri,
-    pub evidence_hash: ContentHash,
-    pub build_commit: BuildCommitHash,
-    pub postgres_schema_fingerprint: ContentHash,
-    pub clickhouse_schema_fingerprint: ContentHash,
-    pub policy_bundle_generation: PolicyBundleGeneration,
-    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    pub policy_bundle_hash: ContentHash,
-    pub recorded_by_kind: PolicyActorKind,
-    pub recorded_by_user_id: Option<UserId>,
-    pub recorded_by_label: String,
-    pub reason: String,
-    pub observed_at: DateTime<Utc>,
-}
-
-// ── System runtime state (operational control singleton) ─────────────
-
-/// DB row projection for the `system_runtime_state` singleton.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
-#[sea_orm(entity = "crate::entities::system_runtime_state::Entity")]
-pub struct SystemRuntimeStateInfo {
-    pub id: i32,
-    pub quant_runtime_mode: QuantRuntimeMode,
-    pub bootstrap_phase: BootstrapPhase,
-    pub bootstrap_contract_version: i32,
-    pub state_revision: i64,
-    pub changed_by: String,
-    pub reason: String,
-    pub changed_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-info_from_model!(
-    SystemRuntimeStateInfo,
-    system_runtime_state::Model,
-    {
-        id,
-        quant_runtime_mode,
-        bootstrap_phase,
-        bootstrap_contract_version,
-        state_revision,
-        changed_by,
-        reason,
-        changed_at,
-        updated_at,
-    }
-);
-
-/// Upsert payload for the runtime-mode singleton (`id` is always the singleton key).
-#[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::system_runtime_state::ActiveModel")]
-pub struct UpsertSystemRuntimeState {
-    pub id: i32,
-    pub quant_runtime_mode: QuantRuntimeMode,
-    pub bootstrap_phase: BootstrapPhase,
-    pub bootstrap_contract_version: i32,
-    pub state_revision: i64,
-    pub changed_by: String,
-    pub reason: String,
-    pub changed_at: DateTime<Utc>,
-}
-
-/// Append-only bootstrap transition insert payload.
-#[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(
-    active_model = "crate::entities::system_bootstrap_transition::ActiveModel",
-    exhaustive
-)]
-pub struct NewSystemBootstrapTransition {
-    pub bootstrap_transition_id: BootstrapTransitionId,
-    pub bootstrap_contract_version: i32,
-    pub state_revision: i64,
-    pub from_phase: BootstrapPhase,
-    pub to_phase: BootstrapPhase,
-    pub actor: String,
-    pub acting_role: Option<RoleCode>,
-    pub reason: String,
-    pub report_only_forced_ack: bool,
-    pub occurred_at: DateTime<Utc>,
-}
-
-/// Repository command for the one permitted operator activation transition.
-#[derive(Debug, Clone)]
-pub struct ActivateBootstrapState {
-    pub bootstrap_contract_version: i32,
-    pub expected_state_revision: i64,
-    pub actor: String,
-    pub acting_role: RoleCode,
-    pub reason: String,
-    pub report_only_forced_ack: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct BootstrapActivationInfo {
-    pub state: SystemRuntimeStateInfo,
 }

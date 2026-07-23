@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration, Utc};
 use quant_pivot_models::{
     domain::{
         api::OperationLogQuery,
-        governance::{NewOperationLog, UpsertKillSwitchState},
+        governance::{NewOperationLog, RuntimeControlUpdate},
         patch::{NullablePatch, Patch},
         quant::{
             AppendReconciliationEvidence, ExecutionOrderPatch, InsertFinalOutcome,
@@ -71,19 +71,18 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgAccountSnapshotRepository, PgAttributionRepository, PgCapitalAllocationRepository,
-        PgEventRepository, PgExecutionOrderRepository, PgKillSwitchStateRepository,
-        PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgOperationLogRepository, PgOrderIntentRepository,
-        PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
-        PgReportRunRepository, PgReservedCapitalRepository,
+        PgEventRepository, PgExecutionOrderRepository, PgMarketRepository,
+        PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
+        PgOperationLogRepository, PgOrderIntentRepository, PgRecommendationReportRepository,
+        PgRecommendationRepository, PgReconciliationRepository, PgReportRunRepository,
+        PgReservedCapitalRepository, PgRuntimeControlRepository,
     },
     traits::{
         AccountSnapshotRepository, AttributionRepository, CapitalAllocationRepository,
-        EventRepository, ExecutionOrderRepository, KillSwitchStateRepository, MarketRepository,
-        MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
-        OperationLogRepository, OrderIntentRepository, RecommendationReportRepository,
-        RecommendationRepository, ReconciliationRepository, ReportRunRepository,
-        ReservedCapitalRepository,
+        EventRepository, ExecutionOrderRepository, MarketRepository, MarketSelectionRepository,
+        ModelRegistryRepository, ModelRunRepository, OperationLogRepository, OrderIntentRepository,
+        RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+        ReportRunRepository, ReservedCapitalRepository, RuntimeControlRepository,
     },
 };
 use quant_pivot_system_tests::{
@@ -121,6 +120,7 @@ fn new_account_snapshot() -> NewAccountSnapshot {
     }];
     NewAccountSnapshot {
         account_snapshot_id: AccountSnapshotId::from_v7(),
+        execution_account_id: execution_pg_seed::fixture_execution_account().execution_account_id,
         as_of: Utc::now(),
         source: AccountSource::Polymarket,
         venue_net_liquidation_usd: Usd::new(dec!(10000)),
@@ -135,6 +135,7 @@ fn new_account_snapshot() -> NewAccountSnapshot {
 pub async fn account_snapshot_repo_create_find() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
+    execution_pg_seed::ensure_fixture_execution_account(&db).await;
     let repo = PgAccountSnapshotRepository::new(db.clone());
 
     let snapshot = new_account_snapshot();
@@ -460,6 +461,7 @@ pub async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early
 }
 
 async fn seed_market_catalog(db: &DatabaseConnection, event_id: &str, market_id: &str) {
+    execution_pg_seed::ensure_fixture_execution_account(db).await;
     PgEventRepository::new(db.clone())
         .upsert(make_event(
             event_id,
@@ -547,6 +549,8 @@ async fn assert_reserved_capital_tracks_pending_intent(
             NewOrderIntent {
                 order_intent_id,
                 recommendation_id: *recommendation_id,
+                execution_account_id: execution_pg_seed::fixture_execution_account()
+                    .execution_account_id,
                 runtime_mode: QuantRuntimeMode::SemiAuto,
                 decision_policy_snapshot_id: *decision_policy_snapshot_id,
                 model_version_id: *model_version_id,
@@ -608,7 +612,6 @@ async fn assert_reserved_capital_tracks_pending_intent(
                 released_usd: Usd::ZERO,
                 reason: "intent created".to_owned(),
             },
-            None,
         )
         .await
         .expect("create intent with allocation");
@@ -813,28 +816,28 @@ pub async fn capital_kill_switch_and_attribution_repositories_round_trip() {
         "a freshly allocated intent must not be impaired"
     );
 
-    let kill_switch_repo = PgKillSwitchStateRepository::new(db.clone());
-    let now = Utc::now();
-    let kill_switch = kill_switch_repo
-        .upsert(UpsertKillSwitchState {
-            id: 1,
-            state: KillSwitchState::ReportOnlyForced,
-            changed_by: "operator".to_owned(),
+    let runtime_control = PgRuntimeControlRepository::new(db.clone());
+    let current = runtime_control.load().await.expect("load runtime control");
+    let control = runtime_control
+        .compare_and_set(RuntimeControlUpdate {
+            expected_revision: current.revision,
+            quant_runtime_mode: None,
+            settlement_write_policy: None,
+            kill_switch_state: Some(KillSwitchState::ExitOnly),
+            kill_switch_requires_ack: Some(false),
+            actor: "operator".to_owned(),
             reason: "recovery default".to_owned(),
-            requires_operator_ack: false,
-            changed_at: now,
         })
         .await
-        .expect("upsert kill switch");
-    assert_eq!(kill_switch.state, KillSwitchState::ReportOnlyForced);
+        .expect("update runtime control");
+    assert_eq!(control.kill_switch_state, KillSwitchState::ExitOnly);
     assert_eq!(
-        kill_switch_repo
+        runtime_control
             .load()
             .await
-            .expect("load kill switch")
-            .expect("kill switch row")
-            .state,
-        KillSwitchState::ReportOnlyForced
+            .expect("load runtime control")
+            .kill_switch_state,
+        KillSwitchState::ExitOnly
     );
 
     let attribution_repo = PgAttributionRepository::new(db.clone());
@@ -935,6 +938,8 @@ async fn create_pending_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderIn
             NewOrderIntent {
                 order_intent_id,
                 recommendation_id: ids.recommendation,
+                execution_account_id: execution_pg_seed::fixture_execution_account()
+                    .execution_account_id,
                 runtime_mode: QuantRuntimeMode::SemiAuto,
                 decision_policy_snapshot_id: ids.decision_policy_snapshot,
                 model_version_id: ids.model_version,
@@ -996,7 +1001,6 @@ async fn create_pending_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderIn
                 released_usd: Usd::ZERO,
                 reason: "intent created".to_owned(),
             },
-            None,
         )
         .await
         .expect("create intent with allocation")
@@ -1004,18 +1008,7 @@ async fn create_pending_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderIn
 }
 
 async fn explicitly_enable_entry_for_test(db: &DatabaseConnection) {
-    let state = PgKillSwitchStateRepository::new(db.clone())
-        .upsert(UpsertKillSwitchState {
-            id: 1,
-            state: KillSwitchState::Closed,
-            changed_by: "pg-account-it-operator".to_owned(),
-            reason: "explicitly enable risk-increasing integration test".to_owned(),
-            requires_operator_ack: false,
-            changed_at: Utc::now(),
-        })
-        .await
-        .expect("explicitly close kill switch for risk-increasing test");
-    assert_eq!(state.state, KillSwitchState::Closed);
+    execution_pg_seed::enable_entry_admission_for_test(db, "pg-account-it-operator").await;
 }
 
 // ── Seed helpers ────────────────────────────────────────────────────────────

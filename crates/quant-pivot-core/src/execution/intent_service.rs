@@ -14,23 +14,22 @@
 use std::{fmt::Display, sync::Arc};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, FixedOffset, Utc};
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{
-    QuantError, QuantResult, execution::ExecutionError, infra::InfraError, storage::StorageError,
+    QuantResult, execution::ExecutionError, infra::InfraError, storage::StorageError,
 };
 use quant_pivot_models::{
     domain::{
         api::OrderIntentListQuery,
-        governance::NewOperationLog,
+        governance::{NewOperationLog, RuntimeControlSnapshot},
         pagination::Paginated,
         ports::{
             ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand, OrderIntentPort,
             RejectIntentCommand,
         },
         quant::{
-            ApproveOrderIntent, ApproveOrderIntentOutcome, IntentCreationLimits,
-            NewCapitalAllocation, NewOrderIntent, OrderIntentInfo, RecommendationInfo,
-            RecommendationReportInfo,
+            ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOrderIntent,
+            OrderIntentInfo, RecommendationInfo, RecommendationReportInfo,
         },
         runtime::IntentEventKind,
     },
@@ -43,17 +42,19 @@ use quant_pivot_models::{
             RecommendationReportStatus, ReportFactDeliveryStatus,
         },
         rbac::ResourceType,
+        settlement::SettlementRoute,
     },
     types::{
         CapitalAllocationId, ContentHash, EntryConditionInstanceId, EntryOrderPolicy,
-        EntryOrderSpec, ExitPolicySpec, ModelVersionId, OperationDetailDocument, OperationLogId,
-        OrderAmount, OrderIntentId, Price, RecommendationId, RecommendationReportId,
-        RecommendationTradePlan, ResearchProfileRef, TradePolicyArtifactId, Usd,
+        EntryOrderSpec, ExecutionAccountId, ExitPolicySpec, ModelVersionId,
+        OperationDetailDocument, OperationLogId, OrderAmount, OrderIntentId, Price,
+        RecommendationId, RecommendationReportId, ResearchProfileRef, Usd,
     },
 };
 use quant_pivot_repository::traits::{
-    EntryConditionRepository, ModelRegistryRepository, OrderIntentRepository,
-    RecommendationReportRepository, RecommendationRepository, TradePolicyRepository,
+    AccountSnapshotRepository, EntryConditionRepository, ModelRegistryRepository,
+    OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
+    TradePolicyRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -65,11 +66,14 @@ use crate::{
         dispatch_wake::DispatchWake,
         intent_lifecycle::IntentLifecyclePublisher,
         mode_gate::{IntentPolicyDecision, RuntimeModeGate},
+        settlement_recovery_admission::{
+            SettlementRecoveryAdmission, SettlementRecoveryAdmissionPort,
+            SettlementRecoveryAdmissionRequest, requires_automatic_settlement_recovery,
+        },
         trade_policy_guard::require_frozen_trade_policy,
     },
-    governance::{KillSwitchHandle, RuntimeModeHandle, resolve_return_model_calibration},
+    governance::{RuntimeControlsHandle, resolve_return_model_calibration},
     observability::metrics_hub::MetricsHub,
-    runtime_config::DecisionPolicyStore,
     service::feature_integrity::FeatureParityGatePort,
 };
 /// Post-commit event sink for terminally invalidated intents.
@@ -83,11 +87,10 @@ pub trait IntentTerminalEventSink: Send + Sync {
 /// Dependencies for [`CoreOrderIntentService`].
 pub struct OrderIntentServiceDeps {
     pub mode_gate: Arc<dyn RuntimeModeGate>,
-    pub runtime_mode: RuntimeModeHandle,
-    pub runtime_config: Arc<DecisionPolicyStore>,
-    pub kill_switch: KillSwitchHandle,
+    pub runtime_controls: RuntimeControlsHandle,
     pub recommendations: Arc<dyn RecommendationRepository>,
     pub reports: Arc<dyn RecommendationReportRepository>,
+    pub account_snapshots: Arc<dyn AccountSnapshotRepository>,
     pub intents: Arc<dyn OrderIntentRepository>,
     pub conditions: Arc<dyn EntryConditionRepository>,
     pub metrics: Arc<MetricsHub>,
@@ -108,17 +111,18 @@ pub struct OrderIntentServiceDeps {
     /// Global training-serving parity latch. Existing exits and settlement do
     /// not enter this service; only risk-increasing intent creation is blocked.
     pub feature_parity_gate: Arc<dyn FeatureParityGatePort>,
+    /// Fresh account-scoped V2 recovery gate for hold-to-resolution auto exits.
+    pub settlement_recovery: Arc<dyn SettlementRecoveryAdmissionPort>,
 }
 
 /// Governed order-intent service (implements the web [`OrderIntentPort`], the
 /// report terminal-event [`IntentTerminalEventSink`], and the sweep `expire_due`).
 pub struct CoreOrderIntentService {
     mode_gate: Arc<dyn RuntimeModeGate>,
-    runtime_mode: RuntimeModeHandle,
-    runtime_config: Arc<DecisionPolicyStore>,
-    kill_switch: KillSwitchHandle,
+    runtime_controls: RuntimeControlsHandle,
     recommendations: Arc<dyn RecommendationRepository>,
     reports: Arc<dyn RecommendationReportRepository>,
+    account_snapshots: Arc<dyn AccountSnapshotRepository>,
     intents: Arc<dyn OrderIntentRepository>,
     conditions: Arc<dyn EntryConditionRepository>,
     metrics: Arc<MetricsHub>,
@@ -129,17 +133,7 @@ pub struct CoreOrderIntentService {
     artifact_store: Arc<dyn ArtifactStore>,
     calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     feature_parity_gate: Arc<dyn FeatureParityGatePort>,
-}
-
-struct SemiAutoCanaryAuthorization {
-    policy_id: TradePolicyArtifactId,
-    policy_hash: ContentHash,
-    expires_at: DateTime<Utc>,
-    limits: IntentCreationLimits,
-}
-
-fn malformed_canary(detail: impl Display) -> QuantError {
-    QuantError::config(format!("active SemiAuto canary is malformed: {detail}"))
+    settlement_recovery: Arc<dyn SettlementRecoveryAdmissionPort>,
 }
 
 impl CoreOrderIntentService {
@@ -148,11 +142,10 @@ impl CoreOrderIntentService {
     pub fn new(deps: OrderIntentServiceDeps) -> Self {
         Self {
             mode_gate: deps.mode_gate,
-            runtime_mode: deps.runtime_mode,
-            runtime_config: deps.runtime_config,
-            kill_switch: deps.kill_switch,
+            runtime_controls: deps.runtime_controls,
             recommendations: deps.recommendations,
             reports: deps.reports,
+            account_snapshots: deps.account_snapshots,
             intents: deps.intents,
             conditions: deps.conditions,
             metrics: deps.metrics,
@@ -163,6 +156,7 @@ impl CoreOrderIntentService {
             artifact_store: deps.artifact_store,
             calibration_loader: deps.calibration_loader,
             feature_parity_gate: deps.feature_parity_gate,
+            settlement_recovery: deps.settlement_recovery,
         }
     }
 
@@ -202,93 +196,6 @@ impl CoreOrderIntentService {
         require_frozen_trade_policy(self.trade_policies.as_ref(), &version, recommendation).await
     }
 
-    fn require_semi_auto_canary(
-        &self,
-        recommendation: &RecommendationInfo,
-        report: &RecommendationReportInfo,
-        now: DateTime<Utc>,
-    ) -> QuantResult<SemiAutoCanaryAuthorization> {
-        let config = self.runtime_config.current();
-        let canary = &config.execution_authorization.semi_auto.canary;
-        if !canary.enabled {
-            return Err(ExecutionError::IntentDenied {
-                reason: "SemiAuto canary is not enabled".to_owned(),
-            }
-            .into());
-        }
-        let policy_id = canary
-            .policy_artifact_id
-            .as_deref()
-            .ok_or_else(|| malformed_canary("policy_artifact_id is missing"))?
-            .parse::<TradePolicyArtifactId>()
-            .map_err(|error| malformed_canary(format!("policy_artifact_id is invalid: {error}")))?;
-        let policy_hash = canary
-            .policy_content_hash
-            .as_deref()
-            .ok_or_else(|| malformed_canary("policy_content_hash is missing"))?
-            .parse::<ContentHash>()
-            .map_err(|error| {
-                malformed_canary(format!("policy_content_hash is invalid: {error}"))
-            })?;
-        let expires_at = canary
-            .expires_at
-            .as_deref()
-            .ok_or_else(|| malformed_canary("expires_at is missing"))?
-            .parse::<DateTime<FixedOffset>>()
-            .map_err(|error| malformed_canary(format!("expires_at is invalid: {error}")))?
-            .with_timezone(&Utc);
-        if expires_at <= now {
-            return Err(ExecutionError::IntentDenied {
-                reason: format!("SemiAuto canary expired at {expires_at}"),
-            }
-            .into());
-        }
-        let RecommendationTradePlan::Frozen { policy, sizing, .. } = &recommendation.trade_plan
-        else {
-            return Err(ExecutionError::IntentDenied {
-                reason: "recommendation has no frozen trade policy".to_owned(),
-            }
-            .into());
-        };
-        if policy.artifact_id != policy_id || policy.artifact_hash != policy_hash {
-            return Err(ExecutionError::IntentDenied {
-                reason:
-                    "recommendation policy identity is not authorized by the active SemiAuto canary"
-                        .to_owned(),
-            }
-            .into());
-        }
-        let allowed_tier = canary
-            .allowed_cash_budget_tiers_usd
-            .iter()
-            .any(|tier| Usd::new(tier.value) == sizing.suggested_usd);
-        if !allowed_tier {
-            return Err(ExecutionError::IntentDenied {
-                reason: format!(
-                    "recommendation tier {} is not authorized by the active SemiAuto canary",
-                    sizing.suggested_usd
-                ),
-            }
-            .into());
-        }
-        let max_total_cash_per_report = Usd::new(canary.max_total_cash_per_report.value);
-        if canary.max_open_intents == 0 || !max_total_cash_per_report.is_positive() {
-            return Err(malformed_canary(
-                "open-intent and report cash-budget limits must be positive",
-            ));
-        }
-        Ok(SemiAutoCanaryAuthorization {
-            policy_id,
-            policy_hash,
-            expires_at,
-            limits: IntentCreationLimits {
-                recommendation_report_id: report.recommendation_report_id,
-                max_open_intents: canary.max_open_intents,
-                max_total_cash_per_report,
-            },
-        })
-    }
-
     /// Create an intent from a recommendation at `now` (mode-gated, atomic with
     /// the capital reservation).
     pub async fn create_at(
@@ -301,11 +208,23 @@ impl CoreOrderIntentService {
             .await?;
         let rec = self.load_recommendation(&command.recommendation_id).await?;
         let report = self.load_report(&rec.recommendation_report_id).await?;
+        let account_snapshot = self
+            .account_snapshots
+            .find_by_id(&report.account_snapshot_ref)
+            .await?
+            .ok_or_else(|| ExecutionError::IntentDenied {
+                reason: format!(
+                    "report {} account snapshot {} no longer exists",
+                    report.recommendation_report_id, report.account_snapshot_ref
+                ),
+            })?;
         self.ensure_report_facts_verified(&rec.recommendation_report_id)
             .await?;
-        self.ensure_create_allowed(&rec, &report, now).await?;
+        let controls = self.runtime_controls.snapshot();
+        self.ensure_create_allowed(&rec, &report, &controls, now)
+            .await?;
 
-        let mode = self.runtime_mode.current();
+        let mode = controls.quant_runtime_mode;
         let profile_ref = if matches!(
             mode,
             QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution
@@ -317,20 +236,30 @@ impl CoreOrderIntentService {
         } else {
             self.ensure_trade_policy_still_executable(&rec).await?
         };
-        let canary = if mode == QuantRuntimeMode::SemiAuto {
-            Some(self.require_semi_auto_canary(&rec, &report, now)?)
-        } else {
-            None
-        };
         let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
         let entry = project_entry_order_spec(&rec, now)?;
         let exit = project_exit_policy_spec(&rec, entry.limit_price)?;
-        let mut resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
-        if let Some(canary) = canary.as_ref() {
-            resolved.expires_at = resolved.expires_at.min(canary.expires_at);
-            resolved.policy_id = Some(canary.policy_id.to_string());
-            resolved.policy_hash = Some(canary.policy_hash);
+        if requires_automatic_settlement_recovery(&exit) {
+            let route = if rec.market_context.neg_risk {
+                SettlementRoute::NegRiskV2
+            } else {
+                SettlementRoute::StandardV2
+            };
+            let recovery = self
+                .settlement_recovery
+                .evaluate_recovery_admission(
+                    SettlementRecoveryAdmissionRequest {
+                        execution_account_id: account_snapshot.execution_account_id,
+                        route,
+                        runtime_mode: mode,
+                        write_policy: controls.settlement_write_policy,
+                    },
+                    now,
+                )
+                .await?;
+            require_ready_settlement_recovery(recovery)?;
         }
+        let resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
         let condition = self
             .conditions
             .find_by_recommendation(&rec.recommendation_id)
@@ -347,11 +276,12 @@ impl CoreOrderIntentService {
             entry,
             exit,
             condition_instance_id: condition.condition_instance_id,
+            execution_account_id: account_snapshot.execution_account_id,
         })?;
 
         let intent = self
             .intents
-            .create_with_allocation(new_intent, allocation, canary.map(|value| value.limits))
+            .create_with_allocation(new_intent, allocation)
             .await?;
         self.metrics
             .inc_order_intent_created(intent.runtime_mode.as_str(), intent.intent_kind.as_str());
@@ -370,6 +300,7 @@ impl CoreOrderIntentService {
         &self,
         rec: &RecommendationInfo,
         report: &RecommendationReportInfo,
+        controls: &RuntimeControlSnapshot,
         now: DateTime<Utc>,
     ) -> QuantResult<()> {
         if rec.valid_until < now {
@@ -404,9 +335,9 @@ impl CoreOrderIntentService {
             }
             .into());
         }
-        if !self.kill_switch.allows_new_entry() {
+        if !controls.kill_switch_state.allows_new_entry() {
             return Err(ExecutionError::KillSwitchBlocks {
-                state: self.kill_switch.current().to_string(),
+                state: controls.kill_switch_state.to_string(),
                 operation: "intent creation".to_owned(),
             }
             .into());
@@ -448,9 +379,6 @@ impl CoreOrderIntentService {
         }
         if intent.runtime_mode == QuantRuntimeMode::SemiAuto {
             let recommendation = self.load_recommendation(&intent.recommendation_id).await?;
-            let report = self
-                .load_report(&recommendation.recommendation_report_id)
-                .await?;
             self.ensure_report_facts_verified(&recommendation.recommendation_report_id)
                 .await?;
             self.ensure_trade_policy_still_executable(&recommendation)
@@ -459,17 +387,6 @@ impl CoreOrderIntentService {
                 &recommendation.evidence_refs.model_version_id,
             )
             .await?;
-            let canary = self.require_semi_auto_canary(&recommendation, &report, now)?;
-            let canary_policy_id = canary.policy_id.to_string();
-            if intent.policy_id.as_deref() != Some(canary_policy_id.as_str())
-                || intent.policy_hash.as_ref() != Some(&canary.policy_hash)
-            {
-                return Err(ExecutionError::IntentDenied {
-                    reason: "pending intent is not bound to the active SemiAuto canary identity"
-                        .to_owned(),
-                }
-                .into());
-            }
         }
 
         let (entry_override, allocated_override) =
@@ -661,6 +578,24 @@ impl IntentTerminalEventSink for CoreOrderIntentService {
     }
 }
 
+fn require_ready_settlement_recovery(
+    recovery: SettlementRecoveryAdmission,
+) -> Result<(), ExecutionError> {
+    match recovery {
+        SettlementRecoveryAdmission::Ready(_) => Ok(()),
+        SettlementRecoveryAdmission::Blocked(reason) => {
+            Err(ExecutionError::SettlementRecoveryUnavailable {
+                reason: reason.to_string(),
+            })
+        }
+        SettlementRecoveryAdmission::NotRequired => {
+            Err(ExecutionError::SettlementRecoveryUnavailable {
+                reason: "required recovery gate returned not_required".to_owned(),
+            })
+        }
+    }
+}
+
 /// The closed-loop calibration recheck (see
 /// [`CoreOrderIntentService::ensure_return_model_still_calibrated`]), extracted
 /// as a free function over its three dependencies so it is unit-testable
@@ -718,6 +653,7 @@ struct ComposeCreateRowsInput<'a> {
     entry: EntryOrderSpec,
     exit: ExitPolicySpec,
     condition_instance_id: EntryConditionInstanceId,
+    execution_account_id: ExecutionAccountId,
 }
 
 fn compose_create_rows(
@@ -732,6 +668,7 @@ fn compose_create_rows(
         entry,
         exit,
         condition_instance_id,
+        execution_account_id,
     } = input;
     let intent_id = OrderIntentId::from_v7();
     let (_, _, _, _, risk_envelope) =
@@ -744,6 +681,7 @@ fn compose_create_rows(
     let intent = NewOrderIntent {
         order_intent_id: intent_id,
         recommendation_id: rec.recommendation_id,
+        execution_account_id,
         runtime_mode: mode,
         decision_policy_snapshot_id: report.decision_policy_snapshot_id,
         model_version_id: report.model_version_id,
@@ -1088,24 +1026,35 @@ mod tests {
             common::{OrderType, Side},
             execution::ApprovalInvalidation,
             quant::{
-                ApprovalStatus, FillRequirement, OrderIntentStatus, OutcomeSide,
-                RecommendationReportStatus, ReportKind,
+                ApprovalStatus, ExecutionWalletKind, FillRequirement, OrderIntentStatus,
+                OutcomeSide, RecommendationReportStatus, ReportKind,
             },
+            settlement::SettlementRoute,
         },
         types::{
             Bps, ContentHash, DecisionPolicySnapshotId, EntryOrderPolicy, EntryOrderSpec,
-            EntryPlan, ExitPlan, OrderAmount, OrderIntentId, Price, RecommendationId,
-            RecommendationReportId, RecommendationTradePlan, RiskEnvelope, RoleCode, Shares,
-            SizingPlan, TokenId, Usd, UserId,
+            EntryPlan, EvmAddress, EvmBlockHash, ExitPlan, OrderAmount, OrderIntentId, Price,
+            RecommendationId, RecommendationReportId, RecommendationTradePlan, RiskEnvelope,
+            RoleCode, Shares, SizingPlan, TokenId, Usd, UserId,
         },
     };
     use rust_decimal_macros::dec;
     use uuid::Uuid;
 
     use super::{
-        project_entry_order_spec, project_exit_policy_spec, resolve_downscale, resolve_policy,
+        project_entry_order_spec, project_exit_policy_spec, require_ready_settlement_recovery,
+        resolve_downscale, resolve_policy,
     };
-    use crate::{execution::mode_gate::IntentPolicyDecision, test_fixtures::report_fixtures};
+    use crate::{
+        execution::{
+            mode_gate::IntentPolicyDecision,
+            settlement_recovery_admission::{
+                SettlementRecoveryAdmission, SettlementRecoveryAdmissionBlockReason,
+                SettlementRecoveryAdmissionEvidence,
+            },
+        },
+        test_fixtures::report_fixtures,
+    };
 
     fn rec() -> RecommendationInfo {
         report_fixtures::recommendation(
@@ -1172,6 +1121,40 @@ mod tests {
             override_amount: None,
             override_price: None,
         }
+    }
+
+    fn ready_settlement_recovery() -> SettlementRecoveryAdmission {
+        SettlementRecoveryAdmission::Ready(SettlementRecoveryAdmissionEvidence {
+            route: SettlementRoute::StandardV2,
+            wallet_kind: ExecutionWalletKind::Eoa,
+            target_adapter: EvmAddress::parse("0xada100db00ca00073811820692005400218fce1f")
+                .expect("target adapter"),
+            deployment_digest: ContentHash::from_bytes([0x41; 32]),
+            verified_block_number: 90_685_098,
+            verified_block_hash: EvmBlockHash::parse(format!("0x{}", "1".repeat(64)))
+                .expect("block hash"),
+            confirmed_canary: false,
+        })
+    }
+
+    #[test]
+    fn required_settlement_recovery_accepts_only_ready_capability() {
+        assert!(require_ready_settlement_recovery(ready_settlement_recovery()).is_ok());
+
+        let blocked = require_ready_settlement_recovery(SettlementRecoveryAdmission::Blocked(
+            SettlementRecoveryAdmissionBlockReason::DeploymentNotReady,
+        ));
+        assert!(matches!(
+            blocked,
+            Err(ExecutionError::SettlementRecoveryUnavailable { reason })
+                if reason.contains("deployment is not ready")
+        ));
+
+        assert!(matches!(
+            require_ready_settlement_recovery(SettlementRecoveryAdmission::NotRequired),
+            Err(ExecutionError::SettlementRecoveryUnavailable { reason })
+                if reason == "required recovery gate returned not_required"
+        ));
     }
 
     #[test]

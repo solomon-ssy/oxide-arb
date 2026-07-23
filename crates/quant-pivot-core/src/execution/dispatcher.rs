@@ -37,8 +37,9 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     types::{
-        EntryOrderSpec, ExecutionOrderId, FeatureParityStateId, OrderIntentId, PreparedVenueOrder,
-        Price, ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId, Usd,
+        EntryOrderSpec, ExecutionAccountId, ExecutionOrderId, FeatureParityStateId, OrderIntentId,
+        PreparedVenueOrder, Price, ReconciliationEvidence, ReconciliationEvidenceChain,
+        ReconciliationId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -289,7 +290,13 @@ impl CoreExecutionDispatcher {
         ) {
             self.deps.metrics.inc_execution_fill();
         }
-        let write = build_ledger_write(&result, recommendation, &spec, &execution_order);
+        let write = build_ledger_write(
+            &result,
+            recommendation,
+            &spec,
+            &execution_order,
+            intent.execution_account_id,
+        );
         let recorded = self
             .deps
             .submission
@@ -480,11 +487,13 @@ fn position_fill(
     recommendation: &RecommendationInfo,
     spec: &EntryOrderSpec,
     order_intent_id: &OrderIntentId,
+    execution_account_id: ExecutionAccountId,
 ) -> PositionFill {
     let price = fill_avg_price(result, spec);
     let fill_cost = result.filled_shares * price;
     PositionFill {
         order_intent_id: *order_intent_id,
+        execution_account_id,
         token_id: spec.token_id.clone(),
         market_id: recommendation.market_id.clone(),
         event_id: Some(recommendation.event_id.clone()),
@@ -544,14 +553,17 @@ fn build_ledger_write(
     recommendation: &RecommendationInfo,
     spec: &EntryOrderSpec,
     execution_order: &ExecutionOrderInfo,
+    execution_account_id: ExecutionAccountId,
 ) -> SubmissionLedgerWrite {
     let outcome = result.outcome;
     let fill_cost = result.filled_shares * fill_avg_price(result, spec);
     let total_spent = fill_cost + result.expected_fee;
     let common_venue_status = outcome.venue_order_status();
+    let identity_refs = result.identity_refs();
 
     match outcome {
         VenueOutcome::Filled => SubmissionLedgerWrite {
+            identity_refs,
             state: ExecutionOrderState::Filled,
             intent_status: OrderIntentStatus::Filled,
             venue_order_id: result.venue_order_id.clone(),
@@ -568,10 +580,12 @@ fn build_ledger_write(
                 recommendation,
                 spec,
                 &execution_order.order_intent_id,
+                execution_account_id,
             )),
             reconciliation: Some(reconciliation_row(result, execution_order, outcome)),
         },
         VenueOutcome::PartiallyFilled => SubmissionLedgerWrite {
+            identity_refs,
             state: ExecutionOrderState::PartiallyFilled,
             intent_status: OrderIntentStatus::PartiallyFilled,
             venue_order_id: result.venue_order_id.clone(),
@@ -588,10 +602,12 @@ fn build_ledger_write(
                 recommendation,
                 spec,
                 &execution_order.order_intent_id,
+                execution_account_id,
             )),
             reconciliation: Some(reconciliation_row(result, execution_order, outcome)),
         },
         VenueOutcome::Open => SubmissionLedgerWrite {
+            identity_refs,
             // Resting limit order: stays `Submitted`, capital stays locked, no
             // Reconciliation polls open orders. Only venue metadata is recorded.
             state: ExecutionOrderState::Submitted,
@@ -607,6 +623,7 @@ fn build_ledger_write(
             reconciliation: None,
         },
         VenueOutcome::Rejected => SubmissionLedgerWrite {
+            identity_refs,
             state: ExecutionOrderState::Failed,
             intent_status: OrderIntentStatus::Failed,
             venue_order_id: result.venue_order_id.clone(),
@@ -620,6 +637,7 @@ fn build_ledger_write(
             reconciliation: Some(reconciliation_row(result, execution_order, outcome)),
         },
         VenueOutcome::Cancelled | VenueOutcome::Expired => SubmissionLedgerWrite {
+            identity_refs,
             state: ExecutionOrderState::Cancelled,
             intent_status: OrderIntentStatus::Cancelled,
             venue_order_id: result.venue_order_id.clone(),
@@ -633,6 +651,7 @@ fn build_ledger_write(
             reconciliation: Some(reconciliation_row(result, execution_order, outcome)),
         },
         VenueOutcome::Ambiguous => SubmissionLedgerWrite {
+            identity_refs,
             // Most dangerous state: unconfirmed. Hold capital, do not fill, must
             // reconcile. Intent stays `Submitted` until venue truth is known.
             state: ExecutionOrderState::Ambiguous,

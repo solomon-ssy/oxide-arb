@@ -5,7 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use quant_pivot_api::ws::{ShardHealthSummary, WsShardHealthPort};
 use quant_pivot_core::{
-    governance::RuntimeModeHandle,
+    governance::RuntimeControlsHandle,
     infra::health_checker::{HealthChecker, HealthCheckerDeps},
     service::catalog_readiness::CatalogReadiness,
 };
@@ -32,7 +32,7 @@ fn checker_with(
         ch_pool: Arc::new(inert_clickhouse_pool(&deploy.db.clickhouse)),
         ws_health: ws,
         catalog,
-        runtime_mode: RuntimeModeHandle::default(),
+        runtime_controls: RuntimeControlsHandle::default(),
     })
 }
 

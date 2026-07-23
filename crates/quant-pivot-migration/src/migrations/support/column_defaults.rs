@@ -379,6 +379,21 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
+        table: "quant_execution_trade_ref",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_execution_trade_ref",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_execution_transaction_ref",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
         table: "quant_factor_definition",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
@@ -606,13 +621,18 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "quant_settlement_redeem",
-        column: "payout_usd",
-        value: DefaultValue::Integer(0),
+        table: "quant_execution_account",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
         table: "quant_settlement_redeem",
         column: "attempt_count",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_settlement_redeem",
+        column: "retry_count",
         value: DefaultValue::Integer(0),
     },
     ColumnDefaultSpec {
@@ -623,6 +643,41 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     ColumnDefaultSpec {
         table: "quant_settlement_redeem",
         column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_settlement_authorization",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_settlement_chain_submission",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_settlement_chain_submission",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_settlement_governed_action",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_settlement_governed_action",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_settlement_external_cursor",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_settlement_inventory_lot",
+        column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
@@ -761,78 +816,48 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "system_bootstrap_transition",
-        column: "report_only_forced_ack",
-        value: DefaultValue::Boolean(false),
-    },
-    ColumnDefaultSpec {
-        table: "system_kill_switch",
-        column: "state",
-        value: DefaultValue::PostgresLiteral("'report_only_forced'::qp_kill_switch_state"),
-    },
-    ColumnDefaultSpec {
-        table: "system_kill_switch",
-        column: "changed_by",
-        value: DefaultValue::Text("bootstrap"),
-    },
-    ColumnDefaultSpec {
-        table: "system_kill_switch",
-        column: "reason",
-        value: DefaultValue::Text("bootstrap requires explicit operator activation"),
-    },
-    ColumnDefaultSpec {
-        table: "system_kill_switch",
-        column: "requires_operator_ack",
-        value: DefaultValue::Boolean(true),
-    },
-    ColumnDefaultSpec {
-        table: "system_kill_switch",
-        column: "changed_at",
-        value: DefaultValue::StatementTimestamp,
-    },
-    ColumnDefaultSpec {
-        table: "system_kill_switch",
-        column: "updated_at",
-        value: DefaultValue::StatementTimestamp,
-    },
-    ColumnDefaultSpec {
-        table: "system_runtime_state",
+        table: "system_runtime_control",
         column: "quant_runtime_mode",
         value: DefaultValue::PostgresLiteral("'report_only'::qp_quant_runtime_mode"),
     },
     ColumnDefaultSpec {
-        table: "system_runtime_state",
-        column: "bootstrap_phase",
-        value: DefaultValue::PostgresLiteral("'initializing'::qp_bootstrap_phase"),
+        table: "system_runtime_control",
+        column: "settlement_write_policy",
+        value: DefaultValue::PostgresLiteral("'disabled'::qp_settlement_write_policy"),
     },
     ColumnDefaultSpec {
-        table: "system_runtime_state",
-        column: "bootstrap_contract_version",
-        value: DefaultValue::Integer(1),
+        table: "system_runtime_control",
+        column: "kill_switch_state",
+        value: DefaultValue::PostgresLiteral("'closed'::qp_kill_switch_state"),
     },
     ColumnDefaultSpec {
-        table: "system_runtime_state",
+        table: "system_runtime_control",
         column: "changed_by",
         value: DefaultValue::Text("bootstrap"),
     },
     ColumnDefaultSpec {
-        table: "system_runtime_state",
+        table: "system_runtime_control",
         column: "reason",
-        value: DefaultValue::Text("bootstrap seed"),
+        value: DefaultValue::Text("fresh boot safe defaults"),
     },
     ColumnDefaultSpec {
-        table: "system_runtime_state",
+        table: "system_runtime_control",
+        column: "kill_switch_requires_ack",
+        value: DefaultValue::Boolean(false),
+    },
+    ColumnDefaultSpec {
+        table: "system_runtime_control",
         column: "changed_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "system_runtime_state",
+        table: "system_runtime_control",
         column: "updated_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "system_runtime_state",
-        column: "state_revision",
+        table: "system_runtime_control",
+        column: "revision",
         value: DefaultValue::Integer(0),
     },
     ColumnDefaultSpec {

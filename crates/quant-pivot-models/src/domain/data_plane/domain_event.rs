@@ -10,10 +10,13 @@ use crate::{
         ChDecimal64, ChSchemaVersion, CryptoPriceReportRow, WeatherForecastFactRow,
         WeatherObservationFactRow,
     },
+    enums::{quant::ExecutionWalletKind, settlement::SettlementRoute},
     hashing::CanonicalDigest,
     types::{
         ContentHash, DomainEventId, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId,
-        IcaoStation, Shares, TemperatureCelsius, Usd, WeatherTemperatureStatistic, WeatherVariable,
+        EvmAddress, EvmBlockHash, EvmTransactionHash, IcaoStation, MarketId,
+        SettlementChainSubmissionId, SettlementRedeemId, Shares, TemperatureCelsius, Usd,
+        WeatherTemperatureStatistic, WeatherVariable,
     },
 };
 
@@ -409,12 +412,31 @@ impl DomainEventEnvelope {
         CanonicalDigest::content_hash_json(&self.payload)
             .is_ok_and(|hash| hash == self.payload_hash)
     }
+
+    /// Validate both the payload digest and deterministic immutable event ID.
+    #[must_use]
+    pub fn validate_integrity(&self) -> bool {
+        if !self.validate_payload_hash() {
+            return false;
+        }
+        CanonicalDigest::content_hash_json(&(
+            &self.source,
+            self.event_type,
+            &self.subject,
+            self.time,
+            &self.supersedes_event_id,
+            &self.payload_hash,
+            &self.source_checkpoint_hash,
+        ))
+        .is_ok_and(|hash| DomainEventId::from_content_hash(&hash) == self.id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DomainEventType {
     CryptoPriceTransition,
+    SettlementRedeemConfirmed,
     WeatherDailyTemperatureExtremeAdvanced,
     WeatherDailyTemperatureExtremeCorrected,
     WeatherObservationDayClosed,
@@ -424,9 +446,29 @@ pub enum DomainEventType {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum DomainEventPayload {
     CryptoPriceTransition(CryptoPriceTransition),
+    SettlementRedeemConfirmed(SettlementRedeemConfirmed),
     WeatherDailyTemperatureExtremeAdvanced(WeatherDailyTemperatureExtremeChange),
     WeatherDailyTemperatureExtremeCorrected(WeatherDailyTemperatureExtremeChange),
     WeatherObservationDayClosed(WeatherObservationDayClosed),
+}
+
+/// Immutable accounting boundary emitted in the same transaction that closes
+/// all lots for a finalized settlement redemption.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementRedeemConfirmed {
+    pub settlement_redeem_id: SettlementRedeemId,
+    pub settlement_chain_submission_id: SettlementChainSubmissionId,
+    pub market_id: MarketId,
+    pub funder_address: EvmAddress,
+    pub wallet_kind: ExecutionWalletKind,
+    pub route: SettlementRoute,
+    pub target_adapter: EvmAddress,
+    pub transaction_hash: EvmTransactionHash,
+    pub block_number: u64,
+    pub block_hash: EvmBlockHash,
+    pub deployment_digest: ContentHash,
+    pub actual_payout_usd: Usd,
+    pub lot_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

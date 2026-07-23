@@ -14,18 +14,20 @@ pub use book::OrderbookSnapshot;
 use chrono::{DateTime, Utc};
 pub use convert::{ClobSide, SdkSideConversionError};
 use num_traits::ToPrimitive;
-pub use orders::{CancelAllResult, CancelResult, ClobMakerOrder, ClobTrade, OpenOrder};
+pub use orders::{CancelAllResult, CancelResult, ClobMakerOrder, ClobOrder, ClobTrade, OpenOrder};
 use polymarket_client_sdk_v2::{
     auth::{Normal, state::Authenticated},
     clob::{
         Client as SdkClient, Config as SdkConfig,
         types::{
-            Amount, AssetType, OrderType as SdkOrderType, Side as SdkSide, SignableOrder,
-            TraderSide,
+            Amount, AssetType, OrderStatusType, OrderType as SdkOrderType, Side as SdkSide,
+            SignableOrder, TradeStatusType, TraderSide,
             request::{
                 BalanceAllowanceRequest, OrderBookSummaryRequest, OrdersRequest, TradesRequest,
             },
-            response::{ClobMarketInfoResponse, PostOrderResponse},
+            response::{
+                ClobMarketInfoResponse, OpenOrderResponse, PostOrderResponse, TradeResponse,
+            },
         },
     },
     types::{B256, U256},
@@ -42,13 +44,14 @@ use quant_pivot_models::{
     },
     enums::{
         common::{OrderType, Side, TickSize},
-        execution::VenueOrderStatus,
+        execution::{VenueOrderStatus, VenueTradeStatus},
         fee::FeeLiquidityRole,
     },
     hashing::CanonicalDigest,
     types::{
         Bps, ClobFeeDetails, ClobMarketInfoVersion, ClobMarketInfoVersionId, ClobTokenDescriptor,
-        MarketId, OrderId, Price, Shares, TokenId, Usd, VenueOrderAmount,
+        EvmTransactionHash, MarketId, OrderId, Price, Shares, TokenId, Usd, VenueOrderAmount,
+        VenueTradeId,
     },
 };
 pub use rate_limiter::RateLimiter;
@@ -218,7 +221,7 @@ fn map_post_order_response(
     order_amount: VenueOrderAmount,
     submitted_at: DateTime<Utc>,
     resp: &PostOrderResponse,
-) -> OrderResponse {
+) -> Result<OrderResponse, ApiError> {
     let (filled_shares, cash_amount) = match req.side {
         Side::Buy => (Shares::new(resp.taking_amount), resp.making_amount),
         Side::Sell => (Shares::new(resp.making_amount), resp.taking_amount),
@@ -258,15 +261,180 @@ fn map_post_order_response(
         None
     };
 
-    OrderResponse {
+    let transaction_hashes = resp
+        .transaction_hashes
+        .iter()
+        .map(|hash| EvmTransactionHash::parse(format!("{hash:#x}")))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ApiError::Deserialize {
+            context: "CLOB post-order transaction identity".to_owned(),
+            detail: error.to_string(),
+        })?;
+
+    Ok(OrderResponse {
         order_id: OrderId::new(&resp.order_id),
         status,
-        tx_hash: resp.transaction_hashes.first().map(|h| format!("{h:#x}")),
+        trade_ids: resp.trade_ids.iter().map(VenueTradeId::new).collect(),
+        transaction_hashes,
         filled_shares,
         avg_fill_price,
         submitted_at,
         responded_at: Utc::now(),
-    }
+    })
+}
+
+fn map_order_lookup(response: OpenOrderResponse) -> Result<ClobOrder, ApiError> {
+    let is_working = match response.status {
+        OrderStatusType::Live | OrderStatusType::Delayed | OrderStatusType::Unmatched => true,
+        OrderStatusType::Matched | OrderStatusType::Canceled => false,
+        OrderStatusType::Unknown(value) => {
+            return Err(ApiError::Deserialize {
+                context: "CLOB exact order status".to_owned(),
+                detail: format!("unknown order status: {value}"),
+            });
+        }
+        _ => {
+            return Err(ApiError::Deserialize {
+                context: "CLOB exact order status".to_owned(),
+                detail: "unsupported order status".to_owned(),
+            });
+        }
+    };
+    Ok(ClobOrder {
+        order_id: OrderId::new(response.id),
+        is_working,
+        original_size: Shares::new(response.original_size),
+        matched_size: Shares::new(response.size_matched),
+        associated_trade_ids: response
+            .associate_trades
+            .into_iter()
+            .map(VenueTradeId::new)
+            .collect(),
+    })
+}
+
+fn map_trade_response(trade: TradeResponse) -> Result<ClobTrade, ApiError> {
+    let status = match trade.status {
+        TradeStatusType::Matched => VenueTradeStatus::Matched,
+        TradeStatusType::Mined => VenueTradeStatus::Mined,
+        TradeStatusType::Confirmed => VenueTradeStatus::Confirmed,
+        TradeStatusType::Retrying => VenueTradeStatus::Retrying,
+        TradeStatusType::Failed => VenueTradeStatus::Failed,
+        TradeStatusType::Unknown(value) => {
+            return Err(ApiError::Deserialize {
+                context: "CLOB trade status".to_owned(),
+                detail: format!("unknown trade status: {value}"),
+            });
+        }
+        _ => {
+            return Err(ApiError::Deserialize {
+                context: "CLOB trade status".to_owned(),
+                detail: "unsupported trade status".to_owned(),
+            });
+        }
+    };
+    let trader_side = match trade.trader_side {
+        TraderSide::Taker => FeeLiquidityRole::Taker,
+        TraderSide::Maker => FeeLiquidityRole::Maker,
+        TraderSide::Unknown(value) => {
+            return Err(ApiError::Deserialize {
+                context: "CLOB trade trader_side".to_owned(),
+                detail: format!("unknown trader side: {value}"),
+            });
+        }
+        _ => {
+            return Err(ApiError::Deserialize {
+                context: "CLOB trade trader_side".to_owned(),
+                detail: "unsupported trader side".to_owned(),
+            });
+        }
+    };
+    let authenticated_maker_order = trade
+        .maker_orders
+        .iter()
+        .find(|order| order.owner == trade.owner);
+    let (order_id, token_id, side, matched_size, matched_price, matched_fee_rate_bps) =
+        match trader_side {
+            FeeLiquidityRole::Taker => (
+                OrderId::new(&trade.taker_order_id),
+                TokenId::new(trade.asset_id.to_string()),
+                ClobSide::try_from(trade.side)
+                    .map(|side| side.0)
+                    .map_err(|error| ApiError::Deserialize {
+                        context: "CLOB trade side".to_owned(),
+                        detail: error.to_string(),
+                    })?,
+                Shares::new(trade.size),
+                Price::new(trade.price),
+                Bps::new(trade.fee_rate_bps),
+            ),
+            FeeLiquidityRole::Maker => {
+                let order = authenticated_maker_order.ok_or_else(|| ApiError::Deserialize {
+                    context: "CLOB trade maker_orders".to_owned(),
+                    detail: "maker-side trade has no order owned by the authenticated account"
+                        .to_owned(),
+                })?;
+                (
+                    OrderId::new(&order.order_id),
+                    TokenId::new(order.asset_id.to_string()),
+                    ClobSide::try_from(order.side)
+                        .map(|side| side.0)
+                        .map_err(|error| ApiError::Deserialize {
+                            context: "CLOB authenticated maker order side".to_owned(),
+                            detail: error.to_string(),
+                        })?,
+                    Shares::new(order.matched_amount),
+                    Price::new(order.price),
+                    Bps::new(order.fee_rate_bps),
+                )
+            }
+        };
+    let maker_orders = trade
+        .maker_orders
+        .into_iter()
+        .map(|order| {
+            Ok(ClobMakerOrder {
+                order_id: OrderId::new(&order.order_id),
+                side: ClobSide::try_from(order.side)
+                    .map(|side| side.0)
+                    .map_err(|error| ApiError::Deserialize {
+                        context: "CLOB trade maker order side".to_owned(),
+                        detail: error.to_string(),
+                    })?,
+                size: Shares::new(order.matched_amount),
+                price: Price::new(order.price),
+                fee_rate_bps: Bps::new(order.fee_rate_bps),
+                token_id: TokenId::new(order.asset_id.to_string()),
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let transaction_hash = if trade.transaction_hash == B256::ZERO {
+        None
+    } else {
+        Some(
+            EvmTransactionHash::parse(format!("{:#x}", trade.transaction_hash)).map_err(
+                |error| ApiError::Deserialize {
+                    context: "CLOB trade transaction hash".to_owned(),
+                    detail: error.to_string(),
+                },
+            )?,
+        )
+    };
+    Ok(ClobTrade {
+        trade_id: VenueTradeId::new(trade.id),
+        order_id,
+        market_id: MarketId::new(format!("{:#x}", trade.market)),
+        token_id,
+        side,
+        size: matched_size,
+        price: matched_price,
+        fee_rate_bps: matched_fee_rate_bps,
+        trader_side,
+        maker_orders,
+        status,
+        transaction_hash,
+        matched_at: trade.match_time,
+    })
 }
 
 impl ClobClient {
@@ -615,13 +783,8 @@ impl ClobClient {
             })?
             .map_err(|e| OrderSubmissionError::post(ApiError::from(SdkClobError(&e))))?;
 
-        Ok(map_post_order_response(
-            req,
-            order_type,
-            order_amount,
-            submitted_at,
-            &resp,
-        ))
+        map_post_order_response(req, order_type, order_amount, submitted_at, &resp)
+            .map_err(OrderSubmissionError::post)
     }
 
     /// Cancel a single order by ID.
@@ -820,14 +983,14 @@ impl ClobClient {
         .await
     }
 
-    /// List authenticated account trades, optionally filtered by market, token,
-    /// and unix-second lower bound.
+    /// List authenticated account trades inside an explicit query boundary.
     #[tracing::instrument(skip(self), fields(market_id = ?market_id, token_id = ?token_id))]
     pub async fn get_trades(
         &self,
         market_id: Option<&MarketId>,
         token_id: Option<&TokenId>,
         after: Option<i64>,
+        before: Option<i64>,
     ) -> Result<Vec<ClobTrade>, ApiError> {
         self.rate_limiter.acquire("GET /data/trades").await;
 
@@ -854,111 +1017,58 @@ impl ClobClient {
                 request.market = market;
                 request.asset_id = asset_id;
                 request.after = after;
+                request.before = before;
                 let resp = sdk
                     .trades(&request, None)
                     .await
                     .map_err(|e| ApiError::from(SdkClobError(&e)))?;
 
-                resp.data
+                resp.data.into_iter().map(map_trade_response).collect()
+            }
+        })
+        .await
+    }
+
+    /// Load one order by its durable venue ID, including its associated trade IDs.
+    #[tracing::instrument(skip(self), fields(order_id = %order_id))]
+    pub async fn get_order(&self, order_id: &OrderId) -> Result<ClobOrder, ApiError> {
+        self.rate_limiter.acquire("GET /data/order/{id}").await;
+        let sdk = Arc::clone(&self.sdk);
+        let order_id = order_id.to_string();
+        retry::retry_with_policy(&RetryPolicy::clob_default(), || {
+            let sdk = Arc::clone(&sdk);
+            let order_id = order_id.clone();
+            async move {
+                sdk.order(&order_id)
+                    .await
+                    .map_err(|error| ApiError::from(SdkClobError(&error)))
+                    .and_then(map_order_lookup)
+            }
+        })
+        .await
+    }
+
+    /// Load one authenticated trade by its globally unique venue trade ID.
+    #[tracing::instrument(skip(self), fields(trade_id = %trade_id))]
+    pub async fn get_trade(&self, trade_id: &VenueTradeId) -> Result<Option<ClobTrade>, ApiError> {
+        self.rate_limiter.acquire("GET /data/trades?id").await;
+        let sdk = Arc::clone(&self.sdk);
+        let trade_id = trade_id.to_string();
+        retry::retry_with_policy(&RetryPolicy::clob_default(), || {
+            let sdk = Arc::clone(&sdk);
+            let trade_id = trade_id.clone();
+            async move {
+                let request = TradesRequest::builder().id(trade_id.clone()).build();
+                let response = sdk
+                    .trades(&request, None)
+                    .await
+                    .map_err(|error| ApiError::from(SdkClobError(&error)))?;
+                response
+                    .data
                     .into_iter()
-                    .map(|trade| {
-                        let trader_side = match trade.trader_side {
-                            TraderSide::Taker => FeeLiquidityRole::Taker,
-                            TraderSide::Maker => FeeLiquidityRole::Maker,
-                            TraderSide::Unknown(value) => {
-                                return Err(ApiError::Deserialize {
-                                    context: "CLOB trade trader_side".into(),
-                                    detail: format!("unknown trader side: {value}"),
-                                });
-                            }
-                            _ => {
-                                return Err(ApiError::Deserialize {
-                                    context: "CLOB trade trader_side".into(),
-                                    detail: "unsupported trader side".to_owned(),
-                                });
-                            }
-                        };
-                        let authenticated_maker_order = trade
-                            .maker_orders
-                            .iter()
-                            .find(|order| order.owner == trade.owner);
-                        let (
-                            order_id,
-                            token_id,
-                            side,
-                            matched_size,
-                            matched_price,
-                            matched_fee_rate_bps,
-                        ) = match trader_side {
-                            FeeLiquidityRole::Taker => (
-                                OrderId::new(&trade.taker_order_id),
-                                TokenId::new(trade.asset_id.to_string()),
-                                ClobSide::try_from(trade.side).map(|side| side.0).map_err(
-                                    |error| ApiError::Deserialize {
-                                        context: "CLOB trade side".into(),
-                                        detail: error.to_string(),
-                                    },
-                                )?,
-                                Shares::new(trade.size),
-                                Price::new(trade.price),
-                                Bps::new(trade.fee_rate_bps),
-                            ),
-                            FeeLiquidityRole::Maker => {
-                                let order = authenticated_maker_order.ok_or_else(|| ApiError::Deserialize {
-                                    context: "CLOB trade maker_orders".into(),
-                                    detail: "maker-side trade has no order owned by the authenticated account"
-                                        .to_owned(),
-                                })?;
-                                (
-                                    OrderId::new(&order.order_id),
-                                    TokenId::new(order.asset_id.to_string()),
-                                    ClobSide::try_from(order.side).map(|side| side.0).map_err(
-                                        |error| ApiError::Deserialize {
-                                            context: "CLOB authenticated maker order side".into(),
-                                            detail: error.to_string(),
-                                        },
-                                    )?,
-                                    Shares::new(order.matched_amount),
-                                    Price::new(order.price),
-                                    Bps::new(order.fee_rate_bps),
-                                )
-                            }
-                        };
-                        let maker_orders = trade
-                            .maker_orders
-                            .into_iter()
-                            .map(|order| {
-                                Ok(ClobMakerOrder {
-                                    order_id: OrderId::new(&order.order_id),
-                                    side: ClobSide::try_from(order.side).map(|side| side.0).map_err(
-                                        |error| ApiError::Deserialize {
-                                            context: "CLOB trade maker order side".into(),
-                                            detail: error.to_string(),
-                                        },
-                                    )?,
-                                    size: Shares::new(order.matched_amount),
-                                    price: Price::new(order.price),
-                                    fee_rate_bps: Bps::new(order.fee_rate_bps),
-                                    token_id: TokenId::new(order.asset_id.to_string()),
-                                })
-                            })
-                            .collect::<Result<Vec<_>, ApiError>>()?;
-                        Ok(ClobTrade {
-                            trade_id: trade.id,
-                            order_id,
-                            market_id: MarketId::new(format!("{:#x}", trade.market)),
-                            token_id,
-                            side,
-                            size: matched_size,
-                            price: matched_price,
-                            fee_rate_bps: matched_fee_rate_bps,
-                            trader_side,
-                            maker_orders,
-                            tx_hash: format!("{:#x}", trade.transaction_hash),
-                            matched_at: trade.match_time,
-                        })
-                    })
-                    .collect()
+                    .find(|trade| trade.id == trade_id)
+                    .map(map_trade_response)
+                    .transpose()
             }
         })
         .await

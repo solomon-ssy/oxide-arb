@@ -13,9 +13,9 @@ pub use data_quality::{DataQualityInput, DataQualityReport, DataQualitySnapshot}
 pub use decision_boundary::{DecisionBoundary, DecisionClock, DecisionSource};
 pub use domain_event::{
     CryptoPriceReport, CryptoPriceTransition, DomainEventEnvelope, DomainEventPayload,
-    DomainEventType, WeatherDailyTemperatureExtremeChange, WeatherForecastPoint,
-    WeatherObservationDayClosed, WeatherObservationFact, WeatherObservationReport,
-    WeatherObservationReportKind,
+    DomainEventType, SettlementRedeemConfirmed, WeatherDailyTemperatureExtremeChange,
+    WeatherForecastPoint, WeatherObservationDayClosed, WeatherObservationFact,
+    WeatherObservationReport, WeatherObservationReportKind,
 };
 pub use domain_observation::{
     DomainCursorStatus, DomainCursorStatusEnum, DomainCursorStatusIter,

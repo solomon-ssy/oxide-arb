@@ -13,7 +13,8 @@
 use std::time::Duration;
 
 use alloy::{
-    primitives::Address,
+    eips::BlockNumberOrTag,
+    primitives::{Address, U256},
     providers::{DynProvider, Provider, ProviderBuilder},
     rpc::client::RpcClient,
     sol,
@@ -33,6 +34,14 @@ sol! {
 
 sol! {
     #[sol(rpc)]
+    interface DepositWalletView {
+        function owner() external view returns (address);
+        function sessionSignerAuthorizedUntil(address signer) external view returns (uint256);
+    }
+}
+
+sol! {
+    #[sol(rpc)]
     interface GnosisSafeWallet {
         function isOwner(address owner) external view returns (bool);
     }
@@ -44,13 +53,20 @@ sol! {
 /// unit-tested with a stub, independent of a live Polygon node.
 #[async_trait]
 pub trait WalletOwnershipVerifier: Send + Sync {
-    /// Returns `true` when `funder` is controlled by `signer` under `kind`.
-    async fn is_controlled_by(
+    /// Returns owner and controller authorization observed on chain.
+    async fn control_evidence(
         &self,
         kind: ExecutionWalletKind,
         funder: Address,
         signer: Address,
-    ) -> Result<bool, RpcError>;
+    ) -> Result<WalletControlEvidence, RpcError>;
+}
+
+/// On-chain control evidence used to retain owner/session-signer lineage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalletControlEvidence {
+    pub owner: Address,
+    pub controller_authorized: bool,
 }
 
 /// Read-only Polygon client that resolves wallet controllers on-chain.
@@ -86,14 +102,17 @@ impl WalletOwnershipClient {
 
 #[async_trait]
 impl WalletOwnershipVerifier for WalletOwnershipClient {
-    async fn is_controlled_by(
+    async fn control_evidence(
         &self,
         kind: ExecutionWalletKind,
         funder: Address,
         signer: Address,
-    ) -> Result<bool, RpcError> {
+    ) -> Result<WalletControlEvidence, RpcError> {
         match kind {
-            ExecutionWalletKind::Eoa => Ok(funder == signer),
+            ExecutionWalletKind::Eoa => Ok(WalletControlEvidence {
+                owner: funder,
+                controller_authorized: funder == signer,
+            }),
             ExecutionWalletKind::Proxy => {
                 let owner = PolymarketProxyWallet::new(funder, &self.provider)
                     .owner()
@@ -103,7 +122,10 @@ impl WalletOwnershipVerifier for WalletOwnershipClient {
                         method: "proxy.owner".into(),
                         reason: e.to_string(),
                     })?;
-                Ok(owner == signer)
+                Ok(WalletControlEvidence {
+                    owner,
+                    controller_authorized: owner == signer,
+                })
             }
             ExecutionWalletKind::GnosisSafe => {
                 let is_owner = GnosisSafeWallet::new(funder, &self.provider)
@@ -114,7 +136,57 @@ impl WalletOwnershipVerifier for WalletOwnershipClient {
                         method: "safe.isOwner".into(),
                         reason: e.to_string(),
                     })?;
-                Ok(is_owner)
+                Ok(WalletControlEvidence {
+                    owner: signer,
+                    controller_authorized: is_owner,
+                })
+            }
+            ExecutionWalletKind::DepositWallet => {
+                let wallet = DepositWalletView::new(funder, &self.provider);
+                let owner = wallet
+                    .owner()
+                    .call()
+                    .await
+                    .map_err(|error| RpcError::CallFailed {
+                        method: "deposit_wallet.owner".into(),
+                        reason: error.to_string(),
+                    })?;
+                super::verify_deposit_wallet_derivation(owner, funder, 137).map_err(|error| {
+                    RpcError::CallFailed {
+                        method: "deposit_wallet.factory_derivation".into(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                if owner == signer {
+                    return Ok(WalletControlEvidence {
+                        owner,
+                        controller_authorized: true,
+                    });
+                }
+                let valid_until = wallet
+                    .sessionSignerAuthorizedUntil(signer)
+                    .call()
+                    .await
+                    .map_err(|error| RpcError::CallFailed {
+                        method: "deposit_wallet.sessionSignerAuthorizedUntil".into(),
+                        reason: error.to_string(),
+                    })?;
+                let head = self
+                    .provider
+                    .get_block_by_number(BlockNumberOrTag::Latest)
+                    .await
+                    .map_err(|error| RpcError::CallFailed {
+                        method: "eth_getBlockByNumber(latest)".into(),
+                        reason: error.to_string(),
+                    })?
+                    .ok_or_else(|| RpcError::CallFailed {
+                        method: "eth_getBlockByNumber(latest)".into(),
+                        reason: "latest block was absent".to_owned(),
+                    })?;
+                Ok(WalletControlEvidence {
+                    owner,
+                    controller_authorized: valid_until >= U256::from(head.header.timestamp),
+                })
             }
         }
     }

@@ -33,8 +33,6 @@ pub struct Model {
     pub policy_approvals: HasMany<super::policy_approval::Entity>,
     #[sea_orm(has_many)]
     pub policy_revisions: HasMany<super::policy_revision::Entity>,
-    #[sea_orm(has_many)]
-    pub system_production_baselines: HasMany<super::system_production_baseline::Entity>,
     #[sea_orm(has_many, via = "user_role")]
     pub roles: HasMany<super::role::Entity>,
 }

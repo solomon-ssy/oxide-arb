@@ -1,6 +1,6 @@
 # quant-pivot 生产运行 Runbook
 
-> Last reviewed: 2026-07-02.
+> Last reviewed: 2026-07-24.
 >
 > This document is an operating manual for quant-pivot on Polymarket. It explains how to prepare credentials and capital, start the system, read reports, place governed orders, sell or redeem positions, and respond to incidents. It is not investment advice. Every buy/sell decision must be traceable to a published `RecommendationReport`, an `OrderIntent`, an `ExecutionOrder`, or an explicit operator incident action.
 
@@ -109,16 +109,18 @@ curl -sS -X POST "$BASE/api/system/kill-switch" \
 | 项 | 是否必须 | 用于 | 配置位置 | 说明 |
 |----|----------|------|----------|------|
 | Polygon / Polymarket signer private key | 所有 mode 必须 | CLOB auth、账户读取、可执行模式签订单 | `[keys].private_key = "REPLACE_WITH_PRIVATE_KEY"` | 明文仅写入 gitignored 或权限 `0600` 的 deploy TOML；解析后由 `SecretText` 持有 |
-| `quant.account.funder` | 所有 mode 必须 | 读取 collateral、positions、计算 capital base | `QUANT_PIVOT__QUANT__ACCOUNT__FUNDER` | EOA 必须等于 signer 地址；proxy/safe 必须是 signer 控制的钱包地址 |
-| `quant.account.wallet_kind` | 所有 mode 必须 | 决定签名类型和 funder 校验 | `QUANT_PIVOT__QUANT__ACCOUNT__WALLET_KIND` | 当前代码支持 `eoa`、`proxy`、`gnosis_safe` |
+| `quant.account.funder` | 所有 mode 必须 | 读取 collateral、positions、计算 capital base | `QUANT_PIVOT__QUANT__ACCOUNT__FUNDER` | EOA 必须等于 signer；contract wallet 必须是 signer/有效 session signer 控制的官方派生钱包 |
+| `quant.account.wallet_kind` | 所有 mode 必须 | 决定签名类型和 funder 校验 | `QUANT_PIVOT__QUANT__ACCOUNT__WALLET_KIND` | 支持 `eoa`、`proxy`、`gnosis_safe`、`deposit_wallet`；fresh boot 的 Deposit Wallet 只接受当前官方 `BeaconProxy` |
 | CLOB L2 credentials | 不单独配置 | CLOB trading endpoints | 自动派生 | SDK connect 时由 private key 和 wallet topology 派生 |
 | Polygon RPC URL | 所有 mode 必须 | on-chain 读写、结算、赎回 | `QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL` | 生产必须使用可靠 RPC，配置超时 |
-| Gasless relayer key/address | proxy/safe 且会提交链上交易时必须 | gasless approval/redeem/settlement | `[polymarket.relayer].api_key = "REPLACE_WITH_RELAYER_API_KEY"`；address 为非敏感配置 | EOA 可直接付 gas；relayer key 不得暴露到前端 |
+| Gasless relayer key/address | proxy/safe/deposit_wallet 且会提交链上交易时必须 | gasless wallet-create/approval/redeem/settlement | `[polymarket.relayer].api_key = "REPLACE_WITH_RELAYER_API_KEY"`；address 为非敏感配置 | EOA 可直接付 gas；relayer key 不得暴露到前端 |
 | JWT signing key | Web API 必须 | HS256 登录和 API 认证 | `[web.jwt].signing_key = "REPLACE_WITH_JWT_SIGNING_KEY"` | 值为 Base64URL-no-pad 编码的恰好 32 个随机字节；轮换立即使所有旧 JWT 失效 |
 | Evidence signing key | 研究证据生产必须 | BLAKE3 keyed attestation | `[research.evidence_attestation].signing_key = "REPLACE_WITH_EVIDENCE_SIGNING_KEY"` | 值为 64 个小写 hex；历史 key 同样由 `SecretText` 持有，禁止与 JWT key 复用 |
 | Telegram / webhook secrets | 可选 | 通知 | deploy TOML 的 `SecretText` 字段；`operational_control.notifications` 只管事件路由 | Config API 永不返回 secret value |
 
-注意：Polymarket 官方文档列出 Deposit Wallet / `POLY_1271` 等签名类型，但当前代码只建模 `eoa`、`proxy`、`gnosis_safe`。如果要接入 Deposit Wallet，需要先扩展 wallet topology、配置校验、CLOB client 和 relayer 路径。
+Deposit Wallet 的 CLOB 身份固定使用 `POLY_1271`；settlement 只接受当前官方 factory 派生的
+`BeaconProxy`、固定 beacon/implementation code hash 和 owner/session-signer 证据。旧 UUPS 钱包不属于本系统
+fresh boot 的输入域，不提供 reader、兼容分支或历史兜底。
 
 ### 4.2 基础设施
 
@@ -156,7 +158,10 @@ ${EDITOR:?set EDITOR} /etc/quant-pivot/quant-pivot.toml
 
 systemd unit 只设置 `Environment=QUANT_PIVOT_CONFIG_DIR=/etc/quant-pivot`，不设置 secret environment。启动前检查所有 `REPLACE_WITH_*` 已替换、文件 owner 是 service user、mode 精确为 `0600`。
 
-PostgreSQL 与 ClickHouse 各自只配置一组 `user + password`，由 runtime、schema CLI 与 Fresh Boot 复用。所有 schema/reset/seal mutation 必须持有 canonical lifecycle lease；应用启动仍只执行 verify，绝不自动 DDL。deploy TOML 必须是普通文件、权限 `0600`、不进入版本控制；Config 控制台只显示 secret readiness，不返回值。
+PostgreSQL 与 ClickHouse 各自只配置一组 `user + password`，由 runtime、schema CLI 与 Fresh Boot 复用。所有
+schema mutation 与 pre-production reset 必须持有同一跨进程 advisory lock；应用启动仍只执行 verify，绝不
+自动 DDL。deploy TOML 必须是普通文件、权限 `0600`、不进入版本控制；Config 控制台只显示 secret
+readiness，不返回值。
 ## 5. 钱包、充值、allowance 与提现
 
 ### 5.1 选择 wallet topology
@@ -166,6 +171,7 @@ PostgreSQL 与 ClickHouse 各自只配置一组 `user + password`，由 runtime�
 | EOA | `eoa` | signer address | 最简单，EOA 自己付 gas | 私钥直接控制资金，必须严控 secret |
 | Proxy wallet | `proxy` | signer 控制的 proxy wallet 地址 | 历史 Polymarket 账户或 proxy 体系 | funder 不等于 signer，需要 relayer/代理链路校验 |
 | Gnosis Safe | `gnosis_safe` | signer 控制的 Safe 地址 | 多签/机构化 custody | relayer、Safe owner、签名类型和 allowance 更复杂 |
+| Deposit Wallet | `deposit_wallet` | 已部署并由 signer 控制的 current BeaconProxy wallet | 新 Polymarket API 用户 | 系统不创建钱包；启动时必须验证 factory、beacon、implementation、owner/session signer |
 
 上线前检查：
 
@@ -572,7 +578,9 @@ Poll `GET /api/research/jobs/{job_id}` 到 `succeeded | failed | cancelled`；�
 
 ## 7. Config policy 操作
 
-Config 控制台（`/system/config`）是首选入口。CLI 仅用于自动化和事故恢复；请求/响应 DTO 与 UI 类型均由 Rust schema 单一来源生成。权限分为 view、create、approve、activate、rollback 与 lifecycle seal，同一操作者可以执行多步，但每一步必须独立留痕。
+Config 控制台（`/system/config`）是首选入口。CLI 仅用于自动化和事故恢复；请求/响应 DTO 与 UI 类型均由
+Rust schema 单一来源生成。权限分为 view、create、approve、activate 与 rollback；具备对应权限的操作者
+可以独立执行多步，但每一步必须通过服务端 RBAC、CAS 和操作日志。
 
 ### 7.1 查看资源、当前 revision 与 schema
 
@@ -706,32 +714,37 @@ curl -sS -X POST \
 
 立即停止新执行使用 `operational_control` 的 halt 动作；不要靠缩小 risk threshold 模拟紧急停机。切换 mode 使用 `execution_authorization`；不要把 mode 当 Deploy Config。
 
-### 7.5 Boot baseline 与正式投产封存
+### 7.5 Fresh Boot 与后续 schema 演进
 
-当前 `project-lifecycle.toml` 为 `pre_production_resettable / boot`。系统自有 policy、feature、dataset、model、manifest、evaluator 与 ClickHouse row schema 均从版本 1 开始；HTTP namespace `/api/v1` 和外部协议编号不重置。
+系统没有 `project-lifecycle.toml`、数据库 lifecycle state 或 production-seal API。空 PostgreSQL 只应用
+`m00000000_000001_bootstrap`，空 ClickHouse 只应用 version 1 bootstrap；API namespace `/api/v1` 与外部协议
+编号不随内部 boot version 重置。
 
-空 PostgreSQL 只应用 `m00000000_000001_bootstrap`，空 ClickHouse 只应用 version 1 bootstrap。若检测到旧 migration history、未知非空 schema 或 manifest fingerprint 不一致，工具必须 fail closed，并提示清空该未投产环境后重新 bootstrap。Runbook 不自动删除数据库、缓存或 artifact；执行任何销毁前必须重新确认精确环境和授权。
+若 fresh install 检测到未知非空 schema、未知 migration history 或 semantic schema fingerprint 不一致，
+工具必须 fail closed。`preproduction-reset` 是需要精确环境、短期 plan token 与操作者明确授权的独立破坏式
+CLI；应用运行时和 Web API 都不会自动清库、自动 DDL 或替操作者推断可销毁范围。
 
-正式上线前进入 `/system/config/lifecycle`，核对环境、build commit、PostgreSQL/ClickHouse fingerprint、migration、backup、Config E2E 与 active policy bundle。封存请求必须使用服务端返回的确认短语：
+标准 fresh deployment 必须由 deploy-only xtask 完成 PostgreSQL boot；不要只运行 migration 后直接启动
+应用：
 
 ```bash
-curl -sS "$BASE/api/config/lifecycle" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" | jq .
-
-curl -sS -X POST "$BASE/api/config/lifecycle/seal-production" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" \
-  -H "X-Acting-Role: operator" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "environment":"production",
-    "confirmation_phrase":"<exact phrase from lifecycle response>",
-    "reason":"seal verified first production baseline"
-  }' | jq .
+cargo run -p quant-pivot-xtask -- \
+  postgres-schema plan --config-dir config
+cargo run -p quant-pivot-xtask -- \
+  postgres-schema apply --config-dir config
+cargo run -p quant-pivot-xtask -- \
+  postgres-schema verify --config-dir config
 ```
 
-`production_frozen` 不可逆。封存后 boot squash/reset 被 API、CLI 与 migration 工具拒绝；任何 schema/data/version 演进都必须恢复标准 forward migration、兼容性评估、回滚方案与数据验证。
+`apply` 在同一 schema mutation lease 内完成唯一 boot migration、catalog/admin finalize、immutable research
+profiles 与 canonical six-resource policy bundle。其输出必须同时包含 schema version 和 policy
+bundle generation/snapshot identity；默认 `system_runtime_control.settlement_write_policy` 必须为
+`disabled`。应用 runtime 不会补 seed，也不会把缺失 active policy 当成可恢复状态；因此漏掉 deploy-only
+bootstrap 会使启动 fail closed，而不是静默生成策略。
+
+首次部署后，所有 schema/data/format 变化直接使用正常 forward migration、备份、回滚与数据验证流程；这是一条
+部署纪律，不再由不可逆 seal、文件开关或额外数据库状态阻断正常演进。资金写入则独立由 runtime mode、
+kill switch、`SettlementWritePolicy` 与 money-path admission 控制。
 ## 8. 生成与阅读报告
 
 ### 8.0 前置条件（冷启动必读）
@@ -771,16 +784,19 @@ curl -sS -X POST "$BASE/api/config/lifecycle/seal-production" \
 
 ### 8.0.1 ClickHouse boot schema 门禁
 
-当前 ClickHouse 只有 version 1 bootstrap。首次启动任何 writer 前，使用同一配置身份显式 apply，再执行只读 verify；两者与 PostgreSQL migration/reset/seal 竞争同一 lifecycle lease：
+当前 ClickHouse 只有 version 1 bootstrap。首次启动任何 writer 前，使用同一配置身份显式 apply，再执行只读
+verify；两者与 PostgreSQL schema mutation / pre-production reset 共用同一 advisory lock：
 
 ```bash
 cargo run -p quant-pivot-xtask -- \
-  clickhouse-schema apply --config-dir config
+  clickhouse-schema apply-online --config-dir config
 cargo run -p quant-pivot-xtask -- \
   clickhouse-schema verify --config-dir config
 ```
 
-若发现旧 migration history、未知非空 schema、manifest checksum 或 schema fingerprint 不一致，命令立即 fail closed；不会搬运旧 rows、创建兼容 view 或让 runtime startup 自动 DDL。项目未投产时应在获得精确销毁授权后清空该环境并重新 bootstrap；`production_frozen` 后必须改用正式 forward migration。
+若发现未知 migration history、未知非空 schema、manifest checksum 或 schema fingerprint 不一致，命令立即
+fail closed；不会搬运旧 rows、创建兼容 view 或让 runtime startup 自动 DDL。只有明确授权的
+pre-production reset 可以销毁未投产环境；正常演进始终使用正式 forward migration。
 
 ### 8.1 从冷启动到第一份报告（完整流程）
 
@@ -1438,7 +1454,79 @@ curl -sS -X POST "$BASE/api/system/quant-mode" \
 - losing tokens 价值为 0；
 - Polymarket 文档表示没有赎回 deadline；
 - redeem 会 burn 整个 condition balance，不是指定部分 amount；
-- 当前 `settlement_redeem` policy 可自动批量 redeem；失败或不支持 topology 时进入 manual required。
+- canonical V2 adapter 先收回 USDC.e，再调用 pUSD `wrap`。到账证据必须同时存在 exact
+  `Transfer(0x0 → funder)` 与 `Wrapped(caller=adapter, asset=USDC.e, to=funder, amount)`；不得把
+  adapter 当成 pUSD `Transfer.from`；
+- settlement 不再受 hot-reload `settlement_redeem` policy 控制。`SettlementWritePolicy` 默认必须为
+  `disabled`；该状态只允许 case discovery、read-only preflight、external observation 和已持久化 identity
+  的 polling/reconciliation，不允许构造任何新链上 submission；
+- case 的 current immutable inventory 中，只要有一个 lot 不是
+  `HoldToResolution + RedeemPolicy::Auto`，`effective_policy` 就必须为 `ManualOnly`。它在 claim、
+  batch authorization、canary、service admission 与 prepared-submission transaction CAS 全部阻断系统新
+  redeem；运营页必须展示 `inventory_lots` 的逐 lot mode/policy，不能用尚未产生的 confirmed payout
+  allocations 代替；
+- 同一 `market × execution_account` 存在 `Planned`、`Accepted`、`Submitted`、`PartiallyFilled`、
+  `CancelRequested` 或 `Ambiguous` execution order 时，库存不具备 quiescence；partial fill 的未成交余量
+  仍可能改变账户余额。signer-free preflight、canary 与最终 DB CAS 必须 fail closed，直到余量取消或
+  order/trade reconciliation 形成确定终态并重新冻结库存；
+- `governed_canary` 只允许 one-shot grant 精确绑定的 approval/canary；全部 settlement governed action
+  均允许单个具备该动作对应 `settlement_redeem:create`、`settlement_redeem:approve` 或
+  `settlement_redeem:revoke` 权限的操作者独立完成；同一操作者同时具备所需权限时可以独立完成完整流程，
+  不要求 requester/approver 分离，也不硬编码 system-admin 角色，但仍强制 fresh preflight、
+  scope digest、CAS、幂等、append-only 审计、TTL/上限和异步 worker；`auto` 仅允许
+  `AutomaticEligible` case 且要求当前
+  deployment digest 存在 accepted governed-canary 数据库事实；
+- 已持久化的 submission 不受后续 mode/halt/manifest 变化影响，必须继续 exact replay、polling 和
+  reconciliation，不得重新取 nonce、重签、换 target 或重复 redeem。
+
+任何真实资金动作前，值班人员必须逐项验证以下 release checklist；缺一项即保持 `disabled`：
+
+1. Contracts authoritative target、PolygonScan source bundle 和本地 reproducible runtime 完全匹配；
+2. adapter、pUSD proxy implementation、CTF、USDC.e、Neg Risk dependency 与实际 wallet factory/code/binding
+   在 finalized canonical block 通过；
+3. money prepare 在新鲜 canonical block 上重新验证 approval、余额、pause、adapter residual collateral 和
+   exact calldata simulation；
+4. execution account、wallet balance、open lots、order/trade reconciliation 与 frozen inventory digest 完全一致，
+   且该 market/account 的 non-terminal execution order 数为 0；
+5. action 精确绑定 `route × wallet_kind × deployment_digest × action/case × authorization digest × payout ceiling × expiry`；
+6. 任一 settlement governed action 均可由单个具备对应 create/approve/revoke 权限的操作者独立完成；
+   权限由服务端 RBAC 决定，不要求 requester 与 approver 为不同 actor；
+7. canary 只在 `semi_auto` 下运行，并获得用户对精确 case/金额上限/route/wallet/digest 的独立授权；
+8. operator approval、receipt finality、mined wrapper call、pUSD Wrapped/mint、outcome balance 归零、lot allocation
+   和 durable outbox 全部确认；
+9. timeout-after-submit、restart-with-relayer-ID、lease loss、reorg 和 rollback/revocation drill 全部通过；
+10. 没有未解决 Critical/High、没有 reconciliation backlog，settlement SLO/告警已启用。
+
+accepted canary 仅是其精确 `route × wallet_kind × deployment_digest` 的 factual admission evidence，
+不生成文件 seal，也不单独授权后续交易；deployment digest 变化会自然导致旧授权/canary scope 不匹配。
+AutoExecution 必须另行完成 recovery/rollback drill，并由具备权限的操作者显式把
+`SettlementWritePolicy` 切换为 `auto`；不能由 SemiAuto canary 自动升级，也不要求第二名操作者。
+
+Settlement worker 的最低监控与告警契约如下。标签值由代码中的封闭枚举映射产生，禁止把 case ID、
+地址、错误文本等高基数字段放入 Prometheus label；完整证据从 Settlement 运营页的 case/action drawer
+和 reconciliation queue 查询。
+
+| Signal | 建议告警 | 操作 |
+|---|---|---|
+| `quant_settlement_worker_error_total` | 任意 worker 5 分钟增量 `> 0` | 检查 RPC/DB 错误；确认 durable identity 仍由 recovery worker 接管 |
+| `quant_settlement_lease_lost_total` | 15 分钟增量 `> 0` | 检查实例抖动、数据库延迟和 claim lease；不得手工重发 |
+| `quant_settlement_reconciliation_required_total` | 5 分钟增量 `> 0`，资金环境按 critical | 在 UI 证据抽屉核对 typed failure；资本保持冻结直至人工查明 |
+| `quant_settlement_discovery_lag_seconds` | p99 10 分钟 `> 120s` | 检查 resolved-market DB poll 与 event wake；Gamma 事件不是真相源 |
+| `quant_settlement_submission_age_seconds` | p99 10 分钟 `> 600s` | 查 relayer ID/tx hash/receipt，继续 exact polling，不生成新 envelope |
+| `quant_settlement_finality_lag_seconds` | p99 10 分钟 `> 600s` | 查 Polygon finalized head 与 canonical block；禁止仅凭 receipt success 确认 |
+
+参考 PromQL：
+
+```promql
+sum(increase(quant_settlement_worker_error_total[5m])) > 0
+sum(increase(quant_settlement_lease_lost_total[15m])) > 0
+sum(increase(quant_settlement_reconciliation_required_total[5m])) > 0
+histogram_quantile(0.99, sum by (le) (rate(quant_settlement_discovery_lag_seconds_bucket[10m]))) > 120
+histogram_quantile(0.99, sum by (le) (rate(quant_settlement_submission_age_seconds_bucket[10m]))) > 600
+histogram_quantile(0.99, sum by (le) (rate(quant_settlement_finality_lag_seconds_bucket[10m]))) > 600
+```
+
+系统不提供 `WALLET-CREATE`。当前 Phase 实施不得调用真实 order、approval、redeem 或 canary。
 
 ## 14. Reconciliation 与账务闭环
 
@@ -1618,9 +1706,10 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 | 当前用户 | `GET /api/auth/me` |
 | 系统状态 | `GET /api/system/status` |
 | 系统健康 | `GET /api/system/health` |
-| 当前 mode | `GET /api/system/quant-mode` |
-| 切 mode | `POST /api/system/quant-mode` |
-| kill switch | `GET/POST /api/system/kill-switch` |
+| runtime controls 快照 | `GET /api/system/runtime-controls` |
+| 切 mode | `POST /api/system/runtime-controls/quant-mode` |
+| settlement write policy | `POST /api/system/runtime-controls/settlement-write-policy` |
+| kill switch | `POST /api/system/runtime-controls/kill-switch` |
 | masked deploy config | `GET /api/system/deploy-config` |
 | Config 资源总览 | `GET /api/config/resources` |
 | 当前 policy resource | `GET /api/config/{kind}/current` |
@@ -1631,7 +1720,6 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 | Activate | `POST /api/config/{kind}/drafts/{id}/activate` |
 | 显式回滚 | `POST /api/config/{kind}/revisions/{id}/rollback` |
 | Deployment 只读快照 | `GET /api/config/deployment` |
-| Lifecycle / production seal | `GET /api/config/lifecycle`, `POST /api/config/lifecycle/seal-production` |
 | Feature Integrity 概览 / latch | `GET /api/research/feature-integrity/summary` |
 | Parity run 列表 | `GET /api/research/feature-integrity/runs` |
 | Parity 逐阶段证据 | `GET /api/research/feature-integrity/events` |
@@ -1653,7 +1741,12 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 | execution orders | `GET /api/quant/execution-orders` |
 | positions | `GET /api/quant/positions` |
 | reconciliations | `GET /api/quant/reconciliations` |
+| settlement readiness | `GET /api/quant/settlement-readiness` |
 | settlement redeems | `GET /api/quant/settlement-redeems` |
+| settlement redeem detail | `GET /api/quant/settlement-redeems/{id}` |
+| 创建 / 预检 governed action | `POST /api/quant/settlement-operator-approvals/preflight`、`POST /api/quant/settlement-canaries/preflight` |
+| 持久化 governed action | `POST /api/quant/settlement-operator-approvals/apply`、`POST /api/quant/settlement-canaries/apply` |
+| 审批 / 撤销 settlement batch | `POST /api/quant/settlement-redeems/{id}/approve`、`POST /api/quant/settlement-redeems/{id}/revoke-approval` |
 
 ## 18. Done criteria
 

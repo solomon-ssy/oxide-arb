@@ -5,8 +5,8 @@ use sea_orm::entity::prelude::*;
 
 use super::{
     decision_policy_snapshot, quant_capital_allocation, quant_entry_condition_instance,
-    quant_execution_order, quant_model_version, quant_position, quant_recommendation,
-    research_profile_artifact,
+    quant_execution_account, quant_execution_order, quant_model_version, quant_position,
+    quant_recommendation, quant_settlement_inventory_lot, research_profile_artifact,
 };
 use crate::{
     enums::{
@@ -15,8 +15,8 @@ use crate::{
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, EntryConditionInstanceId, EntryOrderSpec,
-        ExitPolicySpec, ExitReinferenceObservation, ModelVersionId, OrderIntentId, Price,
-        RecommendationId, ResearchProfileArtifactId, ScaleOutState, UserId,
+        ExecutionAccountId, ExitPolicySpec, ExitReinferenceObservation, ModelVersionId,
+        OrderIntentId, Price, RecommendationId, ResearchProfileArtifactId, ScaleOutState, UserId,
     },
 };
 
@@ -27,6 +27,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
+    pub execution_account_id: ExecutionAccountId,
     pub runtime_mode: QuantRuntimeMode,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
@@ -81,6 +82,13 @@ pub struct Model {
     pub recommendation: BelongsTo<quant_recommendation::Entity>,
     #[sea_orm(
         belongs_to,
+        relation_enum = "ExecutionAccount",
+        from = "execution_account_id",
+        to = "execution_account_id"
+    )]
+    pub execution_account: BelongsTo<quant_execution_account::Entity>,
+    #[sea_orm(
+        belongs_to,
         relation_enum = "ConditionInstance",
         from = "condition_instance_id",
         to = "condition_instance_id"
@@ -106,6 +114,8 @@ pub struct Model {
     pub capital_allocation: HasOne<quant_capital_allocation::Entity>,
     #[sea_orm(has_one, relation_enum = "Position")]
     pub position: HasOne<quant_position::Entity>,
+    #[sea_orm(has_many, relation_enum = "SettlementInventoryLot")]
+    pub settlement_inventory_lot: HasMany<quant_settlement_inventory_lot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -2,7 +2,7 @@
 
 > Last reviewed: 2026-07-19.
 >
-> This document describes the current quant-pivot architecture implemented in this repository. The project has not entered production: lifecycle is `pre_production_resettable`, the baseline is `boot`, and every system-owned policy/schema/manifest/artifact format starts at version `1`. Historical phase increments are audit context only and have no implementation authority. After the irreversible `production_frozen` seal, all evolution requires forward migrations, rollback and data verification.
+> This document describes the current quant-pivot architecture implemented in this repository. The project has not entered production and will be deployed from a fresh boot-v1 database. Historical phase increments are audit context only and have no implementation authority. There is no production seal or compatibility bridge: post-deployment evolution uses normal forward migrations, rollback, and data verification.
 
 ## 1. 系统目标
 
@@ -791,10 +791,9 @@ Redis 不存储不可恢复的交易真相。
 
 ## 19. Deployment lifecycle
 
-仓库、部署声明和数据库 baseline 共同实现两态生命周期：
-
-- `pre_production_resettable / boot`：允许在明确授权后清空测试基础设施、squash migration 与重建 version 1 artifact；应用自身从不自动删除数据。
-- `production_frozen / boot`：不可逆。任何 schema、数据或内部 format 演进必须使用 forward migration、兼容性评估、回滚方案与数据验证；boot reset 被 API、CLI 与 migration tool 拒绝。
+部署只有一套 boot-v1 起点，没有 `pre_production_resettable / production_frozen` 运行时状态，也没有不可逆
+production seal。首次部署前可在精确授权下使用独立 CLI 清空未投产基础设施；应用和 Web API 从不自动删除
+数据。首次部署后所有 schema、数据与内部 format 演进直接使用正常 forward migration、回滚与数据验证。
 
 首次上线顺序：
 
@@ -804,20 +803,20 @@ flowchart TD
     B --> C["Apply one PostgreSQL boot migration"]
     C --> D["Apply one ClickHouse version-1 bootstrap"]
     D --> E["Verify schema fingerprints and empty unknown history"]
-    E --> F["Activate six safe boot policy resources"]
+    E --> F["Verify seeded safe boot policy resources"]
     F --> G["Build version-1 dataset/model artifacts"]
     G --> H["Subject-bound full parity passed"]
     H --> I["Publish model and run ad-hoc canary"]
     I --> J["Enable schedule with conservative execution controls"]
-    J --> K["Review lifecycle evidence checklist"]
-    K --> L["Irreversible production seal"]
+    J --> K["Review deployment and recovery checklist"]
+    K --> L["Go live with runtime controls explicitly selected"]
 ```
 
 Activation failures retain the prior `DecisionPolicySnapshot`; they do not trigger automatic rollback. Operational incidents use explicit policy rollback or halt actions while ingest、exit、reconciliation 和 settlement continue. Scaling budget/caps remains a governed business decision after report/order/reconciliation/attribution evidence, not a deploy toggle.
 ## 20. 设计边界与当前限制
 
 1. 只支持 Polymarket，不存在 multi-venue abstraction。
-2. 当前 wallet topology 只支持 `eoa`、`proxy`、`gnosis_safe`。
+2. 当前 wallet topology 支持 `eoa`、`proxy`、`gnosis_safe`、`deposit_wallet`；系统不创建 Deposit Wallet。
 3. Report sizing 使用真实账户；没有配置预算模拟 fallback。
 4. 当前 order intent kind 是 buy entry；exit order 由 execution/exit subsystem 管理。
 5. 手动在 Polymarket UI 下单不会自动生成系统内 `OrderIntent`。

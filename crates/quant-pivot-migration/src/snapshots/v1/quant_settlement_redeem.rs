@@ -2,7 +2,10 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{QpExecutionWalletKind, QpSettlementRedeemState};
+use super::sea_orm_active_enums::{
+    QpSettlementCaseState, QpSettlementEffectivePolicy, QpSettlementFailureCode,
+    QpSettlementReadinessStatus, QpSettlementReconciliationState, QpSettlementRoute,
+};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -12,19 +15,57 @@ pub struct Model {
     pub settlement_redeem_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub market_id: String,
-    pub funder_address: String,
-    pub wallet_kind: QpExecutionWalletKind,
-    pub state: QpSettlementRedeemState,
-    pub tx_hash: Option<String>,
-    pub index_sets_json: Json,
+    #[sea_orm(column_type = "Text")]
+    pub yes_token_id: String,
+    #[sea_orm(column_type = "Text")]
+    pub no_token_id: String,
+    pub execution_account_id: Uuid,
+    #[sea_orm(column_type = "Text")]
+    pub resolution_content_hash: String,
+    #[sea_orm(column_type = "Text")]
+    pub resolution_outcome: String,
+    pub resolved_at: DateTimeWithTimeZone,
+    pub route: QpSettlementRoute,
+    pub effective_policy: QpSettlementEffectivePolicy,
+    #[sea_orm(column_type = "Text")]
+    pub inventory_digest: String,
+    #[sea_orm(column_type = "Text")]
+    pub contributor_lots_digest: String,
+    pub state: QpSettlementCaseState,
+    pub readiness_status: QpSettlementReadinessStatus,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub readiness_evidence_json: Json,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub target_adapter: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub target_code_hash: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub deployment_digest: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub deployment_evidence_version: Option<String>,
+    pub verified_block_number: Option<i64>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub verified_block_hash: Option<String>,
+    pub current_authorization_id: Option<Uuid>,
+    pub reconciliation_state: QpSettlementReconciliationState,
+    #[sea_orm(column_type = "JsonBinary")]
     pub payout_vector_json: Json,
-    pub balance_before_json: Json,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub balance_before_json: Option<Json>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
     pub balance_after_json: Option<Json>,
-    pub payout_usd: Decimal,
+    pub expected_payout_usd: Option<Decimal>,
+    pub actual_payout_usd: Option<Decimal>,
     pub gas_fee_pol: Option<Decimal>,
+    pub failure_code: Option<QpSettlementFailureCode>,
     pub attempt_count: i32,
+    pub retry_count: i32,
     pub next_attempt_at: Option<DateTimeWithTimeZone>,
+    pub claim_owner: Option<Uuid>,
+    pub lease_expires_at: Option<DateTimeWithTimeZone>,
+    #[sea_orm(column_type = "Text", nullable)]
     pub last_error: Option<String>,
+    pub prepared_at: Option<DateTimeWithTimeZone>,
     pub submitted_at: Option<DateTimeWithTimeZone>,
     pub confirmed_at: Option<DateTimeWithTimeZone>,
     pub failed_at: Option<DateTimeWithTimeZone>,
@@ -38,6 +79,23 @@ pub struct Model {
         on_delete = "NoAction"
     )]
     pub market: BelongsTo<super::market::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "execution_account_id",
+        to = "execution_account_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_execution_account: BelongsTo<super::quant_execution_account::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_settlement_authorizations: HasMany<super::quant_settlement_authorization::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_settlement_governed_actions: HasMany<super::quant_settlement_governed_action::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_settlement_inventory_lots: HasMany<super::quant_settlement_inventory_lot::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_settlement_chain_submissions:
+        HasMany<super::quant_settlement_chain_submission::Entity>,
     #[sea_orm(has_many)]
     pub quant_settlement_redeem_lots: HasMany<super::quant_settlement_redeem_lot::Entity>,
 }

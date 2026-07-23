@@ -25,8 +25,9 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     domain::{
         quant::{
-            CapitalReconcileSettlement, ExecutionOrderInfo, OrderIntentInfo, PositionExit,
-            PositionFill, PositionInfo, RecommendationInfo, ReconciliationLedgerWrite,
+            CapitalReconcileSettlement, ExecutionOrderIdentityRefs, ExecutionOrderInfo,
+            OrderIntentInfo, PositionExit, PositionFill, PositionInfo, RecommendationInfo,
+            ReconciliationLedgerWrite,
         },
         runtime::{CoreEvent, CoreEventPublisher, ReconciliationLifecycleEvent},
     },
@@ -39,8 +40,8 @@ use quant_pivot_models::{
         quant::{AccountSource, ExecutionOrderState, OrderIntentStatus},
     },
     types::{
-        ExecutionOrderId, FeeEvidence, FeeEvidencePriority, OrderIntentId, Price, RecommendationId,
-        ReconciliationEvidence, ReconciliationEvidenceChain, Shares, Usd,
+        ExecutionAccountId, ExecutionOrderId, FeeEvidence, FeeEvidencePriority, OrderIntentId,
+        Price, RecommendationId, ReconciliationEvidence, ReconciliationEvidenceChain, Shares, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -225,9 +226,20 @@ impl ReconciliationService {
 
         let (intent, recommendation) = load_reconcile_context(order, context)?;
 
+        let identity_refs = self
+            .deps
+            .submission
+            .load_identity_refs(&order.execution_order_id)
+            .await?;
+
         // Collect venue evidence. A venue read failure is fail-closed: freeze
         // only once the order is past the staleness deadline, else retry later.
-        let collected = match self.deps.collector.collect(order, now, stale_after).await {
+        let collected = match self
+            .deps
+            .collector
+            .collect(order, &identity_refs, now, stale_after)
+            .await
+        {
             Ok(collected) => collected,
             Err(error) => {
                 let submitted_at = order.submitted_at.unwrap_or(order.created_at);
@@ -245,17 +257,44 @@ impl ReconciliationService {
             }
         };
 
+        // Exact order/trade lookup is identity enrichment, never a placement
+        // verdict rewrite. Persist it before any cancellation or terminal money
+        // transition so restart recovery resumes from the same identities.
+        let discovered_order_id = collected.identity_enrichment.discovered_order_id.clone();
+        let identity_refs = self
+            .deps
+            .submission
+            .enrich_identity_refs(
+                &order.execution_order_id,
+                collected.identity_enrichment.clone(),
+            )
+            .await?;
+        let mut effective_order = order.clone();
+        if effective_order.venue_order_id.is_none() {
+            effective_order.venue_order_id = discovered_order_id;
+        }
+
         // Actively cancel a stale (or GTD-expired) resting order, then re-collect
         // the post-cancel truth so unfilled capital is released promptly.
-        let collected = recollect_after_stale_cancel(
+        let (collected, recollected) = recollect_after_stale_cancel(
             &self.deps.collector,
             &self.deps.order_client,
-            order,
+            &effective_order,
+            &identity_refs,
             collected,
             now,
             stale_after,
         )
         .await;
+        if recollected {
+            self.deps
+                .submission
+                .enrich_identity_refs(
+                    &order.execution_order_id,
+                    collected.identity_enrichment.clone(),
+                )
+                .await?;
+        }
 
         let decision = decide(&collected.facts);
         if decision.result == ReconciliationResult::Pending {
@@ -283,6 +322,7 @@ impl ReconciliationService {
         let write = Self::build_terminal_write(
             order,
             &recommendation,
+            intent.execution_account_id,
             lot.as_ref(),
             terminal,
             ReconciliationEvidenceChain(evidence),
@@ -364,6 +404,7 @@ impl ReconciliationService {
         let write = Self::build_terminal_write(
             &order,
             &recommendation,
+            intent.execution_account_id,
             lot.as_ref(),
             terminal,
             ReconciliationEvidenceChain(vec![note]),
@@ -559,6 +600,7 @@ impl ReconciliationService {
     fn build_terminal_write(
         order: &ExecutionOrderInfo,
         recommendation: &RecommendationInfo,
+        execution_account_id: ExecutionAccountId,
         lot: Option<&PositionInfo>,
         decision: TerminalDecision,
         evidence: ReconciliationEvidenceChain,
@@ -592,6 +634,7 @@ impl ReconciliationService {
             EntryReconcileInput {
                 order,
                 recommendation,
+                execution_account_id,
                 decision,
                 now,
             },
@@ -613,6 +656,7 @@ struct TerminalDecision {
 struct EntryReconcileInput<'a> {
     order: &'a ExecutionOrderInfo,
     recommendation: &'a RecommendationInfo,
+    execution_account_id: ExecutionAccountId,
     decision: TerminalDecision,
     now: DateTime<Utc>,
 }
@@ -716,6 +760,7 @@ fn entry_reconcile_write(
     let EntryReconcileInput {
         order,
         recommendation,
+        execution_account_id,
         decision:
             TerminalDecision {
                 result,
@@ -752,6 +797,7 @@ fn entry_reconcile_write(
             write.fill = Some(position_fill(
                 order,
                 recommendation,
+                execution_account_id,
                 filled_shares,
                 price,
                 spent,
@@ -931,27 +977,29 @@ async fn recollect_after_stale_cancel(
     collector: &Arc<dyn EvidenceCollector>,
     order_client: &Arc<dyn PolymarketOrderClient>,
     order: &ExecutionOrderInfo,
+    identity_refs: &ExecutionOrderIdentityRefs,
     collected: CollectedReconciliation,
     now: DateTime<Utc>,
     stale_after: Duration,
-) -> CollectedReconciliation {
+) -> (CollectedReconciliation, bool) {
     if collected.facts.presence == VenuePresence::Resting
         && (collected.facts.past_stale_deadline || collected.facts.gtd_expired)
         && let Some(venue_order_id) = order.venue_order_id.as_ref()
     {
         let _ = order_client.cancel(venue_order_id).await;
         return collector
-            .collect(order, now, stale_after)
+            .collect(order, identity_refs, now, stale_after)
             .await
-            .unwrap_or(collected);
+            .map_or((collected, false), |recollected| (recollected, true));
     }
-    collected
+    (collected, false)
 }
 
 /// Build the position upsert for a confirmed fill.
 fn position_fill(
     order: &ExecutionOrderInfo,
     recommendation: &RecommendationInfo,
+    execution_account_id: ExecutionAccountId,
     shares: Shares,
     price: Price,
     cost_usd: Usd,
@@ -959,6 +1007,7 @@ fn position_fill(
 ) -> PositionFill {
     PositionFill {
         order_intent_id: order.order_intent_id,
+        execution_account_id,
         token_id: order.token_id.clone(),
         market_id: order.market_id.clone(),
         event_id: Some(recommendation.event_id.clone()),
@@ -1003,7 +1052,7 @@ mod tests {
             quant::{AccountSource, ExecutionOrderState, OutcomeSide},
         },
         types::{
-            ExecutionOrderId, MarketId, OrderIntentId, PositionId, Price,
+            ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId, PositionId, Price,
             ReconciliationEvidenceChain, Shares, TokenId, Usd, VenueOrderAmount,
         },
     };
@@ -1020,6 +1069,7 @@ mod tests {
         PositionInfo {
             position_id: PositionId::from_v7(),
             order_intent_id: OrderIntentId::from_v7(),
+            execution_account_id: ExecutionAccountId::from_v7(),
             token_id: TokenId::new("token-1"),
             market_id: MarketId::new("0xmkt"),
             event_id: None,

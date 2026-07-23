@@ -190,7 +190,11 @@ pub fn configure(cfg: &mut ServiceConfig) {
 
 #[cfg(test)]
 mod tests {
+    use actix_web::http::Method;
+    use quant_pivot_models::enums::rbac::{Operation, ResourceType};
+
     use super::protected_route_specs;
+    use crate::auth::casbin::Rule;
 
     #[test]
     fn feature_integrity_routes_are_in_the_protected_manifest() {
@@ -213,5 +217,45 @@ mod tests {
                 "/research/feature-integrity/latch/acknowledge",
             ]
         );
+    }
+
+    #[test]
+    fn settlement_money_actions_are_governed_and_readiness_is_read_only() {
+        let routes = protected_route_specs()
+            .into_iter()
+            .filter(|spec| spec.path.starts_with("/quant/settlement-"))
+            .map(|spec| (spec.method, spec.path, spec.rule))
+            .collect::<Vec<_>>();
+
+        assert_eq!(routes.len(), 12);
+        for (method, path, rule) in routes {
+            match (method, path, rule) {
+                (
+                    Method::POST,
+                    "/quant/settlement-redeems/{id}/approve",
+                    Rule::ActingRoleGoverned(ResourceType::SettlementRedeem, Operation::Approve),
+                )
+                | (
+                    Method::POST,
+                    "/quant/settlement-redeems/{id}/revoke-approval"
+                    | "/quant/settlement-governed-actions/{id}/revoke",
+                    Rule::ActingRoleGoverned(ResourceType::SettlementRedeem, Operation::Revoke),
+                )
+                | (
+                    Method::POST,
+                    "/quant/settlement-operator-approvals/apply"
+                    | "/quant/settlement-canaries/apply",
+                    Rule::ActingRoleGoverned(ResourceType::SettlementRedeem, Operation::Create),
+                )
+                | (
+                    Method::GET | Method::POST,
+                    _,
+                    Rule::ResourceOp(ResourceType::SettlementRedeem, Operation::Read),
+                ) => {}
+                (_, unexpected_path, unexpected_rule) => panic!(
+                    "unexpected settlement RBAC mapping for {unexpected_path}: {unexpected_rule:?}"
+                ),
+            }
+        }
     }
 }

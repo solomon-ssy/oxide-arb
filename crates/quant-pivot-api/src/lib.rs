@@ -15,15 +15,14 @@ pub mod binance;
 #[cfg(feature = "domain-chainlink")]
 pub mod chainlink;
 pub mod clob;
-pub mod ctf;
 pub mod data_api;
 pub mod domain;
 pub mod exchange;
 pub mod gamma;
 pub mod infra;
 pub mod keystore;
-pub mod relayer;
 pub mod rtds;
+pub mod settlement;
 pub mod wallet;
 pub mod weather;
 pub mod wire;

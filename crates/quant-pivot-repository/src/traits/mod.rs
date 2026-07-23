@@ -12,9 +12,8 @@ pub mod market;
 
 // Flattened facade.
 pub use governance::{
-    EventRepository, KillSwitchStateRepository, OperationLogRepository, PolicyRepository,
-    SystemRuntimeStateRepository, event, kill_switch, operation_log, runtime_config,
-    system_runtime_state,
+    EventRepository, OperationLogRepository, PolicyRepository, RuntimeControlRepository, event,
+    operation_log, runtime_config, runtime_control,
 };
 pub use market::{CatalogLedgerRepository, ClobMarketInfoRepository, MarketRepository};
 pub use quant::{
@@ -22,16 +21,16 @@ pub use quant::{
     BacktestReportRepository, BasisAlertRepository, CalibrationArtifactRepository,
     CapitalAllocationRepository, DomainProjectionRepository, DomainSourceCursorRepository,
     DomainSourceExpectationRepository, EnqueueFrozenFeatureParityOutcome, EntryConditionRepository,
-    EquitySnapshotRepository, ExecutionOrderRepository, ExecutionSubmissionRepository, FactWriter,
-    FactorRepository, FeatureParityEventRepository, FeatureParityLatchActor,
-    FeatureParityRepository, FeatureRepository, KindRunningCount, MarketLinkageRepository,
-    MarketSelectionRepository, ModelComparisonReportRepository, ModelGovernanceAuditRepository,
-    ModelRegistryRepository, ModelRunRepository, OrderIntentRepository, PortfolioPlanRepository,
-    PositionRepository, PublishFeatureParityPermit, PublishModelVersionCommit,
-    PublishModelVersionResult, QuantFactReadRepository, QuantFactRepository, ReclaimOutcome,
-    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-    ReportRunRepository, ResearchJobRepository, ResearchReadinessEvidenceRepository,
-    ReservedCapitalRepository, ServingEvidenceRepository, SettlementRedeemRepository,
+    EquitySnapshotRepository, ExecutionAccountRepository, ExecutionOrderRepository,
+    ExecutionSubmissionRepository, FactWriter, FactorRepository, FeatureParityEventRepository,
+    FeatureParityLatchActor, FeatureParityRepository, FeatureRepository, KindRunningCount,
+    MarketLinkageRepository, MarketSelectionRepository, ModelComparisonReportRepository,
+    ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRunRepository,
+    OrderIntentRepository, PortfolioPlanRepository, PositionRepository, PublishFeatureParityPermit,
+    PublishModelVersionCommit, PublishModelVersionResult, QuantFactReadRepository,
+    QuantFactRepository, ReclaimOutcome, RecommendationReportRepository, RecommendationRepository,
+    ReconciliationRepository, ReportRunRepository, ResearchJobRepository,
+    ResearchReadinessEvidenceRepository, ReservedCapitalRepository, ServingEvidenceRepository,
     ShadowComparisonRepository, ShadowLatencyObservation, SourceSliceRepository,
     TradePolicyRepository, TradeTapeBlockCursorRepository, TrainingDatasetRepository,
 };

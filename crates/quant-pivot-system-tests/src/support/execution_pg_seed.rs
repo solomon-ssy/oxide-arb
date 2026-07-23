@@ -9,17 +9,17 @@ use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::governance::model_score_content_hash;
 use quant_pivot_models::{
     domain::{
-        governance::{NewOperationLog, UpsertKillSwitchState},
+        governance::{NewOperationLog, RuntimeControlUpdate},
         market::fee::BuilderFeeAttribution,
         quant::{
             ApproveOrderIntent, CalibrationArtifactPayload, CapitalSettlement, EntryConditionClaim,
-            ExitLedgerWrite, NewAccountSnapshot, NewCalibrationArtifact, NewCapitalAllocation,
-            NewEntryConditionArtifact, NewEntryConditionInstance, NewEquitySnapshot,
-            NewExecutionOrder, NewFeatureParityState, NewMarketSelection, NewModelRun,
-            NewModelVersion, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
-            NewRecommendationReport, NewReconciliation, NewReportDataQualitySnapshot,
-            NewReportTransaction, NewTradePolicyArtifact, NewTradePolicyGovernanceAudit,
-            PositionExit, PositionFill, SubmissionLedgerWrite,
+            ExecutionIdentityRefs, ExitLedgerWrite, NewAccountSnapshot, NewCalibrationArtifact,
+            NewCapitalAllocation, NewEntryConditionArtifact, NewEntryConditionInstance,
+            NewEquitySnapshot, NewExecutionAccount, NewExecutionOrder, NewFeatureParityState,
+            NewMarketSelection, NewModelRun, NewModelVersion, NewOrderIntent, NewPortfolioPlan,
+            NewRecommendation, NewRecommendationReport, NewReconciliation,
+            NewReportDataQualitySnapshot, NewReportTransaction, NewTradePolicyArtifact,
+            NewTradePolicyGovernanceAudit, PositionExit, PositionFill, SubmissionLedgerWrite,
         },
         query::TimeWindow,
     },
@@ -44,12 +44,12 @@ use quant_pivot_models::{
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
             AccountSource, ApprovalStatus, BindingConstraint, CalibrationKind, DownsideSource,
-            EmptyReportReason, EntryConditionState, ExecutionOrderState, ExitSettlementMode,
-            FactorDirection, FeatureParityLatchState, FeatureParityStateTransition,
-            FillRequirement, ModelRunKind, ModelRunStatus, OrderIntentStatus, OutcomeSide,
-            PriceComparison, PublicationStatus, QuantRuntimeMode, RecommendationReportStatus,
-            RecommendationStatus, RedeemPolicy, ReportKind, SizingModelKind,
-            TradePolicyGovernanceAction, TradePolicyStatus,
+            EmptyReportReason, EntryConditionState, ExecutionOrderState, ExecutionWalletKind,
+            ExitSettlementMode, FactorDirection, FeatureParityLatchState,
+            FeatureParityStateTransition, FillRequirement, ModelRunKind, ModelRunStatus,
+            OrderIntentStatus, OutcomeSide, PriceComparison, PublicationStatus, QuantRuntimeMode,
+            RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
+            SizingModelKind, TradePolicyGovernanceAction, TradePolicyStatus,
         },
         rbac::ResourceType,
     },
@@ -63,13 +63,13 @@ use quant_pivot_models::{
         EntryConditionArtifactId, EntryConditionArtifactV1, EntryConditionBinding,
         EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan,
         EntryConditionTemplate, EntryConditionV1, EntryOrderPolicy, EntryOrderSpec,
-        EntryOrderTemplate, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs,
-        ExecutablePriceBasis, ExecutionEligibility, ExecutionOrderId, ExitExecutionTemplate,
-        ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
-        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
-        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationDetailDocument,
-        OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId, OrderIntentId,
-        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        EntryOrderTemplate, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs, EvmAddress,
+        ExecutablePriceBasis, ExecutionAccountId, ExecutionEligibility, ExecutionOrderId,
+        ExitExecutionTemplate, ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry,
+        FeatureParityStateId, FeatureVectorId, MarketContext, MarketId, MarketSelectionId,
+        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
+        OperationDetailDocument, OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId,
+        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, PreparedFeeSchedule,
         PreparedVenueOrder, Price, PriceCondition, Probability, RecommendationFactorBreakdown,
         RecommendationId, RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
@@ -97,15 +97,16 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgCalibrationArtifactRepository, PgEntryConditionRepository, PgEventRepository,
-        PgExecutionSubmissionRepository, PgFeatureParityRepository, PgKillSwitchStateRepository,
+        PgExecutionAccountRepository, PgExecutionSubmissionRepository, PgFeatureParityRepository,
         PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgOrderIntentRepository, PgPolicyRepository, PgTradePolicyRepository,
+        PgModelRunRepository, PgOrderIntentRepository, PgPolicyRepository,
+        PgRuntimeControlRepository, PgTradePolicyRepository,
     },
     traits::{
         CalibrationArtifactRepository, EntryConditionRepository, EventRepository,
-        ExecutionSubmissionRepository, FeatureParityRepository, KillSwitchStateRepository,
+        ExecutionAccountRepository, ExecutionSubmissionRepository, FeatureParityRepository,
         MarketRepository, MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
-        OrderIntentRepository, PolicyRepository, TradePolicyRepository,
+        OrderIntentRepository, PolicyRepository, RuntimeControlRepository, TradePolicyRepository,
     },
 };
 use quant_pivot_research::{
@@ -138,21 +139,51 @@ use super::{
 /// Weather `SemiAuto` fixtures use the profile's only governed total cash-budget tier.
 pub const EXECUTION_NOTIONAL: Decimal = dec!(25);
 
-/// Explicitly close the fail-closed bootstrap kill switch for integration tests
+#[must_use]
+pub fn fixture_execution_account() -> NewExecutionAccount {
+    let funder = EvmAddress::parse("0x1111111111111111111111111111111111111111")
+        .expect("fixture execution account address");
+    NewExecutionAccount::build(
+        137,
+        funder.clone(),
+        ExecutionWalletKind::Eoa,
+        funder.clone(),
+        funder,
+        None,
+        None,
+    )
+    .expect("fixture execution account identity")
+}
+
+pub async fn ensure_fixture_execution_account(db: &DatabaseConnection) -> ExecutionAccountId {
+    PgExecutionAccountRepository::new(db.clone())
+        .ensure(fixture_execution_account())
+        .await
+        .expect("persist fixture execution account")
+        .execution_account_id
+}
+
+/// Explicitly close the fail-closed kill switch for integration tests
 /// that exercise risk-increasing entry paths.
 pub async fn enable_entry_admission_for_test(db: &DatabaseConnection, actor: &str) {
-    let state = PgKillSwitchStateRepository::new(db.clone())
-        .upsert(UpsertKillSwitchState {
-            id: 1,
-            state: KillSwitchState::Closed,
-            changed_by: actor.to_owned(),
+    let repository = PgRuntimeControlRepository::new(db.clone());
+    let current = repository
+        .load()
+        .await
+        .expect("load runtime control for risk-increasing test");
+    let state = repository
+        .compare_and_set(RuntimeControlUpdate {
+            expected_revision: current.revision,
+            quant_runtime_mode: None,
+            settlement_write_policy: None,
+            kill_switch_state: Some(KillSwitchState::Closed),
+            kill_switch_requires_ack: Some(false),
+            actor: actor.to_owned(),
             reason: "explicitly enable risk-increasing integration test".to_owned(),
-            requires_operator_ack: false,
-            changed_at: Utc::now(),
         })
         .await
         .expect("explicitly close kill switch for risk-increasing test");
-    assert_eq!(state.state, KillSwitchState::Closed);
+    assert_eq!(state.kill_switch_state, KillSwitchState::Closed);
 }
 
 /// Claim the fixture's current condition and intent through the same atomic
@@ -206,6 +237,7 @@ pub struct ExecutionTxnIds {
     pub decision_at: DateTime<Utc>,
     pub feature_parity_state_id: FeatureParityStateId,
     pub account_snapshot: AccountSnapshotId,
+    pub execution_account: ExecutionAccountId,
     pub data_quality_snapshot: ReportDataQualitySnapshotId,
     pub portfolio_plan: PortfolioPlanId,
     pub report: RecommendationReportId,
@@ -496,6 +528,7 @@ async fn prepare_report_seed(
     infra: &SharedDemoInfra,
     config: &ReportSeedConfig,
 ) -> ExecutionTxnIds {
+    let execution_account = ensure_fixture_execution_account(db).await;
     seed_market_catalog(
         db,
         &config.event_id,
@@ -512,6 +545,7 @@ async fn prepare_report_seed(
         decision_at,
         feature_parity_state_id: infra.feature_parity_state_id,
         account_snapshot: AccountSnapshotId::from_v7(),
+        execution_account,
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
         portfolio_plan: PortfolioPlanId::from_v7(),
         report: RecommendationReportId::from_v7(),
@@ -643,6 +677,26 @@ pub async fn seed_report_fixture(db: &DatabaseConnection) -> ExecutionTxnIds {
     .await
 }
 
+/// Seed a report whose token identity is a canonical Polymarket `uint256`.
+/// Settlement contract tests require the catalog, intent, fill, and CTF token
+/// lineage to remain identical end to end.
+pub async fn seed_settlement_report_fixture(db: &DatabaseConnection) -> ExecutionTxnIds {
+    let infra = seed_shared_demo_infra(db).await;
+    seed_report_on_infra(
+        db,
+        &infra,
+        ReportSeedConfig {
+            event_id: "settlement-evt-1".to_owned(),
+            market_id: "0xsettlement-market".to_owned(),
+            market_question: "Will settlement complete?".to_owned(),
+            market_slug: "will-settlement-complete".to_owned(),
+            token_id: "12345".to_owned(),
+            trigger_key: format!("scheduled:settlement:{}", RecommendationReportId::from_v7()),
+        },
+    )
+    .await
+}
+
 /// Create a semi-auto intent awaiting operator approval.
 pub async fn seed_pending_intent(db: &DatabaseConnection, ids: &ExecutionTxnIds) -> OrderIntentId {
     let order_intent_id = OrderIntentId::from_v7();
@@ -657,7 +711,6 @@ pub async fn seed_pending_intent(db: &DatabaseConnection, ids: &ExecutionTxnIds)
                 None,
             ),
             new_capital_allocation(order_intent_id, ids),
-            None,
         )
         .await
         .expect("create pending intent")
@@ -701,7 +754,6 @@ pub async fn seed_approved_intent(db: &DatabaseConnection, ids: &ExecutionTxnIds
                 None,
             ),
             new_capital_allocation(order_intent_id, ids),
-            None,
         )
         .await
         .expect("create approved intent")
@@ -728,6 +780,7 @@ pub async fn fill_entry_lot(
         .record_submission_result(
             &order.execution_order_id,
             SubmissionLedgerWrite {
+                identity_refs: empty_identity_refs(),
                 state: ExecutionOrderState::Filled,
                 intent_status: OrderIntentStatus::Filled,
                 venue_order_id: Some(OrderId::new("venue-entry")),
@@ -778,6 +831,7 @@ pub async fn close_position_full(
         .record_exit_result(
             &exit.execution_order_id,
             ExitLedgerWrite {
+                identity_refs: empty_identity_refs(),
                 order_state: ExecutionOrderState::Filled,
                 venue_order_id: Some(OrderId::new("venue-exit")),
                 venue_status: Some(VenueOrderStatus::Filled),
@@ -801,6 +855,15 @@ pub async fn close_position_full(
         )
         .await
         .expect("record exit");
+}
+
+/// Empty placement identity set for fixtures that exercise accounting only.
+pub fn empty_identity_refs() -> ExecutionIdentityRefs {
+    ExecutionIdentityRefs {
+        trade_ids: Vec::new(),
+        transaction_hashes: Vec::new(),
+        observed_at: Utc::now(),
+    }
 }
 
 pub fn report_operation_log(ids: &ExecutionTxnIds) -> NewOperationLog {
@@ -845,6 +908,7 @@ fn new_order_intent(
     NewOrderIntent {
         order_intent_id,
         recommendation_id: ids.recommendation,
+        execution_account_id: ids.execution_account,
         runtime_mode,
         decision_policy_snapshot_id: ids.decision_policy_snapshot,
         model_version_id: ids.model_version,
@@ -1039,6 +1103,7 @@ pub fn position_fill_public(
 ) -> PositionFill {
     PositionFill {
         order_intent_id: *intent_id,
+        execution_account_id: ids.execution_account,
         token_id: TokenId::new(&ids.token),
         market_id: MarketId::new(&ids.market),
         event_id: Some(EventId::new(&ids.event)),
@@ -1942,6 +2007,7 @@ fn new_account_snapshot(ids: &ExecutionTxnIds) -> NewAccountSnapshot {
     }];
     NewAccountSnapshot {
         account_snapshot_id: AccountSnapshotId::from_v7(),
+        execution_account_id: ids.execution_account,
         as_of: Utc::now(),
         source: AccountSource::Polymarket,
         venue_net_liquidation_usd: Usd::new(dec!(10000)),

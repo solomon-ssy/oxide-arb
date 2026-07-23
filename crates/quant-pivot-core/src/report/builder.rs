@@ -60,7 +60,7 @@ use super::{
     types::{BuildReportRequest, ComposedReport, EmptyReportContext, ReportTrigger},
 };
 use crate::{
-    governance::{RuntimeModeHandle, resolve_return_model_calibration},
+    governance::{RuntimeControlsHandle, resolve_return_model_calibration},
     prefetch::market_candidates::{DecisionSnapshotSource, MarketCandidateProvider},
     service::{
         account::AccountProviderFactory,
@@ -99,7 +99,7 @@ pub struct ReportBuilderDeps {
     pub composer: Arc<dyn RecommendationComposer>,
     pub quant_fact_read_repo: Arc<dyn QuantFactReadRepository>,
     pub correlation_estimator: Arc<dyn CorrelationEstimator>,
-    pub runtime_mode: RuntimeModeHandle,
+    pub runtime_controls: RuntimeControlsHandle,
     pub readiness_gate: Arc<dyn ReportReadinessGate>,
 }
 
@@ -989,7 +989,7 @@ impl DefaultReportBuilder {
             published_at: Utc::now(),
             decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id,
             runtime_config: &input.context.config,
-            runtime_mode: self.deps.runtime_mode.current(),
+            runtime_mode: self.deps.runtime_controls.quant_runtime_mode(),
             model_version_id: input.context.active.model_version_id,
             profile_ref: input.context.active.version.profile_ref.clone(),
             market_selection_id: input.selection.market_selection_id,
@@ -1076,7 +1076,7 @@ impl DefaultReportBuilder {
             published_at: Utc::now(),
             decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id,
             runtime_config: &input.context.config,
-            runtime_mode: self.deps.runtime_mode.current(),
+            runtime_mode: self.deps.runtime_controls.quant_runtime_mode(),
             model_version_id: input.context.active.model_version_id,
             profile_ref: input.context.active.version.profile_ref.clone(),
             market_selection_id: input.market_selection_id,

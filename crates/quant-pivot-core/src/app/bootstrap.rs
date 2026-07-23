@@ -22,7 +22,11 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
     // Crash recovery (in-flight orders → reconciliation) is owned by the
     // execution dispatcher worker, which runs it fail-closed as its first action
     // before any submission (see `register_execution_dispatcher`).
-    let mut runner = AppRunner::for_quant_mode(shutdown.clone(), ctx.runtime_mode().current());
+    let mut runner = AppRunner::for_quant_mode(
+        shutdown.clone(),
+        ctx.runtime_controls().quant_runtime_mode(),
+    );
+    ctx.register_runtime_control_sync(&mut runner);
     ctx.register_runtime_tasks(&mut runner);
     ctx.register_periodic_services(&mut runner);
     ctx.register_equity_snapshot_worker(&mut runner);
@@ -33,8 +37,8 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
     ctx.register_entry_condition_worker(&mut runner);
     ctx.register_execution_dispatcher(&mut runner);
     ctx.register_reconciliation_worker(&mut runner);
+    ctx.register_settlement_workers(&mut runner);
     ctx.register_exit_monitor_worker(&mut runner);
-    ctx.register_settlement_redeem_worker(&mut runner);
     ctx.register_attribution_worker(&mut runner);
 
     // Durable async research-job engine: the enqueue port (HTTP) and the worker
@@ -60,7 +64,7 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
     ctx.register_fact_writer_tasks(&mut runner);
 
     tracing::info!(
-        mode = ?ctx.runtime_mode().current(),
+        mode = ?ctx.runtime_controls().quant_runtime_mode(),
         tasks = runner.registry_len(),
         "quant-pivot starting",
     );

@@ -3,14 +3,19 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-use super::{event, market, quant_order_intent};
+use super::{
+    event, market, quant_execution_account, quant_order_intent, quant_settlement_inventory_lot,
+};
 use crate::{
     enums::{
         common::MarketCategory,
         execution::PositionLedgerState,
         quant::{AccountSource, OutcomeSide},
     },
-    types::{EventId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd},
+    types::{
+        EventId, ExecutionAccountId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId,
+        Usd,
+    },
 };
 
 #[sea_orm::model]
@@ -20,6 +25,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub position_id: PositionId,
     pub order_intent_id: OrderIntentId,
+    pub execution_account_id: ExecutionAccountId,
     pub token_id: TokenId,
     pub market_id: MarketId,
     pub event_id: Option<EventId>,
@@ -45,6 +51,13 @@ pub struct Model {
     pub order_intent: BelongsTo<quant_order_intent::Entity>,
     #[sea_orm(
         belongs_to,
+        relation_enum = "ExecutionAccount",
+        from = "execution_account_id",
+        to = "execution_account_id"
+    )]
+    pub execution_account: BelongsTo<quant_execution_account::Entity>,
+    #[sea_orm(
+        belongs_to,
         relation_enum = "Market",
         from = "market_id",
         to = "market_id"
@@ -57,6 +70,8 @@ pub struct Model {
         to = "event_id"
     )]
     pub event: BelongsTo<Option<event::Entity>>,
+    #[sea_orm(has_many, relation_enum = "SettlementInventoryLot")]
+    pub settlement_inventory_lot: HasMany<quant_settlement_inventory_lot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

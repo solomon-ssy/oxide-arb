@@ -41,6 +41,12 @@ pub mod entity {
     pub const QUANT_ORDER_INTENT: &str = "quant_order_intent";
     /// `quant_execution_order`.
     pub const QUANT_EXECUTION_ORDER: &str = "quant_execution_order";
+    /// `quant_execution_trade_ref`.
+    pub const QUANT_EXECUTION_TRADE_REF: &str = "quant_execution_trade_ref";
+    /// `quant_execution_transaction_ref`.
+    pub const QUANT_EXECUTION_TRANSACTION_REF: &str = "quant_execution_transaction_ref";
+    /// `quant_execution_account`.
+    pub const QUANT_EXECUTION_ACCOUNT: &str = "quant_execution_account";
     /// `quant_capital_allocation`.
     pub const QUANT_CAPITAL_ALLOCATION: &str = "quant_capital_allocation";
     /// `quant_position`.
@@ -49,6 +55,14 @@ pub mod entity {
     pub const QUANT_RECONCILIATION: &str = "quant_reconciliation";
     /// `quant_settlement_redeem`.
     pub const QUANT_SETTLEMENT_REDEEM: &str = "quant_settlement_redeem";
+    /// `quant_settlement_chain_submission`.
+    pub const QUANT_SETTLEMENT_CHAIN_SUBMISSION: &str = "quant_settlement_chain_submission";
+    /// `quant_settlement_authorization`.
+    pub const QUANT_SETTLEMENT_AUTHORIZATION: &str = "quant_settlement_authorization";
+    /// `quant_settlement_governed_action`.
+    pub const QUANT_SETTLEMENT_GOVERNED_ACTION: &str = "quant_settlement_governed_action";
+    /// `quant_settlement_external_cursor`.
+    pub const QUANT_SETTLEMENT_EXTERNAL_CURSOR: &str = "quant_settlement_external_cursor";
     /// `quant_settlement_redeem_lot`.
     pub const QUANT_SETTLEMENT_REDEEM_LOT: &str = "quant_settlement_redeem_lot";
     /// `quant_training_dataset`.

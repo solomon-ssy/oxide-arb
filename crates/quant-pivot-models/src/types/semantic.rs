@@ -46,6 +46,15 @@ fn evm_hex(value: &str, hex_len: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn evm_uint256(value: &str) -> bool {
+    const MAX_U256: &str =
+        "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    let canonical_digits = value == "0"
+        || (!value.starts_with('0') && value.bytes().all(|byte| byte.is_ascii_digit()));
+    canonical_digits
+        && (value.len() < MAX_U256.len() || (value.len() == MAX_U256.len() && value <= MAX_U256))
+}
+
 macro_rules! validated_semantic_text {
     (
         $(#[$meta:meta])*
@@ -239,6 +248,20 @@ validated_semantic_text! {
     validate = contract_version
 }
 
+validated_semantic_text! {
+    /// Version of the authoritative settlement deployment evidence catalog.
+    SettlementEvidenceVersion,
+    kind = "settlement evidence version",
+    validate = contract_version
+}
+
+validated_semantic_text! {
+    /// Caller-supplied idempotency key for one governed settlement action.
+    SettlementActionIdempotencyKey,
+    kind = "settlement action idempotency key",
+    validate = semantic_key
+}
+
 impl SchemaContractVersion {
     /// Fresh-boot v1 source-slice schema contract.
     #[must_use]
@@ -289,6 +312,56 @@ validated_semantic_text! {
     validate = |value: &str| evm_hex(value, 64)
 }
 
+validated_semantic_text! {
+    /// Canonical lower-case `0x`-prefixed Polygon block hash.
+    EvmBlockHash,
+    kind = "EVM block hash",
+    validate = |value: &str| evm_hex(value, 64)
+}
+
+validated_semantic_text! {
+    /// Canonical lower-case `0x`-prefixed Polymarket CTF condition identifier.
+    EvmConditionId,
+    kind = "EVM condition ID",
+    validate = |value: &str| evm_hex(value, 64)
+}
+
+validated_semantic_text! {
+    /// Canonical lower-case `0x`-prefixed Keccak-256 hash of prepared calldata.
+    EvmCalldataHash,
+    kind = "EVM calldata hash",
+    validate = |value: &str| evm_hex(value, 64)
+}
+
+validated_semantic_text! {
+    /// Opaque Polymarket relayer resource identity; never an EVM hash.
+    RelayerTransactionId,
+    kind = "relayer transaction ID",
+    validate = semantic_key
+}
+
+validated_semantic_text! {
+    /// Canonical base-10 unsigned 256-bit EVM integer.
+    EvmUint256,
+    kind = "EVM uint256",
+    validate = evm_uint256
+}
+
+impl EvmUint256 {
+    /// Canonical zero without a fallible parse on an internal constant.
+    #[must_use]
+    pub fn zero() -> Self {
+        Self("0".to_owned())
+    }
+}
+
+validated_semantic_text! {
+    /// Canonical lower-case `0x`-prefixed Keccak-256 hash of deployed EVM bytecode.
+    EvmCodeHash,
+    kind = "EVM code hash",
+    validate = |value: &str| evm_hex(value, 64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,12 +373,34 @@ mod tests {
         assert!(ReportTriggerKey::parse("ad_hoc:\\request").is_err());
         assert!(ReportTriggerKey::parse("ad_hoc:\"request\"").is_err());
         assert!(ReaderContractVersion::parse("reader version 1").is_err());
+        assert!(SettlementEvidenceVersion::parse("polymarket-v2-2026-07-22.1").is_ok());
+        assert!(SettlementEvidenceVersion::parse("settlement evidence v1").is_err());
         assert!(TradePolicyCandidateId::parse("a".repeat(128)).is_ok());
         assert!(TradePolicyCandidateId::parse("a".repeat(129)).is_err());
         assert!(EvmAddress::parse(format!("0x{}", "a".repeat(40))).is_ok());
         assert!(EvmAddress::parse(format!("0x{}", "A".repeat(40))).is_err());
         assert!(EvmTransactionHash::parse(format!("0x{}", "f".repeat(64))).is_ok());
         assert!(EvmTransactionHash::parse("0xdeadbeef").is_err());
+        assert!(EvmCodeHash::parse(format!("0x{}", "0".repeat(64))).is_ok());
+        assert!(EvmBlockHash::parse(format!("0x{}", "1".repeat(64))).is_ok());
+        assert!(EvmConditionId::parse(format!("0x{}", "3".repeat(64))).is_ok());
+        assert!(EvmCalldataHash::parse(format!("0x{}", "2".repeat(64))).is_ok());
+        assert!(RelayerTransactionId::parse("relay_01jz7c").is_ok());
+        assert!(RelayerTransactionId::parse("relay id").is_err());
+        assert!(EvmUint256::parse("0").is_ok());
+        assert!(EvmUint256::parse("01").is_err());
+        assert!(
+            EvmUint256::parse(
+                "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+            )
+            .is_ok()
+        );
+        assert!(
+            EvmUint256::parse(
+                "115792089237316195423570985008687907853269984665640564039457584007913129639936"
+            )
+            .is_err()
+        );
     }
 
     #[test]

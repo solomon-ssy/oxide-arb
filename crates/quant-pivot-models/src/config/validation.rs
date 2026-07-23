@@ -31,16 +31,69 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
             detail: format!("must be Polygon chain id {POLYGON_CHAIN_ID}"),
         });
     }
-    if deploy.polymarket.order_post_timeout_ms == 0 {
+    if deploy.polymarket.order_post_timeout_ms < 35_000 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "polymarket.order_post_timeout_ms",
-            detail: "must be > 0 so an ambiguous order POST cannot hang indefinitely".into(),
+            detail: "must be at least 35000 ms to contain the SDK's 30-second async-commit identity enrichment budget".into(),
         });
     }
     if deploy.polymarket.clob_market_info_refresh_secs < 60 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "polymarket.clob_market_info_refresh_secs",
             detail: "must be at least 60 seconds".to_owned(),
+        });
+    }
+    let settlement = &deploy.polymarket.settlement;
+    if !(5..=300).contains(&settlement.claim_lease_secs) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "polymarket.settlement.claim_lease_secs",
+            detail: "must be between 5 and 300 seconds inclusive".to_owned(),
+        });
+    }
+    if !(30..=3_600).contains(&settlement.semi_auto_authorization_ttl_secs) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "polymarket.settlement.semi_auto_authorization_ttl_secs",
+            detail: "must be between 30 and 3600 seconds inclusive".to_owned(),
+        });
+    }
+    if settlement.discovery_poll_secs == 0 || settlement.submission_poll_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "polymarket.settlement.worker_poll_secs",
+            detail: "discovery and submission polls must both be > 0".to_owned(),
+        });
+    }
+    if !(1..=1_024).contains(&settlement.max_claims_per_tick) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "polymarket.settlement.max_claims_per_tick",
+            detail: "must be between 1 and 1024 inclusive".to_owned(),
+        });
+    }
+    if !(1..=32).contains(&settlement.rpc_concurrency) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "polymarket.settlement.rpc_concurrency",
+            detail: "must be between 1 and 32 inclusive".to_owned(),
+        });
+    }
+    if !(1..=60).contains(&settlement.readiness_ui_cache_secs) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "polymarket.settlement.readiness_ui_cache_secs",
+            detail: "must be between 1 and 60 seconds inclusive".to_owned(),
+        });
+    }
+    if !(1..=10_000).contains(&settlement.external_scan_block_span) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "polymarket.settlement.external_scan_block_span",
+            detail: "must be between 1 and 10000 inclusive".to_owned(),
+        });
+    }
+    if settlement.retry_initial_secs == 0
+        || settlement.retry_initial_secs > settlement.retry_max_secs
+        || settlement.retry_max_secs > 3_600
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "polymarket.settlement.retry",
+            detail: "initial must be > 0, not exceed max, and max must be <= 3600 seconds"
+                .to_owned(),
         });
     }
     validate_polygon_rpc(deploy, &mut report);
@@ -705,13 +758,15 @@ fn validate_credentials_quant_mode(
             });
     }
 
-    // Proxy / Gnosis Safe topologies move money via the gasless relayer, so the
+    // Every contract-wallet topology moves money via the gasless relayer, so
     // relayer API credentials are mandatory once order submission is allowed
     // (SemiAuto / AutoExecution). ReportOnly never redeems, so it is exempt.
     if mode.allows_order_submission()
         && matches!(
             deploy.quant.account.wallet_kind,
-            ExecutionWalletKind::Proxy | ExecutionWalletKind::GnosisSafe
+            ExecutionWalletKind::Proxy
+                | ExecutionWalletKind::GnosisSafe
+                | ExecutionWalletKind::DepositWallet
         )
     {
         let mut relayer_missing = Vec::new();
@@ -829,10 +884,59 @@ mod tests {
     }
 
     #[test]
-    fn zero_order_post_timeout_is_fatal() {
+    fn order_post_timeout_below_sdk_identity_budget_is_fatal() {
         let mut deploy = DeployConfig::default();
-        deploy.polymarket.order_post_timeout_ms = 0;
+        deploy.polymarket.order_post_timeout_ms = 34_999;
         assert!(validate_deploy_common(&deploy).has_errors());
+    }
+
+    #[test]
+    fn order_post_timeout_accepts_sdk_identity_budget_floor() {
+        let mut deploy = DeployConfig::default();
+        deploy.polymarket.order_post_timeout_ms = 35_000;
+        let report = validate_deploy_common(&deploy);
+        assert!(!report.errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("polymarket.order_post_timeout_ms")
+        }));
+    }
+
+    #[test]
+    fn settlement_lease_and_authorization_ttl_are_bounded() {
+        let mut deploy = DeployConfig::default();
+        deploy.polymarket.settlement.claim_lease_secs = 4;
+        deploy
+            .polymarket
+            .settlement
+            .semi_auto_authorization_ttl_secs = 3_601;
+        let report = validate_deploy_common(&deploy);
+        assert!(report.has_errors());
+        assert!(report.errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("polymarket.settlement.claim_lease_secs")
+        }));
+        assert!(report.errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("polymarket.settlement.semi_auto_authorization_ttl_secs")
+        }));
+    }
+
+    #[test]
+    fn settlement_ui_readiness_cache_is_bounded() {
+        for invalid_ttl in [0, 61] {
+            let mut deploy = DeployConfig::default();
+            deploy.polymarket.settlement.readiness_ui_cache_secs = invalid_ttl;
+            let report = validate_deploy_common(&deploy);
+            assert!(report.has_errors());
+            assert!(report.errors.iter().any(|error| {
+                error
+                    .to_string()
+                    .contains("polymarket.settlement.readiness_ui_cache_secs")
+            }));
+        }
     }
 
     #[test]

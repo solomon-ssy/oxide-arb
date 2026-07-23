@@ -128,6 +128,7 @@ fn to_clickhouse_row(event: &DomainEventEnvelope) -> Result<DomainEventRow, Quan
 const fn event_type_name(event_type: DomainEventType) -> &'static str {
     match event_type {
         DomainEventType::CryptoPriceTransition => "crypto.price_transition",
+        DomainEventType::SettlementRedeemConfirmed => "settlement.redeem_confirmed",
         DomainEventType::WeatherDailyTemperatureExtremeAdvanced => {
             "weather.daily_temperature_extreme_advanced"
         }

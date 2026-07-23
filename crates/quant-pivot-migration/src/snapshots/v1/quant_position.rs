@@ -13,6 +13,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub position_id: Uuid,
     pub order_intent_id: Uuid,
+    pub execution_account_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub token_id: String,
     #[sea_orm(column_type = "Text")]
@@ -55,8 +56,18 @@ pub struct Model {
         on_delete = "NoAction"
     )]
     pub quant_order_intent: BelongsTo<super::quant_order_intent::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "execution_account_id",
+        to = "execution_account_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_execution_account: BelongsTo<super::quant_execution_account::Entity>,
     #[sea_orm(has_many)]
     pub quant_settlement_redeem_lots: HasMany<super::quant_settlement_redeem_lot::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_settlement_inventory_lots: HasMany<super::quant_settlement_inventory_lot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

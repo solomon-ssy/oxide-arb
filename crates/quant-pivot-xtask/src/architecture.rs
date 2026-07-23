@@ -88,6 +88,9 @@ pub fn run() -> Result<()> {
     violations.extend(validate_workspace_dependency_inventory(&metadata)?);
     violations.extend(validate_performance_contracts(&metadata)?);
     violations.extend(validate_public_api(&metadata.workspace_root)?);
+    violations.extend(validate_settlement_runtime_reachability(
+        &metadata.workspace_root,
+    )?);
     if violations.is_empty() {
         println!("architecture check passed");
         return Ok(());
@@ -102,6 +105,220 @@ pub fn run() -> Result<()> {
             .collect::<Vec<_>>()
             .join("\n")
     )
+}
+
+fn validate_settlement_runtime_reachability(workspace_root: &Path) -> Result<Vec<String>> {
+    let mut violations = validate_settlement_runtime_wiring(workspace_root)?;
+    violations.extend(validate_settlement_persistence_boundaries(workspace_root)?);
+    violations.extend(validate_settlement_transport_boundaries(workspace_root)?);
+    Ok(violations)
+}
+
+fn validate_settlement_runtime_wiring(workspace_root: &Path) -> Result<Vec<String>> {
+    let (bootstrap_path, bootstrap) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/app/bootstrap.rs",
+    )?;
+    let (workers_path, workers) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/app/settlement_workers.rs",
+    )?;
+    let (bundle_path, bundle) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/app/bundles/execution.rs",
+    )?;
+    let (executor_path, executor) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/execution/settlement_executor.rs",
+    )?;
+    let mut violations = Vec::new();
+    require_exact_occurrences(
+        &mut violations,
+        &bootstrap_path,
+        &bootstrap,
+        "ctx.register_settlement_workers(&mut runner);",
+        1,
+        "production bootstrap must register the settlement worker set exactly once",
+    );
+    require_exact_occurrences(
+        &mut violations,
+        &bootstrap_path,
+        &bootstrap,
+        "ctx.register_runtime_control_sync(&mut runner);",
+        1,
+        "production bootstrap must register runtime-control convergence exactly once",
+    );
+    require_exact_occurrences(
+        &mut violations,
+        &bundle_path,
+        &bundle,
+        "ProductionSettlementExecutor::connect(",
+        1,
+        "production execution bundle must construct exactly one settlement executor",
+    );
+    require_exact_occurrences(
+        &mut violations,
+        &executor_path,
+        &executor,
+        "impl SettlementSubmissionExecutor for ProductionSettlementExecutor",
+        1,
+        "the money-moving settlement executor must have exactly one production implementation",
+    );
+    for task in [
+        "SettlementDiscovery",
+        "SettlementPreflight",
+        "SettlementExecution",
+        "SettlementExternalObservation",
+        "SettlementGovernedAction",
+    ] {
+        let needle = format!("TaskId::{task}");
+        require_exact_occurrences(
+            &mut violations,
+            &workers_path,
+            &workers,
+            &needle,
+            1,
+            "each settlement worker identity must be registered exactly once",
+        );
+    }
+    Ok(violations)
+}
+
+fn validate_settlement_persistence_boundaries(workspace_root: &Path) -> Result<Vec<String>> {
+    let (discovery_path, discovery) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/execution/settlement_discovery.rs",
+    )?;
+    let (external_path, external) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/execution/settlement_external.rs",
+    )?;
+    let (repository_trait_path, repository_trait) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-repository/src/traits/quant/settlement_redeem.rs",
+    )?;
+    let (repository_impl_path, repository_impl) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-repository/src/postgres/quant/settlement_redeem.rs",
+    )?;
+    let mut violations = Vec::new();
+    for (path, source) in [
+        (&repository_trait_path, repository_trait.as_str()),
+        (&repository_impl_path, repository_impl.as_str()),
+    ] {
+        require_exact_occurrences(
+            &mut violations,
+            path,
+            source,
+            "async fn insert_submission(",
+            0,
+            "settlement submissions must enter through guarded prepared/external persistence commands",
+        );
+    }
+    for (path, source, needle, invariant) in [
+        (
+            &discovery_path,
+            discovery.as_str(),
+            ".insert_discovered_case(",
+            "durable settlement case discovery must have exactly one production producer",
+        ),
+        (
+            &external_path,
+            external.as_str(),
+            ".persist_scan(",
+            "external settlement observation must journal cursor and evidence through one production boundary",
+        ),
+        (
+            &external_path,
+            external.as_str(),
+            "kind: SettlementSubmissionKind::ExternallyObserved,",
+            "externally observed settlement identity must have exactly one production constructor",
+        ),
+    ] {
+        require_exact_occurrences(&mut violations, path, source, needle, 1, invariant);
+    }
+    Ok(violations)
+}
+
+fn validate_settlement_transport_boundaries(workspace_root: &Path) -> Result<Vec<String>> {
+    let (control_path, control) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/app/ports/settlement_control.rs",
+    )?;
+    let (web_routes_path, web_routes) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-web/src/routes/settlement_redeems.rs",
+    )?;
+    let (clob_path, clob) =
+        read_architecture_source(workspace_root, "crates/quant-pivot-api/src/clob/mod.rs")?;
+    let (wallet_path, wallet) =
+        read_architecture_source(workspace_root, "crates/quant-pivot-api/src/wallet/mod.rs")?;
+    let (relayer_path, relayer) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-api/src/settlement/relayer.rs",
+    )?;
+    let mut violations = Vec::new();
+    for (path, source, needle, invariant) in [
+        (
+            &control_path,
+            control.as_str(),
+            "async fn apply_governed_action(",
+            "governed settlement apply must have exactly one production control implementation",
+        ),
+        (
+            &web_routes_path,
+            web_routes.as_str(),
+            ".apply_governed_action(request, actor_id, Utc::now())",
+            "the governed settlement HTTP apply boundary must journal through the control port exactly once",
+        ),
+        (
+            &clob_path,
+            clob.as_str(),
+            ".signature_type(topology.signature_type)",
+            "CLOB production orders must consume the verified wallet signature type exactly once",
+        ),
+        (
+            &wallet_path,
+            wallet.as_str(),
+            "ExecutionWalletKind::DepositWallet => SignatureType::Poly1271",
+            "Deposit Wallet topology must map to POLY_1271 exactly once",
+        ),
+        (
+            &relayer_path,
+            relayer.as_str(),
+            "tx_type: \"WALLET\".to_owned(),",
+            "Deposit Wallet settlement must construct exactly one canonical WALLET request body",
+        ),
+    ] {
+        require_exact_occurrences(&mut violations, path, source, needle, 1, invariant);
+    }
+    Ok(violations)
+}
+
+fn read_architecture_source(
+    workspace_root: &Path,
+    relative_path: &str,
+) -> Result<(PathBuf, String)> {
+    let path = workspace_root.join(relative_path);
+    let source = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    Ok((path, source))
+}
+
+fn require_exact_occurrences(
+    violations: &mut Vec<String>,
+    path: &Path,
+    source: &str,
+    needle: &str,
+    expected: usize,
+    invariant: &str,
+) {
+    let actual = source.matches(needle).count();
+    if actual != expected {
+        violations.push(format!(
+            "{} contains `{needle}` {actual} time(s), expected {expected}: {invariant}",
+            path.display()
+        ));
+    }
 }
 
 fn path_is_noncanonical(segments: &[String]) -> bool {

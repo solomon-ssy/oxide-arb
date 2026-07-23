@@ -33,7 +33,7 @@ use quant_pivot_repository::traits::{
 use super::AppContext;
 use crate::{
     app::{capability_gate::wait_for_capability, task_id::TaskId, task_registry::AppRunner},
-    governance::{KillSwitchHandle, RuntimeModeHandle},
+    governance::RuntimeControlsHandle,
     infra::periodic_task::PeriodicTask,
 };
 
@@ -85,11 +85,10 @@ impl AppContext {
             conditions: Arc::clone(&self.infra.repos.entry_condition)
                 as Arc<dyn EntryConditionRepository>,
             reconciliation: Arc::clone(&reconciliation),
-            runtime_mode: self.runtime_mode(),
-            kill_switch: self.kill_switch_handle(),
+            runtime_controls: self.runtime_controls(),
         };
         let wake = self.execution_wake();
-        let bootstrap = Arc::clone(&self.governance.bootstrap);
+        let capabilities = Arc::clone(&self.governance.capabilities);
         let poll = Duration::from_secs(self.config.quant.workers.execution_dispatch_secs);
         runner.spawn(TaskId::ExecutionDispatcher, move |token| async move {
             // Crash recovery is the dispatcher's first action — it must complete
@@ -128,7 +127,7 @@ impl AppContext {
 
             loop {
                 if !wait_for_capability(
-                    Arc::clone(&bootstrap),
+                    Arc::clone(&capabilities),
                     CapabilityId::OrderSubmissionEligible,
                     &token,
                 )
@@ -137,18 +136,18 @@ impl AppContext {
                     return;
                 }
 
-                let mut capabilities = bootstrap.subscribe_capabilities();
+                let mut capability_rx = capabilities.subscribe_capabilities();
                 loop {
                     // Low-latency wake on a fresh `ApprovedByPolicy` approval, or the
                     // poll backstop. Capability revisions revoke submission immediately.
                     tokio::select! {
                         biased;
                         () = token.cancelled() => return,
-                        changed = capabilities.changed() => {
+                        changed = capability_rx.changed() => {
                             if changed.is_err() {
                                 return;
                             }
-                            if !capabilities
+                            if !capability_rx
                                 .borrow()
                                 .get(CapabilityId::OrderSubmissionEligible)
                                 .enabled
@@ -160,7 +159,7 @@ impl AppContext {
                         () = wake.wait() => {}
                         () = tokio::time::sleep(poll) => {}
                     }
-                    if !bootstrap
+                    if !capabilities
                         .capability_snapshot()
                         .get(CapabilityId::OrderSubmissionEligible)
                         .enabled
@@ -181,8 +180,7 @@ struct ArmedDispatchWorker {
     intents: Arc<dyn OrderIntentRepository>,
     conditions: Arc<dyn EntryConditionRepository>,
     reconciliation: Arc<dyn ReconciliationRepository>,
-    runtime_mode: RuntimeModeHandle,
-    kill_switch: KillSwitchHandle,
+    runtime_controls: RuntimeControlsHandle,
 }
 
 /// Boot recovery: scan in-flight (`Submitted`/`Ambiguous`) orders with no
@@ -231,7 +229,8 @@ async fn recover_dangling_orders(
 /// `has_unresolvable` early-exit is a cheap batch-level backstop in addition to
 /// admission `#17`, which denies the same condition per intent.
 async fn armed_dispatch_pass(worker: &ArmedDispatchWorker) -> QuantResult<()> {
-    dispatch_for_runtime_mode(worker.runtime_mode.current(), |status| {
+    let controls = worker.runtime_controls.snapshot();
+    dispatch_for_runtime_mode(controls.quant_runtime_mode, |status| {
         armed_dispatch_enabled_pass(worker, status)
     })
     .await
@@ -254,7 +253,8 @@ async fn armed_dispatch_enabled_pass(
     worker: &ArmedDispatchWorker,
     status: OrderIntentStatus,
 ) -> QuantResult<()> {
-    if !worker.kill_switch.allows_new_entry() {
+    let controls = worker.runtime_controls.snapshot();
+    if !controls.kill_switch_state.allows_new_entry() {
         return Ok(());
     }
     if worker.reconciliation.has_unresolvable().await? {

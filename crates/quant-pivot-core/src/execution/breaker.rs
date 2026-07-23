@@ -449,6 +449,7 @@ impl ExecutionBreaker {
         let reason = format!("execution breaker tripped ({dimension}): {detail}");
         let before = self.kill_switch.view();
         let command = SetKillSwitchCommand {
+            expected_revision: before.revision,
             target: KillSwitchState::ExecutionHalted,
             actor: BREAKER_ACTOR.to_owned(),
             reason: reason.clone(),

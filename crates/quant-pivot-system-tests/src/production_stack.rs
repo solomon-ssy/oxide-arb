@@ -10,14 +10,28 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use quant_pivot_models::{
     config::DeployConfig,
-    entities::quant_feature_parity_run::{Column, Entity},
-    enums::quant::FeatureParityRunKind,
-    types::RecommendationReportId,
+    entities::{
+        market::Entity as MarketEntity,
+        quant_feature_parity_run::{Column, Entity},
+        quant_settlement_redeem::Entity as QuantSettlementRedeemEntity,
+    },
+    enums::{
+        market::MarketStatus, quant::FeatureParityRunKind, settlement::SettlementEffectivePolicy,
+    },
+    types::{ContentHash, MarketId, RecommendationReportId},
+};
+use quant_pivot_repository::postgres::{
+    PgExecutionSubmissionRepository, PgModelRegistryRepository, PgPolicyRepository,
+    policy_bootstrap::ensure_default_policy_bundle,
 };
 use reqwest::Client;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
+    QueryFilter, QueryOrder,
+};
 use serde::Deserialize;
 use tokio::{
     process::{Child, Command as TokioCommand},
@@ -34,7 +48,8 @@ use wiremock::{
 use crate::{
     stack::SystemStack,
     support::execution_pg_seed::{
-        enable_entry_admission_for_test, seed_pending_intent, seed_report_fixture,
+        ReportSeedConfig, SharedDemoInfra, enable_entry_admission_for_test, fill_entry_lot,
+        seed_approved_intent, seed_pending_intent, seed_report_fixture, seed_report_on_infra,
     },
 };
 
@@ -222,6 +237,17 @@ async fn start_at(
     let infrastructure = Box::pin(SystemStack::start())
         .await
         .context("start disposable production-stack infrastructure")?;
+    PgModelRegistryRepository::new(infrastructure.postgres.connection().clone())
+        .ensure_builtin_research_profiles()
+        .await
+        .context("bootstrap immutable fresh-deployment research profiles")?;
+    ensure_default_policy_bundle(
+        &PgPolicyRepository::new(infrastructure.postgres.connection().clone()),
+        "production-stack-fixture",
+        "canonical fresh-boot policy for the real-binary system fixture",
+    )
+    .await
+    .context("bootstrap canonical fresh-boot policy bundle")?;
     let browser_report_id = if browser_fixture {
         let report = seed_report_fixture(infrastructure.postgres.connection()).await;
         enable_entry_admission_for_test(
@@ -230,6 +256,51 @@ async fn start_at(
         )
         .await;
         seed_pending_intent(infrastructure.postgres.connection(), &report).await;
+        let settlement_report = seed_report_on_infra(
+            infrastructure.postgres.connection(),
+            &SharedDemoInfra {
+                feature_parity_state_id: report.feature_parity_state_id,
+                decision_policy_snapshot_id: report.decision_policy_snapshot,
+                model_version_id: report.model_version,
+                model_run_id: report.model_run,
+                trade_policy: report.trade_policy.clone(),
+            },
+            ReportSeedConfig {
+                event_id: "browser-settlement-event".to_owned(),
+                market_id: "0xbrowser-settlement-market".to_owned(),
+                market_question: "Will the browser settlement fixture resolve?".to_owned(),
+                market_slug: "browser-settlement-fixture".to_owned(),
+                token_id: "12345".to_owned(),
+                trigger_key: format!(
+                    "scheduled:browser-settlement:{}",
+                    RecommendationReportId::from_v7()
+                ),
+            },
+        )
+        .await;
+        let settlement_intent =
+            seed_approved_intent(infrastructure.postgres.connection(), &settlement_report).await;
+        fill_entry_lot(
+            infrastructure.postgres.connection(),
+            &PgExecutionSubmissionRepository::new(infrastructure.postgres.connection().clone()),
+            &settlement_report,
+            &settlement_intent,
+        )
+        .await;
+        let market = MarketEntity::find_by_id(MarketId::new(&settlement_report.market))
+            .one(infrastructure.postgres.connection())
+            .await
+            .context("load browser settlement market")?
+            .context("browser settlement market is missing")?;
+        let mut active_market = market.into_active_model();
+        active_market.status = ActiveValue::Set(MarketStatus::Settled);
+        active_market.outcome = ActiveValue::Set(Some("Yes".to_owned()));
+        active_market.resolved_at = ActiveValue::Set(Some(Utc::now()));
+        active_market.content_hash = ActiveValue::Set(ContentHash::from_bytes([0x96; 32]));
+        active_market
+            .update(infrastructure.postgres.connection())
+            .await
+            .context("mark browser settlement market resolved")?;
         Some(report.report)
     } else {
         None
@@ -290,6 +361,7 @@ async fn start_at(
         // serving facts, so wait for fail-closed containment before exposing
         // the stable, auditable report/intent state to Playwright.
         await_sampled_parity_containment(infrastructure.postgres.connection(), report_id).await?;
+        await_browser_settlement_discovery(infrastructure.postgres.connection()).await?;
     }
 
     Ok(ProductionStack {
@@ -299,6 +371,29 @@ async fn start_at(
         _upstream: upstream,
         infrastructure,
     })
+}
+
+async fn await_browser_settlement_discovery(db: &DatabaseConnection) -> Result<()> {
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        if let Some(redeem) = QuantSettlementRedeemEntity::find()
+            .one(db)
+            .await
+            .context("read browser settlement case")?
+        {
+            if redeem.effective_policy != SettlementEffectivePolicy::ManualOnly {
+                bail!(
+                    "browser settlement fixture must remain ManualOnly, got {}",
+                    redeem.effective_policy
+                );
+            }
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("production settlement discovery did not create the browser fixture case");
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
 async fn await_sampled_parity_containment(

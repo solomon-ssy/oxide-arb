@@ -2,11 +2,14 @@
 
 use std::{str::FromStr as _, sync::Arc, time::Duration};
 
-use alloy::signers::{Signer as _, local::LocalSigner};
+use alloy::{
+    primitives::Address,
+    signers::{Signer as _, local::LocalSigner},
+};
 use polymarket_client_sdk_v2::{
     POLYGON,
     auth::{Normal, state::Authenticated},
-    clob::{Client as SdkClient, Config as SdkConfig},
+    clob::{Client as SdkClient, Config as SdkConfig, types::SignatureType},
 };
 use quant_pivot_models::{
     domain::order::OrderRequest,
@@ -126,6 +129,36 @@ pub async fn test_sdk_client(server: &MockServer) -> Arc<SdkClient<Authenticated
 
 pub async fn test_clob_client(server: &MockServer) -> ClobClient {
     test_clob_client_with_order_timeout(server, Duration::from_secs(15)).await
+}
+
+pub async fn test_deposit_wallet_clob_client(
+    server: &MockServer,
+    deposit_wallet: Address,
+) -> ClobClient {
+    let signer = LocalSigner::from_str(PRIVATE_KEY)
+        .expect("local signer")
+        .with_chain_id(Some(POLYGON));
+    let config = SdkConfig::builder().build();
+    let mut sdk = SdkClient::new(&server.uri(), config)
+        .expect("sdk client")
+        .authentication_builder(&signer)
+        .signature_type(SignatureType::Poly1271)
+        .funder(deposit_wallet)
+        .authenticate()
+        .await
+        .expect("authenticate Deposit Wallet client");
+    sdk.stop_heartbeats()
+        .await
+        .expect("stop test heartbeat task");
+    ClobClient {
+        sdk: Arc::new(sdk),
+        http: Client::new(),
+        clob_base_url: server.uri(),
+        signer: test_signer(),
+        order_post_timeout: Duration::from_secs(15),
+        rate_limiter: RateLimiter::new(),
+        on_book_level_rejected: None::<BookLevelRejectHook>,
+    }
 }
 
 pub async fn test_clob_client_with_order_timeout(

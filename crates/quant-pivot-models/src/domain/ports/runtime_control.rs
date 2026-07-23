@@ -10,16 +10,19 @@ use tokio::sync::watch::Receiver;
 
 use crate::{
     domain::{
-        api::{ActivateBootstrapRequest, BootstrapView, ReadinessReport, SystemCapabilities},
+        api::{ReadinessReport, SystemCapabilities},
         data_plane::DataQualitySnapshot,
         governance::{
             kill_switch::KillSwitchView,
             mode::PreflightReport,
+            runtime_control::RuntimeControlSnapshot,
             system::{HealthReport, SystemStatus},
         },
         market::book::BookSnapshot,
     },
-    enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
+    enums::{
+        execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
+    },
     runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
     types::TokenId,
 };
@@ -49,20 +52,11 @@ pub trait CatalogStatusPort: Send + Sync {
 }
 
 #[async_trait]
-pub trait BootstrapPort: Send + Sync {
-    fn view(&self) -> BootstrapView;
-    fn subscribe(&self) -> Receiver<BootstrapView>;
+pub trait SystemCapabilityPort: Send + Sync {
     fn capability_snapshot(&self) -> SystemCapabilities;
     fn subscribe_capabilities(&self) -> Receiver<SystemCapabilities>;
     fn refresh_operational_capabilities(&self, status: &SystemStatus) -> SystemCapabilities;
     async fn capabilities(&self, status: &SystemStatus) -> QuantResult<SystemCapabilities>;
-    async fn mark_catalog_ready(&self) -> QuantResult<BootstrapView>;
-    async fn activate(
-        &self,
-        request: ActivateBootstrapRequest,
-        actor: &str,
-        acting_role: &str,
-    ) -> QuantResult<BootstrapView>;
 }
 
 /// Outcome of a successful governed quant runtime mode transition.
@@ -77,7 +71,7 @@ pub struct QuantModeTransitionReport {
 
 #[async_trait]
 pub trait RuntimeControlPort: Send + Sync {
-    fn quant_runtime_mode(&self) -> QuantRuntimeMode;
+    fn snapshot(&self) -> RuntimeControlSnapshot;
 
     /// Run the transition gate + (upgrade-only) preflight and persist the new
     /// mode fail-closed. Forbidden edges / failed preflight return a typed
@@ -86,9 +80,18 @@ pub trait RuntimeControlPort: Send + Sync {
     async fn switch_quant_mode(
         &self,
         target: QuantRuntimeMode,
+        expected_revision: i64,
         actor: &str,
         reason: &str,
     ) -> QuantResult<QuantModeTransitionReport>;
+
+    async fn switch_settlement_write_policy(
+        &self,
+        target: SettlementWritePolicy,
+        expected_revision: i64,
+        actor: &str,
+        reason: &str,
+    ) -> QuantResult<RuntimeControlSnapshot>;
 
     fn system_status(&self) -> SystemStatus;
 
@@ -98,6 +101,8 @@ pub trait RuntimeControlPort: Send + Sync {
 /// Governed request to transition the operational kill-switch.
 #[derive(Debug, Clone)]
 pub struct SetKillSwitchCommand {
+    /// Optimistic concurrency token from the complete runtime-control snapshot.
+    pub expected_revision: i64,
     /// Target FSM state.
     pub target: KillSwitchState,
     /// Acting operator identity (audit `changed_by`).

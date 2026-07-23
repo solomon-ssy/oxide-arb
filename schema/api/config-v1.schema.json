@@ -34,9 +34,6 @@
     "deployment_response": {
       "$ref": "#/$defs/DeploymentConfigView"
     },
-    "lifecycle_response": {
-      "$ref": "#/$defs/LifecycleView"
-    },
     "resource_schema_response": {
       "$ref": "#/$defs/PolicyResourceSchemaView"
     },
@@ -54,12 +51,6 @@
     },
     "schedule_preview_response": {
       "$ref": "#/$defs/SchedulePreviewView"
-    },
-    "seal_production_request": {
-      "$ref": "#/$defs/SealProductionRequest"
-    },
-    "seal_production_response": {
-      "$ref": "#/$defs/LifecycleView"
     },
     "snapshot_options_query": {
       "$ref": "#/$defs/ConfigSnapshotOptionsQuery"
@@ -94,9 +85,6 @@
     "snapshot_options_query",
     "snapshot_options_response",
     "deployment_response",
-    "lifecycle_response",
-    "seal_production_request",
-    "seal_production_response",
     "schedule_preview_request",
     "schedule_preview_response"
   ],
@@ -200,11 +188,6 @@
       "description": "Auto-execution policy.",
       "type": "object",
       "properties": {
-        "enabled": {
-          "description": "Whether auto-execution policy may approve intents.",
-          "type": "boolean",
-          "default": false
-        },
         "max_orders_per_report": {
           "description": "Maximum orders auto-created per report.",
           "type": "integer",
@@ -925,7 +908,6 @@
         "auto_execution": {
           "$ref": "#/$defs/AutoExecutionConfig",
           "default": {
-            "enabled": false,
             "max_orders_per_report": 0,
             "max_total_usd_per_report": "0",
             "min_confidence": "1.00",
@@ -941,16 +923,7 @@
         "semi_auto": {
           "$ref": "#/$defs/SemiAutoConfig",
           "default": {
-            "approval_ttl_secs": 900,
-            "canary": {
-              "allowed_cash_budget_tiers_usd": [],
-              "enabled": false,
-              "expires_at": null,
-              "max_open_intents": 0,
-              "max_total_cash_per_report": "0",
-              "policy_artifact_id": null,
-              "policy_content_hash": null
-            }
+            "approval_ttl_secs": 900
           }
         }
       },
@@ -1109,18 +1082,6 @@
           "default": 1,
           "x-format": "integer",
           "x-ui-visible": false
-        },
-        "settlement_redeem": {
-          "$ref": "#/$defs/SettlementRedeemPolicy",
-          "default": {
-            "allow_during_emergency": false,
-            "batch_size": 32,
-            "confirmation_blocks": 3,
-            "enabled": true,
-            "interval_secs": 300,
-            "max_attempts": 5,
-            "retry_backoff_secs": 300
-          }
         }
       },
       "additionalProperties": false
@@ -1220,7 +1181,7 @@
       "additionalProperties": false
     },
     "KillSwitchPolicy": {
-      "description": "Execution kill-switch default policy.\n\nOperational state lives in the `system_kill_switch` singleton. Runtime\nconfig only carries the policy to apply when that state escalates.",
+      "description": "Execution kill-switch default policy.\n\nOperational state lives in the `system_runtime_control` singleton. Runtime\nconfig only carries the policy to apply when that state escalates.",
       "type": "object",
       "properties": {
         "emergency_exit": {
@@ -1233,234 +1194,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "LifecycleBaseline": {
-      "type": "string",
-      "enum": [
-        "boot"
-      ]
-    },
-    "LifecycleCheckDetail": {
-      "description": "Closed, strongly typed detail vocabulary for production-seal checks.",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "detail_kind": {
-              "type": "string",
-              "const": "contract_matched"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "detail_kind"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "detail_kind": {
-              "type": "string",
-              "const": "schema_fingerprint"
-            },
-            "fingerprint": {
-              "type": "string",
-              "x-format": "content-hash"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "detail_kind",
-            "fingerprint"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "detail_kind": {
-              "type": "string",
-              "const": "migration_ledgers_verified"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "detail_kind"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "build_commit": {
-              "type": "string"
-            },
-            "clean": {
-              "type": "boolean"
-            },
-            "detail_kind": {
-              "type": "string",
-              "const": "compiled_build_identity"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "detail_kind",
-            "build_commit",
-            "clean"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "detail_kind": {
-              "type": "string",
-              "const": "missing_active_policy_bundle"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "detail_kind"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "detail_kind": {
-              "type": "string",
-              "const": "policy_bundle"
-            },
-            "policy_bundle_hash": {
-              "type": "string",
-              "x-format": "content-hash"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "detail_kind",
-            "policy_bundle_hash"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "detail_kind": {
-              "type": "string",
-              "const": "external_evidence"
-            },
-            "evidence_hash": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "x-format": "content-hash"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "detail_kind"
-          ]
-        }
-      ]
-    },
-    "LifecycleCheckKind": {
-      "type": "string",
-      "enum": [
-        "lifecycle_contract",
-        "postgres_schema_fingerprint",
-        "clickhouse_schema_fingerprint",
-        "migration_state",
-        "compiled_build_identity",
-        "backup_evidence",
-        "config_end_to_end",
-        "active_policy_bundle"
-      ]
-    },
-    "LifecycleCheckView": {
-      "type": "object",
-      "properties": {
-        "detail": {
-          "$ref": "#/$defs/LifecycleCheckDetail"
-        },
-        "kind": {
-          "$ref": "#/$defs/LifecycleCheckKind"
-        },
-        "outcome": {
-          "$ref": "#/$defs/CheckOutcome"
-        }
-      },
-      "required": [
-        "kind",
-        "outcome",
-        "detail"
-      ]
-    },
-    "LifecycleView": {
-      "type": "object",
-      "properties": {
-        "active_policy_bundle_hash": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^blake3:[0-9a-f]{64}$"
-        },
-        "baseline": {
-          "$ref": "#/$defs/LifecycleBaseline"
-        },
-        "build_commit": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "checks": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/LifecycleCheckView"
-          }
-        },
-        "clickhouse_schema_fingerprint": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^blake3:[0-9a-f]{64}$"
-        },
-        "environment": {
-          "type": "string"
-        },
-        "postgres_schema_fingerprint": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^blake3:[0-9a-f]{64}$"
-        },
-        "production_baseline": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ProductionBaselineView"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "required_confirmation_phrase": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "state": {
-          "$ref": "#/$defs/ProjectLifecycleState"
-        }
-      },
-      "required": [
-        "state",
-        "baseline",
-        "environment",
-        "checks"
-      ]
     },
     "MarketCategory": {
       "description": "Polymarket event category for business selection and model cohorts.",
@@ -2647,138 +2380,6 @@
         }
       ]
     },
-    "ProductionBaselineView": {
-      "description": "Append-only production baseline exposed by the lifecycle endpoint.",
-      "type": "object",
-      "properties": {
-        "build_commit": {
-          "type": "string"
-        },
-        "clickhouse_schema_fingerprint": {
-          "type": "string",
-          "pattern": "^blake3:[0-9a-f]{64}$"
-        },
-        "created_at": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "decision_policy_snapshot_id": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "environment": {
-          "type": "string"
-        },
-        "evidence": {
-          "$ref": "#/$defs/ProductionSealEvidence"
-        },
-        "lifecycle_policy_hash": {
-          "type": "string",
-          "pattern": "^blake3:[0-9a-f]{64}$"
-        },
-        "policy_bundle_generation": {
-          "type": "integer",
-          "format": "int64",
-          "minimum": 1
-        },
-        "policy_bundle_hash": {
-          "type": "string",
-          "pattern": "^blake3:[0-9a-f]{64}$"
-        },
-        "postgres_schema_fingerprint": {
-          "type": "string",
-          "pattern": "^blake3:[0-9a-f]{64}$"
-        },
-        "production_baseline_id": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "sealed_at": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "sealed_by": {
-          "$ref": "#/$defs/PolicyActorView"
-        }
-      },
-      "required": [
-        "production_baseline_id",
-        "environment",
-        "sealed_at",
-        "sealed_by",
-        "build_commit",
-        "postgres_schema_fingerprint",
-        "clickhouse_schema_fingerprint",
-        "policy_bundle_generation",
-        "decision_policy_snapshot_id",
-        "policy_bundle_hash",
-        "lifecycle_policy_hash",
-        "evidence",
-        "created_at"
-      ]
-    },
-    "ProductionSealCheck": {
-      "description": "One typed item in the irreversible production-seal evidence bundle.",
-      "type": "object",
-      "properties": {
-        "checked_at": {
-          "type": "string"
-        },
-        "detail": {
-          "$ref": "#/$defs/LifecycleCheckDetail"
-        },
-        "kind": {
-          "$ref": "#/$defs/LifecycleCheckKind"
-        },
-        "outcome": {
-          "$ref": "#/$defs/CheckOutcome"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "outcome",
-        "checked_at",
-        "detail"
-      ]
-    },
-    "ProductionSealEvidence": {
-      "description": "Evidence persisted with the production baseline. The physical column is\nJSONB because this is an immutable aggregate, while `SeaORM` exposes the\nstrongly typed structure end to end.",
-      "type": "object",
-      "properties": {
-        "backup_evidence_hash": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null,
-          "x-format": "content-hash"
-        },
-        "checks": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/ProductionSealCheck"
-          }
-        },
-        "config_e2e_evidence_hash": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null,
-          "x-format": "content-hash"
-        }
-      },
-      "additionalProperties": false
-    },
-    "ProjectLifecycleState": {
-      "type": "string",
-      "enum": [
-        "pre_production_resettable",
-        "production_frozen"
-      ]
-    },
     "RecommendationPolicy": {
       "description": "Market-selection, data-quality, and recommendation payload semantics.",
       "type": "object",
@@ -3119,28 +2720,6 @@
       "type": "integer",
       "format": "int32"
     },
-    "SealProductionRequest": {
-      "type": "object",
-      "properties": {
-        "confirmation_phrase": {
-          "type": "string"
-        },
-        "environment": {
-          "type": "string"
-        },
-        "reason": {
-          "type": "string",
-          "maxLength": 1024,
-          "minLength": 1
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "environment",
-        "confirmation_phrase",
-        "reason"
-      ]
-    },
     "SelectionConfig": {
       "description": "Market selection selection policy.",
       "type": "object",
@@ -3192,62 +2771,6 @@
       },
       "additionalProperties": false
     },
-    "SemiAutoCanaryConfig": {
-      "description": "Runtime v1 policy-bound `SemiAuto` canary.\n\nAn enabled canary is intentionally narrower than a published policy. It\nauthorizes only an exact policy identity and explicit cash-budget tiers; it\nnever acts as an implicit active-policy pointer.",
-      "type": "object",
-      "properties": {
-        "allowed_cash_budget_tiers_usd": {
-          "description": "Exact validated total cash-budget tiers admitted by this canary (v14: only `$25`).",
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/DecimalValue"
-          }
-        },
-        "enabled": {
-          "description": "Whether this exact policy-bound authorization admits new `SemiAuto` intents.",
-          "type": "boolean",
-          "default": false
-        },
-        "expires_at": {
-          "description": "RFC3339 authorization deadline; intents may not outlive this instant.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "max_open_intents": {
-          "description": "Transactional global cap on capital-holding or in-flight intents.",
-          "type": "integer",
-          "format": "uint32",
-          "default": 0,
-          "minimum": 0
-        },
-        "max_total_cash_per_report": {
-          "description": "Transactional cumulative cash-budget cap for one report.",
-          "$ref": "#/$defs/DecimalValue",
-          "default": "0"
-        },
-        "policy_artifact_id": {
-          "description": "Content-addressed Published trade-policy artifact id authorized to run.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "policy_content_hash": {
-          "description": "Canonical content hash that must match the authorized policy artifact.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        }
-      },
-      "additionalProperties": false
-    },
     "SemiAutoConfig": {
       "description": "Semi-auto approval policy.",
       "type": "object",
@@ -3257,71 +2780,6 @@
           "type": "integer",
           "format": "uint64",
           "default": 900,
-          "minimum": 0
-        },
-        "canary": {
-          "description": "Policy-bound, fail-closed production canary limits.",
-          "$ref": "#/$defs/SemiAutoCanaryConfig",
-          "default": {
-            "allowed_cash_budget_tiers_usd": [],
-            "enabled": false,
-            "expires_at": null,
-            "max_open_intents": 0,
-            "max_total_cash_per_report": "0",
-            "policy_artifact_id": null,
-            "policy_content_hash": null
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    "SettlementRedeemPolicy": {
-      "description": "On-chain settlement redemption worker policy.",
-      "type": "object",
-      "properties": {
-        "allow_during_emergency": {
-          "description": "Whether automatic redeem may sign new transactions in emergency halt.",
-          "type": "boolean",
-          "default": false
-        },
-        "batch_size": {
-          "description": "Maximum condition-level redeem batches processed per sweep.",
-          "type": "integer",
-          "format": "uint64",
-          "default": 32,
-          "minimum": 0
-        },
-        "confirmation_blocks": {
-          "description": "Polygon confirmations required before closing the strategy lots.",
-          "type": "integer",
-          "format": "uint64",
-          "default": 3,
-          "minimum": 0
-        },
-        "enabled": {
-          "description": "Whether the worker may submit standard CTF redeem transactions.",
-          "type": "boolean",
-          "default": true
-        },
-        "interval_secs": {
-          "description": "Sweep interval in seconds.",
-          "type": "integer",
-          "format": "uint64",
-          "default": 300,
-          "minimum": 0
-        },
-        "max_attempts": {
-          "description": "Maximum failed submit/confirm attempts before manual escalation.",
-          "type": "integer",
-          "format": "uint32",
-          "default": 5,
-          "minimum": 0
-        },
-        "retry_backoff_secs": {
-          "description": "Base retry backoff in seconds.",
-          "type": "integer",
-          "format": "uint64",
-          "default": 300,
           "minimum": 0
         }
       },

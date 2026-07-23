@@ -11,7 +11,7 @@ use quant_pivot_models::domain::{
 use quant_pivot_storage::{clickhouse::ClickHousePool, postgres::PostgresPool};
 
 use crate::{
-    governance::RuntimeModeHandle, infra::health_alert_state::evaluate_ws_probe,
+    governance::RuntimeControlsHandle, infra::health_alert_state::evaluate_ws_probe,
     service::catalog_readiness::CatalogReadiness,
 };
 
@@ -21,7 +21,7 @@ pub struct HealthCheckerDeps {
     pub ch_pool: Arc<ClickHousePool>,
     pub ws_health: Arc<dyn WsShardHealthPort>,
     pub catalog: Arc<CatalogReadiness>,
-    pub runtime_mode: RuntimeModeHandle,
+    pub runtime_controls: RuntimeControlsHandle,
 }
 
 pub struct HealthChecker {
@@ -29,7 +29,7 @@ pub struct HealthChecker {
     ch_pool: Arc<ClickHousePool>,
     ws_health: Arc<dyn WsShardHealthPort>,
     catalog: Arc<CatalogReadiness>,
-    runtime_mode: RuntimeModeHandle,
+    runtime_controls: RuntimeControlsHandle,
 }
 
 impl HealthChecker {
@@ -39,7 +39,7 @@ impl HealthChecker {
             ch_pool: deps.ch_pool,
             ws_health: deps.ws_health,
             catalog: deps.catalog,
-            runtime_mode: deps.runtime_mode,
+            runtime_controls: deps.runtime_controls,
         }
     }
 
@@ -117,7 +117,7 @@ impl HealthChecker {
     }
 
     #[must_use]
-    pub fn runtime_mode(&self) -> RuntimeModeHandle {
-        self.runtime_mode.clone()
+    pub fn runtime_controls(&self) -> RuntimeControlsHandle {
+        self.runtime_controls.clone()
     }
 }

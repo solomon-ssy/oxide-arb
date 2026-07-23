@@ -45,7 +45,7 @@ pub async fn run(config_dir: &Path) -> Result<()> {
     let (_collateral, _open_orders, _trades, _positions) = tokio::try_join!(
         clob.collateral_balance(),
         clob.get_open_orders(),
-        clob.get_trades(None, None, None),
+        clob.get_trades(None, None, None, None),
         data_api.positions(funder),
     )
     .context("read CLOB collateral/orders/trades and Data API positions")?;

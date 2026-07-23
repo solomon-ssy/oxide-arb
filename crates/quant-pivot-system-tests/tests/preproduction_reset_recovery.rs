@@ -9,30 +9,9 @@ use std::{
     time::Duration,
 };
 
-use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
-use quant_pivot_error::QuantResult;
-use quant_pivot_migration::{
-    acquire_lifecycle_lease, inspect_preproduction_postgres, release_lifecycle_lease,
-};
-use quant_pivot_models::{
-    config::{ClickHouseConfig, DeployConfig, PostgresConfig, ProjectLifecyclePolicy},
-    domain::{
-        governance::{NewProductionBaseline, NewProductionEvidence, ProductionEvidenceInfo},
-        ports::{LifecycleSchemaVerificationPort, VerifiedSchemaFingerprints},
-    },
-    enums::runtime_config::{
-        CheckOutcome, LifecycleBaseline, LifecycleCheckKind, PolicyActorKind,
-        ProductionEvidenceKind, ProjectLifecycleState,
-    },
-    runtime_config::{
-        ActivePolicyBundle, LifecycleCheckDetail, ProductionSealCheck, ProductionSealEvidence,
-    },
-    types::{
-        ArtifactUri, BuildCommitHash, ContentHash, DeploymentEnvironment, ProductionBaselineId,
-        ProductionEvidenceId,
-    },
-};
+use quant_pivot_migration::inspect_preproduction_postgres;
+use quant_pivot_models::config::{ClickHouseConfig, DeployConfig, PostgresConfig};
 use quant_pivot_repository::{postgres::PgPolicyRepository, traits::PolicyRepository};
 use quant_pivot_storage::{
     cache::{CacheBackend, RedisBackend, connect_pool, count_preproduction_namespace},
@@ -40,7 +19,6 @@ use quant_pivot_storage::{
         ClickHousePool, active_preproduction_query_count, database_object_count,
         verify_schema as verify_clickhouse_schema,
     },
-    evidence::FileProductionEvidenceVerifier,
     postgres::{
         PostgresPool,
         migration::{
@@ -58,7 +36,6 @@ use testcontainers::{
 };
 use testcontainers_modules::postgres::Postgres;
 use tokio::process::Command;
-use url::Url;
 use uuid::Uuid;
 
 const POSTGRES_PASSWORD: &str = "w9-postgres-test-secret";
@@ -161,12 +138,14 @@ async fn clean_boot_recovers_each_system_stage_and_restores_backups() {
     fs::set_permissions(&bootstrap_password_file, Permissions::from_mode(0o600))
         .expect("restrict bootstrap admin password file");
     let journal_file = workspace.path().join(JOURNAL_FILE_NAME);
+    let deploy = load_deploy(workspace.path());
 
+    assert_standard_fresh_postgres_deployment(workspace.path(), &bootstrap_password_file, &deploy)
+        .await;
     let first_operation =
         full_reset_cycle(workspace.path(), &journal_file, &bootstrap_password_file).await;
     assert_eq!(read_journal(&journal_file).operation_id, first_operation);
 
-    let deploy = load_deploy(workspace.path());
     assert_reset_plan_rejects_live_owners(&deploy, workspace.path(), &journal_file).await;
 
     seed_partial_reset_markers(&deploy).await;
@@ -247,7 +226,67 @@ async fn clean_boot_recovers_each_system_stage_and_restores_backups() {
 
     verify_postgres_backup_restore(&postgres, &deploy.db.postgres).await;
     verify_clickhouse_backup_restore(&deploy).await;
-    seal_disposable_baseline(&deploy, workspace.path(), &journal_file).await;
+}
+
+async fn assert_standard_fresh_postgres_deployment(
+    config_dir: &Path,
+    bootstrap_password_file: &Path,
+    deploy: &DeployConfig,
+) {
+    let output = run_xtask(
+        vec![
+            "postgres-schema".to_owned(),
+            "apply".to_owned(),
+            "--config-dir".to_owned(),
+            path_text(config_dir),
+        ],
+        Some(bootstrap_password_file),
+    )
+    .await;
+    assert_success(&output, "standard fresh PostgreSQL deployment");
+    assert_output_redacted(&output);
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Policy bundle deployed:"),
+        "deploy output must identify the canonical boot policy bundle"
+    );
+
+    let postgres = PostgresPool::connect_existing(&deploy.db.postgres)
+        .await
+        .expect("connect standard fresh PostgreSQL deployment");
+    verify_postgres_schema(postgres.connection())
+        .await
+        .expect("verify standard fresh PostgreSQL schema");
+    PgPolicyRepository::new(postgres.connection().clone())
+        .load_current_bundle()
+        .await
+        .expect("load standard fresh policy bundle")
+        .expect("standard fresh deployment must create an active policy bundle");
+    let boot_facts = postgres
+        .connection()
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT \
+                (SELECT COUNT(*) FROM research_profile_artifact) AS profile_count, \
+                (SELECT settlement_write_policy::text \
+                   FROM system_runtime_control WHERE id = 1) AS settlement_write_policy",
+        ))
+        .await
+        .expect("query standard fresh deployment facts")
+        .expect("standard fresh deployment facts row");
+    assert!(
+        boot_facts
+            .try_get::<i64>("", "profile_count")
+            .expect("decode built-in research profile count")
+            > 0,
+        "standard fresh deployment must seed immutable research profiles"
+    );
+    assert_eq!(
+        boot_facts
+            .try_get::<String>("", "settlement_write_policy")
+            .expect("decode default settlement write policy"),
+        "disabled"
+    );
+    postgres.close().await;
 }
 
 async fn full_reset_cycle(
@@ -936,277 +975,6 @@ async fn verify_clickhouse_backup_restore(deploy: &DeployConfig) {
     assert_eq!(source_status, restored_status);
 }
 
-struct DisposableLiveSchemaVerification {
-    deploy: DeployConfig,
-}
-
-#[async_trait]
-impl LifecycleSchemaVerificationPort for DisposableLiveSchemaVerification {
-    async fn verify_live(&self) -> QuantResult<VerifiedSchemaFingerprints> {
-        let postgres = PostgresPool::connect_existing(&self.deploy.db.postgres).await?;
-        let (postgres_status, clickhouse_status) = tokio::try_join!(
-            verify_postgres_schema(postgres.connection()),
-            verify_clickhouse_schema(&self.deploy.db.clickhouse),
-        )?;
-        postgres.close().await;
-        Ok(VerifiedSchemaFingerprints {
-            postgres_schema_fingerprint: postgres_status.schema_fingerprint,
-            clickhouse_schema_fingerprint: clickhouse_status.schema_fingerprint,
-        })
-    }
-}
-
-async fn seal_disposable_baseline(deploy: &DeployConfig, directory: &Path, journal_file: &Path) {
-    let postgres = PostgresPool::connect_existing(&deploy.db.postgres)
-        .await
-        .expect("connect disposable seal target");
-    let repository = PgPolicyRepository::new(postgres.connection().clone());
-    let bundle = repository
-        .load_current_bundle()
-        .await
-        .expect("load disposable seal policy bundle")
-        .expect("disposable seal policy bundle");
-    let schema_verification = DisposableLiveSchemaVerification {
-        deploy: deploy.clone(),
-    };
-    let live_schema = schema_verification
-        .verify_live()
-        .await
-        .expect("verify disposable seal schema");
-    let build_commit = BuildCommitHash::parse("9".repeat(40)).expect("disposable build commit");
-    let backup_artifact = write_read_only_evidence(directory, "backup-restore", b"w9-backup");
-    let config_artifact = write_read_only_evidence(directory, "config-e2e", b"w9-config-e2e");
-    let lease = acquire_lifecycle_lease(&deploy.db.postgres)
-        .await
-        .expect("acquire disposable seal lifecycle lease");
-
-    let backup = record_disposable_evidence(
-        &repository,
-        &schema_verification,
-        ProductionEvidenceKind::BackupRestore,
-        backup_artifact,
-        &build_commit,
-        &live_schema,
-        &bundle,
-    )
-    .await;
-    let config_e2e = record_disposable_evidence(
-        &repository,
-        &schema_verification,
-        ProductionEvidenceKind::ProtectedConfigEndToEnd,
-        config_artifact,
-        &build_commit,
-        &live_schema,
-        &bundle,
-    )
-    .await;
-    lease
-        .ensure_active()
-        .expect("disposable seal lease remains active");
-
-    let frozen_policy = ProjectLifecyclePolicy {
-        state: ProjectLifecycleState::ProductionFrozen,
-        baseline: LifecycleBaseline::Boot,
-    };
-    let checks = vec![
-        passed_seal_check(
-            LifecycleCheckKind::LifecycleContract,
-            LifecycleCheckDetail::ContractMatched,
-        ),
-        passed_seal_check(
-            LifecycleCheckKind::PostgresSchemaFingerprint,
-            LifecycleCheckDetail::SchemaFingerprint {
-                fingerprint: live_schema.postgres_schema_fingerprint,
-            },
-        ),
-        passed_seal_check(
-            LifecycleCheckKind::ClickhouseSchemaFingerprint,
-            LifecycleCheckDetail::SchemaFingerprint {
-                fingerprint: live_schema.clickhouse_schema_fingerprint,
-            },
-        ),
-        passed_seal_check(
-            LifecycleCheckKind::MigrationState,
-            LifecycleCheckDetail::MigrationLedgersVerified,
-        ),
-        passed_seal_check(
-            LifecycleCheckKind::CompiledBuildIdentity,
-            LifecycleCheckDetail::CompiledBuildIdentity {
-                build_commit: build_commit.clone(),
-                clean: true,
-            },
-        ),
-        passed_seal_check(
-            LifecycleCheckKind::ActivePolicyBundle,
-            LifecycleCheckDetail::PolicyBundle {
-                policy_bundle_hash: bundle.snapshot_hash,
-            },
-        ),
-        passed_seal_check(
-            LifecycleCheckKind::BackupEvidence,
-            LifecycleCheckDetail::ExternalEvidence {
-                evidence_hash: Some(backup.evidence_hash),
-            },
-        ),
-        passed_seal_check(
-            LifecycleCheckKind::ConfigEndToEnd,
-            LifecycleCheckDetail::ExternalEvidence {
-                evidence_hash: Some(config_e2e.evidence_hash),
-            },
-        ),
-    ];
-    let baseline = NewProductionBaseline {
-        production_baseline_id: ProductionBaselineId::boot(),
-        environment: DeploymentEnvironment::parse("w9-disposable")
-            .expect("disposable seal environment"),
-        sealed_at: Utc::now(),
-        sealed_by_kind: PolicyActorKind::Operator,
-        sealed_by_user_id: None,
-        sealed_by_label: "w9-disposable".to_owned(),
-        build_commit,
-        postgres_schema_fingerprint: live_schema.postgres_schema_fingerprint,
-        clickhouse_schema_fingerprint: live_schema.clickhouse_schema_fingerprint,
-        policy_bundle_generation: bundle.generation,
-        decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
-        policy_bundle_hash: bundle.snapshot_hash,
-        lifecycle_policy_hash: frozen_policy
-            .content_hash()
-            .expect("frozen lifecycle policy hash"),
-        evidence: ProductionSealEvidence {
-            checks,
-            backup_evidence_hash: Some(backup.evidence_hash),
-            config_e2e_evidence_hash: Some(config_e2e.evidence_hash),
-        },
-    };
-    repository
-        .seal_production_baseline(
-            baseline.clone(),
-            &schema_verification,
-            &FileProductionEvidenceVerifier,
-        )
-        .await
-        .expect("seal disposable production baseline");
-    release_lifecycle_lease(lease)
-        .await
-        .expect("release disposable seal lifecycle lease");
-
-    assert!(
-        repository
-            .seal_production_baseline(
-                baseline,
-                &schema_verification,
-                &FileProductionEvidenceVerifier,
-            )
-            .await
-            .is_err(),
-        "a second disposable seal must be rejected"
-    );
-    postgres.close().await;
-    assert_frozen_schema_and_reset_denials(directory, journal_file).await;
-}
-
-async fn record_disposable_evidence(
-    repository: &PgPolicyRepository,
-    schema_verification: &DisposableLiveSchemaVerification,
-    kind: ProductionEvidenceKind,
-    artifact: (ArtifactUri, ContentHash),
-    build_commit: &BuildCommitHash,
-    live_schema: &VerifiedSchemaFingerprints,
-    bundle: &ActivePolicyBundle,
-) -> ProductionEvidenceInfo {
-    repository
-        .record_production_evidence(
-            NewProductionEvidence {
-                production_evidence_id: ProductionEvidenceId::from_v7(),
-                kind,
-                artifact_uri: artifact.0,
-                evidence_hash: artifact.1,
-                build_commit: build_commit.clone(),
-                postgres_schema_fingerprint: live_schema.postgres_schema_fingerprint,
-                clickhouse_schema_fingerprint: live_schema.clickhouse_schema_fingerprint,
-                policy_bundle_generation: bundle.generation,
-                decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
-                policy_bundle_hash: bundle.snapshot_hash,
-                recorded_by_kind: PolicyActorKind::Operator,
-                recorded_by_user_id: None,
-                recorded_by_label: "w9-disposable".to_owned(),
-                reason: "bind disposable seal evidence".to_owned(),
-                observed_at: Utc::now(),
-            },
-            schema_verification,
-            &FileProductionEvidenceVerifier,
-        )
-        .await
-        .expect("record disposable production evidence")
-}
-
-fn passed_seal_check(
-    kind: LifecycleCheckKind,
-    detail: LifecycleCheckDetail,
-) -> ProductionSealCheck {
-    ProductionSealCheck {
-        kind,
-        outcome: CheckOutcome::Passed,
-        checked_at: Utc::now(),
-        detail,
-    }
-}
-
-fn write_read_only_evidence(
-    directory: &Path,
-    name: &str,
-    content: &[u8],
-) -> (ArtifactUri, ContentHash) {
-    let path = directory.join(format!("{name}.evidence"));
-    fs::write(&path, content).expect("write disposable evidence");
-    fs::set_permissions(&path, Permissions::from_mode(0o444))
-        .expect("make disposable evidence read-only");
-    let hash = ContentHash::parse(&format!("blake3:{}", blake3::hash(content).to_hex()))
-        .expect("disposable evidence hash");
-    let uri = Url::from_file_path(&path).expect("disposable evidence file URL");
-    (
-        ArtifactUri::parse(uri.to_string()).expect("disposable evidence artifact URI"),
-        hash,
-    )
-}
-
-async fn assert_frozen_schema_and_reset_denials(directory: &Path, journal_file: &Path) {
-    let config_dir = path_text(directory);
-    let bootstrap_password_file = directory.join("bootstrap-admin-password");
-    let commands = [
-        vec![
-            "postgres-schema".to_owned(),
-            "apply".to_owned(),
-            "--config-dir".to_owned(),
-            config_dir.clone(),
-        ],
-        vec![
-            "clickhouse-schema".to_owned(),
-            "apply-online".to_owned(),
-            "--config-dir".to_owned(),
-            config_dir.clone(),
-        ],
-        vec![
-            "preproduction-reset".to_owned(),
-            "plan".to_owned(),
-            "--config-dir".to_owned(),
-            config_dir,
-            "--journal-file".to_owned(),
-            path_text(journal_file),
-        ],
-    ];
-    for args in commands {
-        let output = run_xtask(args, Some(&bootstrap_password_file)).await;
-        assert!(!output.status.success(), "frozen mutation must be denied");
-        assert_output_redacted(&output);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("frozen") || stderr.contains("production baseline"),
-            "frozen denial must explain the immutable baseline: {stderr}"
-        );
-    }
-}
-
 fn write_disposable_config(
     directory: &Path,
     postgres_port: u16,
@@ -1215,9 +983,8 @@ fn write_disposable_config(
 ) {
     let contents = format!(
         r#"
-[lifecycle]
+[deployment]
 environment = "w9-disposable"
-expected_state = "pre_production_resettable"
 
 [db.postgres]
 host = "127.0.0.1"

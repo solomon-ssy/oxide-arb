@@ -6,8 +6,8 @@ use quant_pivot_models::{
         governance::NewOperationLog,
         pagination::Paginated,
         quant::{
-            ApproveOrderIntent, ApproveOrderIntentOutcome, IntentCreationLimits,
-            NewCapitalAllocation, NewOrderIntent, OrderIntentInfo,
+            ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOrderIntent,
+            OrderIntentInfo,
         },
     },
     enums::{execution::ApprovalInvalidation, quant::OrderIntentStatus},
@@ -30,7 +30,6 @@ pub trait OrderIntentRepository: Send + Sync {
         &self,
         intent: NewOrderIntent,
         allocation: NewCapitalAllocation,
-        limits: Option<IntentCreationLimits>,
     ) -> Result<OrderIntentInfo, StorageError>;
 
     /// Approve a `PendingApproval` intent. Re-reads recommendation, report,

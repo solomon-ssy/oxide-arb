@@ -14,6 +14,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub order_intent_id: Uuid,
     pub recommendation_id: Uuid,
+    pub execution_account_id: Uuid,
     pub runtime_mode: QpQuantRuntimeMode,
     pub decision_policy_snapshot_id: Uuid,
     pub model_version_id: Uuid,
@@ -99,10 +100,20 @@ pub struct Model {
         on_delete = "NoAction"
     )]
     pub quant_recommendation: BelongsTo<super::quant_recommendation::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "execution_account_id",
+        to = "execution_account_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_execution_account: BelongsTo<super::quant_execution_account::Entity>,
     #[sea_orm(has_many)]
     pub quant_reconciliations: HasMany<super::quant_reconciliation::Entity>,
     #[sea_orm(has_many)]
     pub quant_settlement_redeem_lots: HasMany<super::quant_settlement_redeem_lot::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_settlement_inventory_lots: HasMany<super::quant_settlement_inventory_lot::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

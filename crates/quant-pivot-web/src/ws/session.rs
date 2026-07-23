@@ -215,7 +215,6 @@ fn frame(envelope: &WsEnvelope) -> ByteString {
 fn control_plane_status(ctx: &SessionContext) -> SystemStatusView {
     SystemStatusView {
         runtime: ctx.state.control.system_status(),
-        bootstrap: ctx.state.bootstrap.view(),
-        capabilities: ctx.state.bootstrap.capability_snapshot(),
+        capabilities: ctx.state.capabilities.capability_snapshot(),
     }
 }

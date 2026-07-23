@@ -38,6 +38,18 @@ pg_enum! {
 }
 
 pg_enum! {
+    type_name = "qp_venue_trade_status",
+    /// Execution status reported by Polymarket's authenticated trades API.
+    pub enum VenueTradeStatus {
+        Matched => "matched",
+        Mined => "mined",
+        Confirmed => "confirmed",
+        Retrying => "retrying",
+        Failed => "failed",
+    }
+}
+
+pg_enum! {
     type_name = "qp_capital_allocation_state",
     pub enum CapitalAllocationState {
         Allocated => "allocated",
@@ -61,17 +73,6 @@ pg_enum! {
 impl PositionLedgerState {
     /// Position states that allow filled-intent attribution to finalize.
     pub const ATTRIBUTION_READY: [Self; 2] = [Self::Closed, Self::Settled];
-}
-
-pg_enum! {
-    type_name = "qp_settlement_redeem_state",
-    pub enum SettlementRedeemState {
-        Pending => "pending",
-        Submitted => "submitted",
-        Confirmed => "confirmed",
-        Failed => "failed",
-        ManualRequired => "manual_required",
-    }
 }
 
 pg_enum! {
@@ -107,7 +108,6 @@ pg_enum! {
     type_name = "qp_kill_switch_state",
     pub enum KillSwitchState {
         Closed => "closed",
-        ReportOnlyForced => "report_only_forced",
         ExecutionHalted => "execution_halted",
         ExitOnly => "exit_only",
         EmergencyHalted => "emergency_halted",
@@ -133,7 +133,15 @@ impl KillSwitchState {
     /// freezes all automated action (manual handling only).
     #[must_use]
     pub const fn allows_auto_exit(self) -> bool {
-        matches!(self, Self::Closed | Self::ReportOnlyForced | Self::ExitOnly)
+        matches!(self, Self::Closed | Self::ExitOnly)
+    }
+
+    /// Whether a new governed settlement recovery submission may be created.
+    /// Existing durable identities are tracked in every state and do not use
+    /// this gate.
+    #[must_use]
+    pub const fn allows_settlement_recovery_submission(self) -> bool {
+        matches!(self, Self::Closed | Self::ExitOnly)
     }
 
     /// Whether this state mandates the emergency-exit path over open positions.
@@ -157,7 +165,7 @@ impl KillSwitchState {
     pub const fn restriction_rank(self) -> u8 {
         match self {
             Self::Closed => 0,
-            Self::ReportOnlyForced | Self::ExitOnly => 1,
+            Self::ExitOnly => 1,
             Self::ExecutionHalted => 2,
             Self::EmergencyHalted => 3,
         }
@@ -211,6 +219,7 @@ wire_enum! {
         RecommendationFreshness => "recommendation_freshness",
         ReportStatus => "report_status",
         RuntimeMode => "runtime_mode",
+        SettlementRecovery => "settlement_recovery",
         ModelPublication => "model_publication",
         DataQuality => "data_quality",
         BookFreshness => "book_freshness",
@@ -303,7 +312,6 @@ mod tests {
     /// Columns: state, new-entry, auto-exit, emergency-exit.
     const BEHAVIOR_TABLE: &[(KillSwitchState, bool, bool, bool)] = &[
         (KillSwitchState::Closed, true, true, false),
-        (KillSwitchState::ReportOnlyForced, false, true, false),
         (KillSwitchState::ExecutionHalted, false, false, false),
         (KillSwitchState::ExitOnly, false, true, false),
         (KillSwitchState::EmergencyHalted, false, false, true),

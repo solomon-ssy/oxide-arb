@@ -2,7 +2,7 @@
 //! transaction.
 //!
 //! Mirrors the entry dispatcher's write-ahead / venue-call / settle shape but
-//! for the exit side: it does **not** run the 24-check admission engine (an exit
+//! for the exit side: it does **not** run the 25-check admission engine (an exit
 //! reduces existing exposure; its lightweight gates — kill-switch `allows_auto_exit`,
 //! a readable mark — are enforced in [`decide_exit`](super::decide_exit)). The
 //! per-intent lot's capital is already `Spent` from entry; a full exit completes
@@ -338,6 +338,7 @@ fn build_exit_ledger_write(
     let fully_exited = filled >= lot.shares;
 
     let position_exit = |state: ExitState| ExitLedgerWrite {
+        identity_refs: result.identity_refs(),
         order_state: outcome_order_state(outcome),
         venue_order_id: result.venue_order_id.clone(),
         venue_status,
@@ -405,6 +406,7 @@ fn build_exit_ledger_write(
 /// change; the recon sweep polls it (no recon row, like a resting entry order).
 fn resting_open_exit_write(result: &VenueSubmitResult, reason: ExitReason) -> ExitLedgerWrite {
     ExitLedgerWrite {
+        identity_refs: result.identity_refs(),
         order_state: ExecutionOrderState::Submitted,
         venue_order_id: result.venue_order_id.clone(),
         venue_status: VenueOutcome::Open.venue_order_status(),
@@ -428,6 +430,7 @@ fn ambiguous_exit_write(
     reason: ExitReason,
 ) -> ExitLedgerWrite {
     ExitLedgerWrite {
+        identity_refs: result.identity_refs(),
         order_state: ExecutionOrderState::Ambiguous,
         venue_order_id: result.venue_order_id.clone(),
         venue_status: None,
@@ -457,6 +460,7 @@ fn failed_exit_write(
     outcome: VenueOutcome,
 ) -> ExitLedgerWrite {
     ExitLedgerWrite {
+        identity_refs: result.identity_refs(),
         order_state,
         venue_order_id: result.venue_order_id.clone(),
         venue_status: outcome.venue_order_status(),

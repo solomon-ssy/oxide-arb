@@ -8,7 +8,9 @@ use quant_pivot_models::{
     domain::{
         api::{
             ExecutionOrderListQuery, PositionListQuery, PositionSummary, ReconciliationListQuery,
-            SettlementRedeemDetail, SettlementRedeemListQuery, SettlementRedeemSummary,
+            settlement_redeem::{
+                SettlementRedeemDetail, SettlementRedeemListQuery, SettlementRedeemSummary,
+            },
         },
         pagination::Paginated,
         ports::ExecutionReadPort,
@@ -23,7 +25,7 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     AttributionRepository, ExecutionOrderRepository, PositionRepository, ReconciliationRepository,
-    SettlementRedeemRepository,
+    quant::settlement_redeem::SettlementRedeemRepository,
 };
 
 pub struct CoreExecutionReadPort {
@@ -131,7 +133,17 @@ impl ExecutionReadPort for CoreExecutionReadPort {
         let Some(redeem) = self.settlement_redeem.find_by_id(id).await? else {
             return Ok(None);
         };
-        let lots = self.settlement_redeem.list_lots_by_redeem(id).await?;
-        Ok(Some(SettlementRedeemDetail { redeem, lots }))
+        let inventory_lots = self.settlement_redeem.list_current_inventory(id).await?;
+        let redeemed_lots = self.settlement_redeem.list_lots_by_redeem(id).await?;
+        let submissions = self
+            .settlement_redeem
+            .list_submissions_by_redeem(id)
+            .await?;
+        Ok(Some(SettlementRedeemDetail {
+            redeem,
+            inventory_lots,
+            redeemed_lots,
+            submissions,
+        }))
     }
 }

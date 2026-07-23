@@ -8,27 +8,26 @@ use crate::{
     enums::{
         execution::KillSwitchState,
         quant::QuantRuntimeMode,
-        system::{BootstrapPhase, CapabilityId, CapabilityReason},
+        settlement::SettlementWritePolicy,
+        system::{CapabilityId, CapabilityReason},
     },
 };
 
 /// Governed quant runtime mode transition request.
 #[derive(Debug, Deserialize, Validate)]
 pub struct SwitchQuantModeRequest {
+    #[validate(range(min = 0))]
+    pub expected_revision: i64,
     pub mode: QuantRuntimeMode,
     #[validate(length(min = 1, max = 1024))]
     pub reason: String,
 }
 
-/// Quant runtime mode read model.
-#[derive(Debug, Serialize)]
-pub struct QuantModeView {
-    pub mode: QuantRuntimeMode,
-}
-
 /// Governed operational kill-switch transition request.
 #[derive(Debug, Deserialize, Validate)]
 pub struct SetKillSwitchRequest {
+    #[validate(range(min = 0))]
+    pub expected_revision: i64,
     pub state: KillSwitchState,
     #[validate(length(min = 1, max = 1024))]
     pub reason: String,
@@ -37,25 +36,14 @@ pub struct SetKillSwitchRequest {
     pub ack: bool,
 }
 
-/// Explicit cold-start activation. The acknowledgement is intentionally named
-/// and cannot be confused with a generic confirmation checkbox.
+/// Governed settlement write-policy transition request.
 #[derive(Debug, Deserialize, Validate)]
-pub struct ActivateBootstrapRequest {
-    #[validate(range(min = 1))]
-    pub bootstrap_contract_version: i32,
+pub struct SwitchSettlementWritePolicyRequest {
     #[validate(range(min = 0))]
-    pub expected_state_revision: i64,
+    pub expected_revision: i64,
+    pub policy: SettlementWritePolicy,
     #[validate(length(min = 1, max = 1024))]
     pub reason: String,
-    #[serde(default)]
-    pub report_only_forced_ack: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BootstrapView {
-    pub phase: BootstrapPhase,
-    pub bootstrap_contract_version: i32,
-    pub state_revision: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,13 +108,12 @@ impl SystemCapabilities {
     }
 }
 
-/// Authenticated control-plane status with durable bootstrap and derived
-/// capabilities layered over the live operational projection.
+/// Authenticated control-plane status with derived capabilities layered over
+/// the live operational projection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStatusView {
     #[serde(flatten)]
     pub runtime: SystemStatus,
-    pub bootstrap: BootstrapView,
     pub capabilities: SystemCapabilities,
 }
 

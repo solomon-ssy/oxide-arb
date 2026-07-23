@@ -7,7 +7,9 @@ use crate::{
     domain::{
         api::{
             ExecutionOrderListQuery, PositionListQuery, PositionSummary, ReconciliationListQuery,
-            SettlementRedeemDetail, SettlementRedeemListQuery, SettlementRedeemSummary,
+            settlement_redeem::{
+                SettlementRedeemDetail, SettlementRedeemListQuery, SettlementRedeemSummary,
+            },
         },
         pagination::Paginated,
         quant::{

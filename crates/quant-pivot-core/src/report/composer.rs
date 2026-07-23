@@ -151,20 +151,53 @@ impl RecommendationComposer for DefaultRecommendationComposer {
         );
         let data_quality_snapshot_ref = input.data_quality_snapshot.report_data_quality_snapshot_id;
 
-        let recommendation_rows = input
-            .planned
-            .iter()
-            .map(|planned| {
-                compose_recommendation(
-                    &report_id,
-                    planned,
-                    &input,
-                    entry_window_ratio,
-                    fallback_horizon_secs,
-                    &data_quality_snapshot_ref,
-                )
-            })
-            .collect::<QuantResult<Vec<_>>>()?;
+        let mut recommendation_rows = Vec::with_capacity(input.planned.len());
+        let mut auto_authorized_total = Usd::ZERO;
+        let mut previous_rank = 0;
+        for planned in input.planned {
+            if planned.rank <= previous_rank {
+                return Err(ReportError::InvariantViolation {
+                    stage: "compose",
+                    detail: "planned recommendations must be in unique ascending rank order"
+                        .to_owned(),
+                }
+                .into());
+            }
+            previous_rank = planned.rank;
+            let rows = compose_recommendation(
+                &report_id,
+                planned,
+                &input,
+                entry_window_ratio,
+                fallback_horizon_secs,
+                &data_quality_snapshot_ref,
+                auto_authorized_total,
+            )?;
+            if rows
+                .recommendation
+                .execution_eligibility
+                .is_eligible(QuantRuntimeMode::AutoExecution)
+            {
+                let suggested_usd = rows
+                    .recommendation
+                    .trade_plan
+                    .sizing()
+                    .ok_or_else(|| ReportError::InvariantViolation {
+                        stage: "compose",
+                        detail: "auto-eligible recommendation has no sizing plan".to_owned(),
+                    })?
+                    .suggested_usd;
+                let total = auto_authorized_total
+                    .inner()
+                    .checked_add(suggested_usd.inner())
+                    .ok_or_else(|| ReportError::NumericOverflow {
+                        field: "recommendation.auto_authorized_total_usd",
+                        detail: "auto-authorized report total overflowed Decimal".to_owned(),
+                    })?;
+                auto_authorized_total = Usd::new(total);
+            }
+            recommendation_rows.push(rows);
+        }
         let recommendations = recommendation_rows
             .iter()
             .map(|rows| rows.recommendation.clone())
@@ -417,6 +450,7 @@ fn compose_recommendation(
     entry_window_ratio: Decimal,
     fallback_horizon_secs: u64,
     data_quality_snapshot_ref: &ReportDataQualitySnapshotId,
+    auto_authorized_before: Usd,
 ) -> QuantResult<ComposedRecommendationRows> {
     let candidate = &planned.candidate;
     let capture = input.captures.get(&candidate.market_id).ok_or_else(|| {
@@ -446,6 +480,7 @@ fn compose_recommendation(
         candidate,
         planned.rank,
         &planned.sizing,
+        auto_authorized_before,
         input.runtime_config,
         input.return_model_calibrated,
     );
@@ -1426,10 +1461,17 @@ fn calibrated_auto_execution_gate(
     candidate: &SignalCandidate,
     rank: u32,
     sizing: &SizingPlan,
+    auto_authorized_before: Usd,
     runtime_config: &DecisionPolicySnapshot,
     return_model_calibrated: bool,
 ) -> AutoExecutionGate {
-    let mut auto_gate = auto_execution_gate(candidate, rank, sizing, runtime_config);
+    let mut auto_gate = auto_execution_gate(
+        candidate,
+        rank,
+        sizing,
+        auto_authorized_before,
+        runtime_config,
+    );
     if !return_model_calibrated {
         auto_gate.allowed = false;
         if !auto_gate
@@ -1538,6 +1580,7 @@ fn build_new_recommendation(
             auto_gate,
             input.return_model_calibrated,
             trade_policy_available,
+            &input.decision_policy_snapshot_id,
         ),
         valid_from: input.published_at,
         valid_until,
@@ -1748,6 +1791,7 @@ fn execution_eligibility(
     gate: &AutoExecutionGate,
     return_model_calibrated: bool,
     trade_policy_available: bool,
+    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
 ) -> ExecutionEligibility {
     let mut eligible_modes = vec![QuantRuntimeMode::ReportOnly];
     if return_model_calibrated && trade_policy_available {
@@ -1771,7 +1815,7 @@ fn execution_eligibility(
         ineligibility_reasons: reasons,
         approval_required: !gate.allowed || !return_model_calibrated || !trade_policy_available,
         auto_policy_id: (gate.allowed && return_model_calibrated && trade_policy_available)
-            .then(|| "runtime_config.execution_authorization.auto_execution".to_owned()),
+            .then(|| decision_policy_snapshot_id.to_string()),
     }
 }
 
@@ -1779,16 +1823,10 @@ fn auto_execution_gate(
     candidate: &SignalCandidate,
     rank: u32,
     sizing: &SizingPlan,
+    auto_authorized_before: Usd,
     config: &DecisionPolicySnapshot,
 ) -> AutoExecutionGate {
     let policy = &config.execution_authorization.auto_execution;
-    if !policy.enabled {
-        return AutoExecutionGate {
-            allowed: false,
-            reasons: Vec::new(),
-        };
-    }
-
     let min_score = parse_decimal(
         "execution.auto_execution.min_score",
         &policy.min_score.value,
@@ -1811,11 +1849,16 @@ fn auto_execution_gate(
     {
         reasons.push(IneligibilityReason::LowConfidence);
     }
+    let within_budget = auto_authorized_before
+        .inner()
+        .checked_add(sizing.suggested_usd.inner())
+        .is_some_and(|projected| projected <= max_total);
+    if rank > policy.max_orders_per_report || !within_budget {
+        reasons.push(IneligibilityReason::BudgetExhausted);
+    }
 
-    let allowed = rank <= policy.max_orders_per_report
-        && candidate.composite_score.inner() >= min_score
+    let allowed = candidate.composite_score.inner() >= min_score
         && candidate.confidence.inner() >= min_confidence
-        && sizing.suggested_usd.inner() <= max_total
         && reasons.is_empty();
 
     AutoExecutionGate { allowed, reasons }
@@ -2256,9 +2299,10 @@ mod tests {
         runtime_config::DecisionPolicySnapshot,
         types::{
             AccountPositions, AccountSnapshotId, Bps, ContentHash, DecisionPolicySnapshotId,
-            EquitySnapshotId, EventId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
-            Price, Probability, ReportDataQualitySnapshotId, ReportDataQualityTokens, RiskEnvelope,
-            SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, TokenId, Usd,
+            EquitySnapshotId, EventId, ExecutionAccountId, MarketId, MarketSelectionId, ModelRunId,
+            ModelVersionId, Price, Probability, ReportDataQualitySnapshotId,
+            ReportDataQualityTokens, RiskEnvelope, SelectionExclusionSummary, Shares,
+            SignalCandidateId, SizingPlan, TokenId, Usd,
         },
     };
     use quant_pivot_research::{
@@ -2462,11 +2506,15 @@ mod tests {
     #[test]
     fn execution_eligibility_keeps_semi_auto_when_auto_denied_for_low_confidence() {
         let mut config = DecisionPolicySnapshot::default();
-        config.execution_authorization.auto_execution.enabled = true;
         config
             .execution_authorization
             .auto_execution
             .max_orders_per_report = 5;
+        config
+            .execution_authorization
+            .auto_execution
+            .max_total_usd_per_report
+            .value = dec!(1000);
         config
             .execution_authorization
             .auto_execution
@@ -2478,11 +2526,18 @@ mod tests {
             .min_confidence
             .value = dec!(0.90);
 
-        let gate = auto_execution_gate(&candidate(), 1, &sizing_plan(Usd::new(dec!(100))), &config);
+        let gate = auto_execution_gate(
+            &candidate(),
+            1,
+            &sizing_plan(Usd::new(dec!(100))),
+            Usd::ZERO,
+            &config,
+        );
         assert!(!gate.allowed);
         assert_eq!(gate.reasons, vec![IneligibilityReason::LowConfidence]);
 
-        let eligibility = execution_eligibility(&gate, true, true);
+        let policy_id = DecisionPolicySnapshotId::from_v7();
+        let eligibility = execution_eligibility(&gate, true, true, &policy_id);
         assert!(eligibility.is_eligible(QuantRuntimeMode::ReportOnly));
         assert!(eligibility.is_eligible(QuantRuntimeMode::SemiAuto));
         assert!(!eligibility.is_eligible(QuantRuntimeMode::AutoExecution));
@@ -2496,7 +2551,6 @@ mod tests {
     #[test]
     fn execution_eligibility_allows_auto_when_policy_passes() {
         let mut config = DecisionPolicySnapshot::default();
-        config.execution_authorization.auto_execution.enabled = true;
         config
             .execution_authorization
             .auto_execution
@@ -2517,12 +2571,55 @@ mod tests {
             .max_total_usd_per_report
             .value = dec!(1000);
 
-        let gate = auto_execution_gate(&candidate(), 1, &sizing_plan(Usd::new(dec!(100))), &config);
+        let gate = auto_execution_gate(
+            &candidate(),
+            1,
+            &sizing_plan(Usd::new(dec!(100))),
+            Usd::ZERO,
+            &config,
+        );
         assert!(gate.allowed);
         assert!(gate.reasons.is_empty());
 
-        let eligibility = execution_eligibility(&gate, true, true);
+        let policy_id = DecisionPolicySnapshotId::from_v7();
+        let eligibility = execution_eligibility(&gate, true, true, &policy_id);
         assert!(eligibility.is_eligible(QuantRuntimeMode::AutoExecution));
+        assert_eq!(eligibility.auto_policy_id, Some(policy_id.to_string()));
+    }
+
+    #[test]
+    fn auto_execution_budget_is_cumulative_across_ranked_recommendations() {
+        let mut config = DecisionPolicySnapshot::default();
+        config
+            .execution_authorization
+            .auto_execution
+            .max_orders_per_report = 5;
+        config
+            .execution_authorization
+            .auto_execution
+            .max_total_usd_per_report
+            .value = dec!(1000);
+        config
+            .execution_authorization
+            .auto_execution
+            .min_score
+            .value = dec!(0.50);
+        config
+            .execution_authorization
+            .auto_execution
+            .min_confidence
+            .value = dec!(0.50);
+
+        let gate = auto_execution_gate(
+            &candidate(),
+            2,
+            &sizing_plan(Usd::new(dec!(100))),
+            Usd::new(dec!(950)),
+            &config,
+        );
+
+        assert!(!gate.allowed);
+        assert_eq!(gate.reasons, vec![IneligibilityReason::BudgetExhausted]);
     }
 
     fn planned_recommendation(candidate: SignalCandidate) -> PlannedRecommendation {
@@ -2624,6 +2721,7 @@ mod tests {
         let account_snapshot_id = AccountSnapshotId::from_v7();
         let account_snapshot = NewAccountSnapshot {
             account_snapshot_id,
+            execution_account_id: ExecutionAccountId::from_v7(),
             as_of: account.as_of,
             source: account.source,
             venue_net_liquidation_usd: account.venue_net_liquidation_usd,

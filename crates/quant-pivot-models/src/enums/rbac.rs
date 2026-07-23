@@ -86,7 +86,6 @@ pg_enum! {
         System => "system",
         Market => "market",
         DecisionPolicySnapshot => "config",
-        ConfigLifecycle => "config_lifecycle",
         Publication => "publication",
         Materialization => "materialization",
         Replay => "replay",
@@ -122,7 +121,6 @@ pub enum Operation {
     Halt,
     Resume,
     SwitchMode,
-    BootstrapActivate,
     Reject,
     Approve,
     Cancel,
@@ -134,7 +132,6 @@ pub enum Operation {
     Retire,
     Emergency,
     Resolve,
-    Seal,
 }
 
 impl Operation {
@@ -149,7 +146,6 @@ impl Operation {
             Self::Halt => "halt",
             Self::Resume => "resume",
             Self::SwitchMode => "switch_mode",
-            Self::BootstrapActivate => "bootstrap_activate",
             Self::Reject => "reject",
             Self::Approve => "approve",
             Self::Cancel => "cancel",
@@ -161,7 +157,6 @@ impl Operation {
             Self::Retire => "retire",
             Self::Emergency => "emergency",
             Self::Resolve => "resolve",
-            Self::Seal => "seal",
         }
     }
 }
@@ -232,7 +227,6 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
             Operation::Halt,
             Operation::Resume,
             Operation::SwitchMode,
-            Operation::BootstrapActivate,
             Operation::Emergency,
         ],
     ),
@@ -260,7 +254,15 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
         ResourceType::Reconciliation,
         &[Operation::Read, Operation::Resolve],
     ),
-    (ResourceType::SettlementRedeem, &[Operation::Read]),
+    (
+        ResourceType::SettlementRedeem,
+        &[
+            Operation::Read,
+            Operation::Create,
+            Operation::Approve,
+            Operation::Revoke,
+        ],
+    ),
     (
         ResourceType::Publication,
         &[
@@ -293,10 +295,6 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
             Operation::Activate,
             Operation::Rollback,
         ],
-    ),
-    (
-        ResourceType::ConfigLifecycle,
-        &[Operation::Read, Operation::Seal],
     ),
     (ResourceType::OperationLog, &[Operation::Read]),
     (

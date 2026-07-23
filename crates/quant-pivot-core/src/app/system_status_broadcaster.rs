@@ -12,7 +12,7 @@ use std::{sync::Arc, time::Duration};
 use quant_pivot_models::{
     domain::{
         governance::{OperationalPhase, SystemStatus},
-        ports::{BootstrapPort, runtime_control::CatalogState},
+        ports::{SystemCapabilityPort, runtime_control::CatalogState},
     },
     enums::quant::QuantRuntimeMode,
 };
@@ -76,7 +76,7 @@ const fn is_startup_phase(phase: &OperationalPhase) -> bool {
 /// the operator-visible snapshot changes or on startup-phase periodic ticks.
 pub struct SystemStatusBroadcaster {
     publisher: Arc<SystemStatusPublisher>,
-    bootstrap: Option<Arc<dyn BootstrapPort>>,
+    capabilities: Option<Arc<dyn SystemCapabilityPort>>,
     nudge: SystemStatusNudge,
     catalog: Arc<CatalogReadiness>,
     last_fingerprint: Option<StatusFingerprint>,
@@ -91,7 +91,7 @@ impl SystemStatusBroadcaster {
     ) -> Self {
         Self {
             publisher,
-            bootstrap: None,
+            capabilities: None,
             nudge,
             catalog,
             last_fingerprint: None,
@@ -99,8 +99,8 @@ impl SystemStatusBroadcaster {
     }
 
     #[must_use]
-    pub fn with_bootstrap(mut self, bootstrap: Arc<dyn BootstrapPort>) -> Self {
-        self.bootstrap = Some(bootstrap);
+    pub fn with_capabilities(mut self, capabilities: Arc<dyn SystemCapabilityPort>) -> Self {
+        self.capabilities = Some(capabilities);
         self
     }
 
@@ -148,8 +148,8 @@ impl SystemStatusBroadcaster {
     /// Publish when the operator-visible fingerprint changed since the last push.
     async fn maybe_publish(&mut self) {
         let status = self.current_status();
-        if let Some(bootstrap) = &self.bootstrap
-            && let Err(error) = bootstrap.capabilities(&status).await
+        if let Some(capabilities) = &self.capabilities
+            && let Err(error) = capabilities.capabilities(&status).await
         {
             tracing::warn!(%error, "capability evidence refresh failed; cached decisions remain fail-closed");
         }
@@ -177,7 +177,7 @@ impl AppContext {
             self.data.status_nudge.clone(),
             Arc::clone(&self.data.catalog),
         )
-        .with_bootstrap(Arc::clone(&self.governance.bootstrap));
+        .with_capabilities(Arc::clone(&self.governance.capabilities));
         runner.spawn(TaskId::SystemStatusBroadcaster, move |token| {
             broadcaster.run(token)
         });
@@ -193,21 +193,20 @@ mod tests {
     use quant_pivot_error::QuantResult;
     use quant_pivot_models::{
         domain::{
-            api::{ActivateBootstrapRequest, BootstrapView, SystemCapabilities},
+            api::SystemCapabilities,
             governance::{
-                HealthReport, OperationalPhase, SystemStatus,
+                HealthReport, OperationalPhase, RuntimeControlSnapshot, SystemStatus,
                 lifecycle::{MarketDataConnectivity, WsShardConnectivity},
             },
             ports::{
-                BootstrapPort, CatalogStatusPort, QuantModeTransitionReport, RuntimeControlPort,
-                runtime_control::CatalogState,
+                CatalogStatusPort, QuantModeTransitionReport, RuntimeControlPort,
+                SystemCapabilityPort, runtime_control::CatalogState,
             },
             runtime::{CoreEvent, CoreEventPublisher},
         },
         enums::{
-            execution::KillSwitchState,
-            quant::QuantRuntimeMode,
-            system::{BootstrapPhase, CapabilityReason},
+            execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
+            system::CapabilityReason,
         },
     };
     use tokio::sync::{watch, watch::Receiver};
@@ -223,23 +222,10 @@ mod tests {
         catalog: Arc<CatalogReadiness>,
     }
 
-    struct TestBootstrap;
+    struct TestCapabilities;
 
     #[async_trait]
-    impl BootstrapPort for TestBootstrap {
-        fn view(&self) -> BootstrapView {
-            BootstrapView {
-                phase: BootstrapPhase::CollectingBaseline,
-                bootstrap_contract_version: 1,
-                state_revision: 1,
-            }
-        }
-
-        fn subscribe(&self) -> Receiver<BootstrapView> {
-            let (_, receiver) = watch::channel(self.view());
-            receiver
-        }
-
+    impl SystemCapabilityPort for TestCapabilities {
         fn capability_snapshot(&self) -> SystemCapabilities {
             SystemCapabilities::fail_closed(CapabilityReason::CatalogBaselineMissing)
         }
@@ -256,33 +242,40 @@ mod tests {
         async fn capabilities(&self, _status: &SystemStatus) -> QuantResult<SystemCapabilities> {
             Ok(self.capability_snapshot())
         }
-
-        async fn mark_catalog_ready(&self) -> QuantResult<BootstrapView> {
-            Ok(self.view())
-        }
-
-        async fn activate(
-            &self,
-            _request: ActivateBootstrapRequest,
-            _actor: &str,
-            _acting_role: &str,
-        ) -> QuantResult<BootstrapView> {
-            Ok(self.view())
-        }
     }
 
     #[async_trait]
     impl RuntimeControlPort for CatalogAwareControl {
-        fn quant_runtime_mode(&self) -> QuantRuntimeMode {
-            QuantRuntimeMode::ReportOnly
+        fn snapshot(&self) -> RuntimeControlSnapshot {
+            RuntimeControlSnapshot {
+                quant_runtime_mode: QuantRuntimeMode::ReportOnly,
+                settlement_write_policy: SettlementWritePolicy::Disabled,
+                kill_switch_state: KillSwitchState::Closed,
+                kill_switch_requires_ack: false,
+                revision: 0,
+                changed_by: "test".to_owned(),
+                reason: "test fixture".to_owned(),
+                changed_at: Utc::now(),
+            }
         }
 
         async fn switch_quant_mode(
             &self,
             _target: QuantRuntimeMode,
+            _expected_revision: i64,
             _actor: &str,
             _reason: &str,
         ) -> QuantResult<QuantModeTransitionReport> {
+            unimplemented!()
+        }
+
+        async fn switch_settlement_write_policy(
+            &self,
+            _target: SettlementWritePolicy,
+            _expected_revision: i64,
+            _actor: &str,
+            _reason: &str,
+        ) -> QuantResult<RuntimeControlSnapshot> {
             unimplemented!()
         }
 
@@ -380,7 +373,7 @@ mod tests {
             catalog: Arc::clone(&catalog),
         });
         status_publisher.register(control as Arc<dyn RuntimeControlPort>);
-        status_publisher.register_bootstrap(Arc::new(TestBootstrap));
+        status_publisher.register_capabilities(Arc::new(TestCapabilities));
 
         let nudge = SystemStatusNudge::default();
         let shutdown = CancellationToken::new();

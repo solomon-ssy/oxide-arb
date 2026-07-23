@@ -930,12 +930,9 @@ mod tests {
             governance::{
                 ConfigActivityInfo, ConfigResourceInventoryInfo, DecisionPolicySnapshotInfo,
                 DecisionPolicySnapshotOptionInfo, NewDecisionPolicySnapshot, NewPolicyActivation,
-                NewPolicyRevision, NewProductionBaseline, NewProductionEvidence,
-                PolicyActivationCommit, PolicyActivationInfo, PolicyApprovalInfo,
-                PolicyRevisionInfo, ProductionBaselineInfo, ProductionEvidenceInfo,
-                RecordPolicyApproval,
+                NewPolicyRevision, PolicyActivationCommit, PolicyActivationInfo,
+                PolicyApprovalInfo, PolicyRevisionInfo, RecordPolicyApproval,
             },
-            ports::{LifecycleSchemaVerificationPort, ProductionEvidenceArtifactVerificationPort},
             quant::{
                 CompleteFeatureParityRun, FeatureParityRunInfo, FeatureParityStateInfo,
                 FrozenFeatureParitySubject, NewFrozenModelParitySubject, ResearchJobInfo,
@@ -946,10 +943,7 @@ mod tests {
                 EmptyReportReason, FeatureParityStateTransition, RecommendationReportStatus,
                 ReportKind, ReportRunStatus,
             },
-            runtime_config::{
-                ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActorKind,
-                ProductionEvidenceKind,
-            },
+            runtime_config::{ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActorKind},
         },
         runtime_config::PolicyValidationEvidence,
         types::{
@@ -1330,37 +1324,6 @@ mod tests {
             _limit: u64,
         ) -> Result<Vec<PolicyActivationInfo>, StorageError> {
             Err(unexpected("list_activations"))
-        }
-
-        async fn load_production_baseline(
-            &self,
-        ) -> Result<Option<ProductionBaselineInfo>, StorageError> {
-            Err(unexpected("load_production_baseline"))
-        }
-
-        async fn record_production_evidence(
-            &self,
-            _evidence: NewProductionEvidence,
-            _schema_verification: &dyn LifecycleSchemaVerificationPort,
-            _artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
-        ) -> Result<ProductionEvidenceInfo, StorageError> {
-            Err(unexpected("record_production_evidence"))
-        }
-
-        async fn load_latest_production_evidence(
-            &self,
-            _kind: ProductionEvidenceKind,
-        ) -> Result<Option<ProductionEvidenceInfo>, StorageError> {
-            Err(unexpected("load_latest_production_evidence"))
-        }
-
-        async fn seal_production_baseline(
-            &self,
-            _baseline: NewProductionBaseline,
-            _schema_verification: &dyn LifecycleSchemaVerificationPort,
-            _artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
-        ) -> Result<ProductionBaselineInfo, StorageError> {
-            Err(unexpected("seal_production_baseline"))
         }
     }
 

@@ -3,7 +3,10 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-use super::{market, quant_order_intent, quant_reconciliation};
+use super::{
+    market, quant_execution_trade_ref, quant_execution_transaction_ref, quant_order_intent,
+    quant_reconciliation,
+};
 use crate::{
     enums::{
         common::Side,
@@ -61,6 +64,10 @@ pub struct Model {
     pub market: BelongsTo<market::Entity>,
     #[sea_orm(has_one, relation_enum = "Reconciliation")]
     pub reconciliation: HasOne<quant_reconciliation::Entity>,
+    #[sea_orm(has_many, relation_enum = "TradeRefs")]
+    pub trade_refs: HasMany<quant_execution_trade_ref::Entity>,
+    #[sea_orm(has_many, relation_enum = "TransactionRefs")]
+    pub transaction_refs: HasMany<quant_execution_transaction_ref::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

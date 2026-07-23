@@ -10,7 +10,12 @@ use quant_pivot_api::{
 };
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult};
-use quant_pivot_models::{config::DeployConfig, domain::runtime::CoreEventPublisher};
+use quant_pivot_models::{
+    config::DeployConfig,
+    domain::{quant::NewExecutionAccount, runtime::CoreEventPublisher},
+    types::{EvmAddress, EvmCodeHash},
+};
+use quant_pivot_repository::traits::ExecutionAccountRepository;
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -22,7 +27,7 @@ use super::{
     },
 };
 use crate::{
-    execution::IntentLifecyclePublisher, governance::project_lifecycle::verify_project_lifecycle,
+    execution::{IntentLifecyclePublisher, settlement_discovery_wake::SettlementDiscoveryWake},
     observability::metrics_hub::MetricsHub,
 };
 
@@ -36,15 +41,9 @@ impl AppContext {
         let metrics = Arc::new(MetricsHub::new());
         let infra = InfraBundle::assemble(&deploy, Arc::clone(&metrics)).await?;
         let runtime = RuntimeSnapshot::bootstrap(&infra.repos, &deploy).await?;
-        verify_project_lifecycle(
-            &deploy,
-            &infra,
-            infra.repos.runtime_config.as_ref(),
-            &runtime.config,
-        )
-        .await?;
         let (events, event_rx) = CoreEventPublisher::bounded(4096);
         let intent_lifecycle = Arc::new(IntentLifecyclePublisher::new(events.clone()));
+        let settlement_discovery_wake = SettlementDiscoveryWake::new();
         let data = DataBundle::assemble(&DataBundleDeps {
             deploy: &deploy,
             shutdown: &shutdown,
@@ -52,6 +51,7 @@ impl AppContext {
             infra: &infra,
             runtime: &runtime.config,
             events: &events,
+            settlement_discovery_wake: &settlement_discovery_wake,
         })?;
         let governance = GovernanceBundle::assemble(GovernanceBundleDeps {
             deploy: &deploy,
@@ -60,8 +60,7 @@ impl AppContext {
             data: &data,
             runtime,
             events: events.clone(),
-        })
-        .await?;
+        })?;
         let research = ResearchBundle::assemble(&ResearchBundleDeps {
             deploy: &deploy,
             compute: &compute,
@@ -76,6 +75,11 @@ impl AppContext {
         let keystore = Keystore::from_config(&deploy.keys)?;
         let signer = keystore.signer_arc();
         let wallet = resolve_wallet_topology(&deploy, &signer).await?;
+        let execution_account = infra
+            .repos
+            .execution_account
+            .ensure(new_execution_account(&deploy, wallet)?)
+            .await?;
         let clob =
             Arc::new(ClobClient::connect(Arc::clone(&signer), &deploy.polymarket, &wallet).await?);
         let account = AccountBundle::assemble(AccountBundleDeps {
@@ -83,6 +87,7 @@ impl AppContext {
             infra: &infra,
             market_registry: Arc::clone(&data.market_registry),
             clob: Arc::clone(&clob),
+            execution_account,
         })?;
         let execution = ExecutionBundle::assemble(&ExecutionBundleDeps {
             deploy: &deploy,
@@ -95,6 +100,7 @@ impl AppContext {
             clob,
             signer,
             wallet,
+            settlement_discovery_wake,
         })?;
         governance.alerts.attach_event_publisher(events.clone());
         let report = ReportBundle::assemble(ReportBundleDeps {
@@ -118,6 +124,7 @@ impl AppContext {
 
         Ok(Self {
             config: deploy,
+            wallet,
             compute,
             shutdown,
             events,
@@ -132,6 +139,41 @@ impl AppContext {
             execution,
         })
     }
+}
+
+fn new_execution_account(
+    deploy: &DeployConfig,
+    wallet: WalletTopology,
+) -> QuantResult<NewExecutionAccount> {
+    let chain_id = i64::try_from(deploy.polymarket.chain_id)
+        .map_err(|_| QuantError::config("polymarket.chain_id exceeds PostgreSQL bigint"))?;
+    let funder_address = EvmAddress::parse(format!("{:#x}", wallet.funder))
+        .map_err(|error| QuantError::config(error.to_string()))?;
+    let owner_address = EvmAddress::parse(format!("{:#x}", wallet.owner))
+        .map_err(|error| QuantError::config(error.to_string()))?;
+    let controller_address = EvmAddress::parse(format!("{:#x}", wallet.signer))
+        .map_err(|error| QuantError::config(error.to_string()))?;
+    let contract_identity = wallet
+        .contract_identity()
+        .map_err(|error| QuantError::config(error.to_string()))?;
+    let wallet_factory_address = contract_identity
+        .map(|identity| EvmAddress::parse(format!("{:#x}", identity.factory)))
+        .transpose()
+        .map_err(|error| QuantError::config(error.to_string()))?;
+    let wallet_implementation_code_hash = contract_identity
+        .map(|identity| EvmCodeHash::parse(identity.implementation_code_hash))
+        .transpose()
+        .map_err(|error| QuantError::config(error.to_string()))?;
+    NewExecutionAccount::build(
+        chain_id,
+        funder_address,
+        wallet.kind,
+        owner_address,
+        controller_address,
+        wallet_factory_address,
+        wallet_implementation_code_hash,
+    )
+    .map_err(|error| QuantError::config(error.to_string()))
 }
 
 /// Resolve and validate the venue wallet topology from deploy config.

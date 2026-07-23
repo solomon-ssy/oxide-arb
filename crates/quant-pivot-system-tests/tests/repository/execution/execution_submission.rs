@@ -14,10 +14,11 @@ use quant_pivot_error::storage::{
 };
 use quant_pivot_models::{
     domain::{
-        governance::{NewOperationLog, UpsertKillSwitchState},
+        governance::NewOperationLog,
         quant::{
             ApproveOrderIntent, ApproveOrderIntentOutcome, CapitalReconcileSettlement,
-            CapitalSettlement, ExitLedgerWrite, NewAccountSnapshot, NewCapitalAllocation,
+            CapitalSettlement, ExecutionIdentityEnrichment, ExecutionIdentityRefs,
+            ExecutionTradeObservation, ExitLedgerWrite, NewAccountSnapshot, NewCapitalAllocation,
             NewEntryConditionInstance, NewEquitySnapshot, NewExecutionOrder, NewFeatureParityState,
             NewMarketSelection, NewModelRun, NewModelVersion, NewOrderIntent, NewPortfolioPlan,
             NewRecommendation, NewRecommendationReport, NewReconciliation,
@@ -37,9 +38,9 @@ use quant_pivot_models::{
     enums::{
         common::{MarketCategory, OrderType, Side, TickSize},
         execution::{
-            CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, KillSwitchState,
-            OrderIntentKind, OrderTypeKind, PositionLedgerState, ReconciliationEvidenceKind,
-            ReconciliationResult, VenueOrderStatus,
+            CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, OrderIntentKind,
+            OrderTypeKind, PositionLedgerState, ReconciliationEvidenceKind, ReconciliationResult,
+            VenueOrderStatus, VenueTradeStatus,
         },
         factor::{FactorFamily, FactorValueState, NormalizationSource},
         market::MarketStatus,
@@ -60,40 +61,38 @@ use quant_pivot_models::{
         ConditionTruth, ConfidenceSummary, ContentHash, DataQualitySummary,
         DecisionPolicySnapshotId, EligibilitySummary, EntryConditionFoldState,
         EntryConditionInstanceId, EntryConditionPlan, EntryOrderPolicy, EntryOrderSpec, EntryPlan,
-        EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExecutionOrderId, ExitPlan,
-        ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
-        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
-        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationDetailDocument,
-        OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId, OrderIntentId,
-        PendingScaleOut, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        EquitySnapshotId, EventId, EvidenceRefs, EvmTransactionHash, ExecutionEligibility,
+        ExecutionOrderId, ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry,
+        FeatureParityStateId, FeatureVectorId, MarketContext, MarketId, MarketSelectionId,
+        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
+        OperationDetailDocument, OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId,
+        OrderIntentId, PendingScaleOut, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
+        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price,
+        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
         ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
         ReportDataQualityTokens, ReportRunId, ReportSummary, ReportTriggerKey, RiskEnvelope,
         RoleCode, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan,
         ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId, TradePolicyCohortDimension,
-        TradePolicyCohortKey, TradePolicyCohortProvenance, Usd, UserId, VenueOrderAmount, WorkerId,
-        builtin_research_profiles, model_metrics::ModelVersionMetrics,
+        TradePolicyCohortKey, TradePolicyCohortProvenance, Usd, UserId, VenueOrderAmount,
+        VenueTradeId, WorkerId, builtin_research_profiles, model_metrics::ModelVersionMetrics,
         model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgCapitalAllocationRepository, PgEntryConditionRepository, PgEventRepository,
-        PgExecutionSubmissionRepository, PgKillSwitchStateRepository, PgMarketRepository,
-        PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgOrderIntentRepository, PgPolicyRepository, PgPositionRepository,
-        PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
-        PgReportRunRepository,
+        PgExecutionSubmissionRepository, PgMarketRepository, PgMarketSelectionRepository,
+        PgModelRegistryRepository, PgModelRunRepository, PgOrderIntentRepository,
+        PgPolicyRepository, PgPositionRepository, PgRecommendationReportRepository,
+        PgRecommendationRepository, PgReconciliationRepository, PgReportRunRepository,
     },
     traits::{
         CapitalAllocationRepository, EntryConditionRepository, EventRepository,
-        ExecutionSubmissionRepository, KillSwitchStateRepository, MarketRepository,
-        MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
-        OrderIntentRepository, PolicyRepository, PositionRepository,
-        RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-        ReportRunRepository,
+        ExecutionSubmissionRepository, MarketRepository, MarketSelectionRepository,
+        ModelRegistryRepository, ModelRunRepository, OrderIntentRepository, PolicyRepository,
+        PositionRepository, RecommendationReportRepository, RecommendationRepository,
+        ReconciliationRepository, ReportRunRepository,
     },
 };
 use quant_pivot_system_tests::{
@@ -207,7 +206,6 @@ pub async fn concurrent_approval_has_one_winner_and_one_amount_truth() {
         .create_with_allocation(
             new_pending_intent_with_id(&ids, intent_id),
             new_allocation_for(&ids, intent_id),
-            None,
         )
         .await
         .expect("create pending intent");
@@ -1104,6 +1102,7 @@ pub async fn partial_fill_splits_capital_while_locked() {
         .record_submission_result(
             &order.execution_order_id,
             SubmissionLedgerWrite {
+                identity_refs: execution_pg_seed::empty_identity_refs(),
                 state: ExecutionOrderState::PartiallyFilled,
                 intent_status: OrderIntentStatus::PartiallyFilled,
                 venue_order_id: Some(OrderId::new("venue-partial")),
@@ -1117,6 +1116,8 @@ pub async fn partial_fill_splits_capital_while_locked() {
                 },
                 fill: Some(PositionFill {
                     order_intent_id: intent_id,
+                    execution_account_id: execution_pg_seed::fixture_execution_account()
+                        .execution_account_id,
                     token_id: TokenId::new("token-1"),
                     market_id: MarketId::new(&ids.market),
                     event_id: Some(EventId::new(&ids.event)),
@@ -1207,6 +1208,7 @@ pub async fn full_fill_spends_capital_and_writes_position() {
         .record_submission_result(
             &order.execution_order_id,
             SubmissionLedgerWrite {
+                identity_refs: execution_pg_seed::empty_identity_refs(),
                 state: ExecutionOrderState::Filled,
                 intent_status: OrderIntentStatus::Filled,
                 venue_order_id: Some(OrderId::new("venue-1")),
@@ -1244,6 +1246,343 @@ pub async fn full_fill_spends_capital_and_writes_position() {
     assert_eq!(position.shares, Shares::new(dec!(100)));
 }
 
+fn execution_identity_refs(trade_ids: &[&str], hash_digits: &[char]) -> ExecutionIdentityRefs {
+    ExecutionIdentityRefs {
+        trade_ids: trade_ids.iter().map(VenueTradeId::new).collect(),
+        transaction_hashes: hash_digits
+            .iter()
+            .map(|digit| {
+                EvmTransactionHash::parse(format!("0x{}", digit.to_string().repeat(64)))
+                    .expect("canonical test transaction hash")
+            })
+            .collect(),
+        observed_at: Utc::now(),
+    }
+}
+
+fn ambiguous_identity_write(
+    order_id: &ExecutionOrderId,
+    intent_id: &OrderIntentId,
+    identity_refs: ExecutionIdentityRefs,
+) -> SubmissionLedgerWrite {
+    SubmissionLedgerWrite {
+        identity_refs,
+        state: ExecutionOrderState::Ambiguous,
+        intent_status: OrderIntentStatus::Submitted,
+        venue_order_id: Some(OrderId::new(format!("venue-{order_id}"))),
+        venue_status: None,
+        submitted_at: Utc::now(),
+        filled_at: None,
+        cancelled_at: None,
+        error_message: Some("awaiting venue truth".to_owned()),
+        capital: CapitalSettlement::Hold,
+        fill: None,
+        reconciliation: Some(pending_recon_row(order_id, intent_id)),
+    }
+}
+
+pub async fn submission_persists_multi_trade_and_multi_hash_identity_atomically() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let intent_id = seed_approved_intent(&db, &ids).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    claim_entry_for_test(&db, &submission, &intent_id).await;
+    let order = submission
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
+        .await
+        .expect("create order");
+
+    submission
+        .record_submission_result(
+            &order.execution_order_id,
+            ambiguous_identity_write(
+                &order.execution_order_id,
+                &intent_id,
+                execution_identity_refs(&["trade-a", "trade-b"], &['a', 'b']),
+            ),
+        )
+        .await
+        .expect("record identities");
+
+    let identities = submission
+        .load_identity_refs(&order.execution_order_id)
+        .await
+        .expect("load identities");
+    assert_eq!(identities.trades.len(), 2);
+    assert_eq!(identities.transactions.len(), 2);
+    assert_eq!(identities.trades[0].venue_trade_id.as_str(), "trade-a");
+    assert_eq!(
+        identities.transactions[0].transaction_hash.as_str(),
+        format!("0x{}", "a".repeat(64))
+    );
+}
+
+pub async fn duplicate_trade_identity_rolls_back_entire_submission_outcome() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let first_ids = seed_report_fixture(&db).await;
+    let first_intent = seed_approved_intent(&db, &first_ids).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    claim_entry_for_test(&db, &submission, &first_intent).await;
+    let first_order = submission
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&first_intent, &first_ids),
+            &first_ids.feature_parity_state_id,
+        )
+        .await
+        .expect("create first order");
+    submission
+        .record_submission_result(
+            &first_order.execution_order_id,
+            ambiguous_identity_write(
+                &first_order.execution_order_id,
+                &first_intent,
+                execution_identity_refs(&["globally-unique-trade"], &['c']),
+            ),
+        )
+        .await
+        .expect("record first identity");
+
+    let (second_ids, delivery_worker) = seed_successor_prepared(&db, &first_ids).await;
+    PgRecommendationReportRepository::new(db.clone())
+        .verify_and_publish_report(&second_ids.report, delivery_worker, Utc::now())
+        .await
+        .expect("publish second report")
+        .into_applied()
+        .expect("second delivery claim");
+    let second_intent = seed_approved_intent(&db, &second_ids).await;
+    claim_entry_for_test(&db, &submission, &second_intent).await;
+    let second_order = submission
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&second_intent, &second_ids),
+            &second_ids.feature_parity_state_id,
+        )
+        .await
+        .expect("create second order");
+    let error = submission
+        .record_submission_result(
+            &second_order.execution_order_id,
+            ambiguous_identity_write(
+                &second_order.execution_order_id,
+                &second_intent,
+                execution_identity_refs(&["globally-unique-trade"], &['d']),
+            ),
+        )
+        .await
+        .expect_err("duplicate venue trade id must fail");
+    assert!(
+        matches!(error, StorageError::Duplicate { .. }),
+        "unexpected duplicate identity error: {error:?}"
+    );
+
+    let rolled_back_order = QuantExecutionOrderEntity::find_by_id(second_order.execution_order_id)
+        .one(&db)
+        .await
+        .expect("load rolled-back order")
+        .expect("order row");
+    assert_eq!(rolled_back_order.state, ExecutionOrderState::Submitted);
+    assert!(
+        submission
+            .load_identity_refs(&second_order.execution_order_id)
+            .await
+            .expect("load second identities")
+            .trades
+            .is_empty()
+    );
+    let capital = PgCapitalAllocationRepository::new(db)
+        .find_by_intent(&second_intent)
+        .await
+        .expect("capital query")
+        .expect("capital row");
+    assert_eq!(capital.state, CapitalAllocationState::Locked);
+}
+
+pub async fn concurrent_orders_can_share_one_transaction_hash_without_losing_trade_identity() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let first_ids = seed_report_fixture(&db).await;
+    let first_intent = seed_approved_intent(&db, &first_ids).await;
+    let first_repo = PgExecutionSubmissionRepository::new(db.clone());
+    claim_entry_for_test(&db, &first_repo, &first_intent).await;
+    let first_order = first_repo
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&first_intent, &first_ids),
+            &first_ids.feature_parity_state_id,
+        )
+        .await
+        .expect("create first order");
+
+    let (second_ids, delivery_worker) = seed_successor_prepared(&db, &first_ids).await;
+    PgRecommendationReportRepository::new(db.clone())
+        .verify_and_publish_report(&second_ids.report, delivery_worker, Utc::now())
+        .await
+        .expect("publish second report")
+        .into_applied()
+        .expect("second delivery claim");
+    let second_intent = seed_approved_intent(&db, &second_ids).await;
+    let second_repo = PgExecutionSubmissionRepository::new(db.clone());
+    claim_entry_for_test(&db, &second_repo, &second_intent).await;
+    let second_order = second_repo
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&second_intent, &second_ids),
+            &second_ids.feature_parity_state_id,
+        )
+        .await
+        .expect("create second order");
+
+    let (first_result, second_result) = tokio::join!(
+        first_repo.record_submission_result(
+            &first_order.execution_order_id,
+            ambiguous_identity_write(
+                &first_order.execution_order_id,
+                &first_intent,
+                execution_identity_refs(&["trade-concurrent-a"], &['e']),
+            ),
+        ),
+        second_repo.record_submission_result(
+            &second_order.execution_order_id,
+            ambiguous_identity_write(
+                &second_order.execution_order_id,
+                &second_intent,
+                execution_identity_refs(&["trade-concurrent-b"], &['e']),
+            ),
+        )
+    );
+    first_result.expect("first concurrent result");
+    second_result.expect("second concurrent result");
+
+    let first_refs = first_repo
+        .load_identity_refs(&first_order.execution_order_id)
+        .await
+        .expect("first identities");
+    let second_refs = second_repo
+        .load_identity_refs(&second_order.execution_order_id)
+        .await
+        .expect("second identities");
+    assert_eq!(
+        first_refs.trades[0].venue_trade_id.as_str(),
+        "trade-concurrent-a"
+    );
+    assert_eq!(
+        second_refs.trades[0].venue_trade_id.as_str(),
+        "trade-concurrent-b"
+    );
+    assert_eq!(
+        first_refs.transactions[0].transaction_hash,
+        second_refs.transactions[0].transaction_hash
+    );
+}
+
+pub async fn restart_enrichment_backfills_trade_status_hash_and_order_identity() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let intent_id = seed_approved_intent(&db, &ids).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    claim_entry_for_test(&db, &submission, &intent_id).await;
+    let order = submission
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
+        .await
+        .expect("create order");
+    let mut write = ambiguous_identity_write(
+        &order.execution_order_id,
+        &intent_id,
+        execution_identity_refs(&["trade-restart"], &[]),
+    );
+    write.venue_order_id = None;
+    submission
+        .record_submission_result(&order.execution_order_id, write)
+        .await
+        .expect("record trade id before restart");
+    drop(submission);
+
+    let restarted = PgExecutionSubmissionRepository::new(db.clone());
+    let transaction_hash = EvmTransactionHash::parse(format!("0x{}", "f".repeat(64)))
+        .expect("canonical transaction hash");
+    restarted
+        .enrich_identity_refs(
+            &order.execution_order_id,
+            ExecutionIdentityEnrichment {
+                discovered_order_id: Some(OrderId::new("venue-recovered")),
+                trades: vec![ExecutionTradeObservation {
+                    venue_trade_id: VenueTradeId::new("trade-restart"),
+                    trade_status: VenueTradeStatus::Mined,
+                    transaction_hash: Some(transaction_hash.clone()),
+                }],
+                observed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("restart enrichment");
+    let confirmed = restarted
+        .enrich_identity_refs(
+            &order.execution_order_id,
+            ExecutionIdentityEnrichment {
+                discovered_order_id: None,
+                trades: vec![ExecutionTradeObservation {
+                    venue_trade_id: VenueTradeId::new("trade-restart"),
+                    trade_status: VenueTradeStatus::Confirmed,
+                    transaction_hash: Some(transaction_hash.clone()),
+                }],
+                observed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("confirm enriched trade");
+
+    assert_eq!(
+        confirmed.trades[0].trade_status,
+        Some(VenueTradeStatus::Confirmed)
+    );
+    assert_eq!(
+        confirmed.trades[0].transaction_hash.as_ref(),
+        Some(&transaction_hash)
+    );
+    assert_eq!(confirmed.transactions.len(), 1);
+    let recovered_order = QuantExecutionOrderEntity::find_by_id(order.execution_order_id)
+        .one(&db)
+        .await
+        .expect("load recovered order")
+        .expect("recovered order");
+    assert_eq!(
+        recovered_order.venue_order_id,
+        Some(OrderId::new("venue-recovered"))
+    );
+
+    let conflicting_hash = EvmTransactionHash::parse(format!("0x{}", "1".repeat(64)))
+        .expect("canonical conflicting hash");
+    let error = restarted
+        .enrich_identity_refs(
+            &order.execution_order_id,
+            ExecutionIdentityEnrichment {
+                discovered_order_id: None,
+                trades: vec![ExecutionTradeObservation {
+                    venue_trade_id: VenueTradeId::new("trade-restart"),
+                    trade_status: VenueTradeStatus::Confirmed,
+                    transaction_hash: Some(conflicting_hash),
+                }],
+                observed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect_err("confirmed transaction hash is immutable");
+    assert!(matches!(error, StorageError::StateConflict { .. }));
+}
+
+pub async fn execution_identity_refs_are_atomic_unique_and_concurrent() {
+    submission_persists_multi_trade_and_multi_hash_identity_atomically().await;
+    duplicate_trade_identity_rolls_back_entire_submission_outcome().await;
+    concurrent_orders_can_share_one_transaction_hash_without_losing_trade_identity().await;
+    restart_enrichment_backfills_trade_status_hash_and_order_identity().await;
+}
+
 pub async fn ambiguous_holds_capital_and_enqueues_reconciliation() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -1264,6 +1603,7 @@ pub async fn ambiguous_holds_capital_and_enqueues_reconciliation() {
         .record_submission_result(
             &order.execution_order_id,
             SubmissionLedgerWrite {
+                identity_refs: execution_pg_seed::empty_identity_refs(),
                 state: ExecutionOrderState::Ambiguous,
                 intent_status: OrderIntentStatus::Submitted,
                 venue_order_id: None,
@@ -1332,6 +1672,7 @@ pub async fn rejected_releases_capital_without_position() {
         .record_submission_result(
             &order.execution_order_id,
             SubmissionLedgerWrite {
+                identity_refs: execution_pg_seed::empty_identity_refs(),
                 state: ExecutionOrderState::Failed,
                 intent_status: OrderIntentStatus::Failed,
                 venue_order_id: Some(OrderId::new("venue-2")),
@@ -1418,7 +1759,6 @@ pub async fn create_rejects_when_recommendation_executed() {
         .create_with_allocation(
             new_pending_intent_with_id(&ids, intent_id),
             new_allocation_for(&ids, intent_id),
-            None,
         )
         .await
         .expect_err("executed rec must block create");
@@ -1451,7 +1791,6 @@ pub async fn create_rejects_when_submitted_intent_blocks() {
         .create_with_allocation(
             new_pending_intent_with_id(&ids, second_id),
             new_allocation_for(&ids, second_id),
-            None,
         )
         .await
         .expect_err("submitted intent must block create");
@@ -1468,6 +1807,7 @@ fn new_pending_intent_with_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> N
     NewOrderIntent {
         order_intent_id,
         recommendation_id: ids.recommendation,
+        execution_account_id: execution_pg_seed::fixture_execution_account().execution_account_id,
         runtime_mode: QuantRuntimeMode::SemiAuto,
         decision_policy_snapshot_id: ids.decision_policy_snapshot,
         model_version_id: ids.model_version,
@@ -1558,6 +1898,7 @@ async fn ambiguous_order(
         .record_submission_result(
             &order.execution_order_id,
             SubmissionLedgerWrite {
+                identity_refs: execution_pg_seed::empty_identity_refs(),
                 state: ExecutionOrderState::Ambiguous,
                 intent_status: OrderIntentStatus::Submitted,
                 venue_order_id: Some(OrderId::new("venue-amb")),
@@ -1840,6 +2181,7 @@ pub async fn reconcile_partial_fill_splits_capital_and_writes_position() {
     };
     write.fill = Some(PositionFill {
         order_intent_id: intent_id,
+        execution_account_id: execution_pg_seed::fixture_execution_account().execution_account_id,
         token_id: TokenId::new("token-1"),
         market_id: MarketId::new(&ids.market),
         event_id: Some(EventId::new(&ids.event)),
@@ -2042,6 +2384,7 @@ fn new_execution_order(intent_id: &OrderIntentId, ids: &TxnIds) -> NewExecutionO
 fn position_fill(ids: &TxnIds, intent_id: &OrderIntentId) -> PositionFill {
     PositionFill {
         order_intent_id: *intent_id,
+        execution_account_id: execution_pg_seed::fixture_execution_account().execution_account_id,
         token_id: TokenId::new("token-1"),
         market_id: MarketId::new(&ids.market),
         event_id: Some(EventId::new(&ids.event)),
@@ -2096,6 +2439,8 @@ async fn seed_approved_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderInt
             NewOrderIntent {
                 order_intent_id,
                 recommendation_id: ids.recommendation,
+                execution_account_id: execution_pg_seed::fixture_execution_account()
+                    .execution_account_id,
                 runtime_mode: QuantRuntimeMode::AutoExecution,
                 decision_policy_snapshot_id: ids.decision_policy_snapshot,
                 model_version_id: ids.model_version,
@@ -2157,7 +2502,6 @@ async fn seed_approved_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderInt
                 released_usd: Usd::ZERO,
                 reason: "intent created".to_owned(),
             },
-            None,
         )
         .await
         .expect("create approved intent")
@@ -2303,6 +2647,7 @@ async fn seed_empty_successor_prepared(
 }
 
 async fn seed_market_catalog(db: &DatabaseConnection, event_id: &str, market_id: &str) {
+    execution_pg_seed::ensure_fixture_execution_account(db).await;
     PgEventRepository::new(db.clone())
         .upsert(make_event(
             event_id,
@@ -2338,17 +2683,7 @@ async fn seed_approval_governance(
         &active.decision_policy_snapshot_id, decision_policy_snapshot_id,
         "execution fixture must use the active typed policy bundle"
     );
-    PgKillSwitchStateRepository::new(db.clone())
-        .upsert(UpsertKillSwitchState {
-            id: 1,
-            state: KillSwitchState::Closed,
-            changed_by: "concurrent-approval-test".to_owned(),
-            reason: "allow governed entry".to_owned(),
-            requires_operator_ack: false,
-            changed_at: Utc::now(),
-        })
-        .await
-        .expect("seed closed kill switch");
+    execution_pg_seed::enable_entry_admission_for_test(db, "concurrent-approval-test").await;
 }
 
 async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotId {
@@ -2689,6 +3024,7 @@ fn new_account_snapshot() -> NewAccountSnapshot {
     }];
     NewAccountSnapshot {
         account_snapshot_id: AccountSnapshotId::from_v7(),
+        execution_account_id: execution_pg_seed::fixture_execution_account().execution_account_id,
         as_of: Utc::now(),
         source: AccountSource::Polymarket,
         venue_net_liquidation_usd: Usd::new(dec!(10000)),
@@ -2946,6 +3282,7 @@ async fn fill_entry_lot(
         .record_submission_result(
             &order.execution_order_id,
             SubmissionLedgerWrite {
+                identity_refs: execution_pg_seed::empty_identity_refs(),
                 state: ExecutionOrderState::Filled,
                 intent_status: OrderIntentStatus::Filled,
                 venue_order_id: Some(OrderId::new("venue-entry")),
@@ -3051,6 +3388,7 @@ pub async fn exit_full_releases_capital_with_realized_pnl() {
         .record_exit_result(
             &exit.execution_order_id,
             ExitLedgerWrite {
+                identity_refs: execution_pg_seed::empty_identity_refs(),
                 order_state: ExecutionOrderState::Filled,
                 venue_order_id: Some(OrderId::new("venue-exit")),
                 venue_status: Some(VenueOrderStatus::Filled),
@@ -3117,6 +3455,7 @@ pub async fn exit_partial_keeps_capital_spent_and_reduces_lot() {
         .record_exit_result(
             &exit.execution_order_id,
             ExitLedgerWrite {
+                identity_refs: execution_pg_seed::empty_identity_refs(),
                 order_state: ExecutionOrderState::Filled,
                 venue_order_id: Some(OrderId::new("venue-exit-partial")),
                 venue_status: Some(VenueOrderStatus::Filled),

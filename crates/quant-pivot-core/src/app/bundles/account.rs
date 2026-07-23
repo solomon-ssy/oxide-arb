@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use quant_pivot_api::{clob::ClobClient, data_api::DataApiClient};
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::config::DeployConfig;
+use quant_pivot_models::{config::DeployConfig, domain::quant::ExecutionAccountInfo};
 use quant_pivot_repository::traits::ReservedCapitalRepository;
 
 use super::InfraBundle;
@@ -27,6 +27,8 @@ pub struct AccountBundle {
     /// Factory that mints a per-report [`crate::service::account::AccountProvider`]
     /// bound to a budget governance cap.
     pub provider_factory: Arc<AccountProviderFactory>,
+    /// Immutable boot-verified identity referenced by all persisted snapshots.
+    pub execution_account: ExecutionAccountInfo,
 }
 
 /// Dependencies for [`AccountBundle::assemble`].
@@ -40,6 +42,8 @@ pub struct AccountBundleDeps<'a> {
     /// Shared authenticated CLOB client (single L1+L2 identity, also used by
     /// the execution bundle for order writes).
     pub clob: Arc<ClobClient>,
+    /// Boot-persisted wallet identity for this process.
+    pub execution_account: ExecutionAccountInfo,
 }
 
 impl AccountBundle {
@@ -63,6 +67,7 @@ impl AccountBundle {
 
         Ok(Self {
             provider_factory: Arc::new(factory),
+            execution_account: deps.execution_account,
         })
     }
 }

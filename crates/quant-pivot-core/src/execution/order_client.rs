@@ -19,13 +19,17 @@ use chrono::{DateTime, Utc};
 use quant_pivot_api::clob::{ClobClient, OrderSubmissionError, OrderSubmissionStage};
 use quant_pivot_error::api::ApiError;
 use quant_pivot_models::{
-    domain::order::{OrderRequest, OrderResponse},
+    domain::{
+        order::{OrderRequest, OrderResponse},
+        quant::ExecutionIdentityRefs,
+    },
     enums::{
         common::{OrderType, Side},
         execution::{ReconciliationResult, VenueOrderStatus},
     },
     types::{
-        ContentHash, FeeEvidence, MarketId, OrderId, Price, Shares, TokenId, Usd, VenueOrderAmount,
+        ContentHash, EvmTransactionHash, FeeEvidence, MarketId, OrderId, Price, Shares, TokenId,
+        Usd, VenueOrderAmount, VenueTradeId,
     },
 };
 
@@ -175,7 +179,8 @@ pub struct VenueSubmitResult {
     /// reconciliation supplies it.
     pub observed_fee: Option<Usd>,
     pub fee_evidence: FeeEvidence,
-    pub tx_hash: Option<String>,
+    pub trade_ids: Vec<VenueTradeId>,
+    pub transaction_hashes: Vec<EvmTransactionHash>,
     /// Human-readable detail (error message for ambiguous / rejected outcomes).
     pub detail: Option<String>,
     pub submitted_at: DateTime<Utc>,
@@ -183,13 +188,36 @@ pub struct VenueSubmitResult {
 }
 
 impl VenueSubmitResult {
+    /// Clone the complete placement identity set for one atomic ledger write.
+    #[must_use]
+    pub fn identity_refs(&self) -> ExecutionIdentityRefs {
+        ExecutionIdentityRefs {
+            trade_ids: self.trade_ids.clone(),
+            transaction_hashes: self.transaction_hashes.clone(),
+            observed_at: self.responded_at,
+        }
+    }
+
     fn from_response(
         resp: OrderResponse,
         expected_fee: Usd,
         fee_schedule_hash: ContentHash,
     ) -> Self {
+        let outcome = if !resp.trade_ids.is_empty()
+            && matches!(
+                resp.status,
+                VenueOrderStatus::Filled | VenueOrderStatus::PartiallyFilled
+            ) {
+            // In the V2 async commit pipeline, a placement can be accepted and
+            // expose trade IDs before those trades are confirmed on chain.
+            // Acceptance is durable identity, not final fill truth: hold money
+            // until exact trade-ID reconciliation observes CONFIRMED.
+            VenueOutcome::Ambiguous
+        } else {
+            VenueOutcome::from_status(resp.status)
+        };
         Self {
-            outcome: VenueOutcome::from_status(resp.status),
+            outcome,
             venue_order_id: Some(resp.order_id),
             filled_shares: resp.filled_shares,
             avg_fill_price: resp.avg_fill_price,
@@ -199,7 +227,8 @@ impl VenueSubmitResult {
                 schedule_hash: fee_schedule_hash,
                 expected_fee,
             },
-            tx_hash: resp.tx_hash,
+            trade_ids: resp.trade_ids,
+            transaction_hashes: resp.transaction_hashes,
             detail: None,
             submitted_at: resp.submitted_at,
             responded_at: resp.responded_at,
@@ -223,7 +252,8 @@ impl VenueSubmitResult {
                 schedule_hash: fee_schedule_hash,
                 expected_fee,
             },
-            tx_hash: None,
+            trade_ids: Vec::new(),
+            transaction_hashes: Vec::new(),
             detail: Some(error.to_string()),
             submitted_at,
             responded_at: Utc::now(),
@@ -317,10 +347,14 @@ impl PolymarketOrderClient for ClobOrderClient {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use quant_pivot_api::clob::{OrderSubmissionError, OrderSubmissionStage};
+    use quant_pivot_error::api::ApiError;
     use quant_pivot_models::{
-        enums::common::OrderType,
-        types::{ContentHash, FeeEvidence, Shares, Usd},
+        domain::order::OrderResponse,
+        enums::{common::OrderType, execution::VenueOrderStatus},
+        types::{ContentHash, FeeEvidence, OrderId, Shares, Usd, VenueTradeId},
     };
+    use rust_decimal_macros::dec;
 
     use super::{VenueOutcome, VenueSubmitResult};
 
@@ -341,6 +375,18 @@ mod tests {
     }
 
     #[test]
+    fn post_timeout_is_always_ambiguous() {
+        let error = OrderSubmissionError {
+            stage: OrderSubmissionStage::Post,
+            source: ApiError::Timeout {
+                operation: "POST /order".to_owned(),
+                elapsed_ms: 45_000,
+            },
+        };
+        assert_eq!(VenueOutcome::from(&error), VenueOutcome::Ambiguous);
+    }
+
+    #[test]
     fn submit_result_applies_order_type_semantics() {
         let result = VenueSubmitResult {
             outcome: VenueOutcome::PartiallyFilled,
@@ -356,12 +402,39 @@ mod tests {
                 .expect("valid hash"),
                 expected_fee: Usd::ZERO,
             },
-            tx_hash: None,
+            trade_ids: Vec::new(),
+            transaction_hashes: Vec::new(),
             detail: None,
             submitted_at: Utc::now(),
             responded_at: Utc::now(),
         }
         .with_order_type_semantics(&OrderType::Fok);
         assert_eq!(result.outcome, VenueOutcome::Ambiguous);
+    }
+
+    #[test]
+    fn accepted_async_trade_identity_holds_money_until_reconciliation() {
+        let now = Utc::now();
+        let response = OrderResponse {
+            order_id: OrderId::new("async-order"),
+            status: VenueOrderStatus::Filled,
+            trade_ids: vec![VenueTradeId::new("async-trade")],
+            transaction_hashes: Vec::new(),
+            filled_shares: Shares::new(dec!(10)),
+            avg_fill_price: None,
+            submitted_at: now,
+            responded_at: now,
+        };
+        let result = VenueSubmitResult::from_response(
+            response,
+            Usd::ZERO,
+            ContentHash::parse(
+                "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .expect("valid hash"),
+        );
+
+        assert_eq!(result.outcome, VenueOutcome::Ambiguous);
+        assert_eq!(result.trade_ids[0].as_str(), "async-trade");
     }
 }

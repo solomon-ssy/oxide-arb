@@ -18,7 +18,16 @@ pub mod intent_service;
 pub mod mode_gate;
 pub mod order_client;
 pub mod reconciliation;
-pub mod settlement_redeem;
+pub mod settlement_confirmation;
+pub mod settlement_discovery;
+pub mod settlement_discovery_wake;
+pub mod settlement_executor;
+pub mod settlement_external;
+pub mod settlement_governed_action_service;
+pub mod settlement_preflight;
+pub mod settlement_recovery_admission;
+pub mod settlement_service;
+mod settlement_timing;
 pub mod trade_policy_guard;
 
 pub use admission::{
@@ -58,11 +67,5 @@ pub use reconciliation::{
     OperatorReconcileResolution, ReconcileFacts, ReconciliationDecision, ReconciliationService,
     ReconciliationServiceDeps, VenueEvidenceCollector, VenuePresence, VenueReconciliationReader,
     decide,
-};
-pub use settlement_redeem::{
-    RelayerConnectParams, RelayerSettlementClient, SettlementCtfBalances, SettlementCtfClient,
-    SettlementCtfPayoutVector, SettlementCtfRedeemReceipt, SettlementCtfSubmittedRedeemReceipt,
-    SettlementRedeemPassSummary, SettlementRedeemService, SettlementRedeemServiceDeps,
-    SettlementRedeemTx,
 };
 pub use trade_policy_guard::require_frozen_trade_policy;

@@ -36,7 +36,7 @@ pub const CASBIN_SEED: SeedSpec = SeedSpec {
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v1.boot-config-governance",
+    checksum: "rbac.casbin.bootstrap.v1.runtime-controls",
     apply: load_boxed,
     hydrate: hydrate_boxed,
 };
@@ -56,7 +56,6 @@ const READ_RESOURCES: &[ResourceType] = &[
     ResourceType::SettlementRedeem,
     ResourceType::FactorDefinition,
     ResourceType::DecisionPolicySnapshot,
-    ResourceType::ConfigLifecycle,
     ResourceType::Materialization,
     // Read the backtest / comparison report ledgers (research catalog browse);
     // `Replay:Create` remains a risk-owner-only mutation.
@@ -161,7 +160,6 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
 fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
     let mut policies = read_only();
     policies.extend([
-        (ResourceType::System, Operation::BootstrapActivate),
         (ResourceType::DecisionPolicySnapshot, Operation::Create),
         (ResourceType::DecisionPolicySnapshot, Operation::Approve),
         (ResourceType::DecisionPolicySnapshot, Operation::Activate),
@@ -207,8 +205,10 @@ fn admin_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::System, Operation::Resume),
         (ResourceType::System, Operation::SwitchMode),
         (ResourceType::System, Operation::Emergency),
-        (ResourceType::ConfigLifecycle, Operation::Seal),
         (ResourceType::Reconciliation, Operation::Resolve),
+        (ResourceType::SettlementRedeem, Operation::Create),
+        (ResourceType::SettlementRedeem, Operation::Approve),
+        (ResourceType::SettlementRedeem, Operation::Revoke),
     ]);
     policies
 }

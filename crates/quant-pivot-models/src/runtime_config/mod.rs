@@ -7,7 +7,6 @@ pub mod wire;
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
 use quant_pivot_error::{
     QuantError,
     config::ConfigError,
@@ -31,8 +30,8 @@ pub use sections::{
     ResearchTrainingConfig, ResearchValidationConfig, ResearchValidationCpcvConfig,
     ResearchValidationGatesConfig, ResearchValidationPboConfig, ResearchValidationPurgeConfig,
     ResearchValidationTrialsConfig, ReversalAfterShockConfig, SelectionConfig,
-    SellQualityGateConfig, SemiAutoCanaryConfig, SemiAutoConfig, StructuralFactorsConfig,
-    StructuralFeaturesConfig, TrainingConfig, WeatherDomainConfig,
+    SellQualityGateConfig, SemiAutoConfig, StructuralFactorsConfig, StructuralFeaturesConfig,
+    TrainingConfig, WeatherDomainConfig,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Error as SerdeJsonError, Value};
@@ -45,20 +44,19 @@ pub use wire::{
     FeatureFamily, FeatureStalenessPolicy, KillSwitchPolicy, MASKED_SECRET, MissingFactorPolicy,
     ModelVersionRef, NeutralizeDimension, NotificationPolicies, OpportunisticSellPolicy,
     PortfolioOptimizerConfig, RankLossKind, ReconciliationPolicy, ReportDeliveryPolicy,
-    ScheduleCadence, SettlementRedeemPolicy, SizingModelConfig, SmallCrossSectionPolicy,
-    TrainingOptimizerKind,
+    ScheduleCadence, SizingModelConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
 };
 
 use crate::{
     enums::runtime_config::{
-        CheckOutcome, ConfigResourceKind, LifecycleCheckKind, PolicyApplyBoundary, PolicyConsumer,
+        CheckOutcome, ConfigResourceKind, PolicyApplyBoundary, PolicyConsumer,
         PolicyPreflightCheckKind, PolicyPreflightDetailCode, PolicyValidationCode,
         PolicyValidationSeverity, ProfileArtifactKind,
     },
     hashing::CanonicalDigest,
     types::{
-        BuildCommitHash, ContentHash, DecisionPolicySnapshotId, PolicyBundleGeneration,
-        PolicyRevisionId, ProfileArtifactId, SchemaVersion,
+        ContentHash, DecisionPolicySnapshotId, PolicyBundleGeneration, PolicyRevisionId,
+        ProfileArtifactId, SchemaVersion,
     },
 };
 
@@ -98,7 +96,6 @@ pub struct ExecutionRiskPolicy {
     pub exit_monitor: ExitMonitorPolicy,
     pub capital: CapitalPolicy,
     pub reconciliation: ReconciliationPolicy,
-    pub settlement_redeem: SettlementRedeemPolicy,
     pub breaker: ExecutionBreakerConfig,
 }
 
@@ -111,7 +108,6 @@ impl Default for ExecutionRiskPolicy {
             exit_monitor: ExitMonitorPolicy::default(),
             capital: CapitalPolicy::default(),
             reconciliation: ReconciliationPolicy::default(),
-            settlement_redeem: SettlementRedeemPolicy::default(),
             breaker: ExecutionBreakerConfig::default(),
         }
     }
@@ -298,57 +294,6 @@ impl PolicyValidationEvidence {
                 .iter()
                 .all(|check| check.outcome != CheckOutcome::Failed)
     }
-}
-
-/// One typed item in the irreversible production-seal evidence bundle.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ProductionSealCheck {
-    pub kind: LifecycleCheckKind,
-    pub outcome: CheckOutcome,
-    #[schemars(with = "String")]
-    pub checked_at: DateTime<Utc>,
-    pub detail: LifecycleCheckDetail,
-}
-
-/// Closed, strongly typed detail vocabulary for production-seal checks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "detail_kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum LifecycleCheckDetail {
-    ContractMatched,
-    SchemaFingerprint {
-        #[schemars(with = "String", extend("x-format" = "content-hash"))]
-        fingerprint: ContentHash,
-    },
-    MigrationLedgersVerified,
-    CompiledBuildIdentity {
-        build_commit: BuildCommitHash,
-        clean: bool,
-    },
-    MissingActivePolicyBundle,
-    PolicyBundle {
-        #[schemars(with = "String", extend("x-format" = "content-hash"))]
-        policy_bundle_hash: ContentHash,
-    },
-    ExternalEvidence {
-        #[schemars(with = "Option<String>", extend("x-format" = "content-hash"))]
-        evidence_hash: Option<ContentHash>,
-    },
-}
-
-/// Evidence persisted with the production baseline. The physical column is
-/// JSONB because this is an immutable aggregate, while `SeaORM` exposes the
-/// strongly typed structure end to end.
-#[derive(
-    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, FromJsonQueryResult,
-)]
-#[serde(default, deny_unknown_fields)]
-pub struct ProductionSealEvidence {
-    pub checks: Vec<ProductionSealCheck>,
-    #[schemars(with = "Option<String>", extend("x-format" = "content-hash"))]
-    pub backup_evidence_hash: Option<ContentHash>,
-    #[schemars(with = "Option<String>", extend("x-format" = "content-hash"))]
-    pub config_e2e_evidence_hash: Option<ContentHash>,
 }
 
 impl ConfigResourceKind {

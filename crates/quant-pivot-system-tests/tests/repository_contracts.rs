@@ -16,8 +16,6 @@ mod backtest_path_set;
 mod backtest_report;
 #[path = "repository/execution/basis_alert.rs"]
 mod basis_alert;
-#[path = "repository/governance/bootstrap.rs"]
-mod bootstrap;
 #[path = "repository/research/calibration_artifact.rs"]
 mod calibration_artifact;
 #[path = "repository/catalog/catalog_ledger.rs"]
@@ -52,14 +50,14 @@ mod model_registry;
 mod policy_governance;
 #[path = "repository/accounting/portfolio_optimizer.rs"]
 mod portfolio_optimizer;
-#[path = "repository/execution/production_lifecycle.rs"]
-mod production_lifecycle;
 #[path = "repository/execution/report_scheduler.rs"]
 mod report_scheduler;
 #[path = "repository/research/research_job.rs"]
 mod research_job;
 #[path = "repository/research/research_readiness.rs"]
 mod research_readiness;
+#[path = "repository/governance/runtime_control.rs"]
+mod runtime_control;
 #[path = "repository/research/trade_policy_trial.rs"]
 mod trade_policy_trial;
 #[path = "repository/research/training_dataset.rs"]
@@ -157,7 +155,6 @@ async fn repository_persistence_contracts_share_one_postgres_stack() {
         scenario("execution_submission::exit_full_releases_capital_with_realized_pnl", Box::pin(execution_submission::exit_full_releases_capital_with_realized_pnl())).await;
         scenario("execution_submission::exit_partial_keeps_capital_spent_and_reduces_lot", Box::pin(execution_submission::exit_partial_keeps_capital_spent_and_reduces_lot())).await;
         scenario("execution_submission::exit_rejects_second_in_flight_order", Box::pin(execution_submission::exit_rejects_second_in_flight_order())).await;
-        scenario("production_lifecycle::production_baseline_is_a_single_append_only_boot_fact", Box::pin(production_lifecycle::production_baseline_is_a_single_append_only_boot_fact())).await;
         scenario("report_scheduler::two_coordinators_claim_one_global_run", Box::pin(report_scheduler::two_coordinators_claim_one_global_run())).await;
         scenario("report_scheduler::restart_coalesces_latest_and_records_aggregate_gap", Box::pin(report_scheduler::restart_coalesces_latest_and_records_aggregate_gap())).await;
         scenario("report_scheduler::config_change_skips_old_queued_occurrence", Box::pin(report_scheduler::config_change_skips_old_queued_occurrence())).await;
@@ -172,7 +169,6 @@ async fn repository_persistence_contracts_share_one_postgres_stack() {
         scenario("access_control::role_disable_revokes_then_enable_rebuilds_grouping", Box::pin(access_control::role_disable_revokes_then_enable_rebuilds_grouping())).await;
         scenario("access_control::assigning_a_disabled_role_writes_no_grouping", Box::pin(access_control::assigning_a_disabled_role_writes_no_grouping())).await;
         scenario("access_control::operation_log_appends_and_pages_and_is_worm", Box::pin(access_control::operation_log_appends_and_pages_and_is_worm())).await;
-        scenario("bootstrap::bootstrap_transitions_are_monotonic_restart_safe_and_policy_bundle_bound", Box::pin(bootstrap::bootstrap_transitions_are_monotonic_restart_safe_and_policy_bundle_bound())).await;
         scenario("model_governance::quant_shadow_comparison_migration_and_crud", Box::pin(model_governance::quant_shadow_comparison_migration_and_crud())).await;
         scenario("model_governance::quant_model_governance_audit_migration_and_crud", Box::pin(model_governance::quant_model_governance_audit_migration_and_crud())).await;
         scenario("policy_governance::active_resources_are_loaded_in_one_typed_set_and_approvals_are_single_use", Box::pin(policy_governance::active_resources_are_loaded_in_one_typed_set_and_approvals_are_single_use())).await;
@@ -220,6 +216,24 @@ async fn repository_persistence_contracts_share_one_postgres_stack() {
     }))
     .await
     .expect("start shared repository PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn execution_identity_refs_are_atomic_unique_and_concurrent() {
+    Box::pin(with_postgres_suite(
+        execution_submission::execution_identity_refs_are_atomic_unique_and_concurrent(),
+    ))
+    .await
+    .expect("start execution identity PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runtime_control_singleton_cas_is_atomic_audited_and_fail_closed() {
+    Box::pin(with_postgres_suite(
+        runtime_control::singleton_cas_is_atomic_audited_and_fail_closed(),
+    ))
+    .await
+    .expect("start runtime-control PostgreSQL suite");
 }
 
 async fn scenario(name: &str, future: Pin<Box<dyn Future<Output = ()>>>) {

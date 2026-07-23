@@ -163,12 +163,11 @@ paste = "1"
 
 # ── Venue and market-data adapters ───────────────────────────────────────────
 
-# Polymarket SDK (official v2 — CLOB, WS, Gamma, CTF, signing)
-polymarket_client_sdk_v2 = { version = "0.6", features = [
+# Polymarket SDK (official v2 — CLOB, WS, Gamma, signing)
+polymarket_client_sdk_v2 = { version = "=0.7.0", features = [
   "clob",
   "ws",
   "gamma",
-  "ctf",
   "tracing",
   "heartbeats",
 ] }

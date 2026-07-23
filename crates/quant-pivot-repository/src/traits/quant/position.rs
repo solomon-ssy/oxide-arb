@@ -6,7 +6,7 @@ use quant_pivot_models::{
         pagination::Paginated,
         quant::{ExitTrainingLotRow, PositionExit, PositionFill, PositionInfo},
     },
-    types::{MarketId, OrderIntentId, PositionId, TokenId, Usd},
+    types::{ExecutionAccountId, MarketId, OrderIntentId, PositionId, TokenId, Usd},
 };
 
 /// Current-position ledger persistence port (one lot per filled entry intent).
@@ -50,9 +50,11 @@ pub trait PositionRepository: Send + Sync {
         token_id: &TokenId,
     ) -> Result<Vec<PositionInfo>, StorageError>;
 
-    async fn find_open_by_market(
+    /// Open lots for one immutable execution account and market.
+    async fn find_open_by_market_account(
         &self,
         market_id: &MarketId,
+        execution_account_id: &ExecutionAccountId,
     ) -> Result<Vec<PositionInfo>, StorageError>;
 
     /// Cumulative realized `PnL` over all strategy position lots.

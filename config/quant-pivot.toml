@@ -34,13 +34,10 @@
 # Unknown keys are FATAL at startup (deny_unknown_fields): a typo or a stale
 # runtime section aborts boot instead of being silently ignored.
 
-# ── Deployment lifecycle ─────────────────────────────────────────────────────
+# ── Deployment environment ───────────────────────────────────────────────────
 
-[lifecycle]
+[deployment]
 environment = "local-development"
-expected_state = "pre_production_resettable"
-# Git commit and clean/dirty state are embedded by the compiled artifact.
-# Backup/restore and protected Config E2E evidence are WORM database artifacts.
 
 # ── Polymarket Platform ───────────────────────────────────────────────────────
 
@@ -54,8 +51,8 @@ clob_base_url = "https://clob.polymarket.com"
 clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 # Purpose: hard timeout for the single money-changing POST /order attempt.
 # Impact: timeout is Ambiguous and enters reconciliation; it is never retried.
-# Default: 15000.
-order_post_timeout_ms = 15000
+# Default: 45000; must be >= 35000 to contain SDK async-commit enrichment.
+order_post_timeout_ms = 45000
 clob_market_info_refresh_secs = 900
 # Purpose: EVM chain id. Impact: order signing domain + on-chain reads.
 # Caution: must be Polygon (137) — any other value is fatal at startup.
@@ -85,6 +82,23 @@ base_url = "https://relayer-v2.polymarket.com"
 # api_key_address = "0x...."
 # Purpose: relayer HTTP request timeout (ms). Default: 15000.
 request_timeout_ms = 15000
+
+# Settlement worker timing and bounded-work limits. Runtime write authority is
+# controlled only by system_runtime_control.settlement_write_policy.
+[polymarket.settlement]
+# Purpose: exclusive PostgreSQL case lease for one settlement worker epoch.
+claim_lease_secs = 30
+# Purpose: fixed lifetime of one exact SemiAuto settlement batch authorization.
+semi_auto_authorization_ttl_secs = 300
+discovery_poll_secs = 30
+submission_poll_secs = 5
+max_claims_per_tick = 32
+rpc_concurrency = 4
+# Purpose: UI-only signer-free readiness cache; money admission bypasses it.
+readiness_ui_cache_secs = 10
+external_scan_block_span = 2048
+retry_initial_secs = 2
+retry_max_secs = 300
 
 # ── Market Data Connections ───────────────────────────────────────────────────
 # Decision thresholds are governed policy fields, not Deploy Config.

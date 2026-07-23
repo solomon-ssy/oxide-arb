@@ -6,8 +6,9 @@ use std::{sync::Arc, time::Duration};
 use chrono::Utc;
 use quant_pivot_models::domain::ports::OrderIntentPort;
 use quant_pivot_repository::traits::{
-    EntryConditionRepository, FeatureParityRepository, OrderIntentRepository,
-    RecommendationReportRepository, RecommendationRepository, TradePolicyRepository,
+    AccountSnapshotRepository, EntryConditionRepository, FeatureParityRepository,
+    OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
+    TradePolicyRepository,
 };
 
 use super::AppContext;
@@ -35,12 +36,12 @@ impl AppContext {
             Arc::new(DefaultRuntimeModeGate::new(self.runtime_config()));
         Arc::new(CoreOrderIntentService::new(OrderIntentServiceDeps {
             mode_gate,
-            runtime_mode: self.runtime_mode(),
-            runtime_config: self.runtime_config(),
-            kill_switch: self.kill_switch_handle(),
+            runtime_controls: self.runtime_controls(),
             recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
             reports: Arc::clone(&repos.recommendation_report)
                 as Arc<dyn RecommendationReportRepository>,
+            account_snapshots: Arc::clone(&repos.account_snapshot)
+                as Arc<dyn AccountSnapshotRepository>,
             intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
             conditions: Arc::clone(&repos.entry_condition) as Arc<dyn EntryConditionRepository>,
             metrics: Arc::clone(&self.infra.metrics),
@@ -54,6 +55,7 @@ impl AppContext {
                 &repos.feature_parity,
             )
                 as Arc<dyn FeatureParityRepository>)),
+            settlement_recovery: Arc::clone(&self.execution.settlement_recovery_admission),
         }))
     }
 

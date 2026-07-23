@@ -3,17 +3,12 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{
-        governance::{
-            ActivePolicyResourceInfo, ConfigActivityInfo, ConfigResourceInventoryInfo,
-            DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo,
-            NewDecisionPolicySnapshot, NewPolicyActivation, NewPolicyApproval,
-            NewPolicyProfileArtifact, NewPolicyRevision, NewProductionBaseline,
-            NewProductionEvidence, PolicyActivationCommit, PolicyActivationInfo,
-            PolicyActivationOutcome, PolicyApprovalInfo, PolicyRevisionInfo,
-            ProductionBaselineInfo, ProductionEvidenceInfo, RecordPolicyApproval,
-        },
-        ports::{LifecycleSchemaVerificationPort, ProductionEvidenceArtifactVerificationPort},
+    domain::governance::{
+        ActivePolicyResourceInfo, ConfigActivityInfo, ConfigResourceInventoryInfo,
+        DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo, NewDecisionPolicySnapshot,
+        NewPolicyActivation, NewPolicyApproval, NewPolicyProfileArtifact, NewPolicyRevision,
+        PolicyActivationCommit, PolicyActivationInfo, PolicyActivationOutcome, PolicyApprovalInfo,
+        PolicyRevisionInfo, RecordPolicyApproval,
     },
     entities::{
         decision_policy_snapshot::{
@@ -42,16 +37,10 @@ use quant_pivot_models::{
         policy_revision::{
             Column as RevisionColumn, Entity as RevisionEntity, Model as RevisionModel,
         },
-        system_production_baseline::{
-            Column as ProductionBaselineColumn, Entity as ProductionBaselineEntity,
-        },
-        system_production_evidence::{
-            Column as ProductionEvidenceColumn, Entity as ProductionEvidenceEntity,
-        },
     },
     enums::runtime_config::{
         ConfigResourceKind, PolicyActivationKind, PolicyActorKind, PolicyApprovalDecision,
-        PolicyRevisionStatus, ProductionEvidenceKind,
+        PolicyRevisionStatus,
     },
     hashing::CanonicalDigest,
     runtime_config::{
@@ -332,109 +321,6 @@ pub(crate) async fn acquire_activation_lock(
                 "boot seed row is missing",
             )
         })
-}
-
-async fn verify_production_evidence_refs(
-    transaction: &DatabaseTransaction,
-    baseline: &NewProductionBaseline,
-    artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
-) -> Result<(), StorageError> {
-    let backup_hash = baseline
-        .evidence
-        .backup_evidence_hash
-        .as_ref()
-        .ok_or_else(|| {
-            StorageError::state_conflict(
-                "system_production_baseline",
-                Some(&baseline.production_baseline_id),
-                "backup/restore WORM evidence is missing",
-            )
-        })?;
-    let config_e2e_hash = baseline
-        .evidence
-        .config_e2e_evidence_hash
-        .as_ref()
-        .ok_or_else(|| {
-            StorageError::state_conflict(
-                "system_production_baseline",
-                Some(&baseline.production_baseline_id),
-                "protected Config E2E WORM evidence is missing",
-            )
-        })?;
-    let evidence_rows = ProductionEvidenceEntity::find()
-        .filter(
-            Condition::any()
-                .add(
-                    Condition::all()
-                        .add(
-                            ProductionEvidenceColumn::Kind
-                                .eq(ProductionEvidenceKind::BackupRestore),
-                        )
-                        .add(ProductionEvidenceColumn::EvidenceHash.eq(backup_hash)),
-                )
-                .add(
-                    Condition::all()
-                        .add(
-                            ProductionEvidenceColumn::Kind
-                                .eq(ProductionEvidenceKind::ProtectedConfigEndToEnd),
-                        )
-                        .add(ProductionEvidenceColumn::EvidenceHash.eq(config_e2e_hash)),
-                ),
-        )
-        .all(transaction)
-        .await
-        .map_err(StorageError::from)?;
-    for (kind, expected_hash) in [
-        (ProductionEvidenceKind::BackupRestore, backup_hash),
-        (
-            ProductionEvidenceKind::ProtectedConfigEndToEnd,
-            config_e2e_hash,
-        ),
-    ] {
-        let evidence = evidence_rows
-            .iter()
-            .find(|row| row.kind == kind && &row.evidence_hash == expected_hash)
-            .ok_or_else(|| {
-                StorageError::state_conflict(
-                    "system_production_baseline",
-                    Some(&baseline.production_baseline_id),
-                    format!(
-                        "referenced {} WORM evidence row does not exist",
-                        kind.as_str()
-                    ),
-                )
-            })?;
-        if evidence.build_commit != baseline.build_commit
-            || evidence.postgres_schema_fingerprint != baseline.postgres_schema_fingerprint
-            || evidence.clickhouse_schema_fingerprint != baseline.clickhouse_schema_fingerprint
-            || evidence.policy_bundle_generation != baseline.policy_bundle_generation
-            || evidence.decision_policy_snapshot_id != baseline.decision_policy_snapshot_id
-            || evidence.policy_bundle_hash != baseline.policy_bundle_hash
-        {
-            return Err(StorageError::state_conflict(
-                "system_production_baseline",
-                Some(&baseline.production_baseline_id),
-                format!(
-                    "{} evidence is not bound to the exact build/schema/policy bundle",
-                    kind.as_str()
-                ),
-            ));
-        }
-        artifact_verification
-            .verify_artifact(&evidence.artifact_uri, &evidence.evidence_hash)
-            .await
-            .map_err(|error| {
-                StorageError::state_conflict(
-                    "system_production_baseline",
-                    Some(&baseline.production_baseline_id),
-                    format!(
-                        "{} evidence artifact verification failed: {error}",
-                        kind.as_str()
-                    ),
-                )
-            })?;
-    }
-    Ok(())
 }
 
 async fn load_current_activation_from(
@@ -1358,164 +1244,6 @@ impl PolicyRepository for PgPolicyRepository {
             .await
             .map(|rows| rows.into_iter().map(Into::into).collect())
             .map_err(StorageError::from)
-    }
-
-    async fn load_production_baseline(
-        &self,
-    ) -> Result<Option<ProductionBaselineInfo>, StorageError> {
-        ProductionBaselineEntity::find()
-            .order_by_desc(ProductionBaselineColumn::SealedAt)
-            .one(&self.db)
-            .await
-            .map(|row| row.map(Into::into))
-            .map_err(StorageError::from)
-    }
-
-    async fn record_production_evidence(
-        &self,
-        evidence: NewProductionEvidence,
-        schema_verification: &dyn LifecycleSchemaVerificationPort,
-        artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
-    ) -> Result<ProductionEvidenceInfo, StorageError> {
-        let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        if ProductionBaselineEntity::find()
-            .one(&transaction)
-            .await
-            .map_err(StorageError::from)?
-            .is_some()
-        {
-            return Err(StorageError::state_conflict(
-                "system_production_evidence",
-                Some(&evidence.production_evidence_id),
-                "production is frozen; new seal evidence is forbidden",
-            ));
-        }
-        let live_schema = schema_verification.verify_live().await.map_err(|error| {
-            StorageError::state_conflict(
-                "system_production_evidence",
-                Some(&evidence.production_evidence_id),
-                format!("live schema verification failed under lifecycle lease: {error}"),
-            )
-        })?;
-        let current_bundle = load_current_bundle_from(&transaction)
-            .await?
-            .ok_or_else(|| {
-                StorageError::state_conflict(
-                    "system_production_evidence",
-                    Some(&evidence.production_evidence_id),
-                    "no active policy bundle exists",
-                )
-            })?;
-        let policy_bundle_generation = current_bundle.generation;
-        if live_schema.postgres_schema_fingerprint != evidence.postgres_schema_fingerprint
-            || live_schema.clickhouse_schema_fingerprint != evidence.clickhouse_schema_fingerprint
-            || policy_bundle_generation != evidence.policy_bundle_generation
-            || current_bundle.decision_policy_snapshot_id != evidence.decision_policy_snapshot_id
-            || current_bundle.snapshot_hash != evidence.policy_bundle_hash
-        {
-            return Err(StorageError::state_conflict(
-                "system_production_evidence",
-                Some(&evidence.production_evidence_id),
-                "evidence is not bound to the exact live PG/CH schema and policy bundle",
-            ));
-        }
-        artifact_verification
-            .verify_artifact(&evidence.artifact_uri, &evidence.evidence_hash)
-            .await
-            .map_err(|error| {
-                StorageError::state_conflict(
-                    "system_production_evidence",
-                    Some(&evidence.production_evidence_id),
-                    format!("evidence artifact verification failed: {error}"),
-                )
-            })?;
-        let key = evidence.production_evidence_id.to_string();
-        let inserted = ProductionEvidenceEntity::insert(evidence.into_active_model())
-            .exec_with_returning(&transaction)
-            .await
-            .map(Into::into)
-            .map_err(|error| error::map_unique(error, "system_production_evidence", &key))?;
-        transaction.commit().await.map_err(StorageError::from)?;
-        Ok(inserted)
-    }
-
-    async fn load_latest_production_evidence(
-        &self,
-        kind: ProductionEvidenceKind,
-    ) -> Result<Option<ProductionEvidenceInfo>, StorageError> {
-        ProductionEvidenceEntity::find()
-            .filter(ProductionEvidenceColumn::Kind.eq(kind))
-            .order_by_desc(ProductionEvidenceColumn::ObservedAt)
-            .order_by_desc(ProductionEvidenceColumn::ProductionEvidenceId)
-            .one(&self.db)
-            .await
-            .map(|row| row.map(Into::into))
-            .map_err(StorageError::from)
-    }
-
-    async fn seal_production_baseline(
-        &self,
-        baseline: NewProductionBaseline,
-        schema_verification: &dyn LifecycleSchemaVerificationPort,
-        artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
-    ) -> Result<ProductionBaselineInfo, StorageError> {
-        let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        if ProductionBaselineEntity::find()
-            .one(&transaction)
-            .await
-            .map_err(StorageError::from)?
-            .is_some()
-        {
-            return Err(StorageError::state_conflict(
-                "system_production_baseline",
-                Some(&baseline.production_baseline_id),
-                "the production baseline is already sealed",
-            ));
-        }
-        let live_schema = schema_verification.verify_live().await.map_err(|error| {
-            StorageError::state_conflict(
-                "system_production_baseline",
-                Some(&baseline.production_baseline_id),
-                format!("live schema verification failed under lifecycle lease: {error}"),
-            )
-        })?;
-        if live_schema.postgres_schema_fingerprint != baseline.postgres_schema_fingerprint
-            || live_schema.clickhouse_schema_fingerprint != baseline.clickhouse_schema_fingerprint
-        {
-            return Err(StorageError::state_conflict(
-                "system_production_baseline",
-                Some(&baseline.production_baseline_id),
-                "live PG/CH schema fingerprints differ from seal evidence",
-            ));
-        }
-        let current_bundle = load_current_bundle_from(&transaction)
-            .await?
-            .ok_or_else(|| {
-                StorageError::state_conflict(
-                    "system_production_baseline",
-                    Some(&baseline.production_baseline_id),
-                    "no active policy bundle exists",
-                )
-            })?;
-        let policy_bundle_generation = current_bundle.generation;
-        if policy_bundle_generation != baseline.policy_bundle_generation
-            || current_bundle.decision_policy_snapshot_id != baseline.decision_policy_snapshot_id
-            || current_bundle.snapshot_hash != baseline.policy_bundle_hash
-        {
-            return Err(StorageError::state_conflict(
-                "system_production_baseline",
-                Some(&baseline.production_baseline_id),
-                "active policy bundle changed during production sealing",
-            ));
-        }
-        verify_production_evidence_refs(&transaction, &baseline, artifact_verification).await?;
-        let key = baseline.production_baseline_id.to_string();
-        let inserted = ProductionBaselineEntity::insert(baseline.into_active_model())
-            .exec_with_returning(&transaction)
-            .await
-            .map_err(|error| error::map_unique(error, "system_production_baseline", &key))?;
-        transaction.commit().await.map_err(StorageError::from)?;
-        Ok(inserted.into())
     }
 }
 

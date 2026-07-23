@@ -15,9 +15,9 @@ use sea_orm::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as SerdeDeError};
 use thiserror::Error;
 
-/// Process-independent advisory lock shared by schema mutation, reset, and
-/// irreversible production sealing on the canonical `postgres` database.
-pub const LIFECYCLE_ADVISORY_LOCK_KEY: i64 = 7_293_770_821_154_641_591;
+/// Process-independent advisory lock shared by schema mutation and reset on
+/// the canonical `postgres` database.
+pub const SCHEMA_MUTATION_ADVISORY_LOCK_KEY: i64 = 7_293_770_821_154_641_591;
 
 /// Monotonic generation of the complete active policy bundle.
 ///
@@ -283,7 +283,7 @@ macro_rules! validated_text_type {
 }
 
 validated_text_type! {
-    /// Deployment environment name captured by the lifecycle seal.
+    /// Deployment environment name used to scope destructive tooling.
     DeploymentEnvironment,
     field = "environment",
     detail = "must contain 1..=64 ASCII letters, digits, '.', '_' or '-'",
@@ -303,15 +303,6 @@ impl DeploymentEnvironment {
 }
 
 validated_text_type! {
-    /// Canonical Git object id captured by an irreversible production seal.
-    BuildCommitHash,
-    field = "build_commit",
-    detail = "must be a 40- or 64-character lowercase hexadecimal Git object id",
-    validate = |value: &str| matches!(value.len(), 40 | 64)
-        && value.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
-validated_text_type! {
     /// Client-generated idempotency key for one activation command.
     PolicyIdempotencyKey,
     field = "idempotency_key",
@@ -327,14 +318,4 @@ validated_text_type! {
     detail = "must contain 16..=512 visible ASCII characters",
     validate = |value: &str| (16..=512).contains(&value.len())
         && value.bytes().all(|byte| byte.is_ascii_graphic())
-}
-
-validated_text_type! {
-    /// Exact operator confirmation used by the irreversible production seal.
-    ProductionSealConfirmationPhrase,
-    field = "confirmation_phrase",
-    detail = "must contain 16..=128 printable ASCII characters without leading or trailing whitespace",
-    validate = |value: &str| (16..=128).contains(&value.len())
-        && value.trim() == value
-        && value.bytes().all(|byte| byte == b' ' || byte.is_ascii_graphic())
 }

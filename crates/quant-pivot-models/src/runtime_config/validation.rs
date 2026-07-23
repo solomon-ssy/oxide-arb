@@ -5,7 +5,6 @@
 
 use std::collections::HashSet;
 
-use chrono::DateTime;
 use linkme::distributed_slice;
 use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
 use rust_decimal::Decimal;
@@ -1006,11 +1005,10 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
             detail: "must be less than lease_duration_secs".to_owned(),
         });
     }
-    if config.execution_authorization.auto_execution.enabled {
+    if config.execution_authorization.semi_auto.approval_ttl_secs == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.auto_execution.enabled",
-            detail: "AutoExecution is blocked until its production governance gate is enabled"
-                .to_owned(),
+            field: "execution.semi_auto.approval_ttl_secs",
+            detail: "must be greater than zero".to_owned(),
         });
     }
     non_negative_decimal(
@@ -1026,7 +1024,6 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
         &config.execution_authorization.auto_execution.min_confidence,
         report,
     );
-    validate_semi_auto_canary(config, report);
     non_negative_decimal(
         "execution.capital.max_reserved_usd",
         &config.execution_risk.capital.max_reserved_usd,
@@ -1051,71 +1048,6 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.kill_switch.emergency_exit.max_slippage_bps",
             detail: "must be greater than zero".to_owned(),
-        });
-    }
-    validate_settlement_redeem(config, report);
-}
-
-fn validate_semi_auto_canary(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
-    let canary = &config.execution_authorization.semi_auto.canary;
-    non_negative_decimal(
-        "execution.semi_auto.canary.max_total_cash_per_report",
-        &canary.max_total_cash_per_report,
-        report,
-    );
-    for tier in &canary.allowed_cash_budget_tiers_usd {
-        positive_decimal(
-            "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
-            tier,
-            report,
-        );
-    }
-    if !canary.enabled {
-        return;
-    }
-    if canary
-        .policy_artifact_id
-        .as_deref()
-        .is_none_or(str::is_empty)
-        || canary
-            .policy_content_hash
-            .as_deref()
-            .is_none_or(str::is_empty)
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.semi_auto.canary",
-            detail: "an enabled canary must bind both policy_artifact_id and policy_content_hash"
-                .to_owned(),
-        });
-    }
-    let only_first_tier = canary.allowed_cash_budget_tiers_usd.len() == 1
-        && canary.allowed_cash_budget_tiers_usd[0].value == Decimal::new(25, 0);
-    if !only_first_tier {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
-            detail: "runtime v1 canary must contain exactly the $25 cash-budget tier".to_owned(),
-        });
-    }
-    if canary.max_open_intents != 1 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.semi_auto.canary.max_open_intents",
-            detail: "runtime v1 canary must allow exactly one open intent".to_owned(),
-        });
-    }
-    if canary.max_total_cash_per_report.value != Decimal::new(25, 0) {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.semi_auto.canary.max_total_cash_per_report",
-            detail: "runtime v1 canary must cap each report at exactly $25 total cash".to_owned(),
-        });
-    }
-    if canary
-        .expires_at
-        .as_deref()
-        .is_none_or(|value| DateTime::parse_from_rfc3339(value).is_err())
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.semi_auto.canary.expires_at",
-            detail: "an enabled canary requires an RFC3339 expiry".to_owned(),
         });
     }
 }
@@ -1396,39 +1328,6 @@ fn validate_research_validation_pbo_gates(
         &gates.max_turnover,
         report,
     );
-}
-
-fn validate_settlement_redeem(
-    config: &DecisionPolicySnapshot,
-    report: &mut ConfigValidationReport,
-) {
-    let redeem = &config.execution_risk.settlement_redeem;
-    if redeem.enabled {
-        if redeem.interval_secs == 0 {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field: "execution.settlement_redeem.interval_secs",
-                detail: "must be greater than zero when the redeem worker is enabled".to_owned(),
-            });
-        }
-        if redeem.batch_size == 0 {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field: "execution.settlement_redeem.batch_size",
-                detail: "must be greater than zero when the redeem worker is enabled".to_owned(),
-            });
-        }
-        if redeem.max_attempts == 0 {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field: "execution.settlement_redeem.max_attempts",
-                detail: "must be greater than zero when the redeem worker is enabled".to_owned(),
-            });
-        }
-        if redeem.confirmation_blocks == 0 {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field: "execution.settlement_redeem.confirmation_blocks",
-                detail: "must be at least one when the redeem worker is enabled".to_owned(),
-            });
-        }
-    }
 }
 
 /// Validate a non-negative decimal.

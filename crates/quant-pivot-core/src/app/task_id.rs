@@ -22,6 +22,8 @@ pub enum TaskId {
     SessionHub,
     /// Periodic + nudged `SystemStatusChanged` pushes for dashboard clients.
     SystemStatusBroadcaster,
+    /// Converges the atomic runtime-control snapshot across application instances.
+    RuntimeControlSync,
     /// Coalesces per-market order-book changes into throttled `MarketBookUpdate`
     /// events for watching WebSocket sessions (off the hot path).
     BookUpdateCoalescer,
@@ -64,8 +66,6 @@ pub enum TaskId {
     // ── Reconciliation ────────────────────────────────────────────────
     PotentialLossEscalation,
     LedgerReconciliation,
-    MarketSettlement,
-    MarketSettlementRetry,
 
     // ── Health ────────────────────────────────────────────────────────
     HealthChecker,
@@ -85,10 +85,18 @@ pub enum TaskId {
     /// Self-heals the execution breaker (`Degraded → Healthy` after cooldown).
     ExecutionBreakerTick,
     ReconciliationWorker,
+    /// Discovers resolved account-scoped cases from durable `PostgreSQL` truth.
+    SettlementDiscovery,
+    /// Mints signer-free current-deployment and full-inventory readiness.
+    SettlementPreflight,
+    /// Sole redeem prepare/dispatch/recovery worker.
+    SettlementExecution,
+    /// Reconciles current-deployment redemptions initiated outside this process.
+    SettlementExternalObservation,
+    /// Executes permission-authorized operator approval/revocation commands.
+    SettlementGovernedAction,
     /// Scans open position lots and evaluates the exit priority ladder.
     ExitMonitor,
-    /// Redeems resolved standard binary CTF positions and closes settlement lots.
-    SettlementRedeemWorker,
     /// Writes final recommendation-attribution rows after execution reaches truth.
     AttributionWorker,
     /// Best-effort analytics mirror for final attribution events.
@@ -171,19 +179,23 @@ impl TaskId {
             | Self::CalibrationUpdater => TaskKind::CatalogSync,
             Self::Coalescer => TaskKind::CacheWorker,
             Self::TradeTapeReconciliationWorker => TaskKind::BookReconciliation,
-            Self::PotentialLossEscalation
-            | Self::LedgerReconciliation
-            | Self::MarketSettlement
-            | Self::MarketSettlementRetry => TaskKind::LedgerReconciliation,
-            Self::HealthChecker | Self::RiskMetricsRefresh | Self::DataQualityRefresh => {
-                TaskKind::HealthMonitor
+            Self::PotentialLossEscalation | Self::LedgerReconciliation => {
+                TaskKind::LedgerReconciliation
             }
+            Self::HealthChecker
+            | Self::RiskMetricsRefresh
+            | Self::DataQualityRefresh
+            | Self::RuntimeControlSync => TaskKind::HealthMonitor,
             Self::ExecutionDispatcher
             | Self::EntryConditionWorker
             | Self::ExecutionBreakerTick
             | Self::ReconciliationWorker
+            | Self::SettlementDiscovery
+            | Self::SettlementPreflight
+            | Self::SettlementExecution
+            | Self::SettlementExternalObservation
+            | Self::SettlementGovernedAction
             | Self::ExitMonitor
-            | Self::SettlementRedeemWorker
             | Self::AttributionWorker => TaskKind::Execution,
             Self::RiskTick
             | Self::ExposureGc

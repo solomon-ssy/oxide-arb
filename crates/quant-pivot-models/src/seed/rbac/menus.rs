@@ -33,7 +33,7 @@ pub const MENUS_SEED: SeedSpec = SeedSpec {
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v1.boot-config-control-plane",
+    checksum: "rbac.menus.bootstrap.v1.runtime-controls",
     apply: load_boxed,
     hydrate: hydrate_boxed,
 };
@@ -250,12 +250,6 @@ fn build_command_center(t: &mut MenuTree) {
     );
     t.button(
         &dashboard,
-        "system:bootstrap_activate",
-        "Activate Bootstrap",
-        perm(ResourceType::System, Operation::BootstrapActivate),
-    );
-    t.button(
-        &dashboard,
         "system:halt",
         "Halt",
         perm(ResourceType::System, Operation::Halt),
@@ -429,7 +423,7 @@ fn build_execution(t: &mut MenuTree) {
         "Resolve",
         perm(ResourceType::Reconciliation, Operation::Resolve),
     );
-    t.page(PageSpec {
+    let settlement_redeems = t.page(PageSpec {
         parent: &execution,
         name: "settlement-redeems",
         title: "page.menu.settlementRedeems",
@@ -438,6 +432,24 @@ fn build_execution(t: &mut MenuTree) {
         permission_code: Some(perm(ResourceType::SettlementRedeem, Operation::Read)),
         icon: "lucide:banknote",
     });
+    t.button(
+        &settlement_redeems,
+        "settlement_redeem:create",
+        "Create Settlement Action",
+        perm(ResourceType::SettlementRedeem, Operation::Create),
+    );
+    t.button(
+        &settlement_redeems,
+        "settlement_redeem:approve",
+        "Approve Settlement Batch",
+        perm(ResourceType::SettlementRedeem, Operation::Approve),
+    );
+    t.button(
+        &settlement_redeems,
+        "settlement_redeem:revoke",
+        "Revoke Settlement Action",
+        perm(ResourceType::SettlementRedeem, Operation::Revoke),
+    );
     t.page(PageSpec {
         parent: &execution,
         name: "account",
@@ -746,14 +758,6 @@ fn build_governance(t: &mut MenuTree) {
             "lucide:history",
         ),
         (
-            "config-lifecycle",
-            "page.config.lifecycle.title",
-            "/system/config/lifecycle",
-            "config/lifecycle",
-            perm(ResourceType::ConfigLifecycle, Operation::Read),
-            "lucide:shield-check",
-        ),
-        (
             "config-resource",
             "page.config.resource.title",
             "/system/config/:resource",
@@ -795,12 +799,6 @@ fn build_governance(t: &mut MenuTree) {
         "config:rollback",
         "Rollback Revision",
         perm(ResourceType::DecisionPolicySnapshot, Operation::Rollback),
-    );
-    t.button(
-        &config,
-        "config_lifecycle:seal",
-        "Seal Production Baseline",
-        perm(ResourceType::ConfigLifecycle, Operation::Seal),
     );
 }
 
@@ -941,6 +939,9 @@ mod tests {
             "system:halt",
             "system:resume",
             "system:emergency",
+            "settlement_redeem:create",
+            "settlement_redeem:approve",
+            "settlement_redeem:revoke",
         ] {
             assert!(names.contains(expected), "missing menu node `{expected}`");
         }

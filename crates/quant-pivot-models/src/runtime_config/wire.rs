@@ -499,7 +499,7 @@ impl Default for EmergencyExitPolicy {
 
 /// Execution kill-switch default policy.
 ///
-/// Operational state lives in the `system_kill_switch` singleton. Runtime
+/// Operational state lives in the `system_runtime_control` singleton. Runtime
 /// config only carries the policy to apply when that state escalates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -548,26 +548,6 @@ pub struct ReconciliationPolicy {
     pub stale_open_secs: u64,
 }
 
-/// On-chain settlement redemption worker policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct SettlementRedeemPolicy {
-    /// Whether the worker may submit standard CTF redeem transactions.
-    pub enabled: bool,
-    /// Sweep interval in seconds.
-    pub interval_secs: u64,
-    /// Maximum condition-level redeem batches processed per sweep.
-    pub batch_size: u64,
-    /// Maximum failed submit/confirm attempts before manual escalation.
-    pub max_attempts: u32,
-    /// Base retry backoff in seconds.
-    pub retry_backoff_secs: u64,
-    /// Polygon confirmations required before closing the strategy lots.
-    pub confirmation_blocks: u64,
-    /// Whether automatic redeem may sign new transactions in emergency halt.
-    pub allow_during_emergency: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AttributionPolicy {
@@ -585,20 +565,6 @@ impl Default for AttributionPolicy {
             enabled: true,
             sweep_secs: 60,
             batch_size: 256,
-        }
-    }
-}
-
-impl Default for SettlementRedeemPolicy {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            interval_secs: 300,
-            batch_size: 32,
-            max_attempts: 5,
-            retry_backoff_secs: 300,
-            confirmation_blocks: 3,
-            allow_during_emergency: false,
         }
     }
 }

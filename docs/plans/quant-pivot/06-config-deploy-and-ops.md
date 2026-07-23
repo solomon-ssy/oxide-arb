@@ -1,12 +1,12 @@
 # 06 — Config、Deploy 与 Lifecycle 治理
 
-<!-- quant-pivot-lifecycle-contract:v1 -->
-> **Lifecycle contract**
-> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+<!-- quant-pivot-deployment-contract:v1 -->
+> **Deployment contract**
+> - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
-> - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
+> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
+> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
 
 > 状态：boot baseline 的权威目标设计。旧 `RuntimeConfig` 大文档、旧版本表、旧 JSON 编辑器和兼容解析路径均已被本设计取代。
 
@@ -154,16 +154,15 @@ PostgreSQL 与 ClickHouse 各自只有一组 `user + password`，runtime、schem
 - raw SQL 仅允许用于 SeaQuery 无法表示的 PostgreSQL ordered-set aggregate、catalog introspection、DDL gap 与健康探针，并集中在受 lint 约束的 adapter/support 文件。
 - unprepared SQL 不得接受外部输入；动态值必须绑定。
 
-## 6. Lifecycle 与 production seal
+## 6. Fresh Boot 与 schema mutation
 
-`project-lifecycle.toml` 只有两种 typed state：
+系统没有 `project-lifecycle.toml`、production seal、`system_production_baseline` 或手工
+`BootstrapPhase::Active`。首次部署从 reviewed boot-v1 schema 与 seed 开始；应用启动只读验证 PostgreSQL /
+ClickHouse semantic fingerprint，不自动执行 DDL。
 
-- `pre_production_resettable`
-- `production_frozen`
-
-seal 是不可逆治理动作，不是普通 switch。后端重新验证 environment、build commit、备份证据、Config E2E 证据、PostgreSQL/ClickHouse fingerprint、active policy bundle 与目标 lifecycle hash，然后写唯一 `system_production_baseline` WORM row。
-
-source policy、Deploy expectation 与数据库 baseline 三者不一致时应用拒绝启动。`BootstrapPhase::Active` 只表示冷启动运行阶段，绝不代表正式上线。
+schema mutation 和明确授权的 pre-production reset 共用单一 `SchemaMutationLease`，防止 PostgreSQL 与
+ClickHouse deploy tooling 并发改写。首次部署后直接使用正常 forward migration、备份、回滚与数据验证；
+资金和订单能力由 runtime control 与业务 admission 独立决定。
 
 ## 7. Config 控制台
 

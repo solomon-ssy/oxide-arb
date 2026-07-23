@@ -98,6 +98,11 @@ const REPORT_RUN_BUCKETS_SECS: &[f64] = &[
     0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
 ];
 
+/// Settlement lifecycle buckets in seconds (1 s … 24 h).
+const SETTLEMENT_LAG_BUCKETS_SECS: &[f64] = &[
+    1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 900.0, 3_600.0, 21_600.0, 86_400.0,
+];
+
 /// Central Prometheus registry for live paths only.
 pub struct MetricsHub {
     pub registry: Registry,
@@ -210,6 +215,20 @@ pub struct MetricsHub {
     pub exit_signal_reinference: IntCounterVec,
     /// Opportunistic-Sell scorer evaluation outcomes.
     pub opportunistic_sell_eval: IntCounterVec,
+    /// Settlement worker passes by bounded worker and typed outcome.
+    pub settlement_worker_pass_total: IntCounterVec,
+    /// Settlement worker failures by bounded worker.
+    pub settlement_worker_error_total: IntCounterVec,
+    /// Settlement leases lost while freezing a signed envelope.
+    pub settlement_lease_lost_total: IntCounterVec,
+    /// Durable reconciliation-required transitions by workflow and failure code.
+    pub settlement_reconciliation_required_total: IntCounterVec,
+    /// Resolution-to-case discovery lag.
+    pub settlement_discovery_lag_seconds: Histogram,
+    /// Age of durable submissions observed by recovery.
+    pub settlement_submission_age_seconds: HistogramVec,
+    /// Time spent awaiting canonical finality.
+    pub settlement_finality_lag_seconds: HistogramVec,
 }
 
 struct PipelineMetrics {
@@ -296,6 +315,13 @@ struct ExecutionMetrics {
     exit_triggers: IntCounterVec,
     exit_signal_reinference: IntCounterVec,
     opportunistic_sell_eval: IntCounterVec,
+    settlement_worker_pass_total: IntCounterVec,
+    settlement_worker_error_total: IntCounterVec,
+    settlement_lease_lost_total: IntCounterVec,
+    settlement_reconciliation_required_total: IntCounterVec,
+    settlement_discovery_lag_seconds: Histogram,
+    settlement_submission_age_seconds: HistogramVec,
+    settlement_finality_lag_seconds: HistogramVec,
 }
 
 fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
@@ -691,6 +717,50 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "Opportunistic-Sell scorer evaluation outcomes",
             &["outcome"]
         ),
+        settlement_worker_pass_total: register_counter_vec!(
+            registry,
+            "quant_settlement_worker_pass_total",
+            "Settlement worker passes by worker and typed outcome",
+            &["worker", "outcome"]
+        ),
+        settlement_worker_error_total: register_counter_vec!(
+            registry,
+            "quant_settlement_worker_error_total",
+            "Settlement worker pass failures by worker",
+            &["worker"]
+        ),
+        settlement_lease_lost_total: register_counter_vec!(
+            registry,
+            "quant_settlement_lease_lost_total",
+            "Settlement leases lost while freezing a durable signed envelope",
+            &["workflow"]
+        ),
+        settlement_reconciliation_required_total: register_counter_vec!(
+            registry,
+            "quant_settlement_reconciliation_required_total",
+            "Durable settlement reconciliation-required transitions",
+            &["workflow", "failure_code"]
+        ),
+        settlement_discovery_lag_seconds: register_histogram!(
+            registry,
+            "quant_settlement_discovery_lag_seconds",
+            "Resolution-to-settlement-case discovery lag",
+            SETTLEMENT_LAG_BUCKETS_SECS
+        ),
+        settlement_submission_age_seconds: register_histogram_vec!(
+            registry,
+            "quant_settlement_submission_age_seconds",
+            "Age of durable settlement submissions observed by recovery",
+            &["workflow"],
+            SETTLEMENT_LAG_BUCKETS_SECS
+        ),
+        settlement_finality_lag_seconds: register_histogram_vec!(
+            registry,
+            "quant_settlement_finality_lag_seconds",
+            "Time settlement submissions spend awaiting canonical finality",
+            &["workflow"],
+            SETTLEMENT_LAG_BUCKETS_SECS
+        ),
     }
 }
 
@@ -792,6 +862,14 @@ impl MetricsHub {
             exit_triggers: execution.exit_triggers,
             exit_signal_reinference: execution.exit_signal_reinference,
             opportunistic_sell_eval: execution.opportunistic_sell_eval,
+            settlement_worker_pass_total: execution.settlement_worker_pass_total,
+            settlement_worker_error_total: execution.settlement_worker_error_total,
+            settlement_lease_lost_total: execution.settlement_lease_lost_total,
+            settlement_reconciliation_required_total: execution
+                .settlement_reconciliation_required_total,
+            settlement_discovery_lag_seconds: execution.settlement_discovery_lag_seconds,
+            settlement_submission_age_seconds: execution.settlement_submission_age_seconds,
+            settlement_finality_lag_seconds: execution.settlement_finality_lag_seconds,
         }
     }
 
@@ -855,6 +933,47 @@ impl MetricsHub {
         self.opportunistic_sell_eval
             .with_label_values(&[outcome])
             .inc();
+    }
+
+    pub fn record_settlement_worker_pass(&self, worker: &str, outcome: &str) {
+        self.settlement_worker_pass_total
+            .with_label_values(&[worker, outcome])
+            .inc();
+    }
+
+    pub fn record_settlement_worker_error(&self, worker: &str) {
+        self.settlement_worker_error_total
+            .with_label_values(&[worker])
+            .inc();
+    }
+
+    pub fn record_settlement_lease_lost(&self, workflow: &str) {
+        self.settlement_lease_lost_total
+            .with_label_values(&[workflow])
+            .inc();
+    }
+
+    pub fn record_settlement_reconciliation_required(&self, workflow: &str, failure_code: &str) {
+        self.settlement_reconciliation_required_total
+            .with_label_values(&[workflow, failure_code])
+            .inc();
+    }
+
+    pub fn observe_settlement_discovery_lag_ms(&self, lag_ms: u64) {
+        self.settlement_discovery_lag_seconds
+            .observe(lag_secs_from_ms(lag_ms));
+    }
+
+    pub fn observe_settlement_submission_age_ms(&self, workflow: &str, age_ms: u64) {
+        self.settlement_submission_age_seconds
+            .with_label_values(&[workflow])
+            .observe(lag_secs_from_ms(age_ms));
+    }
+
+    pub fn observe_settlement_finality_lag_ms(&self, workflow: &str, lag_ms: u64) {
+        self.settlement_finality_lag_seconds
+            .with_label_values(&[workflow])
+            .observe(lag_secs_from_ms(lag_ms));
     }
 
     /// Publish whether the kill-switch currently blocks new auto entries.
@@ -1027,5 +1146,34 @@ mod tests {
         }
         assert!(body.contains(r#"reason="build_failed""#));
         assert!(body.contains(r#"profile_id="weather_forecast_24h""#));
+    }
+
+    #[test]
+    fn settlement_metrics_expose_bounded_operational_contract() {
+        let hub = MetricsHub::new();
+        hub.record_settlement_worker_pass("recovery", "confirmed");
+        hub.record_settlement_worker_error("discovery");
+        hub.record_settlement_lease_lost("redeem");
+        hub.record_settlement_reconciliation_required("governed_action", "receipt_mismatch");
+        hub.observe_settlement_discovery_lag_ms(2_000);
+        hub.observe_settlement_submission_age_ms("redeem", 3_000);
+        hub.observe_settlement_finality_lag_ms("governed_action", 4_000);
+
+        let (_, text) = hub.gather_prometheus_text().expect("gather");
+        let body = String::from_utf8(text).expect("utf8");
+        for name in [
+            "quant_settlement_worker_pass_total",
+            "quant_settlement_worker_error_total",
+            "quant_settlement_lease_lost_total",
+            "quant_settlement_reconciliation_required_total",
+            "quant_settlement_discovery_lag_seconds",
+            "quant_settlement_submission_age_seconds",
+            "quant_settlement_finality_lag_seconds",
+        ] {
+            assert!(body.contains(name), "missing metric {name}");
+        }
+        assert!(body.contains(r#"worker="recovery""#));
+        assert!(body.contains(r#"outcome="confirmed""#));
+        assert!(body.contains(r#"failure_code="receipt_mismatch""#));
     }
 }

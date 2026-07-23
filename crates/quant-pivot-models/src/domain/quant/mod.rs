@@ -19,6 +19,7 @@ mod dataset;
 #[allow(clippy::needless_update)] // Insert DTOs omit DB-managed timestamps.
 mod entry_condition;
 mod execution;
+mod execution_account;
 mod exit_training;
 mod factor;
 mod feature;
@@ -47,8 +48,12 @@ mod research_job;
 mod research_readiness;
 #[allow(clippy::needless_update)] // NewMarketSelectionMember covers all ActiveModel columns
 mod selection;
-#[allow(clippy::needless_update)] // NewSettlementRedeem* omit DB-managed timestamps
-mod settlement;
+#[allow(clippy::needless_update)] // Child settlement inserts omit DB-managed timestamps.
+pub mod settlement;
+pub mod settlement_governance;
+#[allow(clippy::needless_update)] // NewSettlementInventoryLot omits DB-managed created_at
+pub mod settlement_inventory;
+pub mod settlement_readiness;
 #[allow(clippy::needless_update)] // NewShadowComparison omits DB-managed created_at
 mod shadow;
 #[allow(clippy::needless_update)] // NewSourceSlice omits DB-managed timestamps
@@ -84,10 +89,13 @@ pub use entry_condition::{
     NewEntryConditionInstance, WeatherDailyTemperatureProjectionInfo,
 };
 pub use execution::{
-    ApproveOrderIntent, ApproveOrderIntentOutcome, CapitalSettlement, ExecutionOrderInfo,
-    ExecutionOrderPatch, ExitLedgerWrite, IntentCreationLimits, NewExecutionOrder, NewOrderIntent,
+    ApproveOrderIntent, ApproveOrderIntentOutcome, CapitalSettlement, ExecutionIdentityEnrichment,
+    ExecutionIdentityRefs, ExecutionOrderIdentityRefs, ExecutionOrderInfo, ExecutionOrderPatch,
+    ExecutionTradeObservation, ExecutionTradeRef, ExecutionTransactionRef, ExitLedgerWrite,
+    NewExecutionOrder, NewExecutionTradeRef, NewExecutionTransactionRef, NewOrderIntent,
     OrderIntentInfo, SubmissionLedgerWrite, evaluate_intent_approval_invalidation,
 };
+pub use execution_account::{ExecutionAccountInfo, NewExecutionAccount};
 pub use exit_training::{ExitTrainingLotRow, LotExitEventRow};
 pub use factor::{
     FactorDefinitionInfo, FactorValueInfo, FactorValueModel, LatestFactorSnapshotBundleInfo,
@@ -148,10 +156,6 @@ pub use research_readiness::{NewResearchReadinessEvidence, ResearchReadinessEvid
 pub use selection::{
     MarketSelectionInfo, MarketSelectionMemberInfo, MarketSelectionModel, NewMarketSelection,
     NewMarketSelectionMember,
-};
-pub use settlement::{
-    ConfirmSettlementRedeem, NewSettlementRedeem, NewSettlementRedeemLot, SettlementRedeemInfo,
-    SettlementRedeemLotInfo, SettlementRedeemLotWrite,
 };
 pub use shadow::{NewShadowComparison, ShadowComparisonInfo, ShadowStabilitySummary};
 pub use source_slice::{

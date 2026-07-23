@@ -99,27 +99,6 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_system_production_evidence_kind_latest",
-        table: "system_production_evidence",
-        method: IndexMethod::BTree,
-        unique: false,
-        columns: &[
-            IndexColumnSpec {
-                name: "kind",
-                direction: IndexDirection::Asc,
-            },
-            IndexColumnSpec {
-                name: "observed_at",
-                direction: IndexDirection::Desc,
-            },
-            IndexColumnSpec {
-                name: "production_evidence_id",
-                direction: IndexDirection::Desc,
-            },
-        ],
-        predicate: None,
-    },
-    IndexSpec {
         name: "idx_policy_activation_resource_latest",
         table: "policy_activation",
         method: IndexMethod::BTree,
@@ -1003,6 +982,56 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
+        name: "idx_quant_execution_trade_ref_order",
+        table: "quant_execution_trade_ref",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[IndexColumnSpec {
+            name: "execution_order_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_execution_trade_ref_transaction",
+        table: "quant_execution_trade_ref",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[IndexColumnSpec {
+            name: "transaction_hash",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some("transaction_hash IS NOT NULL"),
+    },
+    IndexSpec {
+        name: "uq_quant_execution_transaction_ref_order_hash",
+        table: "quant_execution_transaction_ref",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "execution_order_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "transaction_hash",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_execution_transaction_ref_hash",
+        table: "quant_execution_transaction_ref",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[IndexColumnSpec {
+            name: "transaction_hash",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
         name: "idx_quant_factor_definition_family_status",
         table: "quant_factor_definition",
         method: IndexMethod::BTree,
@@ -1648,14 +1677,24 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_position_market",
+        name: "idx_quant_position_account_market_state",
         table: "quant_position",
         method: IndexMethod::BTree,
         unique: false,
-        columns: &[IndexColumnSpec {
-            name: "market_id",
-            direction: IndexDirection::Asc,
-        }],
+        columns: &[
+            IndexColumnSpec {
+                name: "execution_account_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "market_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "state",
+                direction: IndexDirection::Asc,
+            },
+        ],
         predicate: None,
     },
     IndexSpec {
@@ -1681,14 +1720,20 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "uq_quant_position_intent",
+        name: "uq_quant_position_intent_account",
         table: "quant_position",
         method: IndexMethod::BTree,
         unique: true,
-        columns: &[IndexColumnSpec {
-            name: "order_intent_id",
-            direction: IndexDirection::Asc,
-        }],
+        columns: &[
+            IndexColumnSpec {
+                name: "order_intent_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "execution_account_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
         predicate: None,
     },
     IndexSpec {
@@ -2161,6 +2206,38 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
+        name: "uq_quant_execution_account_identity_digest",
+        table: "quant_execution_account",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "identity_digest",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_execution_account_funder",
+        table: "quant_execution_account",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "chain_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "funder_address",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
         name: "idx_quant_settlement_redeem_state_next_attempt",
         table: "quant_settlement_redeem",
         method: IndexMethod::BTree,
@@ -2178,7 +2255,7 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "uq_quant_settlement_redeem_market_funder",
+        name: "uq_quant_settlement_redeem_market_account",
         table: "quant_settlement_redeem",
         method: IndexMethod::BTree,
         unique: true,
@@ -2188,11 +2265,218 @@ const INDEXES: &[IndexSpec] = &[
                 direction: IndexDirection::Asc,
             },
             IndexColumnSpec {
-                name: "funder_address",
+                name: "execution_account_id",
                 direction: IndexDirection::Asc,
             },
         ],
         predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_settlement_inventory_digest_position",
+        table: "quant_settlement_inventory_lot",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "settlement_redeem_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "inventory_digest",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "position_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_settlement_inventory_current",
+        table: "quant_settlement_inventory_lot",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "settlement_redeem_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "inventory_digest",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_settlement_authorization_attempt",
+        table: "quant_settlement_authorization",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "settlement_redeem_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "attempt_ordinal",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_settlement_authorization_expiry",
+        table: "quant_settlement_authorization",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "state",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "expires_at",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some(
+            "state = ANY (ARRAY['pending'::qp_settlement_authorization_state, 'approved'::qp_settlement_authorization_state])",
+        ),
+    },
+    IndexSpec {
+        name: "uq_quant_settlement_governed_action_idempotency",
+        table: "quant_settlement_governed_action",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "idempotency_key",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_settlement_active_canary",
+        table: "quant_settlement_governed_action",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "settlement_redeem_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "authorization_digest",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some(
+            "kind = 'canary_grant'::qp_settlement_governed_action_kind AND state = 'authorized'::qp_settlement_governed_action_state",
+        ),
+    },
+    IndexSpec {
+        name: "idx_quant_settlement_governed_action_work",
+        table: "quant_settlement_governed_action",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "state",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "next_attempt_at",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_settlement_external_cursor_scope",
+        table: "quant_settlement_external_cursor",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "execution_account_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "target_adapter",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "deployment_digest",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_settlement_chain_submission_case_created",
+        table: "quant_settlement_chain_submission",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "settlement_redeem_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_settlement_chain_submission_active_redeem",
+        table: "quant_settlement_chain_submission",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "settlement_redeem_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some(
+            "purpose = 'redeem'::qp_settlement_submission_purpose AND state = ANY (ARRAY['prepared'::qp_settlement_submission_state, 'dispatching'::qp_settlement_submission_state, 'awaiting_chain_hash'::qp_settlement_submission_state, 'awaiting_finality'::qp_settlement_submission_state])",
+        ),
+    },
+    IndexSpec {
+        name: "uq_quant_settlement_chain_submission_active_action",
+        table: "quant_settlement_chain_submission",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "settlement_governed_action_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some(
+            "settlement_governed_action_id IS NOT NULL AND state = ANY (ARRAY['prepared'::qp_settlement_submission_state, 'dispatching'::qp_settlement_submission_state, 'awaiting_chain_hash'::qp_settlement_submission_state, 'awaiting_finality'::qp_settlement_submission_state])",
+        ),
+    },
+    IndexSpec {
+        name: "uq_quant_settlement_chain_submission_relayer_id",
+        table: "quant_settlement_chain_submission",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "relayer_transaction_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some("relayer_transaction_id IS NOT NULL"),
+    },
+    IndexSpec {
+        name: "uq_quant_settlement_chain_submission_tx_hash",
+        table: "quant_settlement_chain_submission",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "transaction_hash",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some("transaction_hash IS NOT NULL"),
     },
     IndexSpec {
         name: "idx_quant_settlement_redeem_lot_redeem",
@@ -2579,8 +2863,8 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_system_bootstrap_transition_occurred_at",
-        table: "system_bootstrap_transition",
+        name: "idx_system_runtime_control_transition_occurred_at",
+        table: "system_runtime_control_transition",
         method: IndexMethod::BTree,
         unique: false,
         columns: &[IndexColumnSpec {

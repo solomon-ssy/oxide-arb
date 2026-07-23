@@ -35,7 +35,6 @@ use quant_pivot_models::{
             ReportRunStatus,
         },
         rbac::{Operation, ResourceType},
-        system::BootstrapPhase,
     },
 };
 use uuid::Uuid;
@@ -68,8 +67,7 @@ enum DashboardPermission {
     ReadResearch = 1 << 6,
     ReadReconciliation = 1 << 7,
     EnqueueReport = 1 << 8,
-    ActivateBootstrap = 1 << 9,
-    ReadConfig = 1 << 10,
+    ReadConfig = 1 << 9,
 }
 
 impl DashboardPermissions {
@@ -95,7 +93,6 @@ impl DashboardPermissions {
 #[derive(Clone, Copy)]
 struct PrimaryActionContext {
     has_unresolvable_reconciliation: bool,
-    bootstrap_phase: BootstrapPhase,
     report_capability: bool,
     permissions: DashboardPermissions,
 }
@@ -127,7 +124,6 @@ async fn overview(
         can_read_research,
         can_read_reconciliation,
         can_enqueue_report,
-        can_activate_bootstrap,
         can_read_config,
     ) = tokio::try_join!(
         permission(&state, subject, ResourceType::System, Operation::Read),
@@ -172,12 +168,6 @@ async fn overview(
         permission(
             &state,
             subject,
-            ResourceType::System,
-            Operation::BootstrapActivate
-        ),
-        permission(
-            &state,
-            subject,
             ResourceType::DecisionPolicySnapshot,
             Operation::Read
         ),
@@ -198,10 +188,6 @@ async fn overview(
             can_read_reconciliation,
         ),
         (DashboardPermission::EnqueueReport, can_enqueue_report),
-        (
-            DashboardPermission::ActivateBootstrap,
-            can_activate_bootstrap,
-        ),
         (DashboardPermission::ReadConfig, can_read_config),
     ]);
 
@@ -368,12 +354,11 @@ async fn load_authority(
         None,
         async {
             let runtime = state.control.system_status();
-            let capabilities = state.bootstrap.capabilities(&runtime).await?;
+            let capabilities = state.capabilities.capabilities(&runtime).await?;
             let (primary_action, primary_action_enabled) = primary_action(PrimaryActionContext {
                 has_unresolvable_reconciliation: runtime
                     .execution_recovery
                     .has_unresolvable_reconciliation,
-                bootstrap_phase: state.bootstrap.view().phase,
                 report_capability: capabilities.report_generation_eligible.enabled,
                 permissions,
             });
@@ -383,7 +368,6 @@ async fn load_authority(
                 DashboardAuthorityView {
                     system: SystemStatusView {
                         runtime,
-                        bootstrap: state.bootstrap.view(),
                         capabilities,
                     },
                     primary_action,
@@ -396,15 +380,6 @@ async fn load_authority(
 }
 
 const fn primary_action(context: PrimaryActionContext) -> (DashboardPrimaryAction, bool) {
-    if matches!(context.bootstrap_phase, BootstrapPhase::AwaitingActivation) {
-        return (
-            DashboardPrimaryAction::ActivateBootstrap,
-            context
-                .permissions
-                .allows(DashboardPermission::ActivateBootstrap)
-                && context.permissions.allows(DashboardPermission::ReadConfig),
-        );
-    }
     if context.has_unresolvable_reconciliation {
         return (
             DashboardPrimaryAction::ResolveReconciliation,
@@ -802,9 +777,8 @@ async fn load_action_inbox(
 mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use quant_pivot_error::QuantError;
-    use quant_pivot_models::{
-        domain::api::dashboard::{DashboardPrimaryAction, DashboardReasonCode, DashboardSection},
-        enums::system::BootstrapPhase,
+    use quant_pivot_models::domain::api::dashboard::{
+        DashboardPrimaryAction, DashboardReasonCode, DashboardSection,
     };
 
     use super::{
@@ -814,24 +788,13 @@ mod tests {
     #[test]
     fn primary_action_is_unique_and_safety_ordered() {
         let permissions = DashboardPermissions::from_decisions([
-            (DashboardPermission::ActivateBootstrap, true),
             (DashboardPermission::ReadConfig, true),
             (DashboardPermission::ReadReconciliation, true),
             (DashboardPermission::EnqueueReport, true),
         ]);
         assert_eq!(
             primary_action(PrimaryActionContext {
-                has_unresolvable_reconciliation: false,
-                bootstrap_phase: BootstrapPhase::AwaitingActivation,
-                report_capability: true,
-                permissions,
-            }),
-            (DashboardPrimaryAction::ActivateBootstrap, true)
-        );
-        assert_eq!(
-            primary_action(PrimaryActionContext {
                 has_unresolvable_reconciliation: true,
-                bootstrap_phase: BootstrapPhase::Active,
                 report_capability: true,
                 permissions,
             }),
@@ -840,7 +803,6 @@ mod tests {
         assert_eq!(
             primary_action(PrimaryActionContext {
                 has_unresolvable_reconciliation: false,
-                bootstrap_phase: BootstrapPhase::Active,
                 report_capability: true,
                 permissions,
             }),
@@ -849,7 +811,6 @@ mod tests {
         assert_eq!(
             primary_action(PrimaryActionContext {
                 has_unresolvable_reconciliation: false,
-                bootstrap_phase: BootstrapPhase::Active,
                 report_capability: false,
                 permissions,
             }),

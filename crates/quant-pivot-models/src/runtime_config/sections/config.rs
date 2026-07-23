@@ -17,8 +17,8 @@ use crate::{
         ExecutionBreakerConfig, ExitMonitorPolicy, FactorWeights, FeatureFamily,
         FeatureStalenessPolicy, KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef,
         NeutralizeDimension, PortfolioOptimizerConfig, RankLossKind, ReconciliationPolicy,
-        ReportDeliveryPolicy, ScheduleCadence, SettlementRedeemPolicy, SizingModelConfig,
-        SmallCrossSectionPolicy, TrainingOptimizerKind,
+        ReportDeliveryPolicy, ScheduleCadence, SizingModelConfig, SmallCrossSectionPolicy,
+        TrainingOptimizerKind,
     },
     types::{ReportScheduleId, SchemaVersion, Usd},
 };
@@ -1076,8 +1076,6 @@ pub struct ExecutionConfig {
     pub capital: CapitalPolicy,
     /// Reconciliation policy document.
     pub reconciliation: ReconciliationPolicy,
-    /// On-chain settlement redemption policy.
-    pub settlement_redeem: SettlementRedeemPolicy,
     /// Recommendation attribution worker policy.
     pub attribution: AttributionPolicy,
     /// Execution-breaker thresholds (venue health + auto kill-switch trip).
@@ -1124,53 +1122,12 @@ impl Default for EntryConditionWorkerConfig {
 pub struct SemiAutoConfig {
     /// Approval time-to-live in seconds.
     pub approval_ttl_secs: u64,
-    /// Policy-bound, fail-closed production canary limits.
-    pub canary: SemiAutoCanaryConfig,
 }
 
 impl Default for SemiAutoConfig {
     fn default() -> Self {
         Self {
             approval_ttl_secs: 900,
-            canary: SemiAutoCanaryConfig::default(),
-        }
-    }
-}
-
-/// Runtime v1 policy-bound `SemiAuto` canary.
-///
-/// An enabled canary is intentionally narrower than a published policy. It
-/// authorizes only an exact policy identity and explicit cash-budget tiers; it
-/// never acts as an implicit active-policy pointer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct SemiAutoCanaryConfig {
-    /// Whether this exact policy-bound authorization admits new `SemiAuto` intents.
-    pub enabled: bool,
-    /// Content-addressed Published trade-policy artifact id authorized to run.
-    pub policy_artifact_id: Option<String>,
-    /// Canonical content hash that must match the authorized policy artifact.
-    pub policy_content_hash: Option<String>,
-    /// Exact validated total cash-budget tiers admitted by this canary (v14: only `$25`).
-    pub allowed_cash_budget_tiers_usd: Vec<DecimalValue>,
-    /// Transactional global cap on capital-holding or in-flight intents.
-    pub max_open_intents: u32,
-    /// Transactional cumulative cash-budget cap for one report.
-    pub max_total_cash_per_report: DecimalValue,
-    /// RFC3339 authorization deadline; intents may not outlive this instant.
-    pub expires_at: Option<String>,
-}
-
-impl Default for SemiAutoCanaryConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            policy_artifact_id: None,
-            policy_content_hash: None,
-            allowed_cash_budget_tiers_usd: Vec::new(),
-            max_open_intents: 0,
-            max_total_cash_per_report: DecimalValue::new(rust_decimal_macros::dec!(0)),
-            expires_at: None,
         }
     }
 }
@@ -1179,8 +1136,6 @@ impl Default for SemiAutoCanaryConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AutoExecutionConfig {
-    /// Whether auto-execution policy may approve intents.
-    pub enabled: bool,
     /// Maximum orders auto-created per report.
     pub max_orders_per_report: u32,
     /// Maximum total USD auto-executed per report.
@@ -1194,7 +1149,6 @@ pub struct AutoExecutionConfig {
 impl Default for AutoExecutionConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             max_orders_per_report: 0,
             max_total_usd_per_report: DecimalValue::new(rust_decimal_macros::dec!(0)),
             min_score: DecimalValue::new(rust_decimal_macros::dec!(0.00)),

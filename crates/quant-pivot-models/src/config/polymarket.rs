@@ -27,6 +27,8 @@ pub struct PolymarketConfig {
     pub onchain: OnchainConfig,
     /// Gasless relayer used for Proxy / Gnosis Safe money-moving transactions.
     pub relayer: RelayerConfig,
+    /// Settlement worker timing and bounded-work configuration.
+    pub settlement: SettlementDeployConfig,
 }
 
 impl Default for PolymarketConfig {
@@ -39,6 +41,7 @@ impl Default for PolymarketConfig {
             chain_id: default_chain_id(),
             onchain: OnchainConfig::default(),
             relayer: RelayerConfig::default(),
+            settlement: SettlementDeployConfig::default(),
         }
     }
 }
@@ -53,7 +56,7 @@ const fn default_chain_id() -> u64 {
     137
 }
 const fn default_order_post_timeout() -> u64 {
-    15_000
+    45_000
 }
 const fn default_clob_market_info_refresh_secs() -> u64 {
     900
@@ -119,14 +122,63 @@ const fn default_rpc_timeout() -> u64 {
     10_000
 }
 
+/// Settlement submission rollout configuration (`[polymarket.settlement]`).
+///
+/// This switch is necessary but never sufficient: runtime mode, kill switch,
+/// authorization, verified deployment capability and production evidence are
+/// independent fail-closed gates.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SettlementDeployConfig {
+    /// Exclusive case-claim lease duration. A crashed worker may be replaced
+    /// only after this database-backed lease expires.
+    pub claim_lease_secs: u64,
+    /// Fixed TTL for a `SemiAuto` settlement authorization challenge.
+    pub semi_auto_authorization_ttl_secs: u64,
+    /// Durable discovery cadence; catalog events may only wake this poll early.
+    pub discovery_poll_secs: u64,
+    /// Recovery/submission polling cadence.
+    pub submission_poll_secs: u64,
+    /// Maximum cases processed by one worker tick.
+    pub max_claims_per_tick: u64,
+    /// Maximum concurrent signer-free settlement RPC operations.
+    pub rpc_concurrency: usize,
+    /// UI-only deployment-readiness cache TTL. Money-path preflight and
+    /// admission always bypass this cache.
+    pub readiness_ui_cache_secs: u64,
+    /// Maximum contiguous finalized Polygon blocks read per external-evidence
+    /// cursor pass.
+    pub external_scan_block_span: u64,
+    /// First durable retry delay before exponential backoff.
+    pub retry_initial_secs: u64,
+    /// Maximum durable retry delay.
+    pub retry_max_secs: u64,
+}
+
+impl Default for SettlementDeployConfig {
+    fn default() -> Self {
+        Self {
+            claim_lease_secs: 30,
+            semi_auto_authorization_ttl_secs: 300,
+            discovery_poll_secs: 30,
+            submission_poll_secs: 5,
+            max_claims_per_tick: 32,
+            rpc_concurrency: 4,
+            readiness_ui_cache_secs: 10,
+            external_scan_block_span: 2_048,
+            retry_initial_secs: 2,
+            retry_max_secs: 300,
+        }
+    }
+}
+
 /// Polymarket gasless relayer parameters (`[polymarket.relayer]`).
 ///
-/// The relayer submits money-moving transactions (e.g. CTF `redeemPositions`)
-/// from a user's Proxy / Gnosis Safe wallet on the operator's behalf and pays
-/// the gas. Authentication uses a deploy secret plus the non-secret key-owner
-/// address.
-/// Only required when `quant.account.wallet_kind` is `proxy` or `gnosis_safe`;
-/// EOA settlement signs and pays gas directly and ignores these fields.
+/// The relayer submits explicitly authorized contract calls from a user's
+/// Proxy, Gnosis Safe, or Deposit Wallet and pays the gas. Authentication uses
+/// a deploy secret plus the non-secret key-owner address.
+/// Required for every non-EOA wallet when order submission is enabled; EOA
+/// settlement signs and pays gas directly and ignores these fields.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RelayerConfig {
@@ -197,7 +249,7 @@ const fn default_relayer_timeout() -> u64 {
 
 #[cfg(test)]
 mod rpc_endpoint_tests {
-    use super::{OnchainConfig, PolygonRpcEndpoint};
+    use super::{OnchainConfig, PolygonRpcEndpoint, PolymarketConfig};
     use crate::config::secret::SecretText;
 
     #[test]
@@ -234,5 +286,13 @@ rpc_endpoint = { source = "protected", url = "https://provider.invalid/v2/privat
         let debug = format!("{endpoint:?}");
         assert!(!debug.contains("private-provider-key"));
         assert!(debug.contains("<secret:redacted>"));
+    }
+
+    #[test]
+    fn settlement_governance_durations_have_bounded_defaults() {
+        let config = PolymarketConfig::default().settlement;
+        assert_eq!(config.claim_lease_secs, 30);
+        assert_eq!(config.semi_auto_authorization_ttl_secs, 300);
+        assert_eq!(config.readiness_ui_cache_secs, 10);
     }
 }

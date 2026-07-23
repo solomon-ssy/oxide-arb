@@ -24,8 +24,9 @@ pub mod report_scheduler;
 pub mod research_job;
 pub mod research_job_worker;
 pub mod research_readiness_worker;
+pub mod runtime_control_sync;
 pub mod runtime_tasks;
-pub mod settlement_redeem_worker;
+pub mod settlement_workers;
 pub mod system_status_broadcaster;
 pub mod task_id;
 pub mod task_registry;
@@ -48,6 +49,7 @@ pub use bundles::{
 };
 use flume::Receiver;
 use parking_lot::Mutex;
+use quant_pivot_api::wallet::WalletTopology;
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_models::{
     config::DeployConfig,
@@ -62,7 +64,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     execution::{DispatchWake, IntentLifecyclePublisher},
-    governance::{KillSwitchHandle, RuntimeModeHandle},
+    governance::RuntimeControlsHandle,
     report::{ReportCoordinator, ReportLifecycleService},
     runtime_config::{DecisionPolicyStore, PolicySnapshotApplicator},
     service::{
@@ -74,6 +76,8 @@ use crate::{
 /// System composition root — bundles are the sole subsystem containers.
 pub struct AppContext {
     pub config: Arc<DeployConfig>,
+    /// Boot-verified venue wallet identity reused by settlement readiness.
+    pub wallet: WalletTopology,
     pub compute: Arc<ComputeExecutor>,
     pub shutdown: CancellationToken,
     pub events: CoreEventPublisher,
@@ -98,13 +102,8 @@ impl AppContext {
         Arc::clone(&self.governance.applicator)
     }
 
-    pub fn runtime_mode(&self) -> RuntimeModeHandle {
-        self.governance.runtime_mode.clone()
-    }
-
-    /// Lock-free operational kill-switch state for admission / exit hot paths.
-    pub fn kill_switch_handle(&self) -> KillSwitchHandle {
-        self.governance.kill_switch_handle.clone()
+    pub fn runtime_controls(&self) -> RuntimeControlsHandle {
+        self.governance.runtime_controls.clone()
     }
 
     /// Content-addressed Local or S3-compatible artifact store.

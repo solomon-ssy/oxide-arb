@@ -1,12 +1,12 @@
 # Phase 12 — Production Semantics and Verification Closure
 
-<!-- quant-pivot-lifecycle-contract:v1 -->
-> **Lifecycle contract**
-> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+<!-- quant-pivot-deployment-contract:v1 -->
+> **Deployment contract**
+> - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本 Phase 只维护当前 boot 基线；不提供旧 schema、旧配置、旧命令、旧 DTO 或历史测试的兼容路径。
-> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
-> - `rollback_and_data_verification`: 封存前通过空基础设施 fresh boot、确定性测试和显式证据验证；封存后不得回退到 boot reset。
+> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
+> - `rollback_and_data_verification`: 首次部署前通过空基础设施 fresh boot、确定性测试和显式证据验证；部署后使用备份、前向 migration 与显式回滚。
 
 > 状态：`ACTIVE_EXECUTION_LEDGER`  
 > 建立日期：2026-07-21  
@@ -22,12 +22,12 @@ Phase 12 关闭三类系统性债务：
 
 Neg Risk、官方 Rust SDK 升级和自动赎回的未来设计记录在
 [`12.1-polymarket-v2-neg-risk-sdk-and-settlement.md`](12.1-polymarket-v2-neg-risk-sdk-and-settlement.md)。
-该专项在本轮**只设计、不实施**；其中所有实现项永久保持 `DEFERRED_OUT_OF_SCOPE`，直到新的用户指令
-显式启动独立实施计划。
+Phase 12 原轮次只完成设计；用户已于 2026-07-22 显式启动独立实施。后续实现状态、证据和中断恢复只以
+12.1 专项台账为准，本总账不复制其任务状态。
 
-## 2. 本轮冻结边界
+## 2. 原 Phase 12 轮次冻结边界
 
-本轮不得实施以下事项：
+以下边界只描述 2026-07-21 已关闭的原 Phase 12 轮次，不再限制已独立激活的 12.1 专项：
 
 - 升级 `polymarket_client_sdk_v2` 或修改其 features。
 - 调整 `order_post_timeout_ms`。
@@ -51,8 +51,8 @@ Neg Risk、官方 Rust SDK 升级和自动赎回的未来设计记录在
 | `DONE` | 代码、验证和 Evidence Log 均已完成 |
 | `SUPERSEDED` | 经 Decision Log 明确批准后被其他项替代，或被显式移出本轮范围；不表示已完成 |
 
-同一时间只允许一个本轮条目为 `IN_PROGRESS`。12.1 中的 `DEFERRED_OUT_OF_SCOPE` 不属于此状态机，
-不得在本轮改为 `TODO` 或 `IN_PROGRESS`。
+同一时间只允许一个本轮条目为 `IN_PROGRESS`。12.1 使用自己文档中的独立状态机，不与本历史总账共享
+`IN_PROGRESS` 计数。
 
 ### 3.2 原子完成条件
 
@@ -253,6 +253,7 @@ Rustdoc public API，也不承担跨版本兼容。
 | Timestamp | Decision | Source | Consequence |
 |---|---|---|---|
 | 2026-07-21T00:00:00+08:00 | Neg Risk、SDK 升级和自动赎回本轮只形成专项文档 | 用户明确修正 | 12.1 所有实现项保持 `DEFERRED_OUT_OF_SCOPE` |
+| 2026-07-22T20:55:37+08:00 | 激活 12.1 独立实施台账 | 用户显式要求实施完整计划 | 原冻结决定保留为历史；12.1 状态、证据与恢复只由专项文档维护 |
 | 2026-07-21T00:00:00+08:00 | 使用 Phase README + 专项文档双控制面 | 用户确认的修正版计划 | README 管当前执行，12.1 管未来设计 |
 | 2026-07-21T00:00:00+08:00 | Git 保存历史交付证据，稳定文档只保留当前约束 | 用户要求去 Phase 化 | Phase 03/04/05/06/10/11 在抽取后删除 |
 | 2026-07-21T14:03:07+08:00 | 暂停历史 Phase 文档抽取、迁移、删除和 `phase-12` 收口删除 | 用户本轮显式修正 | DOC-001..010 全部标记 `SUPERSEDED` 且不代表完成；历史目录保持不动，未来由独立计划重新启用；本轮最终闭环不再依赖这些项目 |
@@ -396,6 +397,6 @@ Rustdoc public API，也不承担跨版本兼容。
 
 1. 除已显式移出范围的 DOC-001..010 外，本轮没有 `TODO`、`IN_PROGRESS` 或 `BLOCKED`。
 2. DOC-001..010 保持 `SUPERSEDED`，且历史 Phase 文档目标没有本轮 diff。
-3. 12.1 的所有专项实现项继续保持 `DEFERRED_OUT_OF_SCOPE`，专项文档与本总账原位保留。
+3. 12.1 专项文档与本总账原位保留；专项实施状态不得复制回本历史总账。
 4. 全量 Rust/UI/system/E2E gates 通过并记录证据。
 5. SDK、settlement、relayer、自动赎回冻结边界经最终 diff 审计确认未改变。

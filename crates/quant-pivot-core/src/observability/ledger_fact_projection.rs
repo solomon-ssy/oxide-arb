@@ -92,8 +92,8 @@ mod tests {
             quant::{AccountSource, ExecutionOrderState, OutcomeSide},
         },
         types::{
-            ExecutionOrderId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd,
-            VenueOrderAmount,
+            ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId, PositionId, Price,
+            Shares, TokenId, Usd, VenueOrderAmount,
         },
     };
     use rust_decimal_macros::dec;
@@ -150,6 +150,7 @@ mod tests {
         let position = PositionInfo {
             position_id: PositionId::from_v7(),
             order_intent_id: OrderIntentId::from_v7(),
+            execution_account_id: ExecutionAccountId::from_v7(),
             token_id: TokenId::from("t1"),
             market_id: MarketId::from("m1"),
             event_id: None,

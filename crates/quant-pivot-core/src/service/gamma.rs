@@ -49,6 +49,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    execution::settlement_discovery_wake::SettlementDiscoveryWake,
     governance::LinkageResolverService,
     ingest::{
         market_cache::MarketCache, market_filter::MarketFilter, market_registry::MarketRegistry,
@@ -81,6 +82,8 @@ pub struct GammaServiceDeps {
     pub events: CoreEventPublisher,
     /// Wake the system-status broadcaster after catalog warmup completes.
     pub status_nudge: SystemStatusNudge,
+    /// Best-effort settlement discovery wake. `PostgreSQL` remains the work source of truth.
+    pub settlement_discovery_wake: SettlementDiscoveryWake,
     /// WS subscription look-ahead window (hours) from deploy config.
     pub subscription_window_hours: u64,
     /// Offline linkage resolver — runs after successful sync.
@@ -100,6 +103,7 @@ pub struct GammaService {
     ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
     events: CoreEventPublisher,
     status_nudge: SystemStatusNudge,
+    settlement_discovery_wake: SettlementDiscoveryWake,
     subscription_window_hours: u64,
     linkage_resolver: Option<Arc<LinkageResolverService>>,
     linkage_wake: Arc<Notify>,
@@ -120,6 +124,7 @@ impl GammaService {
             ws_subscription: deps.ws_subscription,
             events: deps.events,
             status_nudge: deps.status_nudge,
+            settlement_discovery_wake: deps.settlement_discovery_wake,
             subscription_window_hours: deps.subscription_window_hours,
             linkage_resolver: deps.linkage_resolver,
             linkage_wake: Arc::new(Notify::new()),
@@ -457,6 +462,7 @@ impl GammaService {
             self.events
                 .publish(CoreEvent::MarketResolved { market_id, outcome });
         }
+        self.settlement_discovery_wake.wake();
     }
 
     async fn preserve_manual_blocks(

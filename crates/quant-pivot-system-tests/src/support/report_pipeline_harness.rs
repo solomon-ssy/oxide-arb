@@ -15,7 +15,7 @@ use quant_pivot_api::data_api::VenuePosition;
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::{
     governance::{
-        BiasTableApplicator, CoreCalibrationArtifactLoader, RuntimeModeHandle,
+        BiasTableApplicator, CoreCalibrationArtifactLoader, RuntimeControlsHandle,
         WeightOverlayApplicator,
     },
     ingest::{book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry},
@@ -61,11 +61,11 @@ use quant_pivot_models::{
         pagination::Paginated,
         quant::{
             BasisAlertInfo, ClaimReportSchedule, MarketLinkageInfo, NewAccountSnapshot,
-            NewBasisAlert, NewEntryConditionInstance, NewEquitySnapshot, NewFeatureParityState,
-            NewMarketLinkage, NewMarketSelection, NewModelRun, NewModelVersion, NewPortfolioPlan,
-            NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot,
-            NewReportTransaction, RecommendationInfo, RecommendationReportInfo,
-            ReportRunClaimConfig,
+            NewBasisAlert, NewEntryConditionInstance, NewEquitySnapshot, NewExecutionAccount,
+            NewFeatureParityState, NewMarketLinkage, NewMarketSelection, NewModelRun,
+            NewModelVersion, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
+            NewReportDataQualitySnapshot, NewReportTransaction, RecommendationInfo,
+            RecommendationReportInfo, ReportRunClaimConfig,
         },
         runtime::CoreEventPublisher,
     },
@@ -78,7 +78,7 @@ use quant_pivot_models::{
         model::ModelFamily,
         operation_log::{OperationCategory, OperationHttpMethod, OperationOutcome},
         quant::{
-            DownsideSource, EntryConditionState, FeatureParityLatchState,
+            DownsideSource, EntryConditionState, ExecutionWalletKind, FeatureParityLatchState,
             FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OutcomeSide,
             PublicationStatus, RecommendationReportStatus, ReportKind,
         },
@@ -92,31 +92,32 @@ use quant_pivot_models::{
     types::{
         AccountPositions, BasisAlertId, ConditionTruth, ContentHash, DecisionPolicySnapshotId,
         DomainInstrumentKey, EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan,
-        EventId, ExposureBreakdown, FeatureParityStateId, MarketId, MarketLinkageId,
-        MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
-        ModelVersionId, OperationDetailDocument, OperationLogId, PortfolioConstraintsSnapshot,
-        PortfolioOptimizerMeta, PortfolioRejectedSummary, PortfolioRiskBudget, Price,
-        RecommendationId, RecommendationReportId, RecommendationTradePlan, ReportDataQualityTokens,
-        ResearchProfileRef, RoleCode, SelectionExclusionSummary, Shares, TokenId, Usd, WorkerId,
+        EventId, EvmAddress, ExecutionAccountId, ExposureBreakdown, FeatureParityStateId, MarketId,
+        MarketLinkageId, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, OperationDetailDocument, OperationLogId,
+        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioRejectedSummary,
+        PortfolioRiskBudget, Price, RecommendationId, RecommendationReportId,
+        RecommendationTradePlan, ReportDataQualityTokens, ResearchProfileRef, RoleCode,
+        SelectionExclusionSummary, Shares, TokenId, Usd, WorkerId,
         model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgCalibrationArtifactRepository, PgEquitySnapshotRepository, PgEventRepository,
-        PgFactorRepository, PgFeatureParityRepository, PgFeatureRepository, PgMarketRepository,
-        PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgPolicyRepository, PgPositionRepository, PgRecommendationReportRepository,
-        PgRecommendationRepository, PgReportRunRepository, PgReservedCapitalRepository,
-        PgShadowComparisonRepository, PgTradePolicyRepository,
+        PgExecutionAccountRepository, PgFactorRepository, PgFeatureParityRepository,
+        PgFeatureRepository, PgMarketRepository, PgMarketSelectionRepository,
+        PgModelRegistryRepository, PgModelRunRepository, PgPolicyRepository, PgPositionRepository,
+        PgRecommendationReportRepository, PgRecommendationRepository, PgReportRunRepository,
+        PgReservedCapitalRepository, PgShadowComparisonRepository, PgTradePolicyRepository,
     },
     traits::{
         BasisAlertRepository, CalibrationArtifactRepository, EquitySnapshotRepository,
-        EventRepository, FactorRepository, FeatureParityRepository, MarketLinkageRepository,
-        MarketRepository, MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
-        PolicyRepository, PositionRepository, QuantFactReadRepository,
-        RecommendationReportRepository, RecommendationRepository, ReportRunRepository,
-        ReservedCapitalRepository, TradePolicyRepository,
+        EventRepository, ExecutionAccountRepository, FactorRepository, FeatureParityRepository,
+        MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
+        ModelRegistryRepository, ModelRunRepository, PolicyRepository, PositionRepository,
+        QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
+        ReportRunRepository, ReservedCapitalRepository, TradePolicyRepository,
     },
 };
 use quant_pivot_research::{
@@ -162,6 +163,29 @@ pub const NO_TOKEN: &str = "66666";
 pub const YES_TOKEN_2: &str = "55556";
 pub const NO_TOKEN_2: &str = "66667";
 pub const STUB_FUNDER: &str = "0xfunder";
+
+fn harness_execution_account() -> NewExecutionAccount {
+    let funder = EvmAddress::parse("0x2222222222222222222222222222222222222222")
+        .expect("harness execution account address");
+    NewExecutionAccount::build(
+        137,
+        funder.clone(),
+        ExecutionWalletKind::Eoa,
+        funder.clone(),
+        funder,
+        None,
+        None,
+    )
+    .expect("harness execution account identity")
+}
+
+async fn ensure_harness_execution_account(db: &DatabaseConnection) -> ExecutionAccountId {
+    PgExecutionAccountRepository::new(db.clone())
+        .ensure(harness_execution_account())
+        .await
+        .expect("persist harness execution account")
+        .execution_account_id
+}
 
 /// How market selection is configured for a harness bootstrap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -663,6 +687,8 @@ impl ReportPipelineHarness {
             .expect("active runtime config")
             .expect("active runtime config row");
 
+        ensure_harness_execution_account(db).await;
+
         let account_factory = account_factory(db, Arc::clone(&registry), &options);
         let model_runner =
             build_model_runner(db, Arc::clone(&store), Arc::clone(&calibration_loader));
@@ -996,6 +1022,7 @@ fn fixture_report_transaction(
 fn fixture_account_snapshot(report: &RecommendationReportInfo) -> NewAccountSnapshot {
     NewAccountSnapshot {
         account_snapshot_id: report.account_snapshot_ref,
+        execution_account_id: harness_execution_account().execution_account_id,
         as_of: report.decision_at,
         source: report.account_source,
         venue_net_liquidation_usd: report.capital_base_usd,
@@ -1244,11 +1271,12 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
             Arc::new(PgEquitySnapshotRepository::new(db.clone()))
                 as Arc<dyn EquitySnapshotRepository>,
             Arc::new(PgPositionRepository::new(db.clone())) as Arc<dyn PositionRepository>,
+            harness_execution_account().execution_account_id,
         )),
         composer: Arc::new(DefaultRecommendationComposer::new()),
         quant_fact_read_repo: Arc::new(EmptyFactRead),
         correlation_estimator: Arc::new(HistoricalCorrelationEstimator::new()),
-        runtime_mode: RuntimeModeHandle::default(),
+        runtime_controls: RuntimeControlsHandle::default(),
         readiness_gate: Arc::new(AlwaysOperationalGate),
     }))
 }

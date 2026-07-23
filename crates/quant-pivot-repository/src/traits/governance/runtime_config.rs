@@ -3,18 +3,13 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{
-        governance::{
-            ActivePolicyResourceInfo, ConfigActivityInfo, ConfigResourceInventoryInfo,
-            DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo,
-            NewDecisionPolicySnapshot, NewPolicyActivation, NewPolicyRevision,
-            NewProductionBaseline, NewProductionEvidence, PolicyActivationCommit,
-            PolicyActivationInfo, PolicyApprovalInfo, PolicyRevisionInfo, ProductionBaselineInfo,
-            ProductionEvidenceInfo, RecordPolicyApproval,
-        },
-        ports::{LifecycleSchemaVerificationPort, ProductionEvidenceArtifactVerificationPort},
+    domain::governance::{
+        ActivePolicyResourceInfo, ConfigActivityInfo, ConfigResourceInventoryInfo,
+        DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo, NewDecisionPolicySnapshot,
+        NewPolicyActivation, NewPolicyRevision, PolicyActivationCommit, PolicyActivationInfo,
+        PolicyApprovalInfo, PolicyRevisionInfo, RecordPolicyApproval,
     },
-    enums::runtime_config::{ConfigResourceKind, ProductionEvidenceKind},
+    enums::runtime_config::ConfigResourceKind,
     runtime_config::{
         ActivePolicyBundle, ImmutableProfileArtifactReferences, ImmutableProfileArtifacts,
         PolicyValidationEvidence,
@@ -198,28 +193,4 @@ pub trait PolicyRepository: Send + Sync {
         kind: Option<ConfigResourceKind>,
         limit: u64,
     ) -> Result<Vec<PolicyActivationInfo>, StorageError>;
-
-    async fn load_production_baseline(
-        &self,
-    ) -> Result<Option<ProductionBaselineInfo>, StorageError>;
-
-    async fn record_production_evidence(
-        &self,
-        evidence: NewProductionEvidence,
-        schema_verification: &dyn LifecycleSchemaVerificationPort,
-        artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
-    ) -> Result<ProductionEvidenceInfo, StorageError>;
-
-    async fn load_latest_production_evidence(
-        &self,
-        kind: ProductionEvidenceKind,
-    ) -> Result<Option<ProductionEvidenceInfo>, StorageError>;
-
-    /// Append the singleton boot production baseline. A second seal is rejected.
-    async fn seal_production_baseline(
-        &self,
-        baseline: NewProductionBaseline,
-        schema_verification: &dyn LifecycleSchemaVerificationPort,
-        artifact_verification: &dyn ProductionEvidenceArtifactVerificationPort,
-    ) -> Result<ProductionBaselineInfo, StorageError>;
 }

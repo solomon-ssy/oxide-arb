@@ -90,7 +90,7 @@ mod tests {
     use super::event_envelope;
     use crate::{
         domain::{
-            api::{BootstrapView, MarketBookView, SystemCapabilities, SystemStatusView},
+            api::{MarketBookView, SystemCapabilities, SystemStatusView},
             governance::SystemStatus,
             runtime::{
                 CoreEvent, MaterializationRunEvent, MaterializationRunKind,
@@ -100,12 +100,13 @@ mod tests {
             ws::{SubscriptionKey, channel::WsChannel},
         },
         enums::{
-            execution::{ReconciliationResult, SettlementRedeemState},
+            execution::ReconciliationResult,
             quant::{
                 QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportRunStatus,
                 TrainingDatasetStatus,
             },
-            system::{BootstrapPhase, CapabilityReason},
+            settlement::SettlementCaseState,
+            system::CapabilityReason,
         },
         types::{MarketId, RecommendationReportId, ReportRunId, ResearchProfileId},
     };
@@ -132,12 +133,7 @@ mod tests {
     fn system_status_maps_to_global_key() {
         let event = CoreEvent::SystemStatusChanged(Box::new(SystemStatusView {
             runtime: SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly),
-            bootstrap: BootstrapView {
-                phase: BootstrapPhase::Initializing,
-                bootstrap_contract_version: 1,
-                state_revision: 0,
-            },
-            capabilities: SystemCapabilities::fail_closed(CapabilityReason::BootstrapInitializing),
+            capabilities: SystemCapabilities::fail_closed(CapabilityReason::ControlPlaneNotReady),
         }));
         let (key, envelope) = event_envelope(&event).expect("status maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::SystemStatus));
@@ -271,7 +267,7 @@ mod tests {
         let event = CoreEvent::Settlement(SettlementRedeemLifecycleEvent {
             settlement_redeem_id: "sr-1".to_owned(),
             market_id: MarketId::new("0xabc"),
-            state: SettlementRedeemState::Confirmed,
+            state: SettlementCaseState::Confirmed,
         });
         let (key, envelope) = event_envelope(&event).expect("settlement maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::QuantSettlement));

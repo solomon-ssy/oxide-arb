@@ -10,6 +10,7 @@ use super::sea_orm_active_enums::QpAccountSource;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub account_snapshot_id: Uuid,
+    pub execution_account_id: Uuid,
     pub as_of: DateTimeWithTimeZone,
     pub source: QpAccountSource,
     pub venue_net_liquidation_usd: Decimal,
@@ -21,6 +22,14 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub exposures_json: Json,
     pub created_at: DateTimeWithTimeZone,
+    #[sea_orm(
+        belongs_to,
+        from = "execution_account_id",
+        to = "execution_account_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_execution_account: BelongsTo<super::quant_execution_account::Entity>,
     #[sea_orm(has_many)]
     pub quant_equity_snapshots: HasMany<super::quant_equity_snapshot::Entity>,
     #[sea_orm(has_many)]

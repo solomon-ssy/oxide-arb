@@ -21,9 +21,9 @@
 
 mod cache;
 mod db;
+mod deployment;
 mod domain_sources;
 mod keys;
-mod lifecycle;
 mod market_data;
 mod observability;
 mod polymarket;
@@ -36,6 +36,7 @@ mod web;
 pub use cache::{CacheConfig, DomainCacheConfig, MokaConfig, RedisConfig};
 use config_rs::{Config, ConfigError as ConfigConfigError, File};
 pub use db::{ClickHouseConfig, DatabaseConfig, PostgresConfig};
+pub use deployment::DeploymentConfig;
 pub use domain_sources::{
     AirNowPm25ReportingAreaBindingConfig, AirNowPm25SiteBindingConfig, AirNowSourceConfig,
     AviationWeatherSourceConfig, BinanceSourceConfig, ChainlinkDataStreamFeedConfig,
@@ -48,7 +49,6 @@ pub use domain_sources::{
     WeatherStationProfileConfig, WeatherVerticalBindingsConfig, builtin_weather_station_profiles,
 };
 pub use keys::KeysConfig;
-pub use lifecycle::{CompiledBuildIdentity, LifecycleDeployConfig, ProjectLifecyclePolicy};
 pub use market_data::{
     DataApiConfig, GammaConfig, MAX_TRADE_TAPE_RECONCILIATION_ROWS, MarketDataDeployConfig,
     TradeTapeOnChainConfig, WebSocketConfig,
@@ -56,7 +56,9 @@ pub use market_data::{
 pub use observability::{
     NotificationChannelsConfig, ObservabilityConfig, TelegramChannelConfig, WebhookChannelConfig,
 };
-pub use polymarket::{OnchainConfig, PolygonRpcEndpoint, PolymarketConfig, RelayerConfig};
+pub use polymarket::{
+    OnchainConfig, PolygonRpcEndpoint, PolymarketConfig, RelayerConfig, SettlementDeployConfig,
+};
 pub use quant::{
     QuantAccountDeployConfig, QuantDeployConfig, QuantWorkersConfig, ResearchJobsConfig,
 };
@@ -81,8 +83,8 @@ use crate::{
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeployConfig {
-    /// Environment identity and irreversible project-lifecycle expectation.
-    pub lifecycle: LifecycleDeployConfig,
+    /// Environment identity used for environment-specific operational safety.
+    pub deployment: DeploymentConfig,
     /// Polymarket platform endpoints, chain, and fee schedule.
     pub polymarket: PolymarketConfig,
     /// Market-data connections (CLOB WebSocket + Gamma catalog).
@@ -133,7 +135,6 @@ impl DeployConfig {
             .chainlink_data_streams
             .normalize_credentials();
         deploy.ensure_valid_common()?;
-        deploy.lifecycle.validate_source_contract()?;
         Ok(deploy)
     }
 }

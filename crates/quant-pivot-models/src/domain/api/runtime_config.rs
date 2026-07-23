@@ -8,24 +8,22 @@ use validator::Validate;
 use crate::{
     domain::governance::{
         ConfigActivityInfo, DecisionPolicySnapshotOptionInfo, PolicyActivationInfo,
-        PolicyActivationOutcome, PolicyApprovalInfo, PolicyRevisionInfo, ProductionBaselineInfo,
+        PolicyActivationOutcome, PolicyApprovalInfo, PolicyRevisionInfo,
     },
     enums::runtime_config::{
-        CheckOutcome, ConfigResourceKind, CredentialHealthStatus, CredentialKind,
-        DecisionPolicySnapshotSource, DeploymentEndpointKind, LifecycleBaseline,
-        LifecycleCheckKind, PolicyActivationKind, PolicyActorKind, PolicyApplyBoundary,
-        PolicyApprovalDecision, PolicyConsumer, PolicyRevisionStatus, ProjectLifecycleState,
-        ResourceBudgetKind, ResourceBudgetMetric, ResourceBudgetUnit,
+        ConfigResourceKind, CredentialHealthStatus, CredentialKind, DecisionPolicySnapshotSource,
+        DeploymentEndpointKind, PolicyActivationKind, PolicyActorKind, PolicyApplyBoundary,
+        PolicyApprovalDecision, PolicyConsumer, PolicyRevisionStatus, ResourceBudgetKind,
+        ResourceBudgetMetric, ResourceBudgetUnit,
     },
     runtime_config::{
-        LifecycleCheckDetail, PolicyDocument, PolicyRevisionBundle, PolicyValidationEvidence,
-        PolicyValidationSubject, ProductionSealEvidence, ScheduleCadence,
+        PolicyDocument, PolicyRevisionBundle, PolicyValidationEvidence, PolicyValidationSubject,
+        ScheduleCadence,
     },
     types::{
-        AuditEventId, BuildCommitHash, ContentHash, DecisionPolicySnapshotId,
-        DeploymentEnvironment, PolicyActivationId, PolicyApprovalId, PolicyBundleGeneration,
-        PolicyIdempotencyKey, PolicyPreflightToken, PolicyRevisionId, ProductionBaselineId,
-        ProductionSealConfirmationPhrase, SchemaVersion, UserId,
+        AuditEventId, ContentHash, DecisionPolicySnapshotId, DeploymentEnvironment,
+        PolicyActivationId, PolicyApprovalId, PolicyBundleGeneration, PolicyIdempotencyKey,
+        PolicyPreflightToken, PolicyRevisionId, SchemaVersion, UserId,
     },
 };
 
@@ -336,78 +334,6 @@ pub struct DeploymentResourceLimitView {
     pub unit: ResourceBudgetUnit,
 }
 
-/// Append-only production baseline exposed by the lifecycle endpoint.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct ProductionBaselineView {
-    pub production_baseline_id: ProductionBaselineId,
-    pub environment: DeploymentEnvironment,
-    pub sealed_at: DateTime<Utc>,
-    pub sealed_by: PolicyActorView,
-    pub build_commit: BuildCommitHash,
-    pub postgres_schema_fingerprint: ContentHash,
-    pub clickhouse_schema_fingerprint: ContentHash,
-    pub policy_bundle_generation: PolicyBundleGeneration,
-    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    pub policy_bundle_hash: ContentHash,
-    pub lifecycle_policy_hash: ContentHash,
-    pub evidence: ProductionSealEvidence,
-    pub created_at: DateTime<Utc>,
-}
-
-impl From<ProductionBaselineInfo> for ProductionBaselineView {
-    fn from(info: ProductionBaselineInfo) -> Self {
-        Self {
-            production_baseline_id: info.production_baseline_id,
-            environment: info.environment,
-            sealed_at: info.sealed_at,
-            sealed_by: PolicyActorView {
-                kind: info.sealed_by_kind,
-                user_id: info.sealed_by_user_id,
-                label: info.sealed_by_label,
-            },
-            build_commit: info.build_commit,
-            postgres_schema_fingerprint: info.postgres_schema_fingerprint,
-            clickhouse_schema_fingerprint: info.clickhouse_schema_fingerprint,
-            policy_bundle_generation: info.policy_bundle_generation,
-            decision_policy_snapshot_id: info.decision_policy_snapshot_id,
-            policy_bundle_hash: info.policy_bundle_hash,
-            lifecycle_policy_hash: info.lifecycle_policy_hash,
-            evidence: info.evidence,
-            created_at: info.created_at,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct LifecycleView {
-    pub state: ProjectLifecycleState,
-    pub baseline: LifecycleBaseline,
-    pub environment: DeploymentEnvironment,
-    pub build_commit: Option<BuildCommitHash>,
-    pub postgres_schema_fingerprint: Option<ContentHash>,
-    pub clickhouse_schema_fingerprint: Option<ContentHash>,
-    pub active_policy_bundle_hash: Option<ContentHash>,
-    pub checks: Vec<LifecycleCheckView>,
-    pub production_baseline: Option<ProductionBaselineView>,
-    pub required_confirmation_phrase: Option<ProductionSealConfirmationPhrase>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct LifecycleCheckView {
-    pub kind: LifecycleCheckKind,
-    pub outcome: CheckOutcome,
-    pub detail: LifecycleCheckDetail,
-}
-
-#[derive(Debug, Deserialize, Validate, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SealProductionRequest {
-    pub environment: DeploymentEnvironment,
-    pub confirmation_phrase: ProductionSealConfirmationPhrase,
-    #[validate(length(min = 1, max = 1024))]
-    pub reason: String,
-}
-
 #[derive(Debug, Deserialize, Validate, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulePreviewRequest {
@@ -491,9 +417,6 @@ pub struct ConfigApiContractSchema {
     pub snapshot_options_query: ConfigSnapshotOptionsQuery,
     pub snapshot_options_response: Vec<DecisionPolicySnapshotOptionView>,
     pub deployment_response: DeploymentConfigView,
-    pub lifecycle_response: LifecycleView,
-    pub seal_production_request: SealProductionRequest,
-    pub seal_production_response: LifecycleView,
     pub schedule_preview_request: SchedulePreviewRequest,
     pub schedule_preview_response: SchedulePreviewView,
 }

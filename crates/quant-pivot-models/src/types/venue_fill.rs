@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     enums::fee::FeeLiquidityRole,
-    types::{Bps, ContentHash, OrderId, Price, Shares, Usd},
+    types::{Bps, ContentHash, EvmTransactionHash, OrderId, Price, Shares, Usd, VenueTradeId},
 };
 
 /// Strength of the evidence supporting a venue fee observation.
@@ -27,12 +27,12 @@ pub enum FeeEvidence {
         expected_fee: Usd,
     },
     AuthenticatedTradeReconstructed {
-        trade_id: String,
+        trade_id: VenueTradeId,
         order_id: OrderId,
         liquidity_role: FeeLiquidityRole,
         fee_rate_bps: Bps,
         reconstructed_fee: Usd,
-        transaction_hash: String,
+        transaction_hash: Option<EvmTransactionHash>,
         matched_at: DateTime<Utc>,
         maker_order_ids: Vec<OrderId>,
     },

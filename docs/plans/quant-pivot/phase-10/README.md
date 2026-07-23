@@ -1,12 +1,12 @@
 # Phase 10 — Frontend Refactor 子phase索引
 
-<!-- quant-pivot-lifecycle-contract:v1 -->
-> **Lifecycle contract**
-> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+<!-- quant-pivot-deployment-contract:v1 -->
+> **Deployment contract**
+> - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
-> - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
+> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
+> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
 
 > 状态：当前实现索引。10.1–10.5 的业务面与 10.7 Config Console 已进入代码；10.6 是统一出口契约。原 users/roles/menus placeholder backlog 已删除，后端 RBAC API 保留但不发布伪 UI。具体 gate 是否通过只以 closure Execution Ledger 的本轮命令和 evidence hash 为准。
 >

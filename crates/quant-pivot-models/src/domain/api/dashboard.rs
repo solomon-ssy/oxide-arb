@@ -81,7 +81,6 @@ pub enum DashboardSection<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DashboardPrimaryAction {
-    ActivateBootstrap,
     ResolveReconciliation,
     RunReport,
     ViewBlockers,

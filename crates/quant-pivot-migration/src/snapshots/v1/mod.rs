@@ -36,7 +36,10 @@ pub mod quant_entry_condition_audit;
 pub mod quant_entry_condition_evaluation_outbox;
 pub mod quant_entry_condition_instance;
 pub mod quant_equity_snapshot;
+pub mod quant_execution_account;
 pub mod quant_execution_order;
+pub mod quant_execution_trade_ref;
+pub mod quant_execution_transaction_ref;
 pub mod quant_factor_definition;
 pub mod quant_factor_value;
 pub mod quant_feature_parity_candidate;
@@ -67,6 +70,11 @@ pub mod quant_report_schedule_gap;
 pub mod quant_report_schedule_state;
 pub mod quant_research_job;
 pub mod quant_research_readiness_evidence;
+pub mod quant_settlement_authorization;
+pub mod quant_settlement_chain_submission;
+pub mod quant_settlement_external_cursor;
+pub mod quant_settlement_governed_action;
+pub mod quant_settlement_inventory_lot;
 pub mod quant_settlement_redeem;
 pub mod quant_settlement_redeem_lot;
 pub mod quant_shadow_comparison;
@@ -85,11 +93,8 @@ pub mod role;
 pub mod role_menu;
 pub mod sea_orm_active_enums;
 pub mod seed_application;
-pub mod system_bootstrap_transition;
-pub mod system_kill_switch;
-pub mod system_production_baseline;
-pub mod system_production_evidence;
-pub mod system_runtime_state;
+pub mod system_runtime_control;
+pub mod system_runtime_control_transition;
 pub mod user;
 pub mod user_role;
 
@@ -132,7 +137,10 @@ pub const TABLES: &[&str] = &[
     "quant_entry_condition_evaluation_outbox",
     "quant_entry_condition_instance",
     "quant_equity_snapshot",
+    "quant_execution_account",
     "quant_execution_order",
+    "quant_execution_trade_ref",
+    "quant_execution_transaction_ref",
     "quant_factor_definition",
     "quant_factor_value",
     "quant_feature_parity_candidate",
@@ -163,6 +171,11 @@ pub const TABLES: &[&str] = &[
     "quant_report_schedule_state",
     "quant_research_job",
     "quant_research_readiness_evidence",
+    "quant_settlement_authorization",
+    "quant_settlement_chain_submission",
+    "quant_settlement_external_cursor",
+    "quant_settlement_governed_action",
+    "quant_settlement_inventory_lot",
     "quant_settlement_redeem",
     "quant_settlement_redeem_lot",
     "quant_shadow_comparison",
@@ -180,11 +193,8 @@ pub const TABLES: &[&str] = &[
     "role",
     "role_menu",
     "seed_application",
-    "system_bootstrap_transition",
-    "system_kill_switch",
-    "system_production_baseline",
-    "system_production_evidence",
-    "system_runtime_state",
+    "system_runtime_control",
+    "system_runtime_control_transition",
     "user",
     "user_role",
 ];
@@ -192,7 +202,6 @@ pub const TABLES: &[&str] = &[
 pub const ENUMS: &[&str] = &[
     "qp_account_source",
     "qp_approval_status",
-    "qp_bootstrap_phase",
     "qp_calibration_kind",
     "qp_capital_allocation_state",
     "qp_catalog_change_type",
@@ -216,6 +225,7 @@ pub const ENUMS: &[&str] = &[
     "qp_execution_order_phase",
     "qp_execution_order_state",
     "qp_execution_wallet_kind",
+    "qp_exit_settlement_mode",
     "qp_exit_reason",
     "qp_exit_state",
     "qp_factor_definition_scope",
@@ -254,10 +264,10 @@ pub const ENUMS: &[&str] = &[
     "qp_policy_approval_decision",
     "qp_profile_artifact_kind",
     "qp_policy_revision_status",
-    "qp_production_evidence_kind",
     "qp_position_ledger_state",
     "qp_publication_status",
     "qp_quant_runtime_mode",
+    "qp_redeem_policy",
     "qp_research_evaluation_track",
     "qp_recommendation_attribution_outcome",
     "qp_recommendation_report_status",
@@ -277,7 +287,19 @@ pub const ENUMS: &[&str] = &[
     "qp_resource_type",
     "qp_role_kind",
     "qp_role_status",
-    "qp_settlement_redeem_state",
+    "qp_settlement_authorization_state",
+    "qp_settlement_case_state",
+    "qp_settlement_effective_policy",
+    "qp_settlement_failure_code",
+    "qp_settlement_governed_action_kind",
+    "qp_settlement_governed_action_state",
+    "qp_settlement_readiness_status",
+    "qp_settlement_reconciliation_state",
+    "qp_settlement_route",
+    "qp_settlement_write_policy",
+    "qp_settlement_submission_kind",
+    "qp_settlement_submission_purpose",
+    "qp_settlement_submission_state",
     "qp_side",
     "qp_source_slice_status",
     "qp_tick_size",
@@ -291,6 +313,7 @@ pub const ENUMS: &[&str] = &[
     "qp_training_dataset_status",
     "qp_user_status",
     "qp_venue_order_status",
+    "qp_venue_trade_status",
     "qp_weather_temperature_statistic",
 ];
 
@@ -332,7 +355,10 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_entry_condition_evaluation_outbox.rs"),
     include_bytes!("quant_entry_condition_instance.rs"),
     include_bytes!("quant_equity_snapshot.rs"),
+    include_bytes!("quant_execution_account.rs"),
     include_bytes!("quant_execution_order.rs"),
+    include_bytes!("quant_execution_trade_ref.rs"),
+    include_bytes!("quant_execution_transaction_ref.rs"),
     include_bytes!("quant_factor_definition.rs"),
     include_bytes!("quant_factor_value.rs"),
     include_bytes!("quant_feature_parity_candidate.rs"),
@@ -363,6 +389,11 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_report_schedule_state.rs"),
     include_bytes!("quant_research_job.rs"),
     include_bytes!("quant_research_readiness_evidence.rs"),
+    include_bytes!("quant_settlement_authorization.rs"),
+    include_bytes!("quant_settlement_chain_submission.rs"),
+    include_bytes!("quant_settlement_external_cursor.rs"),
+    include_bytes!("quant_settlement_governed_action.rs"),
+    include_bytes!("quant_settlement_inventory_lot.rs"),
     include_bytes!("quant_settlement_redeem.rs"),
     include_bytes!("quant_settlement_redeem_lot.rs"),
     include_bytes!("quant_shadow_comparison.rs"),
@@ -381,11 +412,8 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("role_menu.rs"),
     include_bytes!("sea_orm_active_enums.rs"),
     include_bytes!("seed_application.rs"),
-    include_bytes!("system_bootstrap_transition.rs"),
-    include_bytes!("system_kill_switch.rs"),
-    include_bytes!("system_production_baseline.rs"),
-    include_bytes!("system_production_evidence.rs"),
-    include_bytes!("system_runtime_state.rs"),
+    include_bytes!("system_runtime_control.rs"),
+    include_bytes!("system_runtime_control_transition.rs"),
     include_bytes!("user.rs"),
     include_bytes!("user_role.rs"),
 ];

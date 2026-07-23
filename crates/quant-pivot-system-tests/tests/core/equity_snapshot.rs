@@ -14,7 +14,9 @@ use quant_pivot_repository::{
     traits::EquitySnapshotRepository,
 };
 use quant_pivot_research::portfolio::{AccountSnapshot, DrawdownState};
-use quant_pivot_system_tests::postgres::setup_pg;
+use quant_pivot_system_tests::{
+    postgres::setup_pg, support::execution_pg_seed::ensure_fixture_execution_account,
+};
 use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
 
@@ -53,9 +55,11 @@ async fn seed_peak(db: &DatabaseConnection, capital: Usd, as_of: DateTime<Utc>) 
 pub async fn new_account_no_history_is_neutral_drawdown() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
+    let execution_account_id = ensure_fixture_execution_account(&db).await;
     let service = EquitySnapshotService::new(
         Arc::new(PgEquitySnapshotRepository::new(db.clone())),
         Arc::new(PgPositionRepository::new(db)),
+        execution_account_id,
     );
     let as_of = Utc::now();
     let account = account_snapshot(Usd::new(dec!(10000)), as_of);
@@ -72,11 +76,13 @@ pub async fn new_account_no_history_is_neutral_drawdown() {
 pub async fn resolve_drawdown_re_read_picks_up_concurrent_history() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
+    let execution_account_id = ensure_fixture_execution_account(&db).await;
     let equity_repo =
         Arc::new(PgEquitySnapshotRepository::new(db.clone())) as Arc<dyn EquitySnapshotRepository>;
     let service = EquitySnapshotService::new(
         Arc::clone(&equity_repo),
         Arc::new(PgPositionRepository::new(db.clone())),
+        execution_account_id,
     );
 
     let as_of = Utc::now();
@@ -100,9 +106,11 @@ pub async fn resolve_drawdown_re_read_picks_up_concurrent_history() {
 pub async fn equity_snapshot_records_real_equity_and_pnl() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
+    let execution_account_id = ensure_fixture_execution_account(&db).await;
     let service = EquitySnapshotService::new(
         Arc::new(PgEquitySnapshotRepository::new(db.clone())),
         Arc::new(PgPositionRepository::new(db.clone())),
+        execution_account_id,
     );
 
     let as_of = Utc::now();

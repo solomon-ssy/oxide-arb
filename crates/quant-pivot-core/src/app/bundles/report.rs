@@ -83,11 +83,12 @@ impl ReportBundle {
             drawdown_provider: Arc::new(EquitySnapshotService::new(
                 Arc::clone(&equity_repo),
                 Arc::clone(&position_repo),
+                deps.account.execution_account.execution_account_id,
             )),
             composer,
             quant_fact_read_repo: Arc::clone(&deps.infra.quant_fact_read),
             correlation_estimator: Arc::new(HistoricalCorrelationEstimator::new()),
-            runtime_mode: deps.governance.runtime_mode.clone(),
+            runtime_controls: deps.governance.runtime_controls.clone(),
             readiness_gate: Arc::new(DefaultReportReadinessGate::new(
                 Arc::clone(&deps.data.catalog),
                 Arc::clone(&deps.data.ws_manager),

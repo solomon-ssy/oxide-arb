@@ -65,10 +65,10 @@ impl AppContext {
             self.events.clone(),
         ));
         let pg = Arc::clone(&self.infra.pg);
-        let bootstrap = Arc::clone(&self.governance.bootstrap);
+        let capabilities = Arc::clone(&self.governance.capabilities);
         runner.spawn(TaskId::EntryConditionWorker, move |token| async move {
             run_while_capable(
-                bootstrap,
+                capabilities,
                 CapabilityId::ReportGenerationEligible,
                 token,
                 move |worker_token| {

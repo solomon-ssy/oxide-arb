@@ -4,8 +4,7 @@ pub mod context;
 pub mod policy;
 pub mod rbac;
 pub mod spec;
-pub mod system_kill_switch;
-pub mod system_runtime_state;
+pub mod system_runtime_control;
 
 pub use context::SeedContext;
 pub use policy::SeedConflictPolicy;

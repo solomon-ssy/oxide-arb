@@ -45,11 +45,11 @@ impl AppContext {
             attestor,
             scope,
         )?);
-        let bootstrap = Arc::clone(&self.governance.bootstrap);
+        let capabilities = Arc::clone(&self.governance.capabilities);
         runner.spawn(TaskId::ResearchReadinessEvidenceWorker, move |token| async move {
             loop {
                 if !wait_for_capability(
-                    Arc::clone(&bootstrap),
+                    Arc::clone(&capabilities),
                     CapabilityId::ResearchCaptureEnabled,
                     &token,
                 )
@@ -68,7 +68,7 @@ impl AppContext {
                         "research readiness evidence capture failed; previous evidence is not extended"
                     ),
                 }
-                let mut capabilities = bootstrap.subscribe_capabilities();
+                let mut capabilities = capabilities.subscribe_capabilities();
                 tokio::select! {
                     () = token.cancelled() => return,
                     changed = capabilities.changed() => {

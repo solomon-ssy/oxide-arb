@@ -4,9 +4,7 @@ use std::{future::Future, pin::Pin};
 
 use sea_orm::{DatabaseTransaction, DbErr};
 
-use crate::seed::{
-    SeedConflictPolicy, SeedContext, rbac, system_kill_switch, system_runtime_state,
-};
+use crate::seed::{SeedConflictPolicy, SeedContext, rbac, system_runtime_control};
 
 /// Typed key for passing database-hydrated artifacts between ordered seeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -76,8 +74,7 @@ pub struct SeedSpec {
 #[must_use]
 pub fn all_specs() -> Vec<SeedSpec> {
     vec![
-        system_kill_switch::SYSTEM_KILL_SWITCH_SEED,
-        system_runtime_state::SYSTEM_RUNTIME_STATE_SEED,
+        system_runtime_control::SYSTEM_RUNTIME_CONTROL_SEED,
         rbac::menus::MENUS_SEED,
         rbac::roles::ROLES_SEED,
         rbac::admin_user::ADMIN_USER_SEED,

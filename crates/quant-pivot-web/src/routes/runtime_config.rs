@@ -9,12 +9,12 @@ use actix_web::{
     http::Method,
     web::{Data, Path, Query},
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use quant_pivot_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
 };
 use quant_pivot_models::{
-    config::{DeployConfig, ProjectLifecyclePolicy},
+    config::DeployConfig,
     domain::{
         api::{
             ActivatePolicyDraftRequest, ApprovePolicyDraftRequest, ConfigActivityQuery,
@@ -23,17 +23,16 @@ use quant_pivot_models::{
             CurrentPolicyResourceView, DecisionPolicySnapshotOptionView,
             DeploymentConfigSnapshotView, DeploymentConfigView, DeploymentEndpointView,
             DeploymentIdentityView, DeploymentResourceBudgetView, DeploymentResourceLimitView,
-            LifecycleCheckView, LifecycleView, PolicyActivationResultView, PolicyApprovalView,
-            PolicyResourceSchemaView, PolicyRevisionListQuery, PolicyRevisionView,
-            PolicyValidationView, SchedulePreviewRequest, SchedulePreviewView,
-            SealProductionRequest, ValidatePolicyDraftRequest,
+            PolicyActivationResultView, PolicyApprovalView, PolicyResourceSchemaView,
+            PolicyRevisionListQuery, PolicyRevisionView, PolicyValidationView,
+            SchedulePreviewRequest, SchedulePreviewView, ValidatePolicyDraftRequest,
         },
         governance::{
             NewDecisionPolicySnapshot, NewPolicyActivation, NewPolicyRevision,
-            NewProductionBaseline, PolicyActivationCommit, PolicyActivationOutcome,
-            PolicyRevisionInfo, ProductionEvidenceInfo, RecordPolicyApproval,
+            PolicyActivationCommit, PolicyActivationOutcome, PolicyRevisionInfo,
+            RecordPolicyApproval,
         },
-        ports::{PreparedPolicySnapshot, VerifiedSchemaFingerprints},
+        ports::PreparedPolicySnapshot,
         runtime::CoreEvent,
     },
     enums::{
@@ -42,25 +41,22 @@ use quant_pivot_models::{
         runtime_config::{
             CheckOutcome, ConfigAuditAction, ConfigResourceKind, CredentialHealthStatus,
             CredentialKind, DecisionPolicySnapshotSource, DeploymentEndpointKind,
-            LifecycleBaseline, LifecycleCheckKind, PolicyActivationKind, PolicyActorKind,
-            PolicyPreflightCheckKind, PolicyPreflightDetailCode, PolicyRevisionStatus,
-            PolicyValidationCode, PolicyValidationSeverity, ProductionEvidenceKind,
-            ProjectLifecycleState, ResourceBudgetKind, ResourceBudgetMetric, ResourceBudgetUnit,
+            PolicyActivationKind, PolicyActorKind, PolicyPreflightCheckKind,
+            PolicyPreflightDetailCode, PolicyRevisionStatus, PolicyValidationCode,
+            PolicyValidationSeverity, ResourceBudgetKind, ResourceBudgetMetric, ResourceBudgetUnit,
         },
     },
     hashing::CanonicalDigest,
     runtime_config::{
-        ActivePolicyBundle, DecisionPolicySnapshot, LifecycleCheckDetail,
-        POLICY_RESOURCE_SCHEMA_VERSION, PolicyDocument, PolicyPreflightResult,
-        PolicyRevisionBundle, PolicyValidationEvidence, PolicyValidationIssue,
-        PolicyValidationSubject, ProductionSealCheck, ProductionSealEvidence, preview_fire_times,
+        DecisionPolicySnapshot, POLICY_RESOURCE_SCHEMA_VERSION, PolicyDocument,
+        PolicyPreflightResult, PolicyRevisionBundle, PolicyValidationEvidence,
+        PolicyValidationIssue, PolicyValidationSubject, preview_fire_times,
         validate_runtime_config,
     },
     types::{
-        AuditEventId, ContentHash, DecisionPolicySnapshotId, DeploymentEnvironment,
-        PolicyActivationId, PolicyApprovalId, PolicyBundleGeneration, PolicyIdempotencyKey,
-        PolicyPreflightToken, PolicyRevisionId, ProductionBaselineId,
-        ProductionSealConfirmationPhrase, UserId,
+        AuditEventId, ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyApprovalId,
+        PolicyBundleGeneration, PolicyIdempotencyKey, PolicyPreflightToken, PolicyRevisionId,
+        UserId,
     },
 };
 use serde::Serialize;
@@ -89,18 +85,6 @@ struct ConfigAuditDetail<'a> {
     policy_approval_id: Option<&'a PolicyApprovalId>,
     policy_activation_id: Option<&'a PolicyActivationId>,
     activation_kind: Option<PolicyActivationKind>,
-    acting_role: &'a str,
-    request_id: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct ProductionSealAuditDetail<'a> {
-    production_baseline_id: &'a ProductionBaselineId,
-    environment: &'a str,
-    build_commit: &'a str,
-    policy_bundle_hash: &'a ContentHash,
-    lifecycle_policy_hash: &'a ContentHash,
-    reason: &'a str,
     acting_role: &'a str,
     request_id: &'a str,
 }
@@ -194,18 +178,6 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/config/deployment",
             Rule::ResourceOp(ResourceType::DecisionPolicySnapshot, Operation::Read),
             deployment,
-        ),
-        spec(
-            Method::GET,
-            "/config/lifecycle",
-            Rule::ResourceOp(ResourceType::ConfigLifecycle, Operation::Read),
-            lifecycle,
-        ),
-        spec(
-            Method::POST,
-            "/config/lifecycle/seal-production",
-            Rule::ActingRoleGoverned(ResourceType::ConfigLifecycle, Operation::Seal),
-            seal_production,
         ),
         spec(
             Method::POST,
@@ -581,10 +553,6 @@ pub async fn schedule_preview(
     Ok(WebResponse::ok(SchedulePreviewView { next_fire_times }))
 }
 
-pub async fn lifecycle(state: Data<AppState>) -> Result<WebResponse<LifecycleView>, WebError> {
-    lifecycle_view(&state).await.map(WebResponse::ok)
-}
-
 pub async fn deployment(
     state: Data<AppState>,
 ) -> Result<WebResponse<DeploymentConfigView>, WebError> {
@@ -642,7 +610,7 @@ pub async fn deployment(
         },
     ];
     Ok(WebResponse::ok(DeploymentConfigView {
-        environment: deploy.lifecycle.environment.clone(),
+        environment: deploy.deployment.environment.clone(),
         restart_required: true,
         snapshot: DeploymentConfigSnapshotView {
             endpoints,
@@ -877,347 +845,6 @@ const fn credential_health(credential: CredentialKind, configured: bool) -> Cred
 
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
-}
-
-pub async fn seal_production(
-    state: Data<AppState>,
-    actor: AuthedActor,
-    acting_role: ActingRole,
-    request_id: RequestId,
-    op_ctx: OperationCtx,
-    body: ValidatedJson<SealProductionRequest>,
-) -> Result<WebResponse<LifecycleView>, WebError> {
-    let body = body.into_inner();
-    if state
-        .runtime_config
-        .load_production_baseline()
-        .await?
-        .is_some()
-    {
-        return Err(WebError::Conflict(
-            "the production baseline is already sealed and cannot be replaced".to_owned(),
-        ));
-    }
-    if body.environment != state.deploy.lifecycle.environment {
-        return Err(WebError::BadRequest(
-            "request environment does not match the deployment environment".to_owned(),
-        ));
-    }
-    let expected_phrase = production_seal_confirmation(&body.environment)?;
-    if body.confirmation_phrase != expected_phrase {
-        return Err(WebError::BadRequest(
-            "production seal confirmation phrase does not match".to_owned(),
-        ));
-    }
-    let source = ProjectLifecyclePolicy::compiled()?;
-    if source.state != ProjectLifecycleState::PreProductionResettable
-        || state.deploy.lifecycle.expected_state != ProjectLifecycleState::PreProductionResettable
-    {
-        return Err(WebError::Conflict(
-            "production sealing is only allowed from pre_production_resettable".to_owned(),
-        ));
-    }
-    let build_commit = state.build_identity.build_commit.clone();
-    let active_bundle = state
-        .runtime_config
-        .load_current_bundle()
-        .await?
-        .ok_or_else(|| WebError::Conflict("no active policy bundle exists".to_owned()))?;
-    let (evidence, live_schema) = production_seal_evidence(&state, Some(&active_bundle)).await?;
-    let policy_bundle_hash = active_bundle.snapshot_hash;
-    if evidence
-        .checks
-        .iter()
-        .any(|check| check.outcome != CheckOutcome::Passed)
-    {
-        return Err(WebError::Conflict(
-            "all production seal preflight checks must pass".to_owned(),
-        ));
-    }
-    let frozen_policy = ProjectLifecyclePolicy {
-        state: ProjectLifecycleState::ProductionFrozen,
-        baseline: LifecycleBaseline::Boot,
-    };
-    let lifecycle_policy_hash = frozen_policy.content_hash()?;
-    let production_baseline_id = ProductionBaselineId::boot();
-    let now = Utc::now();
-    let lease = state.lifecycle_leases.acquire().await?;
-    let seal_result = tokio::select! {
-      result = state.runtime_config.seal_production_baseline(
-            NewProductionBaseline {
-                production_baseline_id,
-                environment: body.environment.clone(),
-                sealed_at: now,
-                sealed_by_kind: PolicyActorKind::Operator,
-                sealed_by_user_id: Some(actor_user_id(&actor)?),
-                sealed_by_label: actor.claims.username.clone(),
-                build_commit: build_commit.clone(),
-                postgres_schema_fingerprint: live_schema.postgres_schema_fingerprint,
-                clickhouse_schema_fingerprint: live_schema.clickhouse_schema_fingerprint,
-                policy_bundle_generation: active_bundle.generation,
-                decision_policy_snapshot_id: active_bundle.decision_policy_snapshot_id,
-                policy_bundle_hash,
-                lifecycle_policy_hash,
-                evidence,
-            },
-            state.schema_verification.as_ref(),
-            state.production_evidence_verification.as_ref(),
-        ) => result.map_err(WebError::from),
-      () = lease.cancelled() => Err(WebError::Conflict(
-          "canonical PostgreSQL lifecycle lease was lost during production seal".to_owned(),
-      )),
-    };
-    let active_result = lease.ensure_active().map_err(WebError::from);
-    let release_result = lease.release().await.map_err(WebError::from);
-    let baseline = match (seal_result, active_result, release_result) {
-        (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => {
-            return Err(error);
-        }
-        (Ok(baseline), Ok(()), Ok(())) => baseline,
-    };
-
-    op_ctx.set_action(
-        OperationCategory::Governance,
-        ConfigAuditAction::ProductionSealed.as_str(),
-    );
-    op_ctx.set_resource(
-        ResourceType::ConfigLifecycle,
-        production_baseline_id.to_string(),
-    );
-    op_ctx.set_state_hashes(None, Some(lifecycle_policy_hash));
-    set_audit_detail(
-        &op_ctx,
-        &ProductionSealAuditDetail {
-            production_baseline_id: &production_baseline_id,
-            environment: body.environment.as_str(),
-            build_commit: build_commit.as_str(),
-            policy_bundle_hash: &policy_bundle_hash,
-            lifecycle_policy_hash: &lifecycle_policy_hash,
-            reason: &body.reason,
-            acting_role: &acting_role.0,
-            request_id: &request_id.0,
-        },
-    )?;
-
-    let mut view = lifecycle_view(&state).await?;
-    view.production_baseline = Some(baseline.into());
-    Ok(WebResponse::ok(view))
-}
-
-async fn lifecycle_view(state: &AppState) -> Result<LifecycleView, WebError> {
-    let production_baseline = state.runtime_config.load_production_baseline().await?;
-    let state_value = if production_baseline.is_some() {
-        ProjectLifecycleState::ProductionFrozen
-    } else {
-        ProjectLifecycleState::PreProductionResettable
-    };
-    let active_bundle = state.runtime_config.load_current_bundle().await?;
-    let (evidence, live_schema) = production_seal_evidence(state, active_bundle.as_ref()).await?;
-    let checks = evidence
-        .checks
-        .iter()
-        .map(|check| LifecycleCheckView {
-            kind: check.kind,
-            outcome: check.outcome,
-            detail: check.detail.clone(),
-        })
-        .collect();
-    let required_confirmation_phrase =
-        if state_value == ProjectLifecycleState::PreProductionResettable {
-            Some(production_seal_confirmation(
-                &state.deploy.lifecycle.environment,
-            )?)
-        } else {
-            None
-        };
-    Ok(LifecycleView {
-        state: state_value,
-        baseline: LifecycleBaseline::Boot,
-        environment: state.deploy.lifecycle.environment.clone(),
-        build_commit: Some(state.build_identity.build_commit.clone()),
-        postgres_schema_fingerprint: Some(live_schema.postgres_schema_fingerprint),
-        clickhouse_schema_fingerprint: Some(live_schema.clickhouse_schema_fingerprint),
-        active_policy_bundle_hash: active_bundle.map(|bundle| bundle.snapshot_hash),
-        checks,
-        production_baseline: production_baseline.map(Into::into),
-        required_confirmation_phrase,
-    })
-}
-
-async fn production_seal_evidence(
-    state: &AppState,
-    active_bundle: Option<&ActivePolicyBundle>,
-) -> Result<(ProductionSealEvidence, VerifiedSchemaFingerprints), WebError> {
-    let now = Utc::now();
-    let (live_schema, backup_evidence, config_e2e_evidence) = tokio::try_join!(
-        async {
-            state
-                .schema_verification
-                .verify_live()
-                .await
-                .map_err(WebError::from)
-        },
-        async {
-            state
-                .runtime_config
-                .load_latest_production_evidence(ProductionEvidenceKind::BackupRestore)
-                .await
-                .map_err(WebError::from)
-        },
-        async {
-            state
-                .runtime_config
-                .load_latest_production_evidence(ProductionEvidenceKind::ProtectedConfigEndToEnd)
-                .await
-                .map_err(WebError::from)
-        },
-    )?;
-    let mut checks = vec![
-        ProductionSealCheck {
-            kind: LifecycleCheckKind::LifecycleContract,
-            outcome: CheckOutcome::Passed,
-            checked_at: now,
-            detail: LifecycleCheckDetail::ContractMatched,
-        },
-        ProductionSealCheck {
-            kind: LifecycleCheckKind::PostgresSchemaFingerprint,
-            outcome: CheckOutcome::Passed,
-            checked_at: now,
-            detail: LifecycleCheckDetail::SchemaFingerprint {
-                fingerprint: live_schema.postgres_schema_fingerprint,
-            },
-        },
-        ProductionSealCheck {
-            kind: LifecycleCheckKind::ClickhouseSchemaFingerprint,
-            outcome: CheckOutcome::Passed,
-            checked_at: now,
-            detail: LifecycleCheckDetail::SchemaFingerprint {
-                fingerprint: live_schema.clickhouse_schema_fingerprint,
-            },
-        },
-        ProductionSealCheck {
-            kind: LifecycleCheckKind::MigrationState,
-            outcome: CheckOutcome::Passed,
-            checked_at: now,
-            detail: LifecycleCheckDetail::MigrationLedgersVerified,
-        },
-        ProductionSealCheck {
-            kind: LifecycleCheckKind::CompiledBuildIdentity,
-            outcome: if state.build_identity.clean {
-                CheckOutcome::Passed
-            } else {
-                CheckOutcome::Failed
-            },
-            checked_at: now,
-            detail: LifecycleCheckDetail::CompiledBuildIdentity {
-                build_commit: state.build_identity.build_commit.clone(),
-                clean: state.build_identity.clean,
-            },
-        },
-        ProductionSealCheck {
-            kind: LifecycleCheckKind::ActivePolicyBundle,
-            outcome: if active_bundle.is_some() {
-                CheckOutcome::Passed
-            } else {
-                CheckOutcome::Failed
-            },
-            checked_at: now,
-            detail: active_bundle.map_or(
-                LifecycleCheckDetail::MissingActivePolicyBundle,
-                |bundle| LifecycleCheckDetail::PolicyBundle {
-                    policy_bundle_hash: bundle.snapshot_hash,
-                },
-            ),
-        },
-    ];
-    let (backup_artifact_valid, config_e2e_artifact_valid) = tokio::join!(
-        production_evidence_artifact_is_valid(state, backup_evidence.as_ref()),
-        production_evidence_artifact_is_valid(state, config_e2e_evidence.as_ref()),
-    );
-    checks.push(production_evidence_check(
-        LifecycleCheckKind::BackupEvidence,
-        backup_evidence.as_ref(),
-        state,
-        &live_schema,
-        active_bundle,
-        backup_artifact_valid,
-        now,
-    ));
-    checks.push(production_evidence_check(
-        LifecycleCheckKind::ConfigEndToEnd,
-        config_e2e_evidence.as_ref(),
-        state,
-        &live_schema,
-        active_bundle,
-        config_e2e_artifact_valid,
-        now,
-    ));
-    Ok((
-        ProductionSealEvidence {
-            checks,
-            backup_evidence_hash: backup_evidence.map(|evidence| evidence.evidence_hash),
-            config_e2e_evidence_hash: config_e2e_evidence.map(|evidence| evidence.evidence_hash),
-        },
-        live_schema,
-    ))
-}
-
-fn production_evidence_check(
-    kind: LifecycleCheckKind,
-    evidence: Option<&ProductionEvidenceInfo>,
-    state: &AppState,
-    live_schema: &VerifiedSchemaFingerprints,
-    active_bundle: Option<&ActivePolicyBundle>,
-    artifact_valid: bool,
-    checked_at: DateTime<Utc>,
-) -> ProductionSealCheck {
-    let matches_current_state = artifact_valid
-        && evidence
-            .zip(active_bundle)
-            .is_some_and(|(evidence, bundle)| {
-                let policy_bundle_generation = bundle.generation;
-                evidence.build_commit == state.build_identity.build_commit
-                    && evidence.postgres_schema_fingerprint
-                        == live_schema.postgres_schema_fingerprint
-                    && evidence.clickhouse_schema_fingerprint
-                        == live_schema.clickhouse_schema_fingerprint
-                    && evidence.policy_bundle_generation == policy_bundle_generation
-                    && evidence.decision_policy_snapshot_id == bundle.decision_policy_snapshot_id
-                    && evidence.policy_bundle_hash == bundle.snapshot_hash
-            });
-    ProductionSealCheck {
-        kind,
-        outcome: if matches_current_state {
-            CheckOutcome::Passed
-        } else {
-            CheckOutcome::Failed
-        },
-        checked_at,
-        detail: LifecycleCheckDetail::ExternalEvidence {
-            evidence_hash: evidence.map(|evidence| evidence.evidence_hash),
-        },
-    }
-}
-
-async fn production_evidence_artifact_is_valid(
-    state: &AppState,
-    evidence: Option<&ProductionEvidenceInfo>,
-) -> bool {
-    let Some(evidence) = evidence else {
-        return false;
-    };
-    state
-        .production_evidence_verification
-        .verify_artifact(&evidence.artifact_uri, &evidence.evidence_hash)
-        .await
-        .is_ok()
-}
-
-fn production_seal_confirmation(
-    environment: &DeploymentEnvironment,
-) -> Result<ProductionSealConfirmationPhrase, WebError> {
-    ProductionSealConfirmationPhrase::parse(format!("SEAL {} AS PRODUCTION", environment.as_str()))
-        .map_err(|error| WebError::Internal(error.to_string()))
 }
 
 struct PolicyTransitionContext<'a> {

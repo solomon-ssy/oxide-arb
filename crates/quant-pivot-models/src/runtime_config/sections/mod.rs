@@ -13,6 +13,6 @@ pub use config::{
     ResearchTrainingConfig, ResearchValidationConfig, ResearchValidationCpcvConfig,
     ResearchValidationGatesConfig, ResearchValidationPboConfig, ResearchValidationPurgeConfig,
     ResearchValidationTrialsConfig, ReversalAfterShockConfig, SelectionConfig,
-    SellQualityGateConfig, SemiAutoCanaryConfig, SemiAutoConfig, StructuralFactorsConfig,
-    StructuralFeaturesConfig, TrainingConfig, WeatherDomainConfig,
+    SellQualityGateConfig, SemiAutoConfig, StructuralFactorsConfig, StructuralFeaturesConfig,
+    TrainingConfig, WeatherDomainConfig,
 };

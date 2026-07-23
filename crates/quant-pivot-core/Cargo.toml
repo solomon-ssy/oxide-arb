@@ -43,6 +43,7 @@ alloy  = { workspace = true }
 
 # ── Errors / logging ──────────────────────────────────────────────
 tracing   = { workspace = true }
+thiserror = { workspace = true }
 
 # ── Concurrency ────────────────────────────────────────────────────
 ahash       = { workspace = true }

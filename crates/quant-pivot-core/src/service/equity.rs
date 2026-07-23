@@ -9,7 +9,7 @@ use quant_pivot_models::{
         EquitySnapshotInfo, NewAccountSnapshot, NewEquitySnapshot, PositionInfo, capital_drawdown,
         capital_hwm,
     },
-    types::{AccountPositions, AccountSnapshotId, EquitySnapshotId, Usd},
+    types::{AccountPositions, AccountSnapshotId, EquitySnapshotId, ExecutionAccountId, Usd},
 };
 use quant_pivot_repository::traits::{EquitySnapshotRepository, PositionRepository};
 use quant_pivot_research::portfolio::{AccountSnapshot, DrawdownState};
@@ -54,6 +54,7 @@ pub trait DrawdownProvider: Send + Sync {
 pub struct EquitySnapshotService {
     equity_snapshots: Arc<dyn EquitySnapshotRepository>,
     positions: Arc<dyn PositionRepository>,
+    execution_account_id: ExecutionAccountId,
 }
 
 impl EquitySnapshotService {
@@ -61,10 +62,12 @@ impl EquitySnapshotService {
     pub const fn new(
         equity_snapshots: Arc<dyn EquitySnapshotRepository>,
         positions: Arc<dyn PositionRepository>,
+        execution_account_id: ExecutionAccountId,
     ) -> Self {
         Self {
             equity_snapshots,
             positions,
+            execution_account_id,
         }
     }
 
@@ -96,6 +99,7 @@ impl EquitySnapshotService {
 
         let account_snapshot = NewAccountSnapshot {
             account_snapshot_id,
+            execution_account_id: self.execution_account_id,
             as_of: account.as_of,
             source: account.source,
             venue_net_liquidation_usd: account.venue_net_liquidation_usd,

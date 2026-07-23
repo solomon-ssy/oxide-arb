@@ -5,9 +5,7 @@ use std::{sync::Arc, time::Duration};
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::ports::PolicySnapshotPort,
-    enums::system::{BootstrapPhase, CapabilityId},
-    types::Usd,
+    domain::ports::PolicySnapshotPort, enums::system::CapabilityId, types::Usd,
 };
 use quant_pivot_repository::traits::{EquitySnapshotRepository, PositionRepository};
 
@@ -29,7 +27,6 @@ impl AppContext {
         runner.spawn(TaskId::CatalogLinkageResolver, move |token| async move {
             linkage_gamma.run_linkage_resolver(token).await;
         });
-        let bootstrap = Arc::clone(&self.governance.bootstrap);
         let interval_secs = self.config.market_data.gamma.reconcile_interval_secs;
         runner.spawn(TaskId::GammaSync, move |token| async move {
             let _ = PeriodicTask::run(
@@ -40,12 +37,8 @@ impl AppContext {
                 token,
                 move || {
                     let gamma = Arc::clone(&gamma);
-                    let bootstrap = Arc::clone(&bootstrap);
                     async move {
                         gamma.sync().await?;
-                        if bootstrap.view().phase == BootstrapPhase::CollectingBaseline {
-                            bootstrap.mark_catalog_ready().await?;
-                        }
                         QuantResult::Ok(())
                     }
                 },
@@ -89,6 +82,7 @@ impl AppContext {
         let equity_service = Arc::new(EquitySnapshotService::new(
             Arc::clone(&self.infra.repos.equity_snapshot) as Arc<dyn EquitySnapshotRepository>,
             Arc::clone(&self.infra.repos.position) as Arc<dyn PositionRepository>,
+            self.account.execution_account.execution_account_id,
         ));
         let interval_secs = self.config.quant.workers.equity_snapshot_secs;
         runner.spawn(TaskId::EquitySnapshotWorker, move |token| async move {
@@ -125,10 +119,10 @@ impl AppContext {
 
     pub fn register_feature_parity_scheduler(&self, runner: &mut AppRunner) {
         let coordinator = Arc::clone(&self.report.feature_parity);
-        let bootstrap = Arc::clone(&self.governance.bootstrap);
+        let capabilities = Arc::clone(&self.governance.capabilities);
         runner.spawn(TaskId::FeatureParityScheduler, move |token| async move {
             if !wait_for_capability(
-                Arc::clone(&bootstrap),
+                Arc::clone(&capabilities),
                 CapabilityId::AutomaticParityEligible,
                 &token,
             )
@@ -144,9 +138,9 @@ impl AppContext {
                 token,
                 move || {
                     let coordinator = Arc::clone(&coordinator);
-                    let bootstrap = Arc::clone(&bootstrap);
+                    let capabilities = Arc::clone(&capabilities);
                     async move {
-                        if !bootstrap
+                        if !capabilities
                             .capability_snapshot()
                             .get(CapabilityId::AutomaticParityEligible)
                             .enabled

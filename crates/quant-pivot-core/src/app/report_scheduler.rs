@@ -29,10 +29,10 @@ impl AppContext {
     /// Register the durable schedule coordinator and global report build worker.
     pub fn register_report_coordinator(&self, runner: &mut AppRunner) {
         let coordinator = self.report_coordinator();
-        let bootstrap = Arc::clone(&self.governance.bootstrap);
+        let capabilities = Arc::clone(&self.governance.capabilities);
         runner.spawn(TaskId::ReportGenerator, move |token| async move {
             run_while_capable(
-                bootstrap,
+                capabilities,
                 CapabilityId::ReportGenerationEligible,
                 token,
                 move |worker_token| {

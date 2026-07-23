@@ -1,12 +1,12 @@
 # Phase 11 — Alpha Quality & Closed-Loop Hardening 子phase索引
 
-<!-- quant-pivot-lifecycle-contract:v1 -->
-> **Lifecycle contract**
-> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+<!-- quant-pivot-deployment-contract:v1 -->
+> **Deployment contract**
+> - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
-> - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
+> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
+> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
 
 > 状态：生产级破坏式重构。**11.1 已落地并完成收尾闭环加固**（时间原生 EMA/MACD、
 > 退出/卖出复用入场冻结因子面、共线默认 raw 面板 + 类别中性化、Indeterminate 置零 confidence、
@@ -212,8 +212,8 @@ flowchart TD
   boot baseline 取代，但两层向量等业务决策保留。11.9 已完成双垂直数据闭环，反馈/serving/UI
   后续范围 PAUSED；完整字段、测试和逐项状态只见
   [11.9 Implementation Ledger](11.9-attribution-feedback-and-auto-retraining.md#11-implementation-ledger)。
-  Tier 2 LLM linkage 若在封存前落地，直接修改 boot contract 并 fresh-install 验证；封存后必须正式 bump
-  和 migration，任何状态都不得静默改写既有 persisted artifact。
+  Tier 2 LLM linkage 若在首次部署前落地，直接修改 boot contract 并 fresh-install 验证；首次部署后必须正式
+  bump 和 migration，任何状态都不得静默改写既有 persisted artifact。
 
 ## 4. 全局设计基线(贯穿全部子phase)
 
@@ -243,9 +243,9 @@ flowchart TD
 
 与 [`phase-03/README.md`](../phase-03/README.md) §7 / [`phase-05/README.md`](../phase-05/README.md) §7 一致:
 
-每篇文档标题后必须先声明 `lifecycle_assumption`、`schema_data_version_impact`、
-`pre_production_behavior`、`production_frozen_behavior` 与 `rollback_and_data_verification`；缺一项由
-`scripts/lint-phase-lifecycle.sh` 拒绝。
+每篇文档标题后必须先声明 `fresh_boot_assumption`、`schema_data_version_impact`、
+`pre_deployment_behavior`、`post_deployment_behavior` 与 `rollback_and_data_verification`；缺一项即视为
+文档契约不完整。
 
 1. **目标与闭环定位**(含回指 §1 关闭的审计点)
 2. **删除 / 合并 / 重构清单**(加替代代码前必须删的 crate/模块/类型/config/enum;无则显式写"无")

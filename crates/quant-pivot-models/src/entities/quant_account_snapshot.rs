@@ -3,10 +3,10 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-use super::{quant_equity_snapshot, quant_recommendation_report};
+use super::{quant_equity_snapshot, quant_execution_account, quant_recommendation_report};
 use crate::{
     enums::quant::AccountSource,
-    types::{AccountPositions, AccountSnapshotId, ExposureBreakdown, Usd},
+    types::{AccountPositions, AccountSnapshotId, ExecutionAccountId, ExposureBreakdown, Usd},
 };
 
 #[sea_orm::model]
@@ -15,6 +15,7 @@ use crate::{
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub account_snapshot_id: AccountSnapshotId,
+    pub execution_account_id: ExecutionAccountId,
     pub as_of: DateTime<Utc>,
     pub source: AccountSource,
     pub venue_net_liquidation_usd: Usd,
@@ -31,6 +32,13 @@ pub struct Model {
     pub recommendation_report: HasMany<quant_recommendation_report::Entity>,
     #[sea_orm(has_many, relation_enum = "EquitySnapshot")]
     pub equity_snapshot: HasMany<quant_equity_snapshot::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "ExecutionAccount",
+        from = "execution_account_id",
+        to = "execution_account_id"
+    )]
+    pub execution_account: BelongsTo<quant_execution_account::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

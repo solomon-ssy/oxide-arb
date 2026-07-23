@@ -8,10 +8,10 @@ use quant_pivot_system_tests::resources::with_resource_suite;
 mod infrastructure_clickhouse_repository_reads;
 #[path = "infrastructure/clickhouse/storage.rs"]
 mod infrastructure_clickhouse_storage;
-#[path = "infrastructure/postgres/lifecycle.rs"]
-mod infrastructure_postgres_lifecycle;
 #[path = "infrastructure/postgres/schema_migration.rs"]
 mod infrastructure_postgres_schema_migration;
+#[path = "infrastructure/postgres/schema_mutation.rs"]
+mod infrastructure_postgres_schema_mutation;
 #[path = "infrastructure/redis/backend.rs"]
 mod infrastructure_redis_backend;
 #[path = "infrastructure/redis/tiered_cache.rs"]
@@ -56,9 +56,9 @@ async fn infrastructure_contracts_share_one_disposable_stack() {
         run_scenario("infrastructure_clickhouse_repository_reads::weather_long_form_facts_are_pit_visible_and_revision_preserving", Box::pin(infrastructure_clickhouse_repository_reads::weather_long_form_facts_are_pit_visible_and_revision_preserving())).await;
         run_scenario("infrastructure_clickhouse_repository_reads::trade_tape_preserves_prior_revisions_after_merge", Box::pin(infrastructure_clickhouse_repository_reads::trade_tape_preserves_prior_revisions_after_merge())).await;
         run_scenario("infrastructure_clickhouse_repository_reads::replacing_merge_tree_readers_return_one_latest_logical_row", Box::pin(infrastructure_clickhouse_repository_reads::replacing_merge_tree_readers_return_one_latest_logical_row())).await;
-        run_scenario("infrastructure_postgres_lifecycle::empty_postgres_bootstraps_once_and_verifies", Box::pin(infrastructure_postgres_lifecycle::empty_postgres_bootstraps_once_and_verifies())).await;
-        run_scenario("infrastructure_postgres_lifecycle::lifecycle_lease_is_exclusive_and_cancels_after_session_loss", Box::pin(infrastructure_postgres_lifecycle::lifecycle_lease_is_exclusive_and_cancels_after_session_loss())).await;
-        run_scenario("infrastructure_postgres_lifecycle::reset_rejects_unknown_sessions_and_never_forces_them_closed", Box::pin(infrastructure_postgres_lifecycle::reset_rejects_unknown_sessions_and_never_forces_them_closed())).await;
+        run_scenario("infrastructure_postgres_schema_mutation::empty_postgres_bootstraps_once_and_verifies", Box::pin(infrastructure_postgres_schema_mutation::empty_postgres_bootstraps_once_and_verifies())).await;
+        run_scenario("infrastructure_postgres_schema_mutation::schema_mutation_lease_is_exclusive_and_cancels_after_session_loss", Box::pin(infrastructure_postgres_schema_mutation::schema_mutation_lease_is_exclusive_and_cancels_after_session_loss())).await;
+        run_scenario("infrastructure_postgres_schema_mutation::reset_rejects_unknown_sessions_and_never_forces_them_closed", Box::pin(infrastructure_postgres_schema_mutation::reset_rejects_unknown_sessions_and_never_forces_them_closed())).await;
         run_scenario("infrastructure_clickhouse_storage::first_deployment_creates_missing_database_and_schema", Box::pin(infrastructure_clickhouse_storage::first_deployment_creates_missing_database_and_schema())).await;
         run_scenario("infrastructure_clickhouse_storage::deployment_and_runtime_fail_closed_while_schema_lock_is_held", Box::pin(infrastructure_clickhouse_storage::deployment_and_runtime_fail_closed_while_schema_lock_is_held())).await;
         run_scenario("infrastructure_clickhouse_storage::clean_boot_rejects_nonempty_unmanaged_database", Box::pin(infrastructure_clickhouse_storage::clean_boot_rejects_nonempty_unmanaged_database())).await;

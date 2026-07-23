@@ -55,6 +55,10 @@ pub struct Model {
     pub quant_order_intent: BelongsTo<super::quant_order_intent::Entity>,
     #[sea_orm(has_many)]
     pub quant_reconciliations: HasMany<super::quant_reconciliation::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_execution_trade_refs: HasMany<super::quant_execution_trade_ref::Entity>,
+    #[sea_orm(has_many)]
+    pub quant_execution_transaction_refs: HasMany<super::quant_execution_transaction_ref::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

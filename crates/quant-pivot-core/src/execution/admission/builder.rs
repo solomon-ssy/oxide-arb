@@ -23,7 +23,7 @@ use quant_pivot_models::{
             RecommendationReportInfo,
         },
     },
-    enums::{market::MarketStatus, quant::PublicationStatus},
+    enums::{market::MarketStatus, quant::PublicationStatus, settlement::SettlementRoute},
     types::{ClobMarketInfoVersion, Usd},
 };
 use quant_pivot_repository::traits::{
@@ -45,10 +45,15 @@ use super::{
 };
 use crate::{
     execution::{
-        breaker::VenueHealthHandle, exit_monitor::ExitMonitorHealthHandle,
+        breaker::VenueHealthHandle,
+        exit_monitor::ExitMonitorHealthHandle,
+        settlement_recovery_admission::{
+            SettlementRecoveryAdmission, SettlementRecoveryAdmissionPort,
+            SettlementRecoveryAdmissionRequest, requires_automatic_settlement_recovery,
+        },
         trade_policy_guard::require_frozen_trade_policy,
     },
-    governance::{KillSwitchHandle, RuntimeModeHandle, resolve_return_model_calibration},
+    governance::{RuntimeControlsHandle, resolve_return_model_calibration},
     ingest::book_store::{BookStore, FreshBook},
     runtime_config::DecisionPolicyStore,
     service::account::AccountProviderFactory,
@@ -79,12 +84,13 @@ pub struct AdmissionInputBuilderDeps {
     pub clob: Arc<ClobClient>,
     pub data_quality: Arc<dyn DataQualityPort>,
     pub config: Arc<DecisionPolicyStore>,
-    pub runtime_mode: RuntimeModeHandle,
-    pub kill_switch: KillSwitchHandle,
+    pub runtime_controls: RuntimeControlsHandle,
     /// Venue-health hot read published by the execution breaker (seam #18).
     pub venue_health: VenueHealthHandle,
     /// Exit-monitor health hot read published by the worker (seam #20).
     pub exit_monitor_health: ExitMonitorHealthHandle,
+    /// Fresh signer-free settlement capability gate for automatic resolution recovery.
+    pub settlement_recovery: Arc<dyn SettlementRecoveryAdmissionPort>,
 }
 
 /// Builds the frozen [`AdmissionInput`] for an intent at decision time.
@@ -171,8 +177,30 @@ impl AdmissionInputBuilder {
             .ok()
             .map(FreshBook::into_snapshot);
         let data_quality = deps.data_quality.snapshot();
-        let mode = deps.runtime_mode.current();
-        let kill_switch = deps.kill_switch.current();
+        let controls = deps.runtime_controls.snapshot();
+        let mode = controls.quant_runtime_mode;
+        let kill_switch = controls.kill_switch_state;
+        let settlement_recovery =
+            if requires_automatic_settlement_recovery(&intent.exit_policy_json) {
+                let route = if fetched.venue_metadata.registry_neg_risk {
+                    SettlementRoute::NegRiskV2
+                } else {
+                    SettlementRoute::StandardV2
+                };
+                deps.settlement_recovery
+                    .evaluate_recovery_admission(
+                        SettlementRecoveryAdmissionRequest {
+                            execution_account_id: intent.execution_account_id,
+                            route,
+                            runtime_mode: mode,
+                            write_policy: controls.settlement_write_policy,
+                        },
+                        now,
+                    )
+                    .await?
+            } else {
+                SettlementRecoveryAdmission::NotRequired
+            };
         let now_ms = u64::try_from(now.timestamp_millis()).map_err(|error| {
             ExecutionError::TimeConversion {
                 field: "admission.now_ms",
@@ -186,6 +214,9 @@ impl AdmissionInputBuilder {
             book_version: book.as_ref().map(|snapshot| snapshot.version),
             book_as_of_ms: book.as_ref().map(|snapshot| snapshot.timestamp_ms),
             kill_switch_state: kill_switch,
+            settlement_write_policy: controls.settlement_write_policy,
+            settlement_deployment_digest: settlement_recovery.deployment_digest(),
+            settlement_verified_block_hash: settlement_recovery.verified_block_hash(),
         };
         let fee_schedule = pit_fee_schedule(&fetched.clob_market_info, now)?;
 
@@ -215,6 +246,7 @@ impl AdmissionInputBuilder {
                 credentials_ready: deps.account_factory.credentials_ready(),
                 exit_monitor_ready: deps.exit_monitor_health.is_ready(now),
             },
+            settlement_recovery,
             now,
             now_ms,
             state_version,

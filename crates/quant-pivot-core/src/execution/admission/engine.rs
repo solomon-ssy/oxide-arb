@@ -14,17 +14,17 @@ use super::{
         ExitMonitorReadinessCheck, IntentStateCheck, KillSwitchCheck, LiquidityDepthCheck,
         ManualBlockCheck, MarketExposureCheck, MaxOpenIntentsCheck, MaxReservedCapitalCheck,
         ModelPublicationCheck, RecommendationFreshnessCheck, ReportStatusCheck,
-        RiskEnvelopeHashCheck, RuntimeModeCheck, SlippageCheck, VenueGuardCheck,
-        VenueMetadataCheck,
+        RiskEnvelopeHashCheck, RuntimeModeCheck, SettlementRecoveryCheck, SlippageCheck,
+        VenueGuardCheck, VenueMetadataCheck,
     },
 };
 use crate::observability::metrics_hub::MetricsHub;
 
-/// The 24-check admission set. A fixed-size array makes the count
+/// The 25-check admission set. A fixed-size array makes the count
 /// a compile-time invariant.
-const ADMISSION_CHECK_COUNT: usize = 24;
+const ADMISSION_CHECK_COUNT: usize = 25;
 
-/// Default admission engine: holds the 24 checks in canonical order and folds
+/// Default admission engine: holds the 25 checks in canonical order and folds
 /// their outcomes into a single decision.
 pub struct DefaultAdmissionEngine {
     checks: [Box<dyn AdmissionCheck>; ADMISSION_CHECK_COUNT],
@@ -40,6 +40,7 @@ impl DefaultAdmissionEngine {
             Box::new(RecommendationFreshnessCheck),
             Box::new(ReportStatusCheck),
             Box::new(RuntimeModeCheck),
+            Box::new(SettlementRecoveryCheck),
             Box::new(ModelPublicationCheck),
             Box::new(DataQualityCheck),
             Box::new(BookFreshnessCheck),

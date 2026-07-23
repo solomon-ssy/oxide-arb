@@ -2,15 +2,15 @@
 
 use std::{future::Future, sync::Arc};
 
-use quant_pivot_models::{domain::ports::BootstrapPort, enums::system::CapabilityId};
+use quant_pivot_models::{domain::ports::SystemCapabilityPort, enums::system::CapabilityId};
 use tokio_util::sync::CancellationToken;
 
 pub async fn wait_for_capability(
-    bootstrap: Arc<dyn BootstrapPort>,
+    capabilities: Arc<dyn SystemCapabilityPort>,
     capability: CapabilityId,
     shutdown: &CancellationToken,
 ) -> bool {
-    let mut capabilities = bootstrap.subscribe_capabilities();
+    let mut capabilities = capabilities.subscribe_capabilities();
     loop {
         if capabilities.borrow().get(capability).enabled {
             return true;
@@ -32,7 +32,7 @@ pub async fn wait_for_capability(
 /// A revoked capability cancels and drains the current worker instance. The task
 /// then waits for a later capability revision before constructing a new worker.
 pub async fn run_while_capable<F, Fut>(
-    bootstrap: Arc<dyn BootstrapPort>,
+    capabilities: Arc<dyn SystemCapabilityPort>,
     capability: CapabilityId,
     shutdown: CancellationToken,
     mut worker_factory: F,
@@ -41,14 +41,14 @@ pub async fn run_while_capable<F, Fut>(
     Fut: Future<Output = ()>,
 {
     loop {
-        if !wait_for_capability(Arc::clone(&bootstrap), capability, &shutdown).await {
+        if !wait_for_capability(Arc::clone(&capabilities), capability, &shutdown).await {
             return;
         }
 
         let worker_token = shutdown.child_token();
         let worker = worker_factory(worker_token.clone());
         tokio::pin!(worker);
-        let mut capabilities = bootstrap.subscribe_capabilities();
+        let mut capability_rx = capabilities.subscribe_capabilities();
 
         loop {
             tokio::select! {
@@ -58,13 +58,13 @@ pub async fn run_while_capable<F, Fut>(
                     worker.await;
                     return;
                 }
-                changed = capabilities.changed() => {
+                changed = capability_rx.changed() => {
                     if changed.is_err() {
                         worker_token.cancel();
                         worker.await;
                         return;
                     }
-                    if !capabilities.borrow().get(capability).enabled {
+                    if !capability_rx.borrow().get(capability).enabled {
                         worker_token.cancel();
                         worker.await;
                         break;

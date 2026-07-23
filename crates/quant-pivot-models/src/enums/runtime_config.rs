@@ -20,15 +20,6 @@ pg_enum! {
 }
 
 pg_enum! {
-    type_name = "qp_production_evidence_kind",
-    @derive(schemars::JsonSchema, PartialOrd, Ord)
-    pub enum ProductionEvidenceKind {
-        BackupRestore => "backup_restore",
-        ProtectedConfigEndToEnd => "protected_config_end_to_end",
-    }
-}
-
-pg_enum! {
     type_name = "qp_profile_artifact_kind",
     @derive(schemars::JsonSchema, PartialOrd, Ord)
     pub enum ProfileArtifactKind {
@@ -59,7 +50,6 @@ wire_enum! {
         ApprovalRecorded => "config.approval_recorded",
         RevisionActivated => "config.revision_activated",
         RevisionRolledBack => "config.revision_rolled_back",
-        ProductionSealed => "config.production_sealed",
     }
 }
 
@@ -136,20 +126,6 @@ wire_enum! {
         Passed => "passed",
         Failed => "failed",
         NotApplicable => "not_applicable",
-    }
-}
-
-wire_enum! {
-    @derive(schemars::JsonSchema, PartialOrd, Ord)
-    pub enum LifecycleCheckKind {
-        LifecycleContract => "lifecycle_contract",
-        PostgresSchemaFingerprint => "postgres_schema_fingerprint",
-        ClickhouseSchemaFingerprint => "clickhouse_schema_fingerprint",
-        MigrationState => "migration_state",
-        CompiledBuildIdentity => "compiled_build_identity",
-        BackupEvidence => "backup_evidence",
-        ConfigEndToEnd => "config_end_to_end",
-        ActivePolicyBundle => "active_policy_bundle",
     }
 }
 
@@ -232,23 +208,6 @@ wire_enum! {
         Seconds => "seconds",
         Entries => "entries",
         Tokens => "tokens",
-    }
-}
-
-wire_enum! {
-    @derive(Default, schemars::JsonSchema)
-    pub enum ProjectLifecycleState {
-        #[default]
-        PreProductionResettable => "pre_production_resettable",
-        ProductionFrozen => "production_frozen",
-    }
-}
-
-wire_enum! {
-    @derive(Default, schemars::JsonSchema)
-    pub enum LifecycleBaseline {
-        #[default]
-        Boot => "boot",
     }
 }
 

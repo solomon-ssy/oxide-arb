@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use quant_pivot_models::domain::{
     api::SystemStatusView,
     governance::SystemStatus,
-    ports::{BootstrapPort, RuntimeControlPort},
+    ports::{RuntimeControlPort, SystemCapabilityPort},
     runtime::{CoreEvent, CoreEventPublisher},
 };
 
@@ -17,7 +17,7 @@ use quant_pivot_models::domain::{
 pub struct SystemStatusPublisher {
     events: CoreEventPublisher,
     control: OnceLock<Arc<dyn RuntimeControlPort>>,
-    bootstrap: OnceLock<Arc<dyn BootstrapPort>>,
+    capabilities: OnceLock<Arc<dyn SystemCapabilityPort>>,
 }
 
 impl SystemStatusPublisher {
@@ -26,7 +26,7 @@ impl SystemStatusPublisher {
         Arc::new(Self {
             events,
             control: OnceLock::new(),
-            bootstrap: OnceLock::new(),
+            capabilities: OnceLock::new(),
         })
     }
 
@@ -35,9 +35,9 @@ impl SystemStatusPublisher {
         let _ = self.control.set(control);
     }
 
-    /// Wire capability projection after bootstrap and runtime control exist.
-    pub fn register_bootstrap(&self, bootstrap: Arc<dyn BootstrapPort>) {
-        let _ = self.bootstrap.set(bootstrap);
+    /// Wire capability projection after runtime control exists.
+    pub fn register_capabilities(&self, capabilities: Arc<dyn SystemCapabilityPort>) {
+        let _ = self.capabilities.set(capabilities);
     }
 
     /// Latest projected snapshot without publishing (dedup / diagnostics).
@@ -52,15 +52,14 @@ impl SystemStatusPublisher {
             tracing::warn!("system status publisher invoked before registration");
             return;
         };
-        let Some(bootstrap) = self.bootstrap.get() else {
-            tracing::warn!("system status publisher invoked before bootstrap registration");
+        let Some(capability_service) = self.capabilities.get() else {
+            tracing::warn!("system status publisher invoked before capability registration");
             return;
         };
-        let capabilities = bootstrap.refresh_operational_capabilities(&status);
+        let capabilities = capability_service.refresh_operational_capabilities(&status);
         self.events
             .publish(CoreEvent::SystemStatusChanged(Box::new(SystemStatusView {
                 runtime: status,
-                bootstrap: bootstrap.view(),
                 capabilities,
             })));
     }

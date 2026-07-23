@@ -417,8 +417,8 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
 
     // A `HoldToResolution` lot is held to settlement: it skips the take-gains /
     // time-out tiers below (only the protective exits above and the emergency
-    // override act). Redemption is handled at settlement when RedeemPolicy::Auto
-    // is enabled for the frozen exit policy.
+    // override act). Resolution recovery is owned by the separate settlement
+    // lifecycle and is never submitted by the exit monitor.
     if policy.settlement_mode == ExitSettlementMode::HoldToResolution {
         return ExitDecision::Hold;
     }

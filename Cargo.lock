@@ -7453,9 +7453,9 @@ dependencies = [
 
 [[package]]
 name = "polymarket_client_sdk_v2"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0ed9ca91088808232ee7e6b48f8f4eaa846882f799c40f8190b0a0e3d28ed5e"
+checksum = "ba212e0641f178c274af266772de15962ac7e76da550a0f79f47b49349b1138a"
 dependencies = [
  "alloy",
  "async-stream",
@@ -7796,6 +7796,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "testcontainers",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
@@ -7893,6 +7894,7 @@ dependencies = [
  "sha2 0.11.0",
  "strum 0.28.0",
  "teloxide",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",

@@ -12,12 +12,15 @@ use crate::{
             RecommendationReportInfo,
         },
     },
-    entities::{quant_order_intent, quant_order_intent::Model},
+    entities::{
+        quant_execution_trade_ref, quant_execution_transaction_ref, quant_order_intent,
+        quant_order_intent::Model,
+    },
     enums::{
         common::Side,
         execution::{
             ApprovalInvalidation, ExecutionOrderPhase, ExitReason, ExitState, OrderIntentKind,
-            OrderTypeKind, VenueOrderStatus,
+            OrderTypeKind, VenueOrderStatus, VenueTradeStatus,
         },
         quant::{
             ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode,
@@ -26,10 +29,11 @@ use crate::{
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, EntryConditionInstanceId, EntryOrderSpec,
-        ExecutionOrderId, ExitPolicySpec, ExitReinferenceObservation, MarketId, ModelVersionId,
-        OrderId, OrderIntentId, PreparedVenueOrder, Price, RecommendationId,
-        RecommendationReportId, ResearchProfileArtifactId, ResearchProfileRef, ScaleOutState,
-        Shares, TokenId, Usd, UserId,
+        EvmTransactionHash, ExecutionAccountId, ExecutionOrderId, ExecutionTradeRefId,
+        ExecutionTransactionRefId, ExitPolicySpec, ExitReinferenceObservation, MarketId,
+        ModelVersionId, OrderId, OrderIntentId, PreparedVenueOrder, Price, RecommendationId,
+        ResearchProfileArtifactId, ResearchProfileRef, ScaleOutState, Shares, TokenId, Usd, UserId,
+        VenueTradeId,
     },
 };
 
@@ -38,6 +42,7 @@ use crate::{
 pub struct OrderIntentInfo {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
+    pub execution_account_id: ExecutionAccountId,
     pub runtime_mode: QuantRuntimeMode,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
@@ -73,6 +78,7 @@ impl From<Model> for OrderIntentInfo {
         Self {
             order_intent_id: model.order_intent_id,
             recommendation_id: model.recommendation_id,
+            execution_account_id: model.execution_account_id,
             runtime_mode: model.runtime_mode,
             decision_policy_snapshot_id: model.decision_policy_snapshot_id,
             model_version_id: model.model_version_id,
@@ -111,6 +117,7 @@ impl From<Model> for OrderIntentInfo {
 pub struct NewOrderIntent {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
+    pub execution_account_id: ExecutionAccountId,
     pub runtime_mode: QuantRuntimeMode,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
@@ -130,18 +137,6 @@ pub struct NewOrderIntent {
     pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
-}
-
-/// Transactional limits attached to one policy-bound `SemiAuto` canary intent.
-///
-/// The repository evaluates these limits under the same lock and transaction
-/// that reserve capital, so concurrent requests cannot both pass a stale
-/// process-local count.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IntentCreationLimits {
-    pub recommendation_report_id: RecommendationReportId,
-    pub max_open_intents: u32,
-    pub max_total_cash_per_report: Usd,
 }
 
 /// Approval transition payload for an order intent.
@@ -208,6 +203,101 @@ pub struct NewExecutionOrder {
     pub cancelled_at: Option<DateTime<Utc>>,
     pub gtd_expiration_at: Option<DateTime<Utc>>,
     pub error_message: Option<String>,
+}
+
+/// Typed venue identities observed from one order-placement response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionIdentityRefs {
+    pub trade_ids: Vec<VenueTradeId>,
+    pub transaction_hashes: Vec<EvmTransactionHash>,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// One Polymarket trade identity associated with an execution order.
+#[derive(Debug, Clone, PartialEq, Eq, DerivePartialModel)]
+#[sea_orm(entity = "quant_execution_trade_ref::Entity")]
+pub struct ExecutionTradeRef {
+    pub execution_trade_ref_id: ExecutionTradeRefId,
+    pub execution_order_id: ExecutionOrderId,
+    pub venue_trade_id: VenueTradeId,
+    pub trade_status: Option<VenueTradeStatus>,
+    pub transaction_hash: Option<EvmTransactionHash>,
+    pub observed_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+info_from_model!(ExecutionTradeRef, quant_execution_trade_ref::Model, {
+    execution_trade_ref_id, execution_order_id, venue_trade_id, trade_status, transaction_hash,
+    observed_at, created_at, updated_at,
+});
+
+/// Insert payload for `quant_execution_trade_ref`.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "quant_execution_trade_ref::ActiveModel")]
+pub struct NewExecutionTradeRef {
+    pub execution_trade_ref_id: ExecutionTradeRefId,
+    pub execution_order_id: ExecutionOrderId,
+    pub venue_trade_id: VenueTradeId,
+    pub trade_status: Option<VenueTradeStatus>,
+    pub transaction_hash: Option<EvmTransactionHash>,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// One queryable execution-order to EVM transaction relationship.
+#[derive(Debug, Clone, PartialEq, Eq, DerivePartialModel)]
+#[sea_orm(entity = "quant_execution_transaction_ref::Entity")]
+pub struct ExecutionTransactionRef {
+    pub execution_transaction_ref_id: ExecutionTransactionRefId,
+    pub execution_order_id: ExecutionOrderId,
+    pub transaction_hash: EvmTransactionHash,
+    pub observed_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(ExecutionTransactionRef, quant_execution_transaction_ref::Model, {
+    execution_transaction_ref_id, execution_order_id, transaction_hash, observed_at, created_at,
+});
+
+/// Insert payload for `quant_execution_transaction_ref`.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "quant_execution_transaction_ref::ActiveModel")]
+pub struct NewExecutionTransactionRef {
+    pub execution_transaction_ref_id: ExecutionTransactionRefId,
+    pub execution_order_id: ExecutionOrderId,
+    pub transaction_hash: EvmTransactionHash,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Complete persisted identity graph for one execution order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionOrderIdentityRefs {
+    pub trades: Vec<ExecutionTradeRef>,
+    pub transactions: Vec<ExecutionTransactionRef>,
+}
+
+impl ExecutionOrderIdentityRefs {
+    /// Whether placement persisted no venue identity of any kind.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.trades.is_empty() && self.transactions.is_empty()
+    }
+}
+
+/// Latest authenticated state observed for one durable venue trade identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionTradeObservation {
+    pub venue_trade_id: VenueTradeId,
+    pub trade_status: VenueTradeStatus,
+    pub transaction_hash: Option<EvmTransactionHash>,
+}
+
+/// Identity facts discovered by exact order/trade reads during reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionIdentityEnrichment {
+    pub discovered_order_id: Option<OrderId>,
+    pub trades: Vec<ExecutionTradeObservation>,
+    pub observed_at: DateTime<Utc>,
 }
 
 /// Controlled partial update for an execution-order lifecycle row.
@@ -297,6 +387,8 @@ pub enum CapitalSettlement {
 /// atomically across execution order + capital + position + intent + recon.
 #[derive(Debug, Clone)]
 pub struct SubmissionLedgerWrite {
+    /// Complete placement identities persisted atomically with this outcome.
+    pub identity_refs: ExecutionIdentityRefs,
     /// Target execution-order state (from the venue outcome).
     pub state: ExecutionOrderState,
     /// Target order-intent status (kept consistent with `state`).
@@ -329,6 +421,8 @@ pub struct SubmissionLedgerWrite {
 /// exit), the intent's exit FSM, and reconciliation.
 #[derive(Debug, Clone)]
 pub struct ExitLedgerWrite {
+    /// Complete placement identities persisted atomically with this outcome.
+    pub identity_refs: ExecutionIdentityRefs,
     /// Target exit-order state (from the venue outcome).
     pub order_state: ExecutionOrderState,
     /// Venue-assigned order id, when acknowledged.

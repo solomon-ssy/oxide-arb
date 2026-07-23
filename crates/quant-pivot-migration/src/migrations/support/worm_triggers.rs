@@ -51,18 +51,6 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
-        name: "trg_system_production_baseline_append_only",
-        table: "system_production_baseline",
-        events: TriggerEvents::DeleteOrUpdate,
-        program: TriggerProgram::DenyWrite,
-    },
-    TriggerSpec {
-        name: "trg_system_production_evidence_append_only",
-        table: "system_production_evidence",
-        events: TriggerEvents::DeleteOrUpdate,
-        program: TriggerProgram::DenyWrite,
-    },
-    TriggerSpec {
         name: "trg_quant_domain_source_expectation_updated_at",
         table: "quant_domain_source_expectation",
         events: TriggerEvents::Update,
@@ -189,6 +177,18 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::SetUpdatedAt,
     },
     TriggerSpec {
+        name: "trg_quant_execution_trade_ref_updated_at",
+        table: "quant_execution_trade_ref",
+        events: TriggerEvents::Update,
+        program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_execution_transaction_ref_append_only",
+        table: "quant_execution_transaction_ref",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
         name: "trg_quant_factor_definition_updated_at",
         table: "quant_factor_definition",
         events: TriggerEvents::Update,
@@ -279,10 +279,34 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
+        name: "trg_quant_settlement_external_cursor_updated_at",
+        table: "quant_settlement_external_cursor",
+        events: TriggerEvents::Update,
+        program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_settlement_governed_action_updated_at",
+        table: "quant_settlement_governed_action",
+        events: TriggerEvents::Update,
+        program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_settlement_chain_submission_updated_at",
+        table: "quant_settlement_chain_submission",
+        events: TriggerEvents::Update,
+        program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
         name: "trg_quant_settlement_redeem_updated_at",
         table: "quant_settlement_redeem",
         events: TriggerEvents::Update,
         program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_settlement_inventory_lot_append_only",
+        table: "quant_settlement_inventory_lot",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
         name: "trg_quant_shadow_comparison_append_only",
@@ -339,20 +363,14 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::SetUpdatedAt,
     },
     TriggerSpec {
-        name: "trg_system_bootstrap_transition_append_only",
-        table: "system_bootstrap_transition",
+        name: "trg_system_runtime_control_transition_append_only",
+        table: "system_runtime_control_transition",
         events: TriggerEvents::DeleteOrUpdate,
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
-        name: "trg_system_kill_switch_updated_at",
-        table: "system_kill_switch",
-        events: TriggerEvents::Update,
-        program: TriggerProgram::SetUpdatedAt,
-    },
-    TriggerSpec {
-        name: "trg_system_runtime_state_updated_at",
-        table: "system_runtime_state",
+        name: "trg_system_runtime_control_updated_at",
+        table: "system_runtime_control",
         events: TriggerEvents::Update,
         program: TriggerProgram::SetUpdatedAt,
     },

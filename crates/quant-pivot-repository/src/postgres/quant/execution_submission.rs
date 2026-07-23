@@ -7,22 +7,33 @@
 //! happens between [`create_entry_order_and_lock_capital`] and
 //! [`record_submission_result`] — never inside a transaction.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{
     StorageError,
     entity::{
-        QUANT_EXECUTION_ORDER, QUANT_ORDER_INTENT, QUANT_RECOMMENDATION,
-        QUANT_RECOMMENDATION_REPORT,
+        QUANT_EXECUTION_ORDER, QUANT_EXECUTION_TRADE_REF, QUANT_EXECUTION_TRANSACTION_REF,
+        QUANT_ORDER_INTENT, QUANT_RECOMMENDATION, QUANT_RECOMMENDATION_REPORT,
     },
 };
 use quant_pivot_models::{
     domain::quant::{
-        EntryConditionClaim, EntryConditionInstanceInfo, ExecutionOrderInfo, ExitLedgerWrite,
-        NewExecutionOrder, NewReconciliation, OrderIntentInfo, ReconciliationLedgerWrite,
+        EntryConditionClaim, EntryConditionInstanceInfo, ExecutionIdentityEnrichment,
+        ExecutionIdentityRefs, ExecutionOrderIdentityRefs, ExecutionOrderInfo, ExecutionTradeRef,
+        ExecutionTransactionRef, ExitLedgerWrite, NewExecutionOrder, NewExecutionTradeRef,
+        NewExecutionTransactionRef, NewReconciliation, OrderIntentInfo, ReconciliationLedgerWrite,
         SubmissionLedgerWrite,
     },
     entities::{
         quant_execution_order::{Column, Entity as QuantExecutionOrderEntity},
+        quant_execution_trade_ref::{
+            Column as QuantExecutionTradeRefColumn, Entity as QuantExecutionTradeRefEntity,
+        },
+        quant_execution_transaction_ref::{
+            Column as QuantExecutionTransactionRefColumn,
+            Entity as QuantExecutionTransactionRefEntity,
+        },
         quant_order_intent::Model,
         quant_recommendation::Entity,
         quant_recommendation_report::Entity as QuantRecommendationReportEntity,
@@ -31,16 +42,17 @@ use quant_pivot_models::{
         },
     },
     enums::{
-        execution::{ExecutionOrderPhase, ExitReason, ExitState},
+        execution::{ExecutionOrderPhase, ExitReason, ExitState, VenueTradeStatus},
         quant::{
             ExecutionOrderState, OrderIntentStatus, RecommendationReportStatus,
             RecommendationStatus, ReportKind,
         },
     },
     types::{
-        ExecutionOrderId, ExitReinferenceObservation, FeatureParityStateId, OrderIntentId,
-        PendingScaleOut, Price, RecommendationId, RecommendationReportId, ReconciliationId,
-        ResearchProfileArtifactId, ResearchProfileId,
+        EvmTransactionHash, ExecutionOrderId, ExecutionTradeRefId, ExecutionTransactionRefId,
+        ExitReinferenceObservation, FeatureParityStateId, OrderIntentId, PendingScaleOut, Price,
+        RecommendationId, RecommendationReportId, ReconciliationId, ResearchProfileArtifactId,
+        ResearchProfileId,
     },
 };
 use sea_orm::{
@@ -69,6 +81,7 @@ use crate::{
             position,
             report_scope::acquire_report_scope_lock,
         },
+        write::insert_many_chunked,
     },
     traits::ExecutionSubmissionRepository,
 };
@@ -102,6 +115,132 @@ struct SubmissionReportScope {
     profile_id: ResearchProfileId,
     research_profile_artifact_id: ResearchProfileArtifactId,
     report_kind: ReportKind,
+}
+
+async fn insert_identity_refs(
+    db: &impl ConnectionTrait,
+    execution_order_id: ExecutionOrderId,
+    refs: ExecutionIdentityRefs,
+) -> Result<(), StorageError> {
+    let unique_trade_ids = refs.trade_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if unique_trade_ids.len() != refs.trade_ids.len() {
+        return Err(error::invariant_violation(
+            Some(QUANT_EXECUTION_TRADE_REF),
+            "placement response contains duplicate venue trade ids",
+        ));
+    }
+    if !unique_trade_ids.is_empty() {
+        let trades = unique_trade_ids
+            .into_iter()
+            .map(|venue_trade_id| NewExecutionTradeRef {
+                execution_trade_ref_id: ExecutionTradeRefId::from_v7(),
+                execution_order_id,
+                venue_trade_id,
+                trade_status: None,
+                transaction_hash: None,
+                observed_at: refs.observed_at,
+            })
+            .collect();
+        insert_many_chunked::<QuantExecutionTradeRefEntity, NewExecutionTradeRef>(db, trades)
+            .await
+            .map_err(|storage_error| match storage_error {
+                StorageError::Database(database_error) => {
+                    error::map_unique(database_error, QUANT_EXECUTION_TRADE_REF, "venue_trade_id")
+                }
+                other => other,
+            })?;
+    }
+
+    let unique_transaction_hashes = refs.transaction_hashes.into_iter().collect::<BTreeSet<_>>();
+    if !unique_transaction_hashes.is_empty() {
+        let transactions = unique_transaction_hashes
+            .into_iter()
+            .map(|transaction_hash| NewExecutionTransactionRef {
+                execution_transaction_ref_id: ExecutionTransactionRefId::from_v7(),
+                execution_order_id,
+                transaction_hash,
+                observed_at: refs.observed_at,
+            })
+            .collect();
+        insert_many_chunked::<QuantExecutionTransactionRefEntity, NewExecutionTransactionRef>(
+            db,
+            transactions,
+        )
+        .await
+        .map_err(|storage_error| match storage_error {
+            StorageError::Database(database_error) => error::map_unique(
+                database_error,
+                QUANT_EXECUTION_TRANSACTION_REF,
+                "execution_order_id,transaction_hash",
+            ),
+            other => other,
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_trade_status_transition(
+    trade_ref: &ExecutionTradeRef,
+    next: VenueTradeStatus,
+) -> Result<(), StorageError> {
+    let Some(current) = trade_ref.trade_status else {
+        return Ok(());
+    };
+    let allowed = match current {
+        VenueTradeStatus::Matched => true,
+        VenueTradeStatus::Retrying | VenueTradeStatus::Mined => {
+            !matches!(next, VenueTradeStatus::Matched)
+        }
+        VenueTradeStatus::Confirmed => next == VenueTradeStatus::Confirmed,
+        VenueTradeStatus::Failed => next == VenueTradeStatus::Failed,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(error::illegal_transition(
+            QUANT_EXECUTION_TRADE_REF,
+            Some(&trade_ref.venue_trade_id),
+            format!("{current:?}"),
+            format!("{next:?}"),
+        ))
+    }
+}
+
+async fn insert_transaction_ref_if_missing(
+    db: &impl ConnectionTrait,
+    execution_order_id: ExecutionOrderId,
+    transaction_hash: EvmTransactionHash,
+    observed_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    let exists = QuantExecutionTransactionRefEntity::find()
+        .filter(QuantExecutionTransactionRefColumn::ExecutionOrderId.eq(execution_order_id))
+        .filter(QuantExecutionTransactionRefColumn::TransactionHash.eq(transaction_hash.clone()))
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .is_some();
+    if exists {
+        return Ok(());
+    }
+    QuantExecutionTransactionRefEntity::insert(
+        NewExecutionTransactionRef {
+            execution_transaction_ref_id: ExecutionTransactionRefId::from_v7(),
+            execution_order_id,
+            transaction_hash,
+            observed_at,
+        }
+        .into_active_model(),
+    )
+    .exec(db)
+    .await
+    .map_err(|database_error| {
+        error::map_unique(
+            database_error,
+            QUANT_EXECUTION_TRANSACTION_REF,
+            "execution_order_id,transaction_hash",
+        )
+    })?;
+    Ok(())
 }
 
 async fn probe_submission_scope(
@@ -368,6 +507,8 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .await
             .map_err(StorageError::from)?;
 
+        insert_identity_refs(&txn, *execution_order_id, write.identity_refs).await?;
+
         settle_capital(
             &txn,
             &intent_id,
@@ -422,6 +563,177 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
 
         txn.commit().await.map_err(StorageError::from)?;
         Ok(execution_order.into())
+    }
+
+    async fn load_identity_refs(
+        &self,
+        execution_order_id: &ExecutionOrderId,
+    ) -> Result<ExecutionOrderIdentityRefs, StorageError> {
+        let exists = QuantExecutionOrderEntity::find_by_id(*execution_order_id)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .is_some();
+        if !exists {
+            return Err(error::not_found(QUANT_EXECUTION_ORDER, execution_order_id));
+        }
+        let trades = QuantExecutionTradeRefEntity::find()
+            .filter(QuantExecutionTradeRefColumn::ExecutionOrderId.eq(*execution_order_id))
+            .order_by_asc(QuantExecutionTradeRefColumn::CreatedAt)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(ExecutionTradeRef::from)
+            .collect();
+        let transactions = QuantExecutionTransactionRefEntity::find()
+            .filter(QuantExecutionTransactionRefColumn::ExecutionOrderId.eq(*execution_order_id))
+            .order_by_asc(QuantExecutionTransactionRefColumn::CreatedAt)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(ExecutionTransactionRef::from)
+            .collect();
+        Ok(ExecutionOrderIdentityRefs {
+            trades,
+            transactions,
+        })
+    }
+
+    async fn enrich_identity_refs(
+        &self,
+        execution_order_id: &ExecutionOrderId,
+        enrichment: ExecutionIdentityEnrichment,
+    ) -> Result<ExecutionOrderIdentityRefs, StorageError> {
+        let unique_trade_ids = enrichment
+            .trades
+            .iter()
+            .map(|trade| trade.venue_trade_id.clone())
+            .collect::<BTreeSet<_>>();
+        if unique_trade_ids.len() != enrichment.trades.len() {
+            return Err(error::invariant_violation(
+                Some(QUANT_EXECUTION_TRADE_REF),
+                "identity enrichment contains duplicate venue trade ids",
+            ));
+        }
+
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let order = QuantExecutionOrderEntity::find_by_id(*execution_order_id)
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| error::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
+        if let Some(discovered_order_id) = enrichment.discovered_order_id {
+            if order
+                .venue_order_id
+                .as_ref()
+                .is_some_and(|current| current != &discovered_order_id)
+            {
+                return Err(error::state_conflict(
+                    QUANT_EXECUTION_ORDER,
+                    Some(execution_order_id),
+                    "venue order identity cannot be replaced by reconciliation discovery",
+                ));
+            }
+            if order.venue_order_id.is_none() {
+                let mut active = order.into_active_model();
+                active.venue_order_id = ActiveValue::Set(Some(discovered_order_id));
+                active.update(&txn).await.map_err(StorageError::from)?;
+            }
+        }
+
+        for observation in enrichment.trades {
+            if matches!(
+                observation.trade_status,
+                VenueTradeStatus::Mined | VenueTradeStatus::Confirmed
+            ) && observation.transaction_hash.is_none()
+            {
+                return Err(error::invariant_violation(
+                    Some(QUANT_EXECUTION_TRADE_REF),
+                    format!(
+                        "trade {} is {:?} without a transaction hash",
+                        observation.venue_trade_id, observation.trade_status
+                    ),
+                ));
+            }
+            let existing = QuantExecutionTradeRefEntity::find()
+                .filter(
+                    QuantExecutionTradeRefColumn::VenueTradeId
+                        .eq(observation.venue_trade_id.clone()),
+                )
+                .lock_exclusive()
+                .one(&txn)
+                .await
+                .map_err(StorageError::from)?;
+            if let Some(existing) = existing {
+                if existing.execution_order_id != *execution_order_id {
+                    return Err(error::duplicate(
+                        QUANT_EXECUTION_TRADE_REF,
+                        observation.venue_trade_id,
+                    ));
+                }
+                let trade_ref = ExecutionTradeRef::from(existing.clone());
+                validate_trade_status_transition(&trade_ref, observation.trade_status)?;
+                if trade_ref.trade_status == Some(VenueTradeStatus::Confirmed)
+                    && trade_ref.transaction_hash != observation.transaction_hash
+                {
+                    return Err(error::state_conflict(
+                        QUANT_EXECUTION_TRADE_REF,
+                        Some(&trade_ref.venue_trade_id),
+                        "confirmed trade transaction hash is immutable",
+                    ));
+                }
+                let transaction_hash = observation
+                    .transaction_hash
+                    .clone()
+                    .or(trade_ref.transaction_hash);
+                let mut active = existing.into_active_model();
+                active.trade_status = ActiveValue::Set(Some(observation.trade_status));
+                active.transaction_hash = ActiveValue::Set(transaction_hash.clone());
+                active.observed_at = ActiveValue::Set(enrichment.observed_at);
+                active.update(&txn).await.map_err(StorageError::from)?;
+                if let Some(transaction_hash) = transaction_hash {
+                    insert_transaction_ref_if_missing(
+                        &txn,
+                        *execution_order_id,
+                        transaction_hash,
+                        enrichment.observed_at,
+                    )
+                    .await?;
+                }
+            } else {
+                let transaction_hash = observation.transaction_hash.clone();
+                QuantExecutionTradeRefEntity::insert(
+                    NewExecutionTradeRef {
+                        execution_trade_ref_id: ExecutionTradeRefId::from_v7(),
+                        execution_order_id: *execution_order_id,
+                        venue_trade_id: observation.venue_trade_id,
+                        trade_status: Some(observation.trade_status),
+                        transaction_hash: transaction_hash.clone(),
+                        observed_at: enrichment.observed_at,
+                    }
+                    .into_active_model(),
+                )
+                .exec(&txn)
+                .await
+                .map_err(|database_error| {
+                    error::map_unique(database_error, QUANT_EXECUTION_TRADE_REF, "venue_trade_id")
+                })?;
+                if let Some(transaction_hash) = transaction_hash {
+                    insert_transaction_ref_if_missing(
+                        &txn,
+                        *execution_order_id,
+                        transaction_hash,
+                        enrichment.observed_at,
+                    )
+                    .await?;
+                }
+            }
+        }
+        txn.commit().await.map_err(StorageError::from)?;
+        self.load_identity_refs(execution_order_id).await
     }
 
     async fn mark_exit_manual(
@@ -571,6 +883,8 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .update(&txn)
             .await
             .map_err(StorageError::from)?;
+
+        insert_identity_refs(&txn, *execution_order_id, write.identity_refs).await?;
 
         // Reduce/close the lot on a (partial) fill; complete capital on full exit.
         let exit_fill_shares = write.position_exit.as_ref().map(|exit| exit.shares);

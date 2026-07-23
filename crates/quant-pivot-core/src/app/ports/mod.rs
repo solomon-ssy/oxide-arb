@@ -12,5 +12,6 @@ pub mod quant_report;
 pub mod reconciliation;
 pub mod research_catalog;
 pub mod research_job;
+pub mod settlement_control;
 pub mod structural_monitor;
 pub mod training_dataset;

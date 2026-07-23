@@ -43,8 +43,8 @@ pub trait RuntimeModeGate: Send + Sync {
 /// frozen [`ExecutionEligibility`](quant_pivot_models::types::ExecutionEligibility)
 /// + [`RiskEnvelope`](quant_pivot_models::types::RiskEnvelope).
 ///
-/// Deterministic and side-effect free: it reads the hot config snapshot for the
-/// approval TTL and the auto-execution switch, then maps
+/// Deterministic and side-effect free: it reads the hot policy bundle for the
+/// approval TTL and exact active-policy identity, then maps
 /// `(mode, recommendation)` to one of the five [`IntentPolicyDecision`] arms.
 pub struct DefaultRuntimeModeGate {
     config: Arc<DecisionPolicyStore>,
@@ -90,17 +90,42 @@ impl RuntimeModeGate for DefaultRuntimeModeGate {
             });
         }
 
-        let config = self.config.current();
-        let semi_auto = &config.execution_authorization.semi_auto;
-
         match mode {
             QuantRuntimeMode::ReportOnly => Ok(IntentPolicyDecision::ReportOnly),
-            QuantRuntimeMode::SemiAuto => Ok(IntentPolicyDecision::RequiresApproval {
-                approval_ttl: Duration::from_secs(semi_auto.approval_ttl_secs),
-            }),
-            QuantRuntimeMode::AutoExecution => Ok(IntentPolicyDecision::Denied {
-                reason: ModeDenialReason::AutoExecutionNotAllowed,
-            }),
+            QuantRuntimeMode::SemiAuto => {
+                let config = self.config.current();
+                Ok(IntentPolicyDecision::RequiresApproval {
+                    approval_ttl: Duration::from_secs(
+                        config.execution_authorization.semi_auto.approval_ttl_secs,
+                    ),
+                })
+            }
+            QuantRuntimeMode::AutoExecution => {
+                let expected_policy_id = recommendation.evidence_refs.decision_policy_snapshot_id;
+                let expected_policy_text = expected_policy_id.to_string();
+                let exact_frozen_policy =
+                    eligibility.auto_policy_id.as_deref() == Some(expected_policy_text.as_str());
+                let Some(active_bundle) = self.config.current_bundle() else {
+                    return Ok(IntentPolicyDecision::Denied {
+                        reason: ModeDenialReason::AutoExecutionNotAllowed,
+                    });
+                };
+                if !envelope.auto_execution_allowed
+                    || !exact_frozen_policy
+                    || active_bundle.decision_policy_snapshot_id != expected_policy_id
+                {
+                    return Ok(IntentPolicyDecision::Denied {
+                        reason: ModeDenialReason::AutoExecutionNotAllowed,
+                    });
+                }
+                Ok(IntentPolicyDecision::ApprovedByPolicy {
+                    policy_id: expected_policy_text,
+                    policy_hash: Some(active_bundle.snapshot_hash),
+                    reason:
+                        "frozen recommendation and active decision policy authorize auto execution"
+                            .to_owned(),
+                })
+            }
         }
     }
 }
@@ -115,9 +140,10 @@ mod tests {
             execution::ModeDenialReason,
             quant::{OutcomeSide, QuantRuntimeMode},
         },
-        runtime_config::DecisionPolicySnapshot,
+        runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
         types::{
-            RecommendationId, RecommendationReportId, RecommendationTradePlan, RiskEnvelope, Usd,
+            DecisionPolicySnapshotId, PolicyBundleGeneration, RecommendationId,
+            RecommendationReportId, RecommendationTradePlan, RiskEnvelope, Usd,
         },
     };
     use rust_decimal_macros::dec;
@@ -138,6 +164,20 @@ mod tests {
 
     fn gate(config: DecisionPolicySnapshot) -> DefaultRuntimeModeGate {
         DefaultRuntimeModeGate::new(Arc::new(DecisionPolicyStore::new(config)))
+    }
+
+    fn active_gate(
+        config: DecisionPolicySnapshot,
+        policy_id: DecisionPolicySnapshotId,
+    ) -> DefaultRuntimeModeGate {
+        let hash = config.persistence_hash().expect("hash policy snapshot");
+        let bundle = ActivePolicyBundle::from_parts(
+            PolicyBundleGeneration::try_new(1).expect("positive generation"),
+            policy_id,
+            hash,
+            config,
+        );
+        DefaultRuntimeModeGate::new(Arc::new(DecisionPolicyStore::new_active(bundle)))
     }
 
     fn risk_envelope(rec: &mut RecommendationInfo) -> &mut RiskEnvelope {
@@ -195,36 +235,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_blocks_auto_execution_when_authorization_envelope_denies_it() {
-        let mut config = DecisionPolicySnapshot::default();
-        config.execution_authorization.auto_execution.enabled = true;
-        let gate = gate(config);
+    async fn exact_active_policy_allows_auto_execution() {
+        let config = DecisionPolicySnapshot::default();
         let mut rec = rec();
+        let policy_id = rec.evidence_refs.decision_policy_snapshot_id;
+        let gate = active_gate(config, policy_id);
         rec.execution_eligibility.eligible_modes = vec![QuantRuntimeMode::AutoExecution];
         rec.execution_eligibility.ineligibility_reasons = Vec::new();
-        rec.execution_eligibility.auto_policy_id = Some("policy-7".to_owned());
+        rec.execution_eligibility.auto_policy_id = Some(policy_id.to_string());
         risk_envelope(&mut rec).auto_execution_allowed = true;
         let decision = gate
             .evaluate_intent_policy(QuantRuntimeMode::AutoExecution, &rec)
             .await
             .expect("policy");
-        assert_eq!(
+        assert!(matches!(
             decision,
-            IntentPolicyDecision::Denied {
-                reason: ModeDenialReason::AutoExecutionNotAllowed,
-            }
-        );
+            IntentPolicyDecision::ApprovedByPolicy { policy_id: id, .. } if id == policy_id.to_string()
+        ));
     }
 
     #[tokio::test]
     async fn auto_execution_denied_when_envelope_disallows() {
-        let mut config = DecisionPolicySnapshot::default();
-        config.execution_authorization.auto_execution.enabled = true;
-        let gate = gate(config);
+        let config = DecisionPolicySnapshot::default();
         let mut rec = rec();
+        let policy_id = rec.evidence_refs.decision_policy_snapshot_id;
+        let gate = active_gate(config, policy_id);
         rec.execution_eligibility.eligible_modes = vec![QuantRuntimeMode::AutoExecution];
         rec.execution_eligibility.ineligibility_reasons = Vec::new();
-        rec.execution_eligibility.auto_policy_id = Some("policy-7".to_owned());
+        rec.execution_eligibility.auto_policy_id = Some(policy_id.to_string());
         risk_envelope(&mut rec).auto_execution_allowed = false;
         let decision = gate
             .evaluate_intent_policy(QuantRuntimeMode::AutoExecution, &rec)

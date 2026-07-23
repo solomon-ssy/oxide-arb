@@ -18,7 +18,7 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::ReconciliationRepository;
 
-use super::RuntimeModeHandle;
+use super::RuntimeControlsHandle;
 
 /// Max blocking reconciliation rows returned in the detailed recovery view.
 const BLOCKING_RECONCILIATION_LIMIT: u64 = 32;
@@ -47,10 +47,10 @@ impl ExecutionRecoveryHandle {
         &self,
         reconciliation: &Arc<dyn ReconciliationRepository>,
         kill_switch: &Arc<dyn KillSwitchPort>,
-        runtime_mode: &RuntimeModeHandle,
+        runtime_controls: &RuntimeControlsHandle,
     ) -> QuantResult<()> {
         let summary =
-            build_execution_recovery_summary(reconciliation, kill_switch, runtime_mode).await?;
+            build_execution_recovery_summary(reconciliation, kill_switch, runtime_controls).await?;
         self.inner.store(Arc::new(summary));
         Ok(())
     }
@@ -63,7 +63,7 @@ pub struct ExecutionRecoveryCoordinator {
     handle: ExecutionRecoveryHandle,
     reconciliation: Arc<dyn ReconciliationRepository>,
     kill_switch: Arc<dyn KillSwitchPort>,
-    runtime_mode: RuntimeModeHandle,
+    runtime_controls: RuntimeControlsHandle,
 }
 
 impl ExecutionRecoveryCoordinator {
@@ -72,13 +72,13 @@ impl ExecutionRecoveryCoordinator {
         handle: ExecutionRecoveryHandle,
         reconciliation: Arc<dyn ReconciliationRepository>,
         kill_switch: Arc<dyn KillSwitchPort>,
-        runtime_mode: RuntimeModeHandle,
+        runtime_controls: RuntimeControlsHandle,
     ) -> Self {
         Self {
             handle,
             reconciliation,
             kill_switch,
-            runtime_mode,
+            runtime_controls,
         }
     }
 
@@ -90,7 +90,11 @@ impl ExecutionRecoveryCoordinator {
     /// Recompute and publish the recovery summary.
     pub async fn refresh(&self) -> QuantResult<()> {
         self.handle
-            .refresh(&self.reconciliation, &self.kill_switch, &self.runtime_mode)
+            .refresh(
+                &self.reconciliation,
+                &self.kill_switch,
+                &self.runtime_controls,
+            )
             .await
     }
 }
@@ -99,11 +103,11 @@ impl ExecutionRecoveryCoordinator {
 pub async fn build_execution_recovery_summary(
     reconciliation: &Arc<dyn ReconciliationRepository>,
     kill_switch: &Arc<dyn KillSwitchPort>,
-    runtime_mode: &RuntimeModeHandle,
+    runtime_controls: &RuntimeControlsHandle,
 ) -> QuantResult<ExecutionRecoverySummary> {
     let unresolvable_count = reconciliation.count_blocking_unresolvable().await?;
     let kill_switch_view = kill_switch.view();
-    let mode = runtime_mode.current();
+    let mode = runtime_controls.quant_runtime_mode();
     Ok(summary_from_parts(
         unresolvable_count,
         &kill_switch_view,
@@ -115,10 +119,10 @@ pub async fn build_execution_recovery_summary(
 pub async fn build_execution_recovery_view(
     reconciliation: &Arc<dyn ReconciliationRepository>,
     kill_switch: &Arc<dyn KillSwitchPort>,
-    runtime_mode: &RuntimeModeHandle,
+    runtime_controls: &RuntimeControlsHandle,
 ) -> QuantResult<ExecutionRecoveryView> {
     let kill_switch_view = kill_switch.view();
-    let mode = runtime_mode.current();
+    let mode = runtime_controls.quant_runtime_mode();
     let unresolvable_count = reconciliation.count_blocking_unresolvable().await?;
     let summary = summary_from_parts(unresolvable_count, &kill_switch_view, mode);
 
@@ -192,6 +196,7 @@ mod tests {
         KillSwitchView {
             state,
             requires_operator_ack: requires_ack,
+            revision: 0,
             last_reason: "test".to_owned(),
             changed_by: "test".to_owned(),
             changed_at: Utc::now(),

@@ -30,7 +30,7 @@ mod research_job;
 mod research_model_contract;
 mod role;
 mod runtime_config;
-mod settlement_redeem;
+pub mod settlement_redeem;
 mod structural_monitor;
 mod system;
 mod trade_policy;
@@ -138,15 +138,10 @@ pub use runtime_config::{
     ConfigSnapshotOptionsQuery, CreatePolicyDraftRequest, CredentialHealthView,
     CurrentPolicyResourceView, DecisionPolicySnapshotOptionView, DeploymentConfigSnapshotView,
     DeploymentConfigView, DeploymentEndpointView, DeploymentIdentityView,
-    DeploymentResourceBudgetView, DeploymentResourceLimitView, LifecycleCheckView, LifecycleView,
-    PolicyActivationResultView, PolicyActivationView, PolicyActorView, PolicyApprovalView,
-    PolicyResourceSchemaView, PolicyRevisionListQuery, PolicyRevisionView, PolicyValidationView,
-    ProductionBaselineView, SchedulePreviewRequest, SchedulePreviewView, SealProductionRequest,
-    ValidatePolicyDraftRequest,
-};
-pub use settlement_redeem::{
-    SettlementRedeemDetail, SettlementRedeemDetailView, SettlementRedeemListQuery,
-    SettlementRedeemLotView, SettlementRedeemSummary, SettlementRedeemView,
+    DeploymentResourceBudgetView, DeploymentResourceLimitView, PolicyActivationResultView,
+    PolicyActivationView, PolicyActorView, PolicyApprovalView, PolicyResourceSchemaView,
+    PolicyRevisionListQuery, PolicyRevisionView, PolicyValidationView, SchedulePreviewRequest,
+    SchedulePreviewView, ValidatePolicyDraftRequest,
 };
 pub use structural_monitor::{
     MissingReasonCountView, NegRiskEventDriftView, NegRiskLegView,
@@ -155,9 +150,9 @@ pub use structural_monitor::{
     TradeTapeCoverageView, TradeTapeSourceHealthView,
 };
 pub use system::{
-    ActionEligibilityDecision, ActionEligibilityView, ActivateBootstrapRequest, BootstrapView,
-    CapabilityView, QuantModeView, SetKillSwitchRequest, SwitchQuantModeRequest,
-    SystemCapabilities, SystemStatusView,
+    ActionEligibilityDecision, ActionEligibilityView, CapabilityView, SetKillSwitchRequest,
+    SwitchQuantModeRequest, SwitchSettlementWritePolicyRequest, SystemCapabilities,
+    SystemStatusView,
 };
 pub use trade_policy::{
     FitTradePolicyRequest, TradePolicyAuditListQuery, TradePolicyDetailView,

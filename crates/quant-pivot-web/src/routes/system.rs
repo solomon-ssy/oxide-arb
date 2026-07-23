@@ -4,11 +4,11 @@ use actix_web::{http::Method, web::Data};
 use quant_pivot_models::{
     domain::{
         api::{
-            ActionEligibilityDecision, ActionEligibilityView, ActivateBootstrapRequest,
-            BootstrapView, CapabilityView, ExecutionRecoveryView, QuantModeView,
-            SetKillSwitchRequest, SwitchQuantModeRequest, SystemStatusView,
+            ActionEligibilityDecision, ActionEligibilityView, CapabilityView,
+            ExecutionRecoveryView, SetKillSwitchRequest, SwitchQuantModeRequest,
+            SwitchSettlementWritePolicyRequest, SystemStatusView,
         },
-        governance::{HealthReport, KillSwitchView},
+        governance::{HealthReport, KillSwitchView, RuntimeControlSnapshot},
         ports::{QuantModeTransitionReport, SetKillSwitchCommand},
     },
     enums::{
@@ -46,12 +46,6 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             action_eligibility,
         ),
         spec(
-            Method::POST,
-            "/system/bootstrap/activate",
-            Rule::ActingRoleGoverned(ResourceType::System, Operation::BootstrapActivate),
-            activate_bootstrap,
-        ),
-        spec(
             Method::GET,
             "/system/health",
             Rule::ResourceOp(ResourceType::System, Operation::Read),
@@ -59,25 +53,25 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         ),
         spec(
             Method::GET,
-            "/system/quant-mode",
+            "/system/runtime-controls",
             Rule::ResourceOp(ResourceType::System, Operation::Read),
-            quant_mode,
+            runtime_controls,
         ),
         spec(
             Method::POST,
-            "/system/quant-mode",
+            "/system/runtime-controls/quant-mode",
             Rule::ActingRoleGoverned(ResourceType::System, Operation::SwitchMode),
             switch_quant_mode,
         ),
         spec(
-            Method::GET,
-            "/system/kill-switch",
-            Rule::ResourceOp(ResourceType::System, Operation::Read),
-            kill_switch_status,
+            Method::POST,
+            "/system/runtime-controls/settlement-write-policy",
+            Rule::ActingRoleGoverned(ResourceType::System, Operation::SwitchMode),
+            switch_settlement_write_policy,
         ),
         spec(
             Method::POST,
-            "/system/kill-switch",
+            "/system/runtime-controls/kill-switch",
             // The required permission depends on the transition (halt / resume /
             // emergency), computed in the handler once the target state is known.
             Rule::ActingRoleDeferred(ResourceType::System),
@@ -94,10 +88,9 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 
 pub async fn status(state: Data<AppState>) -> Result<WebResponse<SystemStatusView>, WebError> {
     let runtime = state.control.system_status();
-    let capabilities = state.bootstrap.capabilities(&runtime).await?;
+    let capabilities = state.capabilities.capabilities(&runtime).await?;
     Ok(WebResponse::ok(SystemStatusView {
         runtime,
-        bootstrap: state.bootstrap.view(),
         capabilities,
     }))
 }
@@ -107,7 +100,7 @@ pub async fn action_eligibility(
     actor: AuthedActor,
 ) -> Result<WebResponse<ActionEligibilityView>, WebError> {
     let runtime = state.control.system_status();
-    let capabilities = state.bootstrap.capabilities(&runtime).await?;
+    let capabilities = state.capabilities.capabilities(&runtime).await?;
     let subject = &actor.claims.sub;
     let report_permission = state
         .casbin
@@ -155,28 +148,6 @@ const fn action_decision(
     }
 }
 
-pub async fn activate_bootstrap(
-    state: Data<AppState>,
-    actor: AuthedActor,
-    ActingRole(acting_role): ActingRole,
-    op_ctx: OperationCtx,
-    body: ValidatedJson<ActivateBootstrapRequest>,
-) -> Result<WebResponse<BootstrapView>, WebError> {
-    let request = body.into_inner();
-    op_ctx.set_action(OperationCategory::System, "system.bootstrap.activate");
-    op_ctx.set_detail(serde_json::json!({
-        "bootstrap_contract_version": request.bootstrap_contract_version,
-        "expected_state_revision": request.expected_state_revision,
-        "reason": &request.reason,
-        "report_only_forced_ack": request.report_only_forced_ack,
-    }))?;
-    let view = state
-        .bootstrap
-        .activate(request, &actor.claims.username, &acting_role)
-        .await?;
-    Ok(WebResponse::ok(view))
-}
-
 pub async fn health(state: Data<AppState>) -> Result<WebResponse<HealthReport>, WebError> {
     Ok(WebResponse::ok(state.control.health().await))
 }
@@ -187,10 +158,10 @@ pub async fn execution_recovery(
     Ok(WebResponse::ok(state.execution_recovery.view().await?))
 }
 
-pub async fn quant_mode(state: Data<AppState>) -> Result<WebResponse<QuantModeView>, WebError> {
-    Ok(WebResponse::ok(QuantModeView {
-        mode: state.control.quant_runtime_mode(),
-    }))
+pub async fn runtime_controls(
+    state: Data<AppState>,
+) -> Result<WebResponse<RuntimeControlSnapshot>, WebError> {
+    Ok(WebResponse::ok(state.control.snapshot()))
 }
 
 pub async fn switch_quant_mode(
@@ -201,29 +172,58 @@ pub async fn switch_quant_mode(
     body: ValidatedJson<SwitchQuantModeRequest>,
 ) -> Result<WebResponse<QuantModeTransitionReport>, WebError> {
     let body = body.into_inner();
-    let before_hash = canonical_state_hash(&QuantModeView {
-        mode: state.control.quant_runtime_mode(),
-    })?;
+    let before_hash = canonical_state_hash(&state.control.snapshot())?;
     op_ctx.set_action(OperationCategory::System, "system.switch_quant_mode");
     op_ctx.set_detail(serde_json::json!({
         "target_mode": body.mode.as_str(),
-        "reason": body.reason,
+        "reason": &body.reason,
+        "expected_revision": body.expected_revision,
     }))?;
     let report = state
         .control
-        .switch_quant_mode(body.mode, &actor.claims.username, &body.reason)
+        .switch_quant_mode(
+            body.mode,
+            body.expected_revision,
+            &actor.claims.username,
+            &body.reason,
+        )
         .await?;
-    let after_hash = canonical_state_hash(&QuantModeView {
-        mode: state.control.quant_runtime_mode(),
-    })?;
+    let after_hash = canonical_state_hash(&state.control.snapshot())?;
     op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
     Ok(WebResponse::ok(report))
 }
 
-pub async fn kill_switch_status(
+pub async fn switch_settlement_write_policy(
     state: Data<AppState>,
-) -> Result<WebResponse<KillSwitchView>, WebError> {
-    Ok(WebResponse::ok(state.kill_switch.view()))
+    actor: AuthedActor,
+    _acting_role: ActingRole,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<SwitchSettlementWritePolicyRequest>,
+) -> Result<WebResponse<RuntimeControlSnapshot>, WebError> {
+    let body = body.into_inner();
+    let before = state.control.snapshot();
+    let before_hash = canonical_state_hash(&before)?;
+    op_ctx.set_action(
+        OperationCategory::System,
+        "system.switch_settlement_write_policy",
+    );
+    op_ctx.set_detail(serde_json::json!({
+        "target_policy": body.policy.as_str(),
+        "reason": &body.reason,
+        "expected_revision": body.expected_revision,
+    }))?;
+    let snapshot = state
+        .control
+        .switch_settlement_write_policy(
+            body.policy,
+            body.expected_revision,
+            &actor.claims.username,
+            &body.reason,
+        )
+        .await?;
+    let after_hash = canonical_state_hash(&snapshot)?;
+    op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
+    Ok(WebResponse::ok(snapshot))
 }
 
 /// The permission a kill-switch transition requires, keyed on the transition's
@@ -273,12 +273,13 @@ pub async fn set_kill_switch(
     op_ctx.set_action(OperationCategory::System, "system.set_kill_switch");
     op_ctx.set_detail(serde_json::json!({
         "target_state": body.state.as_str(),
-        "reason": body.reason,
+        "reason": &body.reason,
         "ack": body.ack,
     }))?;
     let view = state
         .kill_switch
         .set(SetKillSwitchCommand {
+            expected_revision: body.expected_revision,
             target: body.state,
             actor: actor.claims.username.clone(),
             reason: body.reason,

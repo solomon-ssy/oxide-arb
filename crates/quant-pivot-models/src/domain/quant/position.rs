@@ -10,7 +10,10 @@ use crate::{
         execution::{ExitReason, PositionLedgerState},
         quant::{AccountSource, OutcomeSide},
     },
-    types::{EventId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd},
+    types::{
+        EventId, ExecutionAccountId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId,
+        Usd,
+    },
 };
 
 /// Persisted current-position ledger row (one lot per filled entry intent).
@@ -19,6 +22,7 @@ use crate::{
 pub struct PositionInfo {
     pub position_id: PositionId,
     pub order_intent_id: OrderIntentId,
+    pub execution_account_id: ExecutionAccountId,
     pub token_id: TokenId,
     pub market_id: MarketId,
     pub event_id: Option<EventId>,
@@ -36,7 +40,7 @@ pub struct PositionInfo {
 }
 
 info_from_model!(PositionInfo, crate::entities::quant_position::Model, {
-    position_id, order_intent_id, token_id, market_id, event_id, category, side,
+    position_id, order_intent_id, execution_account_id, token_id, market_id, event_id, category, side,
     state, shares, avg_price, cost_usd, realized_pnl_usd, source, opened_at,
     updated_at, closed_at,
 });
@@ -47,6 +51,7 @@ info_from_model!(PositionInfo, crate::entities::quant_position::Model, {
 pub struct NewPosition {
     pub position_id: PositionId,
     pub order_intent_id: OrderIntentId,
+    pub execution_account_id: ExecutionAccountId,
     pub token_id: TokenId,
     pub market_id: MarketId,
     pub event_id: Option<EventId>,
@@ -66,6 +71,7 @@ pub struct NewPosition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionFill {
     pub order_intent_id: OrderIntentId,
+    pub execution_account_id: ExecutionAccountId,
     pub token_id: TokenId,
     pub market_id: MarketId,
     pub event_id: Option<EventId>,

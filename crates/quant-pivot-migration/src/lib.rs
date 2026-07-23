@@ -14,15 +14,10 @@ mod snapshots;
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use async_trait::async_trait;
 use blake3::Hasher;
 use migrations::Migrator;
-use quant_pivot_error::{QuantResult, storage::StorageError};
-use quant_pivot_models::{
-    config::PostgresConfig,
-    domain::ports::{LifecycleLeaseGuardPort, LifecycleLeaseProviderPort},
-    types::LIFECYCLE_ADVISORY_LOCK_KEY,
-};
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{config::PostgresConfig, types::SCHEMA_MUTATION_ADVISORY_LOCK_KEY};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use sea_orm_migration::MigratorTrait;
 use serde::Serialize;
@@ -39,8 +34,8 @@ const CHECKSUM_ALGORITHM: &str = "blake3-256";
 const MIGRATION_ENGINE: &str = "sea-orm-migration/2.0.0";
 const PREPRODUCTION_DATABASE: &str = "quant_pivot";
 const PREPRODUCTION_DATABASE_USER: &str = "quant_pivot";
-const LIFECYCLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
-const LIFECYCLE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(2);
+const SCHEMA_MUTATION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const SCHEMA_MUTATION_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const CHECKED_MIGRATION_MANIFEST: &str = include_str!("../../../schema/postgres/migrations.json");
 
@@ -74,7 +69,6 @@ pub struct PreproductionPostgresInventory {
     pub database_exists: bool,
     pub object_count: i64,
     pub connection_count: i64,
-    pub production_baseline_exists: bool,
 }
 
 /// Inspect only the exact project-owned preproduction database.
@@ -101,7 +95,6 @@ pub async fn inspect_preproduction_postgres(
             database_exists: false,
             object_count: 0,
             connection_count: 0,
-            production_baseline_exists: false,
         });
     }
     let connection_count = sqlx::query_scalar::<_, i64>(
@@ -134,29 +127,12 @@ pub async fn inspect_preproduction_postgres(
     .fetch_one(&target)
     .await
     .map_err(migration_error("count PostgreSQL target objects"))?;
-    let baseline_relation_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT to_regclass('public.system_production_baseline') IS NOT NULL",
-    )
-    .fetch_one(&target)
-    .await
-    .map_err(migration_error(
-        "inspect PostgreSQL production baseline relation",
-    ))?;
-    let production_baseline_exists = if baseline_relation_exists {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM system_production_baseline)")
-            .fetch_one(&target)
-            .await
-            .map_err(migration_error("inspect PostgreSQL production baseline"))?
-    } else {
-        false
-    };
     target.close().await;
     maintenance.close().await;
     Ok(PreproductionPostgresInventory {
         database_exists,
         object_count,
         connection_count,
-        production_baseline_exists,
     })
 }
 
@@ -166,15 +142,10 @@ pub async fn inspect_preproduction_postgres(
 /// reset fail closed and the operator must stop its owner first.
 pub async fn reset_preproduction_postgres(
     config: &PostgresConfig,
-    lease: &LifecycleLease,
+    lease: &SchemaMutationLease,
 ) -> Result<(), StorageError> {
     lease.ensure_active()?;
     let inventory = inspect_preproduction_postgres(config).await?;
-    if inventory.production_baseline_exists {
-        return Err(StorageError::Migration(
-            "production baseline exists; PostgreSQL reset is forbidden".to_owned(),
-        ));
-    }
     if inventory.connection_count != 0 {
         return Err(StorageError::Migration(format!(
             "{} PostgreSQL target connections remain; stop their owners before reset",
@@ -211,8 +182,8 @@ fn validate_preproduction_postgres_target(config: &PostgresConfig) -> Result<(),
     Ok(())
 }
 
-/// Dedicated session-scoped lease shared by every lifecycle mutation.
-pub struct LifecycleLease {
+/// Dedicated session-scoped lease shared by every schema mutation and reset.
+pub struct SchemaMutationLease {
     connection: Option<Arc<Mutex<PgConnection>>>,
     backend_pid: i32,
     lost: CancellationToken,
@@ -220,7 +191,7 @@ pub struct LifecycleLease {
     heartbeat: Option<JoinHandle<()>>,
 }
 
-impl LifecycleLease {
+impl SchemaMutationLease {
     /// Wait until the canonical coordination session is lost.
     pub async fn cancelled(&self) {
         self.lost.cancelled().await;
@@ -230,14 +201,14 @@ impl LifecycleLease {
     pub fn ensure_active(&self) -> Result<(), StorageError> {
         if self.lost.is_cancelled() {
             Err(StorageError::Migration(
-                "canonical PostgreSQL lifecycle lease was lost".to_owned(),
+                "canonical PostgreSQL schema mutation lease was lost".to_owned(),
             ))
         } else {
             Ok(())
         }
     }
 
-    /// `PostgreSQL` session identifier exposed for lifecycle diagnostics and
+    /// `PostgreSQL` session identifier exposed for lease diagnostics and
     /// deterministic lease-loss integration tests.
     #[must_use]
     pub const fn backend_pid(&self) -> i32 {
@@ -245,82 +216,48 @@ impl LifecycleLease {
     }
 }
 
-impl Drop for LifecycleLease {
+impl Drop for SchemaMutationLease {
     fn drop(&mut self) {
         self.shutdown.cancel();
     }
 }
 
-/// Runtime/deploy adapter for the canonical `PostgreSQL` lifecycle lease.
-#[derive(Clone)]
-pub struct PostgresLifecycleLeaseProvider {
-    config: PostgresConfig,
-}
-
-impl PostgresLifecycleLeaseProvider {
-    #[must_use]
-    pub const fn new(config: PostgresConfig) -> Self {
-        Self { config }
-    }
-}
-
-#[async_trait]
-impl LifecycleLeaseProviderPort for PostgresLifecycleLeaseProvider {
-    async fn acquire(&self) -> QuantResult<Box<dyn LifecycleLeaseGuardPort>> {
-        acquire_lifecycle_lease(&self.config)
-            .await
-            .map(|lease| Box::new(lease) as Box<dyn LifecycleLeaseGuardPort>)
-            .map_err(Into::into)
-    }
-}
-
-#[async_trait]
-impl LifecycleLeaseGuardPort for LifecycleLease {
-    async fn cancelled(&self) {
-        Self::cancelled(self).await;
-    }
-
-    fn ensure_active(&self) -> QuantResult<()> {
-        Self::ensure_active(self).map_err(Into::into)
-    }
-
-    async fn release(self: Box<Self>) -> QuantResult<()> {
-        release_lifecycle_lease(*self).await.map_err(Into::into)
-    }
-}
-
-/// Acquire the cross-system lifecycle lease on the fixed `postgres`
+/// Acquire the cross-system schema mutation lease on the fixed `postgres`
 /// coordination database using the single configured `PostgreSQL` identity.
-pub async fn acquire_lifecycle_lease(
+pub async fn acquire_schema_mutation_lease(
     config: &PostgresConfig,
-) -> Result<LifecycleLease, StorageError> {
+) -> Result<SchemaMutationLease, StorageError> {
     let maintenance_url = config
         .try_connection_url_with_database("postgres")
-        .map_err(|error| StorageError::Migration(format!("build PG lifecycle URL: {error}")))?;
+        .map_err(|error| {
+            StorageError::Migration(format!("build PostgreSQL coordination URL: {error}"))
+        })?;
     let mut connection = PgConnection::connect(&maintenance_url).await.map_err(|_| {
         StorageError::Connection(
-            "connect canonical PostgreSQL lifecycle coordination database failed".to_owned(),
+            "connect canonical PostgreSQL schema mutation coordination database failed".to_owned(),
         )
     })?;
     let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
-        .bind(LIFECYCLE_ADVISORY_LOCK_KEY)
+        .bind(SCHEMA_MUTATION_ADVISORY_LOCK_KEY)
         .fetch_one(&mut connection)
         .await
         .map_err(|_| {
             StorageError::Connection(
-                "acquire canonical PostgreSQL lifecycle lease failed".to_owned(),
+                "acquire canonical PostgreSQL schema mutation lease failed".to_owned(),
             )
         })?;
     if !acquired {
         return Err(StorageError::Migration(
-            "schema/reset/seal mutation already holds the canonical lifecycle lease".to_owned(),
+            "schema mutation or pre-production reset already holds the canonical schema mutation lease".to_owned(),
         ));
     }
     let backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
         .fetch_one(&mut connection)
         .await
         .map_err(|_| {
-            StorageError::Connection("inspect PostgreSQL lifecycle lease session failed".to_owned())
+            StorageError::Connection(
+                "inspect PostgreSQL schema mutation lease session failed".to_owned(),
+            )
         })?;
 
     let connection = Arc::new(Mutex::new(connection));
@@ -330,7 +267,7 @@ pub async fn acquire_lifecycle_lease(
     let heartbeat_lost = lost.clone();
     let heartbeat_shutdown = shutdown.clone();
     let heartbeat = tokio::spawn(async move {
-        let mut ticker = interval(LIFECYCLE_HEARTBEAT_INTERVAL);
+        let mut ticker = interval(SCHEMA_MUTATION_HEARTBEAT_INTERVAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         ticker.tick().await;
         loop {
@@ -339,7 +276,7 @@ pub async fn acquire_lifecycle_lease(
                 _ = ticker.tick() => {
                     let mut connection = heartbeat_connection.lock().await;
                     let heartbeat_result = timeout(
-                        LIFECYCLE_HEARTBEAT_TIMEOUT,
+                        SCHEMA_MUTATION_HEARTBEAT_TIMEOUT,
                         sqlx::query_scalar::<_, i32>("SELECT 1")
                         .fetch_one(&mut *connection),
                     )
@@ -354,7 +291,7 @@ pub async fn acquire_lifecycle_lease(
         }
     });
 
-    Ok(LifecycleLease {
+    Ok(SchemaMutationLease {
         connection: Some(connection),
         backend_pid,
         lost,
@@ -363,39 +300,41 @@ pub async fn acquire_lifecycle_lease(
     })
 }
 
-/// Release the canonical lifecycle lease after guarded work completes.
-pub async fn release_lifecycle_lease(mut lease: LifecycleLease) -> Result<(), StorageError> {
+/// Release the canonical schema mutation lease after guarded work completes.
+pub async fn release_schema_mutation_lease(
+    mut lease: SchemaMutationLease,
+) -> Result<(), StorageError> {
     lease.shutdown.cancel();
     if let Some(heartbeat) = lease.heartbeat.take() {
         heartbeat.await.map_err(|_| {
-            StorageError::Connection("PostgreSQL lifecycle heartbeat task failed".to_owned())
+            StorageError::Connection("PostgreSQL schema mutation heartbeat task failed".to_owned())
         })?;
     }
     lease.ensure_active()?;
     let connection = lease.connection.take().ok_or_else(|| {
-        StorageError::Migration("PostgreSQL lifecycle lease connection is absent".to_owned())
+        StorageError::Migration("PostgreSQL schema mutation lease connection is absent".to_owned())
     })?;
     let connection = Arc::try_unwrap(connection).map_err(|_| {
-        StorageError::Migration("PostgreSQL lifecycle lease is still borrowed".to_owned())
+        StorageError::Migration("PostgreSQL schema mutation lease is still borrowed".to_owned())
     })?;
     let mut connection = connection.into_inner();
     let released = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
-        .bind(LIFECYCLE_ADVISORY_LOCK_KEY)
+        .bind(SCHEMA_MUTATION_ADVISORY_LOCK_KEY)
         .fetch_one(&mut connection)
         .await
         .map_err(|_| {
             StorageError::Connection(
-                "release canonical PostgreSQL lifecycle lease failed".to_owned(),
+                "release canonical PostgreSQL schema mutation lease failed".to_owned(),
             )
         })?;
     connection.close().await.map_err(|_| {
-        StorageError::Connection("close PostgreSQL lifecycle lease session failed".to_owned())
+        StorageError::Connection("close PostgreSQL schema mutation lease session failed".to_owned())
     })?;
     if released {
         Ok(())
     } else {
         Err(StorageError::Migration(
-            "canonical PostgreSQL lifecycle lease was not held at release".to_owned(),
+            "canonical PostgreSQL schema mutation lease was not held at release".to_owned(),
         ))
     }
 }
@@ -437,14 +376,14 @@ pub async fn plan(db: &DatabaseConnection) -> Result<MigrationPlan, StorageError
 
 /// Apply pending migrations while holding the canonical cross-system lease.
 pub async fn apply(config: &PostgresConfig, db: &DatabaseConnection) -> Result<(), StorageError> {
-    let lease = acquire_lifecycle_lease(config).await?;
+    let lease = acquire_schema_mutation_lease(config).await?;
     let apply_result = tokio::select! {
-        result = apply_under_lifecycle_lease(db, &lease) => result,
+        result = apply_under_schema_mutation_lease(db, &lease) => result,
         () = lease.cancelled() => Err(StorageError::Migration(
-            "canonical PostgreSQL lifecycle lease was lost during migration".to_owned(),
+            "canonical PostgreSQL schema mutation lease was lost during migration".to_owned(),
         )),
     };
-    let release_result = release_lifecycle_lease(lease).await;
+    let release_result = release_schema_mutation_lease(lease).await;
     match (apply_result, release_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), _) | (Ok(()), Err(error)) => Err(error),
@@ -452,9 +391,9 @@ pub async fn apply(config: &PostgresConfig, db: &DatabaseConnection) -> Result<(
 }
 
 /// Apply `PostgreSQL` migrations while a caller-owned canonical lease is held.
-pub async fn apply_under_lifecycle_lease(
+pub async fn apply_under_schema_mutation_lease(
     db: &DatabaseConnection,
-    lease: &LifecycleLease,
+    lease: &SchemaMutationLease,
 ) -> Result<(), StorageError> {
     lease.ensure_active()?;
     apply_locked(db).await?;
@@ -462,7 +401,6 @@ pub async fn apply_under_lifecycle_lease(
 }
 
 async fn apply_locked(db: &DatabaseConnection) -> Result<(), StorageError> {
-    reject_frozen_production_baseline(db).await?;
     if relation_exists(db, "seaql_migrations").await? {
         let applied_versions = read_native_versions(db).await?;
         validate_known_versions(&applied_versions)?;
@@ -475,33 +413,6 @@ async fn apply_locked(db: &DatabaseConnection) -> Result<(), StorageError> {
         .await
         .map_err(|error| StorageError::Migration(error.to_string()))?;
     verify(db).await
-}
-
-async fn reject_frozen_production_baseline(db: &impl ConnectionTrait) -> Result<(), StorageError> {
-    if !relation_exists(db, "system_production_baseline").await? {
-        return Ok(());
-    }
-    let row = db
-        .query_one_raw(Statement::from_string(
-            DbBackend::Postgres,
-            "SELECT COUNT(*)::bigint AS baseline_count FROM system_production_baseline".to_owned(),
-        ))
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| {
-            StorageError::Migration(
-                "PostgreSQL returned no production baseline preflight row".to_owned(),
-            )
-        })?;
-    let baseline_count = row
-        .try_get::<i64>("", "baseline_count")
-        .map_err(StorageError::from)?;
-    if baseline_count != 0 {
-        return Err(StorageError::Migration(
-            "production baseline is frozen; schema mutation is forbidden".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 /// Verify exact `SeaORM` ledger membership and project checksum audit rows.

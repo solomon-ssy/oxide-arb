@@ -3,7 +3,7 @@
 //! Identifiers fall into two families:
 //!
 //! - **External string ids** ([`MarketId`], [`TokenId`], [`EventId`],
-//!   [`OrderId`]) wrap `Arc<str>` via `#[derive(StrId)]`. Their
+//!   [`OrderId`], [`VenueTradeId`]) wrap `Arc<str>` via `#[derive(StrId)]`. Their
 //!   value is defined by an external system or carries semantic structure, so
 //!   it is **not** a UUID and is persisted as `text` / `varchar`.
 //! - **Internal UUID ids** (everything else) wrap `Uuid` by value via
@@ -65,6 +65,10 @@ impl TokenId {
 #[derive(StrId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OrderId(Arc<str>);
 
+/// Globally unique Polymarket trade identifier returned by order placement.
+#[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VenueTradeId(Arc<str>);
+
 /// External domain data source identifier (e.g. `binance`, `chainlink`).
 ///
 /// A stable, lowercase source label persisted on every long-format
@@ -98,6 +102,12 @@ pub struct ReportScheduleId(Arc<str>);
 pub struct DiagnosticCode(Arc<str>);
 
 impl DomainSourceId {
+    /// Internal finalized Polymarket settlement accounting source.
+    #[must_use]
+    pub fn polymarket_settlement() -> Self {
+        Self::new("polymarket_settlement")
+    }
+
     /// The Binance spot kline source.
     #[must_use]
     pub fn binance() -> Self {
@@ -557,6 +567,27 @@ pub struct OrderIntentId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExecutionOrderId(Uuid);
 
+/// One Polymarket trade identity attached to an execution order.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExecutionTradeRefId(Uuid);
+
+/// One execution-order to EVM transaction relationship.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExecutionTransactionRefId(Uuid);
+
+/// Immutable money-holding account identity used by order and settlement ledgers.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExecutionAccountId(Uuid);
+
+impl ExecutionAccountId {
+    /// Deterministic identity for one canonical execution-account digest.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x1fe8_5901_622b_47cb_baaa_c2ec_0e37_5ff8);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
+
 /// Intent-level capital allocation ledger identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CapitalAllocationId(Uuid);
@@ -564,6 +595,26 @@ pub struct CapitalAllocationId(Uuid);
 /// One on-chain CTF redemption batch for a `(condition_id, funder)` pair.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SettlementRedeemId(Uuid);
+
+/// One durable approval, revocation, or redemption chain submission.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SettlementChainSubmissionId(Uuid);
+
+/// One immutable `SemiAuto` settlement authorization attempt.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SettlementAuthorizationId(Uuid);
+
+/// One governed settlement action or exact one-shot canary grant.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SettlementGovernedActionId(Uuid);
+
+/// Durable cursor for account-scoped external settlement observation.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SettlementExternalCursorId(Uuid);
+
+/// One immutable contributing lot in a settlement inventory snapshot.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SettlementInventoryLotId(Uuid);
 
 /// Per-position allocation row within a settlement redemption batch.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -620,22 +671,6 @@ pub struct PolicyActivationId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PolicyApprovalId(Uuid);
 
-/// Irreversible production-baseline seal identifier.
-#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ProductionBaselineId(Uuid);
-
-impl ProductionBaselineId {
-    /// Singleton identity for the irreversible boot production baseline.
-    #[must_use]
-    pub const fn boot() -> Self {
-        Self::new(Uuid::from_u128(0x1f0e_1c5e_0000_5000_8000_0000_0000_0001))
-    }
-}
-
-/// Immutable backup/restore or protected-E2E production-seal evidence row.
-#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ProductionEvidenceId(Uuid);
-
 /// One-time guarded preproduction-reset plan and confirmation nonce.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PreproductionResetNonce(Uuid);
@@ -644,9 +679,9 @@ pub struct PreproductionResetNonce(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AuditEventId(Uuid);
 
-/// Append-only bootstrap lifecycle transition identifier.
+/// Append-only atomic runtime-control transition identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BootstrapTransitionId(Uuid);
+pub struct RuntimeControlTransitionId(Uuid);
 
 /// Frozen parity subject identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]

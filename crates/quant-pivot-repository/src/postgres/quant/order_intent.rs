@@ -18,9 +18,9 @@ use quant_pivot_models::{
         governance::NewOperationLog,
         pagination::{PageWindow, Paginated},
         quant::{
-            ApproveOrderIntent, ApproveOrderIntentOutcome, IntentCreationLimits,
-            NewCapitalAllocation, NewOrderIntent, OrderIntentInfo, RecommendationInfo,
-            RecommendationReportInfo, evaluate_intent_approval_invalidation,
+            ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOrderIntent,
+            OrderIntentInfo, RecommendationInfo, RecommendationReportInfo,
+            evaluate_intent_approval_invalidation,
         },
     },
     entities::{
@@ -32,16 +32,14 @@ use quant_pivot_models::{
         quant_capital_allocation::Entity as QuantCapitalAllocationEntity,
         quant_entry_condition_instance::Entity as QuantEntryConditionInstanceEntity,
         quant_order_intent::{Column, Entity as QuantOrderIntentEntity, Model, Relation},
-        quant_recommendation::{
-            Column as QuantRecommendationColumn, Entity, Model as QuantRecommendationModel,
-        },
+        quant_recommendation::{Column as QuantRecommendationColumn, Entity},
         quant_recommendation_report::Entity as QuantRecommendationReportEntity,
-        system_kill_switch::Entity as SystemKillSwitchEntity,
+        system_runtime_control::Entity as SystemRuntimeControlEntity,
     },
     enums::{
         execution::{ApprovalInvalidation, CapitalAllocationState},
         operation_log::OperationCategory,
-        quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode, RecommendationStatus},
+        quant::{ApprovalStatus, OrderIntentStatus, RecommendationStatus},
         rbac::ResourceType,
     },
     types::{
@@ -77,8 +75,8 @@ const EXPIRABLE_STATUSES: [OrderIntentStatus; 3] = [
     OrderIntentStatus::ApprovedByPolicy,
 ];
 
-/// Singleton row id for `system_kill_switch`.
-const SYSTEM_KILL_SWITCH_ID: i32 = 1;
+/// Singleton row id for `system_runtime_control`.
+const SYSTEM_RUNTIME_CONTROL_ID: i32 = 1;
 const ENTRY_CONDITION_ENTITY: &str = "quant_entry_condition_instance";
 
 /// Postgres-backed order intent repository.
@@ -98,7 +96,6 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         &self,
         intent: NewOrderIntent,
         allocation: NewCapitalAllocation,
-        limits: Option<IntentCreationLimits>,
     ) -> Result<OrderIntentInfo, StorageError> {
         validate_new_intent_and_allocation(&intent, &allocation)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
@@ -125,8 +122,13 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             ));
         }
         lock_kill_switch_for_entry(&txn).await?;
-        if let Some(limits) = limits.as_ref() {
-            enforce_creation_limits(&txn, &intent, &allocation, &rec_row, limits).await?;
+        let active_policy_snapshot_id = load_current_policy_snapshot_id(&txn).await?;
+        if active_policy_snapshot_id.as_ref() != Some(&intent.decision_policy_snapshot_id) {
+            return Err(error::state_conflict(
+                QUANT_ORDER_INTENT,
+                None::<&OrderIntentId>,
+                "recommendation decision policy is no longer the active policy snapshot",
+            ));
         }
         if find_blocking_intent_for_recommendation(&txn, &intent.recommendation_id)
             .await?
@@ -634,108 +636,40 @@ async fn load_current_policy_snapshot_id(
 }
 
 async fn load_kill_switch_allows_entry(db: &impl ConnectionTrait) -> Result<bool, StorageError> {
-    Ok(SystemKillSwitchEntity::find_by_id(SYSTEM_KILL_SWITCH_ID)
-        .lock_shared()
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .is_some_and(|row| row.state.allows_new_entry()))
+    Ok(
+        SystemRuntimeControlEntity::find_by_id(SYSTEM_RUNTIME_CONTROL_ID)
+            .lock_shared()
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .is_some_and(|row| row.kill_switch_state.allows_new_entry()),
+    )
 }
 
 async fn lock_kill_switch_for_entry(db: &impl ConnectionTrait) -> Result<(), StorageError> {
-    let row = SystemKillSwitchEntity::find_by_id(SYSTEM_KILL_SWITCH_ID)
+    let row = SystemRuntimeControlEntity::find_by_id(SYSTEM_RUNTIME_CONTROL_ID)
         .lock_exclusive()
         .one(db)
         .await
         .map_err(StorageError::from)?
         .ok_or_else(|| {
             error::state_conflict(
-                "system_kill_switch",
-                Some(&SYSTEM_KILL_SWITCH_ID),
-                "kill-switch singleton is missing; new entry fails closed",
+                "system_runtime_control",
+                Some(&SYSTEM_RUNTIME_CONTROL_ID),
+                "runtime-control singleton is missing; new entry fails closed",
             )
         })?;
-    if !row.state.allows_new_entry() {
+    if !row.kill_switch_state.allows_new_entry() {
         return Err(error::state_conflict(
-            "system_kill_switch",
-            Some(&SYSTEM_KILL_SWITCH_ID),
+            "system_runtime_control",
+            Some(&SYSTEM_RUNTIME_CONTROL_ID),
             format!(
                 "kill switch is {}; new entry is blocked",
-                row.state.as_str()
+                row.kill_switch_state.as_str()
             ),
         ));
     }
     Ok(())
-}
-
-async fn enforce_creation_limits(
-    db: &impl ConnectionTrait,
-    intent: &NewOrderIntent,
-    allocation: &NewCapitalAllocation,
-    recommendation: &QuantRecommendationModel,
-    limits: &IntentCreationLimits,
-) -> Result<(), StorageError> {
-    if intent.runtime_mode != QuantRuntimeMode::SemiAuto
-        || limits.max_open_intents == 0
-        || !limits.max_total_cash_per_report.is_positive()
-        || recommendation.recommendation_report_id != limits.recommendation_report_id
-    {
-        return Err(error::invariant_violation(
-            Some(QUANT_ORDER_INTENT),
-            "SemiAuto intent creation limits are invalid or bound to another report",
-        ));
-    }
-    let open = QuantOrderIntentEntity::find()
-        .filter(Column::Status.is_in(OrderIntentStatus::OPEN))
-        .count(db)
-        .await
-        .map_err(StorageError::from)?;
-    if open >= u64::from(limits.max_open_intents) {
-        return Err(error::state_conflict(
-            QUANT_ORDER_INTENT,
-            None::<&OrderIntentId>,
-            format!(
-                "SemiAuto canary open-intent cap {} is exhausted",
-                limits.max_open_intents
-            ),
-        ));
-    }
-    let existing = intents_for_report_all(db, &limits.recommendation_report_id).await?;
-    let total = existing
-        .iter()
-        .map(|row| row.entry_order_json.notional().inner())
-        .try_fold(allocation.planned_usd.inner(), |sum, value| {
-            sum.checked_add(value).ok_or_else(|| {
-                error::invariant_violation(
-                    Some(QUANT_ORDER_INTENT),
-                    "SemiAuto canary report notional sum overflowed Decimal",
-                )
-            })
-        })?;
-    if total > limits.max_total_cash_per_report.inner() {
-        return Err(error::state_conflict(
-            QUANT_ORDER_INTENT,
-            None::<&OrderIntentId>,
-            format!(
-                "SemiAuto canary report total {total} exceeds {}",
-                limits.max_total_cash_per_report
-            ),
-        ));
-    }
-    Ok(())
-}
-
-async fn intents_for_report_all(
-    db: &impl ConnectionTrait,
-    report_id: &RecommendationReportId,
-) -> Result<Vec<OrderIntentInfo>, StorageError> {
-    QuantOrderIntentEntity::find()
-        .join(JoinType::InnerJoin, Relation::Recommendation.def())
-        .filter(QuantRecommendationColumn::RecommendationReportId.eq(*report_id))
-        .all(db)
-        .await
-        .map_err(StorageError::from)
-        .map(|rows| rows.into_iter().map(Into::into).collect())
 }
 
 async fn intents_for_report<const N: usize>(

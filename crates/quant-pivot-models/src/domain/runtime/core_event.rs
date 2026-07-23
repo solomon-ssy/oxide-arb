@@ -16,12 +16,13 @@ use crate::{
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
-        execution::{ReconciliationResult, SettlementRedeemState},
+        execution::ReconciliationResult,
         quant::{
             EmptyReportReason, EntryConditionState, OrderIntentStatus, QuantRuntimeMode,
             RecommendationReportStatus, ReportKind, ReportRunStatus, ReportRunTerminalReason,
             ResearchJobKind, ResearchJobStatus, TrainingDatasetStatus,
         },
+        settlement::SettlementCaseState,
     },
     types::{
         ConditionTruth, ContentHash, EntryConditionInstanceId, MarketId, RecommendationReportId,
@@ -512,7 +513,7 @@ pub struct ReconciliationLifecycleEvent {
 pub struct SettlementRedeemLifecycleEvent {
     pub settlement_redeem_id: String,
     pub market_id: MarketId,
-    pub state: SettlementRedeemState,
+    pub state: SettlementCaseState,
 }
 
 /// Condition-instance revision hint fanned out on `quant.condition`.

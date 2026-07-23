@@ -1,4 +1,4 @@
-//! The 23 admission checks, each a pure function of the frozen
+//! The 25 admission checks, each a pure function of the frozen
 //! [`AdmissionInput`]. Every check is hard: a violation is `Deny`, a
 //! not-now-but-retryable condition is `Defer`, otherwise `Allow`.
 
@@ -19,6 +19,7 @@ use quant_pivot_research::execution_semantics::{
 use rust_decimal::Decimal;
 
 use super::{AdmissionCheck, AdmissionCheckTrace, AdmissionInput, VenueHealth};
+use crate::execution::settlement_recovery_admission::SettlementRecoveryAdmission;
 
 // 1 ──────────────────────────────────────────────────────────────────────────
 /// Intent is in a submittable state and not expired.
@@ -148,6 +149,33 @@ impl AdmissionCheck for RuntimeModeCheck {
 }
 
 // 5 ──────────────────────────────────────────────────────────────────────────
+/// A promised automatic resolution exit has a current, account-scoped recovery path.
+pub(super) struct SettlementRecoveryCheck;
+
+impl AdmissionCheck for SettlementRecoveryCheck {
+    fn id(&self) -> AdmissionCheckId {
+        AdmissionCheckId::SettlementRecovery
+    }
+
+    fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
+        match &input.settlement_recovery {
+            SettlementRecoveryAdmission::NotRequired => {
+                AdmissionCheckTrace::pass(self.id(), "automatic settlement recovery not required")
+            }
+            SettlementRecoveryAdmission::Ready(evidence) => AdmissionCheckTrace::pass(
+                self.id(),
+                "current account-scoped settlement recovery is ready",
+            )
+            .with_threshold(evidence.route.as_str())
+            .with_actual(evidence.deployment_digest.to_string()),
+            SettlementRecoveryAdmission::Blocked(reason) => {
+                AdmissionCheckTrace::deny(self.id(), reason.to_string())
+            }
+        }
+    }
+}
+
+// 6 ──────────────────────────────────────────────────────────────────────────
 /// The intent's model version is still `Published`.
 pub(super) struct ModelPublicationCheck;
 

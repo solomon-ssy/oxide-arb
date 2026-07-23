@@ -23,16 +23,24 @@ pub enum QpApprovalStatus {
     Expired,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
-#[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_bootstrap_phase")]
-pub enum QpBootstrapPhase {
-    #[sea_orm(string_value = "initializing")]
-    Initializing,
-    #[sea_orm(string_value = "collecting_baseline")]
-    CollectingBaseline,
-    #[sea_orm(string_value = "awaiting_activation")]
-    AwaitingActivation,
-    #[sea_orm(string_value = "active")]
-    Active,
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_exit_settlement_mode"
+)]
+pub enum QpExitSettlementMode {
+    #[sea_orm(string_value = "hold_to_resolution")]
+    HoldToResolution,
+    #[sea_orm(string_value = "exit_before_resolution")]
+    ExitBeforeResolution,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_redeem_policy")]
+pub enum QpRedeemPolicy {
+    #[sea_orm(string_value = "manual")]
+    Manual,
+    #[sea_orm(string_value = "auto")]
+    Auto,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_calibration_kind")]
@@ -409,6 +417,8 @@ pub enum QpExecutionWalletKind {
     Proxy,
     #[sea_orm(string_value = "gnosis_safe")]
     GnosisSafe,
+    #[sea_orm(string_value = "deposit_wallet")]
+    DepositWallet,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_exit_reason")]
@@ -609,8 +619,6 @@ pub enum QpFeatureParityStateTransition {
 pub enum QpKillSwitchState {
     #[sea_orm(string_value = "closed")]
     Closed,
-    #[sea_orm(string_value = "report_only_forced")]
-    ReportOnlyForced,
     #[sea_orm(string_value = "execution_halted")]
     ExecutionHalted,
     #[sea_orm(string_value = "exit_only")]
@@ -843,8 +851,6 @@ pub enum QpOperationCategory {
     Governance,
     #[sea_orm(string_value = "config")]
     Config,
-    #[sea_orm(string_value = "config_lifecycle")]
-    ConfigLifecycle,
     #[sea_orm(string_value = "system")]
     System,
     #[sea_orm(string_value = "risk")]
@@ -1353,18 +1359,6 @@ pub enum QpResearchReadinessEvidenceKind {
     ShadowLatencyProfile,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
-#[sea_orm(
-    rs_type = "Enum",
-    db_type = "Enum",
-    enum_name = "qp_production_evidence_kind"
-)]
-pub enum QpProductionEvidenceKind {
-    #[sea_orm(string_value = "backup_restore")]
-    BackupRestore,
-    #[sea_orm(string_value = "protected_config_end_to_end")]
-    ProtectedConfigEndToEnd,
-}
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_resolver_tier")]
 pub enum QpResolverTier {
     #[sea_orm(string_value = "tier0_slug")]
@@ -1383,8 +1377,6 @@ pub enum QpResourceType {
     Market,
     #[sea_orm(string_value = "config")]
     Config,
-    #[sea_orm(string_value = "config_lifecycle")]
-    ConfigLifecycle,
     #[sea_orm(string_value = "publication")]
     Publication,
     #[sea_orm(string_value = "materialization")]
@@ -1439,22 +1431,242 @@ pub enum QpRoleStatus {
     Disabled,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_settlement_route")]
+pub enum QpSettlementRoute {
+    #[sea_orm(string_value = "standard_v2")]
+    StandardV2,
+    #[sea_orm(string_value = "neg_risk_v2")]
+    NegRiskV2,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
-    enum_name = "qp_settlement_redeem_state"
+    enum_name = "qp_settlement_write_policy"
 )]
-pub enum QpSettlementRedeemState {
-    #[sea_orm(string_value = "pending")]
-    Pending,
+pub enum QpSettlementWritePolicy {
+    #[sea_orm(string_value = "disabled")]
+    Disabled,
+    #[sea_orm(string_value = "governed_canary")]
+    GovernedCanary,
+    #[sea_orm(string_value = "semi_auto")]
+    SemiAuto,
+    #[sea_orm(string_value = "auto")]
+    Auto,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_settlement_readiness_status"
+)]
+pub enum QpSettlementReadinessStatus {
+    #[sea_orm(string_value = "unchecked")]
+    Unchecked,
+    #[sea_orm(string_value = "ready")]
+    Ready,
+    #[sea_orm(string_value = "blocked")]
+    Blocked,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_settlement_case_state"
+)]
+pub enum QpSettlementCaseState {
+    #[sea_orm(string_value = "discovered")]
+    Discovered,
+    #[sea_orm(string_value = "prepared")]
+    Prepared,
     #[sea_orm(string_value = "submitted")]
     Submitted,
     #[sea_orm(string_value = "confirmed")]
     Confirmed,
-    #[sea_orm(string_value = "failed")]
-    Failed,
+    #[sea_orm(string_value = "retry_scheduled")]
+    RetryScheduled,
+    #[sea_orm(string_value = "reconciliation_required")]
+    ReconciliationRequired,
     #[sea_orm(string_value = "manual_required")]
     ManualRequired,
+    #[sea_orm(string_value = "not_required")]
+    NotRequired,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_settlement_authorization_state"
+)]
+pub enum QpSettlementAuthorizationState {
+    #[sea_orm(string_value = "not_required")]
+    NotRequired,
+    #[sea_orm(string_value = "pending")]
+    Pending,
+    #[sea_orm(string_value = "approved")]
+    Approved,
+    #[sea_orm(string_value = "revoked")]
+    Revoked,
+    #[sea_orm(string_value = "consumed")]
+    Consumed,
+    #[sea_orm(string_value = "expired")]
+    Expired,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_settlement_effective_policy"
+)]
+pub enum QpSettlementEffectivePolicy {
+    #[sea_orm(string_value = "automatic_eligible")]
+    AutomaticEligible,
+    #[sea_orm(string_value = "manual_only")]
+    ManualOnly,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_settlement_governed_action_kind"
+)]
+pub enum QpSettlementGovernedActionKind {
+    #[sea_orm(string_value = "outcome_token_approval")]
+    OutcomeTokenApproval,
+    #[sea_orm(string_value = "outcome_token_revocation")]
+    OutcomeTokenRevocation,
+    #[sea_orm(string_value = "canary_grant")]
+    CanaryGrant,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_settlement_governed_action_state"
+)]
+pub enum QpSettlementGovernedActionState {
+    #[sea_orm(string_value = "authorized")]
+    Authorized,
+    #[sea_orm(string_value = "retry_scheduled")]
+    RetryScheduled,
+    #[sea_orm(string_value = "consumed")]
+    Consumed,
+    #[sea_orm(string_value = "revoked")]
+    Revoked,
+    #[sea_orm(string_value = "expired")]
+    Expired,
+    #[sea_orm(string_value = "reconciliation_required")]
+    ReconciliationRequired,
+    #[sea_orm(string_value = "failed")]
+    Failed,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_settlement_submission_kind"
+)]
+pub enum QpSettlementSubmissionKind {
+    #[sea_orm(string_value = "direct_eoa")]
+    DirectEoa,
+    #[sea_orm(string_value = "relayer")]
+    Relayer,
+    #[sea_orm(string_value = "externally_observed")]
+    ExternallyObserved,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_settlement_submission_purpose"
+)]
+pub enum QpSettlementSubmissionPurpose {
+    #[sea_orm(string_value = "outcome_token_approval")]
+    OutcomeTokenApproval,
+    #[sea_orm(string_value = "outcome_token_revocation")]
+    OutcomeTokenRevocation,
+    #[sea_orm(string_value = "redeem")]
+    Redeem,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_settlement_submission_state"
+)]
+pub enum QpSettlementSubmissionState {
+    #[sea_orm(string_value = "prepared")]
+    Prepared,
+    #[sea_orm(string_value = "dispatching")]
+    Dispatching,
+    #[sea_orm(string_value = "awaiting_chain_hash")]
+    AwaitingChainHash,
+    #[sea_orm(string_value = "awaiting_finality")]
+    AwaitingFinality,
+    #[sea_orm(string_value = "confirmed")]
+    Confirmed,
+    #[sea_orm(string_value = "failed")]
+    Failed,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_settlement_failure_code"
+)]
+pub enum QpSettlementFailureCode {
+    #[sea_orm(string_value = "route_not_ready")]
+    RouteNotReady,
+    #[sea_orm(string_value = "balance_mismatch")]
+    BalanceMismatch,
+    #[sea_orm(string_value = "simulation_reverted")]
+    SimulationReverted,
+    #[sea_orm(string_value = "transport_uncertain")]
+    TransportUncertain,
+    #[sea_orm(string_value = "submission_rejected")]
+    SubmissionRejected,
+    #[sea_orm(string_value = "relayer_terminal_failure")]
+    RelayerTerminalFailure,
+    #[sea_orm(string_value = "on_chain_reverted")]
+    OnChainReverted,
+    #[sea_orm(string_value = "receipt_evidence_mismatch")]
+    ReceiptEvidenceMismatch,
+    #[sea_orm(string_value = "payout_mismatch")]
+    PayoutMismatch,
+    #[sea_orm(string_value = "deployment_changed")]
+    DeploymentChanged,
+    #[sea_orm(string_value = "authorization_invalid")]
+    AuthorizationInvalid,
+    #[sea_orm(string_value = "execution_not_quiescent")]
+    ExecutionNotQuiescent,
+    #[sea_orm(string_value = "lease_lost")]
+    LeaseLost,
+    #[sea_orm(string_value = "ledger_unavailable")]
+    LedgerUnavailable,
+    #[sea_orm(string_value = "local_invariant")]
+    LocalInvariant,
+    #[sea_orm(string_value = "external_evidence_incomplete")]
+    ExternalEvidenceIncomplete,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_settlement_reconciliation_state"
+)]
+pub enum QpSettlementReconciliationState {
+    #[sea_orm(string_value = "not_required")]
+    NotRequired,
+    #[sea_orm(string_value = "awaiting_relayer_hash")]
+    AwaitingRelayerHash,
+    #[sea_orm(string_value = "awaiting_receipt")]
+    AwaitingReceipt,
+    #[sea_orm(string_value = "evidence_mismatch")]
+    EvidenceMismatch,
+    #[sea_orm(string_value = "operator_review_required")]
+    OperatorReviewRequired,
+    #[sea_orm(string_value = "reconciled")]
+    Reconciled,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_side")]
@@ -1617,6 +1829,24 @@ pub enum QpVenueOrderStatus {
     Open,
     #[sea_orm(string_value = "expired")]
     Expired,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_venue_trade_status"
+)]
+pub enum QpVenueTradeStatus {
+    #[sea_orm(string_value = "matched")]
+    Matched,
+    #[sea_orm(string_value = "mined")]
+    Mined,
+    #[sea_orm(string_value = "confirmed")]
+    Confirmed,
+    #[sea_orm(string_value = "retrying")]
+    Retrying,
+    #[sea_orm(string_value = "failed")]
+    Failed,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(

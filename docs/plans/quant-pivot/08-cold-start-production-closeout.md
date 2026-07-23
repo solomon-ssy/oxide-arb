@@ -1,12 +1,12 @@
 # quant-pivot Cold-Start Production Closeout
 
-<!-- quant-pivot-lifecycle-contract:v1 -->
-> **Lifecycle contract**
-> - `lifecycle_assumption`: 项目尚未正式生产上线，当前状态为 `pre_production_resettable`，系统自有基线统一为 `boot` / schema version `1`。
+<!-- quant-pivot-deployment-contract:v1 -->
+> **Deployment contract**
+> - `fresh_boot_assumption`: 项目尚未正式生产上线，将从全新 `boot` / schema version `1` 部署；仓库和数据库不保存 lifecycle seal 状态。
 > - `schema_data_version_impact`: 本文中的历史版本号与递增路径不再具有实施效力；当前实现不迁移测试数据、旧结构或旧版本。
-> - `pre_production_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
-> - `production_frozen_behavior`: 一旦完成不可逆 production seal，后续变更必须提供前向 migration、兼容性评估、回滚方案与数据验证。
-> - `rollback_and_data_verification`: 封存前通过清空后的 fresh-install 验证；封存后不得回退到 boot reset。
+> - `pre_deployment_behavior`: 允许 clean-break、migration squash 与全新基础设施 bootstrap，但任何数据销毁仍需操作者单独授权。
+> - `post_deployment_behavior`: 首次部署后使用正常前向 migration、回滚与数据验证；不使用不可逆 production seal 或兼容桥。
+> - `rollback_and_data_verification`: 首次部署前通过清空后的 fresh-install 验证；部署后使用备份、前向 migration 与显式回滚。
 
 This document is the execution contract for closing the remaining cold-start,
 schema, governance, deterministic-evidence, authentication, and operator-UI
@@ -187,11 +187,11 @@ operator confirms all previously exposed wallet, relayer, JWT/RPC, PostgreSQL,
 and ClickHouse credentials have been rotated and installed in a permission-0600,
 untracked deploy TOML. No old secret value may be read, copied, or reused.
 
-The eventual destructive scope is limited to PostgreSQL database
+The explicitly authorized pre-production destructive scope is limited to PostgreSQL database
 `quant_pivot`, ClickHouse database `quant_pivot`, and Redis keys matching the
-validated non-empty `qp:` namespace. The local environment remains
-`pre_production_resettable`; irreversible production freeze is validated only
-in a disposable environment.
+validated non-empty `qp:` namespace. No runtime lifecycle state or production
+freeze exists; after first deployment, schema evolution uses normal forward
+migrations, backups, and explicit rollback.
 ### Automated verification
 
 CI and local closeout use the same command inventory through

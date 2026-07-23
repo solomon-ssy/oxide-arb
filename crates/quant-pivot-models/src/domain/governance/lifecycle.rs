@@ -39,7 +39,7 @@ pub enum OperationalDegradeReason {
     SubsystemUnhealthy {
         name: String,
     },
-    /// Kill-switch tightened (`report_only_forced` / `exit_only`); reports may
+    /// Kill-switch tightened (`exit_only`); reports may
     /// continue but new entries are blocked.
     KillSwitchTightened {
         state: KillSwitchState,
@@ -170,7 +170,7 @@ mod tests {
     fn kill_switch_tightened_degraded_still_allows_reports() {
         let phase = OperationalPhase::Degraded {
             reasons: vec![OperationalDegradeReason::KillSwitchTightened {
-                state: KillSwitchState::ReportOnlyForced,
+                state: KillSwitchState::ExitOnly,
             }],
         };
         assert!(phase.allows_report_generation());

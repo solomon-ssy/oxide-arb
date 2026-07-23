@@ -2,8 +2,9 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::quant::{
-        EntryConditionClaim, EntryConditionInstanceInfo, ExecutionOrderInfo, ExitLedgerWrite,
-        NewExecutionOrder, OrderIntentInfo, ReconciliationLedgerWrite, SubmissionLedgerWrite,
+        EntryConditionClaim, EntryConditionInstanceInfo, ExecutionIdentityEnrichment,
+        ExecutionOrderIdentityRefs, ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder,
+        OrderIntentInfo, ReconciliationLedgerWrite, SubmissionLedgerWrite,
     },
     enums::execution::ExitReason,
     types::{
@@ -72,6 +73,21 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
         execution_order_id: &ExecutionOrderId,
         write: SubmissionLedgerWrite,
     ) -> Result<ExecutionOrderInfo, StorageError>;
+
+    /// Load the complete typed venue identity graph for reconciliation.
+    async fn load_identity_refs(
+        &self,
+        execution_order_id: &ExecutionOrderId,
+    ) -> Result<ExecutionOrderIdentityRefs, StorageError>;
+
+    /// Atomically enrich exact order/trade observations. A trade ID already
+    /// owned by another order is a hard conflict; every non-zero hash is also
+    /// retained in the append-only transaction-ref ledger.
+    async fn enrich_identity_refs(
+        &self,
+        execution_order_id: &ExecutionOrderId,
+        enrichment: ExecutionIdentityEnrichment,
+    ) -> Result<ExecutionOrderIdentityRefs, StorageError>;
 
     /// Write-ahead an exit (Sell) order in one txn: insert the exit
     /// execution order (`order_phase = Exit`, `state = Submitted`), mark the

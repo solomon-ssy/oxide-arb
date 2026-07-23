@@ -753,10 +753,9 @@ fn fresh_signal_from_candidate(
 }
 
 fn fresh_auto_exec_eligible(candidate: &SignalCandidate, config: &DecisionPolicySnapshot) -> bool {
-    // Thesis eligibility is purely the score/confidence bar — NOT the
-    // `auto_execution.enabled` admission toggle. The evaluator already gates
-    // forced exits to auto-execution intents (see `ReinferenceSignalEvaluator`),
-    // so keying invalidation off `enabled` here would only mis-fire.
+    // Thesis eligibility is the frozen score/confidence policy. Runtime mode is
+    // an independent operator control and must not retrospectively rewrite the
+    // thesis of an already-created auto-execution intent.
     let policy = &config.execution_authorization.auto_execution;
     let min_score = parse_config_decimal(
         "execution.auto_execution.min_score",
@@ -794,8 +793,8 @@ mod tests {
         runtime_config::DecisionPolicySnapshot,
         types::{
             CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, EventId,
-            MarketId, ModelRunId, OrderIntentId, PositionId, Price, Probability, Shares,
-            SignalCandidateId, TokenId, Usd,
+            ExecutionAccountId, MarketId, ModelRunId, OrderIntentId, PositionId, Price,
+            Probability, Shares, SignalCandidateId, TokenId, Usd,
         },
     };
     use quant_pivot_research::{
@@ -843,6 +842,7 @@ mod tests {
         let lot = PositionInfo {
             position_id: PositionId::from_v7(),
             order_intent_id: OrderIntentId::from_v7(),
+            execution_account_id: ExecutionAccountId::from_v7(),
             token_id: TokenId::new("yes"),
             market_id: MarketId::new("m1"),
             event_id: None,
@@ -946,6 +946,7 @@ mod tests {
         let lot = PositionInfo {
             position_id: PositionId::from_v7(),
             order_intent_id: OrderIntentId::from_v7(),
+            execution_account_id: ExecutionAccountId::from_v7(),
             token_id: TokenId::new("no"),
             market_id: MarketId::new("m1"),
             event_id: Some(EventId::new("e1")),

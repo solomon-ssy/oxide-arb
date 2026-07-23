@@ -9,8 +9,8 @@ use quant_pivot_models::{
 /// operational kill-switch state machine.
 ///
 /// Priority: catalog warmup → market-data connecting → kill-switch impact →
-/// nominal operational. Tightened kill-switch states (`report_only_forced`,
-/// `exit_only`) surface as [`OperationalPhase::Degraded`] so reports may
+/// nominal operational. The tightened `exit_only` state surfaces as
+/// [`OperationalPhase::Degraded`] so reports may
 /// continue; full execution freezes map to [`OperationalPhase::Halted`].
 #[must_use]
 pub fn operational_phase_from_readiness(
@@ -26,11 +26,9 @@ pub fn operational_phase_from_readiness(
     }
     match kill_switch {
         KillSwitchState::Closed => OperationalPhase::Operational,
-        KillSwitchState::ReportOnlyForced | KillSwitchState::ExitOnly => {
-            OperationalPhase::Degraded {
-                reasons: vec![OperationalDegradeReason::KillSwitchTightened { state: kill_switch }],
-            }
-        }
+        KillSwitchState::ExitOnly => OperationalPhase::Degraded {
+            reasons: vec![OperationalDegradeReason::KillSwitchTightened { state: kill_switch }],
+        },
         KillSwitchState::ExecutionHalted | KillSwitchState::EmergencyHalted => {
             OperationalPhase::Halted
         }
@@ -56,14 +54,13 @@ mod tests {
 
     #[test]
     fn tightened_kill_switch_states_are_degraded_not_halted() {
-        for state in [KillSwitchState::ReportOnlyForced, KillSwitchState::ExitOnly] {
-            assert_eq!(
-                operational_phase_from_readiness(state, true, true),
-                OperationalPhase::Degraded {
-                    reasons: vec![OperationalDegradeReason::KillSwitchTightened { state }],
-                }
-            );
-        }
+        let state = KillSwitchState::ExitOnly;
+        assert_eq!(
+            operational_phase_from_readiness(state, true, true),
+            OperationalPhase::Degraded {
+                reasons: vec![OperationalDegradeReason::KillSwitchTightened { state }],
+            }
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! submission.
 //!
 //! Admission never mutates the report and never submits an order. It runs a
-//! fixed sequence of 24 hard checks over a frozen [`AdmissionInput`] (built once
+//! fixed sequence of 25 hard checks over a frozen [`AdmissionInput`] (built once
 //! by the [`AdmissionInputBuilder`], which owns *all* I/O) and produces an
 //! [`AdmissionDecision`] of allow / deny / defer plus a full per-check trace and
 //! replayable [`StateVersion`].
@@ -44,10 +44,11 @@ use quant_pivot_models::{
         common::{OrderType, Side, TickSize},
         execution::{AdmissionCheckId, AdmissionOutcome, KillSwitchState},
         quant::{FillRequirement, QuantRuntimeMode},
+        settlement::SettlementWritePolicy,
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, DecisionPolicySnapshotId, OrderAmount, PreparedFeeSchedule,
+        ContentHash, DecisionPolicySnapshotId, EvmBlockHash, OrderAmount, PreparedFeeSchedule,
         PreparedVenueOrder, ResearchProfileRef, Usd, VenueOrderAmount,
     },
 };
@@ -58,6 +59,8 @@ use quant_pivot_research::{
     portfolio::AccountSnapshot,
 };
 use serde::{Deserialize, Serialize};
+
+use super::settlement_recovery_admission::SettlementRecoveryAdmission;
 
 /// Venue-health seam read by `VenueGuardCheck` (#18).
 ///
@@ -101,6 +104,9 @@ pub struct StateVersion {
     pub book_version: Option<u64>,
     pub book_as_of_ms: Option<u64>,
     pub kill_switch_state: KillSwitchState,
+    pub settlement_write_policy: SettlementWritePolicy,
+    pub settlement_deployment_digest: Option<ContentHash>,
+    pub settlement_verified_block_hash: Option<EvmBlockHash>,
 }
 
 /// Model-governance flags distilled at build time (`#5`, `#23`).
@@ -188,6 +194,8 @@ pub struct AdmissionInput {
     pub venue_metadata: AdmissionVenueMetadata,
     /// Deferred readiness seams (`#18`/`#19`/`#20`).
     pub seams: AdmissionSeams,
+    /// Fresh current-deployment recovery truth for `HoldToResolution + Auto`.
+    pub settlement_recovery: SettlementRecoveryAdmission,
     /// Decision time.
     pub now: DateTime<Utc>,
     /// Decision time in epoch milliseconds (book-age comparisons).

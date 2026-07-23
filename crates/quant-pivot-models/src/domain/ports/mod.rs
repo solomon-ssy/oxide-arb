@@ -20,7 +20,7 @@ pub mod research_catalog;
 pub mod research_job;
 pub mod research_readiness;
 pub mod runtime_control;
-pub mod schema_verification;
+pub mod settlement_control;
 pub mod structural_monitor;
 pub mod trade_policy;
 pub mod training_dataset;
@@ -56,13 +56,9 @@ pub use research_catalog::ResearchCatalogPort;
 pub use research_job::{JobSubmitContext, ResearchJobPort};
 pub use research_readiness::{ResearchReadinessPort, ResearchReadinessSnapshot};
 pub use runtime_control::{
-    BootstrapPort, CatalogState, CatalogStatusPort, DataQualityPort, KillSwitchPort,
-    MarketDataPort, MetricsScrapePort, PolicySnapshotPort, PreparedPolicySnapshot,
-    QuantModeTransitionReport, ReadinessPort, RuntimeControlPort, SetKillSwitchCommand,
-};
-pub use schema_verification::{
-    LifecycleLeaseGuardPort, LifecycleLeaseProviderPort, LifecycleSchemaVerificationPort,
-    ProductionEvidenceArtifactVerificationPort, VerifiedSchemaFingerprints,
+    CatalogState, CatalogStatusPort, DataQualityPort, KillSwitchPort, MarketDataPort,
+    MetricsScrapePort, PolicySnapshotPort, PreparedPolicySnapshot, QuantModeTransitionReport,
+    ReadinessPort, RuntimeControlPort, SetKillSwitchCommand, SystemCapabilityPort,
 };
 pub use structural_monitor::StructuralMonitorPort;
 pub use trade_policy::TradePolicyPort;

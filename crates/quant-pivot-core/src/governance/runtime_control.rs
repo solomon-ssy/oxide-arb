@@ -1,4 +1,4 @@
-//! Quant runtime control port implementation for the web layer.
+//! Atomic runtime-control service for mode, settlement policy, and kill switch.
 
 use std::{sync::Arc, time::Instant};
 
@@ -7,47 +7,50 @@ use chrono::Utc;
 use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
     domain::{
-        governance::{HealthReport, MarketDataConnectivity, SystemStatus, WsShardConnectivity},
+        governance::{
+            HealthReport, KillSwitchView, MarketDataConnectivity, RuntimeControlSnapshot,
+            RuntimeControlUpdate, SystemStatus, WsShardConnectivity,
+        },
         ports::{
             CatalogState, CatalogStatusPort, KillSwitchPort, QuantModeTransitionReport,
-            RuntimeControlPort,
+            RuntimeControlPort, SetKillSwitchCommand,
         },
     },
-    enums::quant::QuantRuntimeMode,
+    enums::{
+        execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
+    },
 };
-use quant_pivot_repository::traits::SystemRuntimeStateRepository;
+use quant_pivot_repository::traits::RuntimeControlRepository;
 
 use crate::{
     governance::{
-        ModePreflight, ModeTransitionGate, RuntimeModeHandle,
+        ModePreflight, ModeTransitionGate, RuntimeControlsHandle,
         execution_recovery::ExecutionRecoveryHandle,
         operational_phase::operational_phase_from_readiness, system_status::SystemStatusPublisher,
     },
     infra::health_checker::HealthChecker,
+    observability::metrics_hub::MetricsHub,
 };
 
-/// Governed quant runtime control: mode reads/transitions, kill-switch projection,
-/// and live system-status assembly.
 pub struct QuantRuntimeControl {
-    runtime_mode: RuntimeModeHandle,
+    controls: RuntimeControlsHandle,
     health_checker: Arc<HealthChecker>,
-    runtime_state_repo: Arc<dyn SystemRuntimeStateRepository>,
+    repository: Arc<dyn RuntimeControlRepository>,
     transition_gate: Arc<dyn ModeTransitionGate>,
     preflight: Arc<dyn ModePreflight>,
-    kill_switch: Arc<dyn KillSwitchPort>,
+    metrics: Arc<MetricsHub>,
     status_publisher: Arc<SystemStatusPublisher>,
     execution_recovery: ExecutionRecoveryHandle,
     started_at: Instant,
 }
 
-/// Construction dependencies for [`QuantRuntimeControl`].
 pub struct QuantRuntimeControlDeps {
-    pub runtime_mode: RuntimeModeHandle,
+    pub controls: RuntimeControlsHandle,
     pub health_checker: Arc<HealthChecker>,
-    pub runtime_state_repo: Arc<dyn SystemRuntimeStateRepository>,
+    pub repository: Arc<dyn RuntimeControlRepository>,
     pub transition_gate: Arc<dyn ModeTransitionGate>,
     pub preflight: Arc<dyn ModePreflight>,
-    pub kill_switch: Arc<dyn KillSwitchPort>,
+    pub metrics: Arc<MetricsHub>,
     pub status_publisher: Arc<SystemStatusPublisher>,
     pub execution_recovery: ExecutionRecoveryHandle,
 }
@@ -55,70 +58,120 @@ pub struct QuantRuntimeControlDeps {
 impl QuantRuntimeControl {
     #[must_use]
     pub fn new(deps: QuantRuntimeControlDeps) -> Self {
+        deps.metrics
+            .set_auto_execution_halted(!deps.controls.kill_switch_state().allows_new_entry());
         Self {
-            runtime_mode: deps.runtime_mode,
+            controls: deps.controls,
             health_checker: deps.health_checker,
-            runtime_state_repo: deps.runtime_state_repo,
+            repository: deps.repository,
             transition_gate: deps.transition_gate,
             preflight: deps.preflight,
-            kill_switch: deps.kill_switch,
+            metrics: deps.metrics,
             status_publisher: deps.status_publisher,
             execution_recovery: deps.execution_recovery,
             started_at: Instant::now(),
+        }
+    }
+
+    async fn persist(&self, update: RuntimeControlUpdate) -> QuantResult<RuntimeControlSnapshot> {
+        let snapshot = RuntimeControlSnapshot::from(self.repository.compare_and_set(update).await?);
+        self.controls.publish_local(snapshot.clone());
+        self.metrics
+            .set_auto_execution_halted(!snapshot.kill_switch_state.allows_new_entry());
+        self.status_publisher.publish();
+        Ok(snapshot)
+    }
+
+    fn kill_switch_view(snapshot: &RuntimeControlSnapshot) -> KillSwitchView {
+        KillSwitchView {
+            state: snapshot.kill_switch_state,
+            requires_operator_ack: snapshot.kill_switch_requires_ack,
+            revision: snapshot.revision,
+            last_reason: snapshot.reason.clone(),
+            changed_by: snapshot.changed_by.clone(),
+            changed_at: snapshot.changed_at,
         }
     }
 }
 
 #[async_trait]
 impl RuntimeControlPort for QuantRuntimeControl {
-    fn quant_runtime_mode(&self) -> QuantRuntimeMode {
-        self.runtime_mode.current()
+    fn snapshot(&self) -> RuntimeControlSnapshot {
+        self.controls.snapshot()
     }
 
     async fn switch_quant_mode(
         &self,
         target: QuantRuntimeMode,
+        expected_revision: i64,
         actor: &str,
         reason: &str,
     ) -> QuantResult<QuantModeTransitionReport> {
-        let from = self.runtime_mode.current();
-        // No-op: same mode never runs preflight and never re-persists.
-        if from == target {
-            return Ok(QuantModeTransitionReport {
-                from,
-                to: target,
-                preflight: None,
-            });
-        }
+        let current = self.controls.snapshot();
+        let from = current.quant_runtime_mode;
+        let preflight = if from == target {
+            None
+        } else {
+            self.transition_gate.check(from, target)?;
+            if from.is_upgrade_to(target) {
+                let report = self.preflight.run(target).await?;
+                if !report.passed {
+                    return Err(ExecutionError::ModePreflightDenied {
+                        reason: report.summary(),
+                    }
+                    .into());
+                }
+                Some(report)
+            } else {
+                None
+            }
+        };
 
-        // Gate 1: transition matrix (forbidden edges fail closed, no persist).
-        self.transition_gate.check(from, target)?;
+        self.persist(RuntimeControlUpdate {
+            expected_revision,
+            quant_runtime_mode: Some(target),
+            settlement_write_policy: None,
+            kill_switch_state: None,
+            kill_switch_requires_ack: None,
+            actor: actor.to_owned(),
+            reason: reason.to_owned(),
+        })
+        .await?;
+        Ok(QuantModeTransitionReport {
+            from,
+            to: target,
+            preflight,
+        })
+    }
 
-        // Gate 2: business preflight on upgrades only (downgrades always allowed).
-        let preflight = if from.is_upgrade_to(target) {
-            let report = self.preflight.run(target).await?;
+    async fn switch_settlement_write_policy(
+        &self,
+        target: SettlementWritePolicy,
+        expected_revision: i64,
+        actor: &str,
+        reason: &str,
+    ) -> QuantResult<RuntimeControlSnapshot> {
+        let current = self.controls.snapshot();
+        if settlement_policy_rank(target) > settlement_policy_rank(current.settlement_write_policy)
+        {
+            let report = self.preflight.run(current.quant_runtime_mode).await?;
             if !report.passed {
                 return Err(ExecutionError::ModePreflightDenied {
                     reason: report.summary(),
                 }
                 .into());
             }
-            Some(report)
-        } else {
-            None
-        };
-
-        // Persist operational truth, then hot-swap the in-process handle.
-        self.runtime_state_repo
-            .set_quant_runtime_mode(target, actor, reason)
-            .await?;
-        self.runtime_mode.store(target);
-        self.status_publisher.publish();
-        Ok(QuantModeTransitionReport {
-            from,
-            to: target,
-            preflight,
+        }
+        self.persist(RuntimeControlUpdate {
+            expected_revision,
+            quant_runtime_mode: None,
+            settlement_write_policy: Some(target),
+            kill_switch_state: None,
+            kill_switch_requires_ack: None,
+            actor: actor.to_owned(),
+            reason: reason.to_owned(),
         })
+        .await
     }
 
     fn system_status(&self) -> SystemStatus {
@@ -136,15 +189,16 @@ impl RuntimeControlPort for QuantRuntimeControl {
             CatalogState::Ready { markets, .. } => u32::try_from(*markets).unwrap_or(u32::MAX),
             CatalogState::Warming => 0,
         };
-        let kill_switch = self.kill_switch.view();
+        let controls = self.controls.snapshot();
+        let kill_switch = Self::kill_switch_view(&controls);
         let operational_phase = operational_phase_from_readiness(
-            kill_switch.state,
+            controls.kill_switch_state,
             catalog.is_ready(),
             market_data.ready,
         );
 
         SystemStatus {
-            quant_runtime_mode: self.runtime_mode.current(),
+            quant_runtime_mode: controls.quant_runtime_mode,
             uptime_secs: self.started_at.elapsed().as_secs(),
             active_markets,
             catalog,
@@ -158,5 +212,52 @@ impl RuntimeControlPort for QuantRuntimeControl {
 
     async fn health(&self) -> HealthReport {
         self.health_checker.check_all().await
+    }
+}
+
+#[async_trait]
+impl KillSwitchPort for QuantRuntimeControl {
+    fn current(&self) -> KillSwitchState {
+        self.controls.kill_switch_state()
+    }
+
+    fn view(&self) -> KillSwitchView {
+        Self::kill_switch_view(&self.controls.snapshot())
+    }
+
+    async fn set(&self, command: SetKillSwitchCommand) -> QuantResult<KillSwitchView> {
+        let current = self.controls.snapshot();
+        let current_latched =
+            current.kill_switch_state.is_emergency() || current.kill_switch_requires_ack;
+        let loosening =
+            command.target.restriction_rank() < current.kill_switch_state.restriction_rank();
+        if current_latched && loosening && !command.ack {
+            return Err(ExecutionError::KillSwitchBlocks {
+                state: current.kill_switch_state.to_string(),
+                operation: "loosen_latched_requires_ack".to_owned(),
+            }
+            .into());
+        }
+        let snapshot = self
+            .persist(RuntimeControlUpdate {
+                expected_revision: command.expected_revision,
+                quant_runtime_mode: None,
+                settlement_write_policy: None,
+                kill_switch_state: Some(command.target),
+                kill_switch_requires_ack: Some(command.target.is_emergency() || command.latch),
+                actor: command.actor,
+                reason: command.reason,
+            })
+            .await?;
+        Ok(Self::kill_switch_view(&snapshot))
+    }
+}
+
+const fn settlement_policy_rank(policy: SettlementWritePolicy) -> u8 {
+    match policy {
+        SettlementWritePolicy::Disabled => 0,
+        SettlementWritePolicy::GovernedCanary => 1,
+        SettlementWritePolicy::SemiAuto => 2,
+        SettlementWritePolicy::Auto => 3,
     }
 }

@@ -16,8 +16,8 @@ use crate::{
     entities::{quant_account_snapshot, quant_equity_snapshot},
     enums::quant::AccountSource,
     types::{
-        AccountPositions, AccountSnapshotId, EquitySnapshotId, ExposureBreakdown, PositionSnapshot,
-        Usd,
+        AccountPositions, AccountSnapshotId, EquitySnapshotId, ExecutionAccountId,
+        ExposureBreakdown, PositionSnapshot, Usd,
     },
 };
 
@@ -26,6 +26,7 @@ use crate::{
 #[sea_orm(entity = "crate::entities::quant_account_snapshot::Entity")]
 pub struct AccountSnapshotInfo {
     pub account_snapshot_id: AccountSnapshotId,
+    pub execution_account_id: ExecutionAccountId,
     pub as_of: DateTime<Utc>,
     pub source: AccountSource,
     pub venue_net_liquidation_usd: Usd,
@@ -42,6 +43,7 @@ info_from_model!(
     quant_account_snapshot::Model,
     {
         account_snapshot_id,
+        execution_account_id,
         as_of,
         source,
         venue_net_liquidation_usd,
@@ -96,6 +98,7 @@ impl LiveAccountSnapshot {
 #[sea_orm(active_model = "crate::entities::quant_account_snapshot::ActiveModel")]
 pub struct NewAccountSnapshot {
     pub account_snapshot_id: AccountSnapshotId,
+    pub execution_account_id: ExecutionAccountId,
     pub as_of: DateTime<Utc>,
     pub source: AccountSource,
     pub venue_net_liquidation_usd: Usd,

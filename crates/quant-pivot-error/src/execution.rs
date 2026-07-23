@@ -63,6 +63,10 @@ pub enum ExecutionError {
     #[error("settlement redeem invariant failed: {reason}")]
     SettlementRedeemInvariant { reason: String },
 
+    /// A risk-increasing hold-to-resolution entry has no verified recovery path.
+    #[error("automatic settlement recovery is unavailable: {reason}")]
+    SettlementRecoveryUnavailable { reason: String },
+
     /// Runtime-mode transition is not allowed.
     #[error("mode transition forbidden: {reason}")]
     ModeTransitionForbidden { reason: String },

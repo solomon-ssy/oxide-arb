@@ -32,7 +32,7 @@ use rust_decimal::Decimal;
 use crate::{
     execution::ExitMonitorHealthHandle,
     governance::{
-        kill_switch::KillSwitchHandle,
+        RuntimeControlsHandle,
         quality_gate_load::{active_load_ok, active_publication_status_ok, shadow_load_ok},
     },
     runtime_config::DecisionPolicyStore,
@@ -58,7 +58,7 @@ pub struct ModePreflightDeps {
     pub shadow_comparison: Arc<dyn ShadowComparisonRepository>,
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub capital: Arc<dyn CapitalAllocationRepository>,
-    pub kill_switch: KillSwitchHandle,
+    pub runtime_controls: RuntimeControlsHandle,
     /// Exit-monitor health: `auto_execution` requires a live worker.
     pub exit_monitor_health: ExitMonitorHealthHandle,
 }
@@ -353,7 +353,7 @@ impl DefaultModePreflight {
     }
 
     fn check_kill_switch_closed(&self) -> PreflightCheck {
-        let state = self.deps.kill_switch.current();
+        let state = self.deps.runtime_controls.kill_switch_state();
         PreflightCheck::hard(
             "kill_switch_closed",
             state == KillSwitchState::Closed,

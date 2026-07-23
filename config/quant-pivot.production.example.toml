@@ -28,16 +28,10 @@
 # older layouts ([detection], [risk], [sizing], [treasury], [analytics], ...)
 # abort boot instead of being silently ignored.
 
-# ── Deployment lifecycle ─────────────────────────────────────────────────────
+# ── Deployment environment ───────────────────────────────────────────────────
 
-[lifecycle]
+[deployment]
 environment = "production"
-# Keep this pre-production until the irreversible seal has been written. After
-# sealing, change both this declaration and project-lifecycle.toml to
-# production_frozen before the next deployment; startup rejects any mismatch.
-expected_state = "pre_production_resettable"
-# Git commit and clean/dirty state are embedded by the compiled artifact.
-# Backup/restore and protected Config E2E evidence are WORM database artifacts.
 
 # ── Polymarket Platform ───────────────────────────────────────────────────────
 
@@ -51,8 +45,8 @@ clob_base_url = "https://clob.polymarket.com"
 clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 # Purpose: hard timeout for the single money-changing POST /order attempt.
 # Impact: timeout is Ambiguous and enters reconciliation; it is never retried.
-# Default: 15000.
-order_post_timeout_ms = 15000
+# Default: 45000; must be >= 35000 to contain SDK async-commit enrichment.
+order_post_timeout_ms = 45000
 # Purpose: EVM chain id. Impact: order signing domain + on-chain reads.
 # Caution: must be Polygon (137) — any other value is fatal at startup.
 # Default: 137.
@@ -80,6 +74,23 @@ api_key = "REPLACE_WITH_POLYMARKET_RELAYER_API_KEY"
 # api_key_address = "0x...."
 # Purpose: relayer HTTP request timeout (ms). Default: 15000.
 request_timeout_ms = 15000
+
+# Settlement worker timing and bounded-work limits. Switch write authority at
+# runtime through the audited settlement write-policy control.
+[polymarket.settlement]
+# Exclusive PostgreSQL claim lease; do not exceed the validated 300s ceiling.
+claim_lease_secs = 30
+# Exact SemiAuto batch authorization lifetime (validated range: 30..=3600s).
+semi_auto_authorization_ttl_secs = 300
+discovery_poll_secs = 30
+submission_poll_secs = 5
+max_claims_per_tick = 32
+rpc_concurrency = 4
+# UI-only signer-free readiness cache; money admission always performs fresh reads.
+readiness_ui_cache_secs = 10
+external_scan_block_span = 2048
+retry_initial_secs = 2
+retry_max_secs = 300
 
 # ── Market Data Connections ───────────────────────────────────────────────────
 # Decision thresholds are governed policy fields, not Deploy Config.

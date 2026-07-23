@@ -6,6 +6,5 @@ use quant_pivot_allocator as _;
 pub mod cache;
 pub mod clickhouse;
 pub mod error;
-pub mod evidence;
 pub mod postgres;
 pub mod write;

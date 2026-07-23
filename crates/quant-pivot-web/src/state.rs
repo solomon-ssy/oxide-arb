@@ -2,29 +2,31 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use quant_pivot_error::QuantResult;
+use crate::{
+    audit::OperationLogBuffer,
+    auth::casbin::{CasbinService, PermChecker},
+    jwt::{JwtService, RedisTokenBlacklist},
+    ws::SessionRegistry,
+};
 use quant_pivot_models::{
-    config::{CompiledBuildIdentity, DeployConfig},
+    config::DeployConfig,
     domain::{
         ports::{
-            AccountReadPort, BacktestPort, BootstrapPort, CalibrationArtifactFitPort,
-            CatalogStatusPort, CpcvBacktestPort, DataQualityPort, ExecutionReadPort,
-            ExecutionRecoveryPort, FactorGovernancePort, FeatureIntegrityPort, KillSwitchPort,
-            LifecycleLeaseProviderPort, LifecycleSchemaVerificationPort, MarketDataPort,
+            AccountReadPort, BacktestPort, CalibrationArtifactFitPort, CatalogStatusPort,
+            CpcvBacktestPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
+            FactorGovernancePort, FeatureIntegrityPort, KillSwitchPort, MarketDataPort,
             MarketLinkageGovernancePort, MetricsScrapePort, ModelCalibrationFitPort,
             ModelGovernancePort, ModelSpecPort, ModelTrainingPort, OrderIntentPort,
-            PolicySnapshotPort, ProductionEvidenceArtifactVerificationPort, QuantReportPort,
-            ReadinessPort, ReconciliationPort, ResearchCatalogPort, ResearchJobPort,
-            ResearchReadinessPort, RuntimeControlPort, StructuralMonitorPort, TradePolicyPort,
-            TrainingDatasetPort, VerifiedSchemaFingerprints,
+            PolicySnapshotPort, QuantReportPort, ReadinessPort, ReconciliationPort,
+            ResearchCatalogPort, ResearchJobPort, ResearchReadinessPort, RuntimeControlPort,
+            StructuralMonitorPort, SystemCapabilityPort, TradePolicyPort, TrainingDatasetPort,
+            settlement_control::SettlementControlPort,
         },
         runtime::{
             CoreEvent, CoreEventPublisher, MaterializationRunEvent, MaterializationRunKind,
             MaterializationRunStatus,
         },
     },
-    types::ContentHash,
 };
 use quant_pivot_repository::traits::{
     BasisAlertRepository, DomainSourceCursorRepository, DomainSourceExpectationRepository,
@@ -32,28 +34,11 @@ use quant_pivot_repository::traits::{
     OperationLogRepository, PolicyRepository, QuantFactReadRepository, RoleMenuRepository,
     RolePermissionRepository, RoleRepository, UserRepository, UserRoleRepository,
 };
-use quant_pivot_storage::{
-    clickhouse::ClickHousePool,
-    postgres::{PostgresPool, migration as postgres_migration},
-};
-
-use crate::{
-    audit::OperationLogBuffer,
-    auth::casbin::{CasbinService, PermChecker},
-    jwt::{JwtService, RedisTokenBlacklist},
-    ws::SessionRegistry,
-};
 
 /// Dependency bundle shared by all handlers and middleware.
 #[derive(Clone)]
 pub struct AppState {
     pub deploy: Arc<DeployConfig>,
-    pub postgres_schema_fingerprint: ContentHash,
-    pub clickhouse_schema_fingerprint: ContentHash,
-    pub build_identity: CompiledBuildIdentity,
-    pub schema_verification: Arc<dyn LifecycleSchemaVerificationPort>,
-    pub lifecycle_leases: Arc<dyn LifecycleLeaseProviderPort>,
-    pub production_evidence_verification: Arc<dyn ProductionEvidenceArtifactVerificationPort>,
     pub runtime_config_apply: Arc<dyn PolicySnapshotPort>,
     pub jwt: Arc<JwtService>,
     pub jwt_blacklist: Arc<RedisTokenBlacklist>,
@@ -69,7 +54,7 @@ pub struct AppState {
     pub operation_logs: Arc<dyn OperationLogRepository>,
     pub operation_log: OperationLogBuffer,
     pub control: Arc<dyn RuntimeControlPort>,
-    pub bootstrap: Arc<dyn BootstrapPort>,
+    pub capabilities: Arc<dyn SystemCapabilityPort>,
     /// Operational kill-switch governed read/write surface.
     pub kill_switch: Arc<dyn KillSwitchPort>,
     pub market_data: Arc<dyn MarketDataPort>,
@@ -136,39 +121,12 @@ pub struct AppState {
     pub entry_conditions: Arc<dyn EntryConditionRepository>,
     /// Execution order, position, and attribution read API.
     pub execution_read: Arc<dyn ExecutionReadPort>,
+    /// Live settlement deployment truth and governed authorization mutations.
+    pub settlement_control: Arc<dyn SettlementControlPort>,
     /// Operator reconciliation resolution API.
     pub reconciliation: Arc<dyn ReconciliationPort>,
     /// Execution recovery playbook detail API.
     pub execution_recovery: Arc<dyn ExecutionRecoveryPort>,
-}
-
-pub struct LiveSchemaVerifier {
-    postgres: Arc<PostgresPool>,
-    clickhouse: Arc<ClickHousePool>,
-}
-
-impl LiveSchemaVerifier {
-    #[must_use]
-    pub const fn new(postgres: Arc<PostgresPool>, clickhouse: Arc<ClickHousePool>) -> Self {
-        Self {
-            postgres,
-            clickhouse,
-        }
-    }
-}
-
-#[async_trait]
-impl LifecycleSchemaVerificationPort for LiveSchemaVerifier {
-    async fn verify_live(&self) -> QuantResult<VerifiedSchemaFingerprints> {
-        let (postgres, clickhouse) = tokio::try_join!(
-            postgres_migration::verify_schema(self.postgres.connection()),
-            self.clickhouse.verify_schema(),
-        )?;
-        Ok(VerifiedSchemaFingerprints {
-            postgres_schema_fingerprint: postgres.schema_fingerprint,
-            clickhouse_schema_fingerprint: clickhouse.schema_fingerprint,
-        })
-    }
 }
 
 impl AppState {

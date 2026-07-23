@@ -3,17 +3,14 @@
 use std::{sync::Arc, time::Duration};
 
 use quant_pivot_error::{QuantResult, infra::InfraError};
-use quant_pivot_migration::PostgresLifecycleLeaseProvider;
-use quant_pivot_models::{
-    config::CompiledBuildIdentity,
-    domain::{
-        governance::NewOperationLog,
-        ports::{
-            CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
-            FeatureIntegrityPort, MarketLinkageGovernancePort, ModelCalibrationFitPort,
-            OrderIntentPort, PolicySnapshotPort, ReconciliationPort, ResearchJobPort,
-            ResearchReadinessPort, TradePolicyPort, TrainingDatasetPort,
-        },
+use quant_pivot_models::domain::{
+    governance::NewOperationLog,
+    ports::{
+        CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
+        FeatureIntegrityPort, MarketLinkageGovernancePort, ModelCalibrationFitPort,
+        OrderIntentPort, PolicySnapshotPort, ReconciliationPort, ResearchJobPort,
+        ResearchReadinessPort, TradePolicyPort, TrainingDatasetPort,
+        settlement_control::SettlementControlPort,
     },
 };
 use quant_pivot_repository::{
@@ -26,22 +23,19 @@ use quant_pivot_repository::{
         OperationLogRepository, OrderIntentRepository, PolicyRepository, PositionRepository,
         RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
         ReportRunRepository, ResearchReadinessEvidenceRepository, RoleMenuRepository,
-        RolePermissionRepository, RoleRepository, ServingEvidenceRepository,
-        SettlementRedeemRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
-        UserRepository, UserRoleRepository,
+        RolePermissionRepository, RoleRepository, ServingEvidenceRepository, TradePolicyRepository,
+        TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
+        quant::settlement_redeem::SettlementRedeemRepository,
     },
 };
-use quant_pivot_storage::{
-    evidence::FileProductionEvidenceVerifier,
-    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker},
-};
+use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
 use quant_pivot_web::{
     audit::OperationLogBuffer,
     auth::casbin::{CasbinService, PermChecker},
     jwt::{JwtService, TokenBlacklist},
     readiness::PgRedisReadiness,
     routes, spawn_web_server,
-    state::{AppState, LiveSchemaVerifier},
+    state::AppState,
     ws::{SessionHubMetrics, SessionRegistry, spawn_ws_broadcaster},
 };
 
@@ -161,17 +155,6 @@ async fn build_app_state(
 
     Ok(AppState {
         deploy: Arc::clone(&ctx.config),
-        postgres_schema_fingerprint: ctx.infra.postgres_schema_fingerprint,
-        clickhouse_schema_fingerprint: ctx.infra.clickhouse_schema_fingerprint,
-        build_identity: CompiledBuildIdentity::compiled()?,
-        schema_verification: Arc::new(LiveSchemaVerifier::new(
-            Arc::clone(&ctx.infra.pg),
-            Arc::clone(&ctx.infra.ch),
-        )),
-        lifecycle_leases: Arc::new(PostgresLifecycleLeaseProvider::new(
-            ctx.config.db.postgres.clone(),
-        )),
-        production_evidence_verification: Arc::new(FileProductionEvidenceVerifier),
         runtime_config_apply: Arc::clone(&ctx.governance.applicator) as Arc<dyn PolicySnapshotPort>,
         jwt: auth.jwt,
         jwt_blacklist: Arc::clone(&ctx.infra.jwt_blacklist),
@@ -187,7 +170,7 @@ async fn build_app_state(
         operation_logs: Arc::clone(&repos.operation_log) as Arc<dyn OperationLogRepository>,
         operation_log,
         control: Arc::clone(&ctx.governance.runtime_control),
-        bootstrap: Arc::clone(&ctx.governance.bootstrap),
+        capabilities: Arc::clone(&ctx.governance.capabilities),
         kill_switch: Arc::clone(&ctx.governance.kill_switch),
         market_data: Arc::new(CoreMarketData::new(
             Arc::clone(&ctx.data.book_store),
@@ -268,6 +251,7 @@ async fn build_app_state(
             Arc::clone(&ctx.governance.applicator) as Arc<dyn PolicySnapshotPort>,
         )),
         execution_read: execution.execution_read,
+        settlement_control: execution.settlement_control,
         reconciliation: execution.reconciliation,
         execution_recovery: execution.execution_recovery,
     })
@@ -356,6 +340,7 @@ async fn build_web_auth(ctx: &AppContext) -> QuantResult<WebAuthServices> {
 
 struct WebExecutionPorts {
     execution_read: Arc<dyn ExecutionReadPort>,
+    settlement_control: Arc<dyn SettlementControlPort>,
     reconciliation: Arc<dyn ReconciliationPort>,
     execution_recovery: Arc<dyn ExecutionRecoveryPort>,
 }
@@ -369,6 +354,7 @@ fn build_web_execution_ports(ctx: &AppContext) -> WebExecutionPorts {
         Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
         Arc::clone(&repos.settlement_redeem) as Arc<dyn SettlementRedeemRepository>,
     ));
+    let settlement_control = Arc::clone(&ctx.execution.settlement_control);
     let reconciliation = Arc::new(CoreReconciliationPort::new(
         Arc::clone(&ctx.execution.reconciliation),
         Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
@@ -377,11 +363,12 @@ fn build_web_execution_ports(ctx: &AppContext) -> WebExecutionPorts {
     let execution_recovery = Arc::new(CoreExecutionRecoveryPort::new(
         Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
         Arc::clone(&ctx.governance.kill_switch),
-        ctx.governance.runtime_mode.clone(),
+        ctx.governance.runtime_controls.clone(),
     )) as Arc<dyn ExecutionRecoveryPort>;
 
     WebExecutionPorts {
         execution_read: execution_read as Arc<dyn ExecutionReadPort>,
+        settlement_control,
         reconciliation,
         execution_recovery,
     }
