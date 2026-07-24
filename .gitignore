@@ -14,5 +14,8 @@ config/quant-pivot.local.toml
 var/
 .DS_Store
 
+# Local agent plans / evidence
+.hermes/
+
 # VS Code extension stats
 .VSCodeCounter/
