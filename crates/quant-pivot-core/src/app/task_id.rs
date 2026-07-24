@@ -85,6 +85,8 @@ pub enum TaskId {
     /// Self-heals the execution breaker (`Degraded → Healthy` after cooldown).
     ExecutionBreakerTick,
     ReconciliationWorker,
+    /// Seals resolution and execution outcome truth in all runtime modes.
+    OutcomeReconciliationWorker,
     /// Discovers resolved account-scoped cases from durable `PostgreSQL` truth.
     SettlementDiscovery,
     /// Mints signer-free current-deployment and full-inventory readiness.
@@ -97,10 +99,6 @@ pub enum TaskId {
     SettlementGovernedAction,
     /// Scans open position lots and evaluates the exit priority ladder.
     ExitMonitor,
-    /// Writes final recommendation-attribution rows after execution reaches truth.
-    AttributionWorker,
-    /// Best-effort analytics mirror for final attribution events.
-    AttributionEventsWriter,
     /// Best-effort analytics mirror for execution-order lifecycle events.
     ExecutionEventsWriter,
     /// Best-effort analytics mirror for capital-allocation ledger events.
@@ -120,7 +118,6 @@ pub enum TaskId {
     BookStreamSessionWriter,
     BookL2LedgerWriter,
     BookMicrostructure1sWriter,
-    MarketResolutionWriter,
     FactorEventsWriter,
     SignalCandidateEventsWriter,
     BookSnapshotPublisher,
@@ -190,13 +187,13 @@ impl TaskId {
             | Self::EntryConditionWorker
             | Self::ExecutionBreakerTick
             | Self::ReconciliationWorker
+            | Self::OutcomeReconciliationWorker
             | Self::SettlementDiscovery
             | Self::SettlementPreflight
             | Self::SettlementExecution
             | Self::SettlementExternalObservation
             | Self::SettlementGovernedAction
-            | Self::ExitMonitor
-            | Self::AttributionWorker => TaskKind::Execution,
+            | Self::ExitMonitor => TaskKind::Execution,
             Self::RiskTick
             | Self::ExposureGc
             | Self::ReportGenerator
@@ -214,10 +211,8 @@ impl TaskId {
             | Self::BookStreamSessionWriter
             | Self::BookL2LedgerWriter
             | Self::BookMicrostructure1sWriter
-            | Self::MarketResolutionWriter
             | Self::FactorEventsWriter
             | Self::SignalCandidateEventsWriter
-            | Self::AttributionEventsWriter
             | Self::ExecutionEventsWriter
             | Self::ExitSignalEvaluationEventsWriter
             | Self::CapitalAllocationEventsWriter

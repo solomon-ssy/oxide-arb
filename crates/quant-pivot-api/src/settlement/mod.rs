@@ -6,3 +6,4 @@ pub mod contracts;
 pub mod eoa;
 pub mod external;
 pub mod relayer;
+pub mod resolution;

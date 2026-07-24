@@ -51,7 +51,6 @@ pub struct DatasetManifest {
 #[serde(rename_all = "snake_case")]
 pub enum TrainingSampleSource {
     HistoricalPit,
-    LiveAttribution,
     /// Per-tick hold-vs-exit decision points sampled along a closed/settled
     /// lot's life for Sell-scorer training. Anchored on position-lot
     /// timelines rather than a uniform market grid.

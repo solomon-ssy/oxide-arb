@@ -73,7 +73,7 @@ async fn infrastructure_contracts_share_one_disposable_stack() {
         run_scenario("infrastructure_clickhouse_storage::clickhouse_fact_contract_uses_decimal_and_enum_columns", Box::pin(infrastructure_clickhouse_storage::clickhouse_fact_contract_uses_decimal_and_enum_columns())).await;
         run_scenario("infrastructure_clickhouse_storage::crypto_price_report_rust_row_matches_clickhouse_schema", Box::pin(infrastructure_clickhouse_storage::crypto_price_report_rust_row_matches_clickhouse_schema())).await;
         run_scenario("infrastructure_clickhouse_storage::domain_event_rust_row_matches_clickhouse_schema", Box::pin(infrastructure_clickhouse_storage::domain_event_rust_row_matches_clickhouse_schema())).await;
-        run_scenario("infrastructure_clickhouse_storage::report_fact_schema_accepts_decision_snapshot_and_superseded_censor", Box::pin(infrastructure_clickhouse_storage::report_fact_schema_accepts_decision_snapshot_and_superseded_censor())).await;
+        run_scenario("infrastructure_clickhouse_storage::report_fact_schema_accepts_immutable_decision_snapshot", Box::pin(infrastructure_clickhouse_storage::report_fact_schema_accepts_immutable_decision_snapshot())).await;
         run_scenario("infrastructure_clickhouse_storage::trade_tape_direct_insert_roundtrip", Box::pin(infrastructure_clickhouse_storage::trade_tape_direct_insert_roundtrip())).await;
         run_scenario("infrastructure_clickhouse_storage::last_trade_ledger_retry_projects_exactly_once", Box::pin(infrastructure_clickhouse_storage::last_trade_ledger_retry_projects_exactly_once())).await;
         run_scenario("infrastructure_clickhouse_storage::async_writer_shutdown_drains_buffer", Box::pin(infrastructure_clickhouse_storage::async_writer_shutdown_drains_buffer())).await;

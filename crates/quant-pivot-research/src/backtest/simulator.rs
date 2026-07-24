@@ -1,11 +1,11 @@
-//! Binary-resolution settlement of an already executed historical BUY.
+//! Resolution settlement of an already executed historical BUY.
 //!
 //! Entry price, depth, fee rounding, and cash-budget feasibility are resolved
-//! upstream by the shared venue book walk. This module only applies the `0`/`1`
+//! upstream by the shared venue book walk. This module only applies the exact
 //! token payout to that frozen executable fill; it never reconstructs a gross
 //! return from a reference price.
 
-use quant_pivot_models::enums::quant::OutcomeSide;
+use quant_pivot_models::types::PayoutRatio;
 
 use crate::execution_semantics::{
     BookWalkFill, FeeError, ResolutionBuyEconomics, ResolutionBuySettlement,
@@ -14,14 +14,9 @@ use crate::execution_semantics::{
 /// Settle one executable cash-budget BUY against the binary market truth.
 pub fn settle_executed_buy(
     fill: &BookWalkFill,
-    outcome_side: OutcomeSide,
-    settled_yes: bool,
+    token_payout_ratio: PayoutRatio,
 ) -> Result<ResolutionBuySettlement, FeeError> {
-    let won = match outcome_side {
-        OutcomeSide::Yes => settled_yes,
-        OutcomeSide::No => !settled_yes,
-    };
-    ResolutionBuyEconomics::from_fill(fill).map(|economics| economics.settle(won))
+    ResolutionBuyEconomics::from_fill(fill).map(|economics| economics.settle(token_payout_ratio))
 }
 
 #[cfg(test)]
@@ -29,8 +24,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
-        enums::quant::{FillRequirement, OutcomeSide},
-        types::{Bps, ContentHash, Price, Shares, Usd},
+        enums::quant::FillRequirement,
+        types::{Bps, ContentHash, PayoutRatio, Price, Shares, Usd},
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -70,8 +65,11 @@ mod tests {
             fees.effective_at,
         )
         .expect("walk");
-        let won = settle_executed_buy(&fill, OutcomeSide::Yes, true).expect("settlement");
-        let lost = settle_executed_buy(&fill, OutcomeSide::Yes, false).expect("settlement");
+        let won = settle_executed_buy(&fill, PayoutRatio::ONE).expect("settlement");
+        let lost = settle_executed_buy(&fill, PayoutRatio::ZERO).expect("settlement");
+        let split =
+            settle_executed_buy(&fill, PayoutRatio::try_new(dec!(0.5)).expect("half payout"))
+                .expect("settlement");
 
         assert_eq!(won.economics.entry_fee, fill.expected_fee);
         assert_eq!(
@@ -79,6 +77,10 @@ mod tests {
             Usd::new(-lost.economics.cash_outlay.inner())
         );
         assert!(won.realized_return_bps < Bps::new(dec!(10_000)));
+        assert_eq!(
+            split.payout_usd,
+            Usd::new(split.economics.filled_shares.inner() * dec!(0.5))
+        );
         assert!(!won.economics.all_in_price.inner().is_zero());
     }
 }

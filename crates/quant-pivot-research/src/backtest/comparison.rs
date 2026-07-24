@@ -220,8 +220,8 @@ mod tests {
             quant::{DataQualityStatus, OutcomeSide},
         },
         types::{
-            BacktestReportId, DecisionPolicySnapshotId, MarketId, ModelVersionId, Probability,
-            Shares, TokenId, Usd,
+            BacktestReportId, DecisionPolicySnapshotId, MarketId, ModelVersionId, PayoutRatio,
+            Probability, Shares, TokenId, Usd,
             backtest::{CategoryMetric, ExpectedVsRealized, PnlCurvePoint, PnlSimulation},
         },
     };
@@ -250,7 +250,11 @@ mod tests {
             confidence: Probability::new(dec!(1)),
             expected_return_bps: dec!(100),
             realized_return_bps: realized,
-            settled_yes: realized > Decimal::ZERO,
+            token_payout_ratio: if realized > Decimal::ZERO {
+                PayoutRatio::ONE
+            } else {
+                PayoutRatio::ZERO
+            },
             max_adverse_excursion_bps: None,
             allocated_usd: Usd::new(dec!(100)),
             entry_fee_usd: Usd::ZERO,

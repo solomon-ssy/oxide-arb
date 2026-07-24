@@ -32,6 +32,7 @@ use quant_pivot_models::{
         common::OrderType,
         execution::{
             AdmissionOutcome, ExecutionOrderPhase, OrderTypeKind, ReconciliationEvidenceKind,
+            ReconciliationResult,
         },
         quant::{AccountSource, ExecutionOrderState, OrderIntentStatus},
     },
@@ -512,6 +513,9 @@ fn reconciliation_row(
     execution_order: &ExecutionOrderInfo,
     outcome: VenueOutcome,
 ) -> NewReconciliation {
+    let reconciliation_result = outcome.reconciliation_result();
+    let (resolved_by, resolved_at) =
+        submit_response_resolution(reconciliation_result, result.responded_at);
     let detail = format!(
         "venue outcome {outcome:?}; order_id={:?}; filled={}",
         result.venue_order_id, result.filled_shares
@@ -529,7 +533,7 @@ fn reconciliation_row(
         reconciliation_id: ReconciliationId::from_v7(),
         execution_order_id: execution_order.execution_order_id,
         order_intent_id: execution_order.order_intent_id,
-        result: outcome.reconciliation_result(),
+        result: reconciliation_result,
         evidence_json: evidence,
         venue_filled_shares: Some(result.filled_shares),
         venue_avg_price: result.avg_fill_price,
@@ -541,8 +545,24 @@ fn reconciliation_row(
         expected_fee_usd: Some(result.expected_fee),
         observed_fee_usd: result.observed_fee,
         fee_delta_usd: result.observed_fee.map(|fee| fee - result.expected_fee),
-        resolved_by: None,
-        resolved_at: None,
+        resolved_by,
+        resolved_at,
+    }
+}
+
+/// Freeze terminal truth observed synchronously in the venue submit response.
+///
+/// `Pending` remains unresolved for the asynchronous reconciliation worker.
+/// Every other result is already a terminal source fact and must not be
+/// indistinguishable from an ambiguous submission.
+pub(super) fn submit_response_resolution(
+    result: ReconciliationResult,
+    responded_at: DateTime<Utc>,
+) -> (Option<String>, Option<DateTime<Utc>>) {
+    if result == ReconciliationResult::Pending {
+        (None, None)
+    } else {
+        (Some("venue_submit_response".to_owned()), Some(responded_at))
     }
 }
 

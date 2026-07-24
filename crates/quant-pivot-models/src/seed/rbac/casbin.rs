@@ -51,7 +51,6 @@ const READ_RESOURCES: &[ResourceType] = &[
     ResourceType::OrderIntent,
     ResourceType::ExecutionOrder,
     ResourceType::Position,
-    ResourceType::RecommendationAttribution,
     ResourceType::Reconciliation,
     ResourceType::SettlementRedeem,
     ResourceType::FactorDefinition,

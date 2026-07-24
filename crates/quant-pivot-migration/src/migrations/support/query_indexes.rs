@@ -1754,6 +1754,27 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
+        name: "idx_quant_recommendation_profile_available_id",
+        table: "quant_recommendation",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "research_profile_artifact_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "recommendation_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
         name: "idx_quant_recommendation_status_valid_until",
         table: "quant_recommendation",
         method: IndexMethod::BTree,
@@ -1803,6 +1824,40 @@ const INDEXES: &[IndexSpec] = &[
             },
             IndexColumnSpec {
                 name: "rank",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_recommendation_execution_outcome_available",
+        table: "quant_recommendation_execution_outcome",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "available_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "recommendation_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_recommendation_resolution_outcome_available",
+        table: "quant_recommendation_resolution_outcome",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "available_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "recommendation_id",
                 direction: IndexDirection::Asc,
             },
         ],

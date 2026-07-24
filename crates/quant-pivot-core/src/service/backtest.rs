@@ -31,8 +31,8 @@ use quant_pivot_models::{
     runtime_config::PortfolioConfig,
     types::{
         BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, MarketId,
-        ModelComparisonReportId, ModelRunId, ModelVersionId, ResearchJobProgress, TokenId,
-        TrainingDatasetId, Usd, model_lineage::ModelVersionDerivation,
+        ModelComparisonReportId, ModelRunId, ModelVersionId, PayoutRatio, ResearchJobProgress,
+        TokenId, TrainingDatasetId, Usd, model_lineage::ModelVersionDerivation,
     },
 };
 use quant_pivot_repository::traits::{
@@ -730,11 +730,10 @@ pub(crate) fn frozen_ticks(
                 event_id: Some(example.selected_market.event_id.clone()),
                 liquidity_usd: context.liquidity_usd,
             });
-            let (settled_yes, matured) = settlement_outcome(example, &settlement_label);
+            let yes_payout_ratio = settlement_payout(example, &settlement_label)?;
             outcomes.push(MarketOutcome {
                 market_id: example.market_id.clone(),
-                settled_yes,
-                matured,
+                yes_payout_ratio,
                 max_adverse_excursion_bps: max_adverse_excursion(example, &mae_label),
             });
             for token_id in iter::once(&example.selected_market.primary_token_id)
@@ -898,14 +897,25 @@ fn replay_pages_for_examples(
         .collect()
 }
 
-fn settlement_outcome(example: &TrainingExample, label: &LabelName) -> (bool, bool) {
-    example
-        .labels
-        .iter()
-        .find(|row| row.label_name == *label)
-        .map_or((false, false), |row| {
-            (row.value >= Decimal::ONE, row.is_resolved)
-        })
+fn settlement_payout(
+    example: &TrainingExample,
+    label: &LabelName,
+) -> QuantResult<Option<PayoutRatio>> {
+    let Some(row) = example.labels.iter().find(|row| row.label_name == *label) else {
+        return Ok(None);
+    };
+    if !row.is_resolved {
+        return Ok(None);
+    }
+    PayoutRatio::try_new(row.value).map(Some).map_err(|error| {
+        ResearchError::LabelResolution {
+            detail: format!(
+                "settlement payout for market {} is invalid: {error}",
+                example.market_id
+            ),
+        }
+        .into()
+    })
 }
 
 fn max_adverse_excursion(example: &TrainingExample, label: &LabelName) -> Option<Decimal> {

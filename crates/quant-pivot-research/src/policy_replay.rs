@@ -19,8 +19,8 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         Bps, ConditionTruth, ContentHash, EntryConditionTemplate, EntryOrderTemplate,
-        PassivePlacement, Price, Shares, TokenId, TradePolicyCandidateSpec, TradePolicyReplayGap,
-        Usd,
+        PassivePlacement, PayoutRatio, Price, Shares, TokenId, TradePolicyCandidateSpec,
+        TradePolicyReplayGap, Usd,
     },
 };
 use rust_decimal::{Decimal, RoundingStrategy, prelude::ToPrimitive};
@@ -76,7 +76,7 @@ pub struct PolicyReplayTrade {
 /// Resolution visible at this observation, if the market has settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyReplayResolution {
-    pub winning_token: bool,
+    pub token_payout_ratio: PayoutRatio,
     pub resolved_at: DateTime<Utc>,
     pub observed_at: DateTime<Utc>,
 }
@@ -907,11 +907,7 @@ fn settle_resolution(
     if state.remaining == Shares::ZERO {
         return Ok(());
     }
-    let payout = if resolution.winning_token {
-        state.remaining.inner()
-    } else {
-        Decimal::ZERO
-    };
+    let payout = state.remaining.inner() * resolution.token_payout_ratio.inner();
     let reason = ExitReason::ResolutionRedeem;
     state.fills.push(PolicyReplayFill {
         leg_ordinal: next_ordinal(&state.fills)?,
@@ -923,11 +919,7 @@ fn settle_resolution(
         outcome: BookWalkOutcome::Filled,
         requested_shares: Some(state.remaining),
         filled_shares: state.remaining,
-        vwap: Some(if resolution.winning_token {
-            Price::ONE
-        } else {
-            Price::ZERO
-        }),
+        vwap: Some(Price::new(resolution.token_payout_ratio.inner())),
         gross_amount: Usd::new(payout),
         fee: Usd::ZERO,
         cash_delta: payout,
@@ -1232,9 +1224,10 @@ mod tests {
         },
         types::{
             Bps, ConditionTruth, ContentHash, EntryConditionTemplate, EntryOrderTemplate,
-            ExitExecutionTemplate, OpportunisticExitPolicy, PassivePlacement, Price, Probability,
-            ResidualSharePolicy, ScaleOutTemplate, Shares, TokenId, TradePolicyCandidateSpec,
-            TradePolicyExitTemplate, TradePolicyReplayGap, TrailingStopTemplate, Usd,
+            ExitExecutionTemplate, OpportunisticExitPolicy, PassivePlacement, PayoutRatio, Price,
+            Probability, ResidualSharePolicy, ScaleOutTemplate, Shares, TokenId,
+            TradePolicyCandidateSpec, TradePolicyExitTemplate, TradePolicyReplayGap,
+            TrailingStopTemplate, Usd,
         },
     };
     use rust_decimal::Decimal;
@@ -1565,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn hold_to_resolution_uses_final_token_payout_without_a_fee_schedule() {
+    fn hold_to_resolution_uses_fractional_token_payout_without_a_fee_schedule() {
         let mut held = candidate(FillRequirement::AllowPartial);
         held.exit.settlement_mode = ExitSettlementMode::HoldToResolution;
         held.exit.upper_barrier_bps = Bps::new(dec!(20_000));
@@ -1578,7 +1571,7 @@ mod tests {
         resolution.fee_schedule = None;
         resolution.signal = None;
         resolution.resolution = Some(PolicyReplayResolution {
-            winning_token: true,
+            token_payout_ratio: PayoutRatio::try_new(dec!(0.5)).expect("half payout"),
             resolved_at: at(59),
             observed_at: at(60),
         });
@@ -1599,7 +1592,7 @@ mod tests {
         assert_eq!(outcome.exit_fill_ratio, Decimal::ONE);
         assert_eq!(
             outcome.fills.last().and_then(|fill| fill.vwap),
-            Some(Price::ONE)
+            Some(Price::new(dec!(0.5)))
         );
     }
 

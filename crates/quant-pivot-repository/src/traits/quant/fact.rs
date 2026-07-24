@@ -3,9 +3,8 @@ use quant_pivot_models::{
     clickhouse::{
         QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
         QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow,
-        QuantModelInputEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
-        QuantReportRecommendationFactRow, QuantServingEvidenceCompletionRow,
-        QuantSignalCandidateEventRow, ReportMarketFunnelRow,
+        QuantModelInputEventRow, QuantPositionEventRow, QuantReportRecommendationFactRow,
+        QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow, ReportMarketFunnelRow,
     },
     types::ContentHash,
 };
@@ -100,11 +99,6 @@ pub trait QuantFactRepository: Send + Sync {
     async fn insert_position_events(
         &self,
         rows: Vec<QuantPositionEventRow>,
-    ) -> Result<(), StorageError>;
-
-    async fn insert_recommendation_attribution_events(
-        &self,
-        rows: Vec<QuantRecommendationAttributionEventRow>,
     ) -> Result<(), StorageError>;
 
     async fn insert_exit_signal_evaluation_events(

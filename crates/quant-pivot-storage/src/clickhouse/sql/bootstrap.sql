@@ -70,9 +70,8 @@ CREATE TABLE IF NOT EXISTS book_microstructure_1s (
 ORDER BY (token_id, bucket_time) SETTINGS index_granularity = 4096;
 CREATE TABLE IF NOT EXISTS market_resolution_event (
     `market_id` String,
-    `winning_token_id` String,
-    `winning_outcome` String,
-    `asset_token_ids` Array(String),
+    `token_ids` Array(String),
+    `payout_ratios` Array(Decimal(20, 18)),
     `resolved_at` DateTime64(3, 'UTC'),
     `observed_at` DateTime64(3, 'UTC'),
     `source` Enum8(
@@ -81,16 +80,28 @@ CREATE TABLE IF NOT EXISTS market_resolution_event (
         'WsBbo' = 3,
         'WsTickSize' = 4,
         'WsLastTrade' = 5,
-        'WsMarketResolved' = 6,
+        'ResolutionReconciliation' = 6,
         'QuantPipeline' = 7,
         'Execution' = 8,
         'WsShardStatus' = 9
     ),
-    `sequence` UInt64,
+    `source_block_number` UInt64,
+    `source_block_hash` String,
+    `source_transaction_hash` String,
+    `source_log_index` UInt64,
+    `source_checkpoint_hash` String,
+    `resolution_fact_hash` String,
     `schema_version` UInt32,
     `resolved_date` Date MATERIALIZED toDate(resolved_at)
 ) ENGINE = MergeTree PARTITION BY toYYYYMM(resolved_date)
-ORDER BY (market_id, resolved_at, observed_at, sequence) SETTINGS index_granularity = 8192;
+ORDER BY (
+    market_id,
+    resolved_at,
+    observed_at,
+    source_block_number,
+    source_log_index,
+    resolution_fact_hash
+) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS quant_book_l2_ledger (
     `stream_session_id` UUID,
     `shard_id` UInt32,
@@ -495,24 +506,6 @@ CREATE TABLE IF NOT EXISTS quant_position_event (
     `ingestion_time` DateTime64(3, 'UTC')
 ) ENGINE = MergeTree
 ORDER BY (market_id, token_id, event_time, ingestion_time) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS quant_recommendation_attribution_event (
-    `event_time` DateTime64(3, 'UTC'),
-    `recommendation_id` String,
-    `outcome` Enum8(
-        'filled_exited' = 1,
-        'filled_settled' = 2,
-        'expired_unfilled' = 3,
-        'cancelled_unfilled' = 4,
-        'failed_unfilled' = 5,
-        'superseded_unfilled' = 6
-    ),
-    `realized_pnl_usd` Decimal(38, 18),
-    `max_adverse_excursion_bps` Nullable(Decimal(18, 8)),
-    `max_favorable_excursion_bps` Decimal(18, 8),
-    `label_available_at` DateTime64(3, 'UTC'),
-    `ingestion_time` DateTime64(3, 'UTC')
-) ENGINE = MergeTree
-ORDER BY (recommendation_id, event_time, ingestion_time) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS quant_report_market_funnel (
     `event_time` DateTime64(3, 'UTC'),
     `recommendation_report_id` String,

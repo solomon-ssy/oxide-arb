@@ -33,7 +33,7 @@ use quant_pivot_models::{
         quant_position::{Column, Entity},
     },
     enums::{
-        execution::{ExecutionOrderPhase, PositionLedgerState},
+        execution::{ExecutionOrderPhase, ExitReason, PositionLedgerState},
         quant::ExecutionOrderState,
     },
     types::{
@@ -427,7 +427,12 @@ pub async fn apply_exit(
     let cost_usd = row.cost_usd - cost_reduction;
     let realized_pnl_usd = row.realized_pnl_usd + exit.realized_pnl_usd;
     let (state, closed_at, normalized_cost) = if shares.is_zero() {
-        (PositionLedgerState::Closed, Some(exit.exited_at), Usd::ZERO)
+        let terminal_state = if exit.reason == ExitReason::ResolutionRedeem {
+            PositionLedgerState::Settled
+        } else {
+            PositionLedgerState::Closed
+        };
+        (terminal_state, Some(exit.exited_at), Usd::ZERO)
     } else {
         (PositionLedgerState::Closing, row.closed_at, cost_usd)
     };

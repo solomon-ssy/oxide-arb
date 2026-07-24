@@ -6,7 +6,7 @@
 /// migration instead of replaying historical ALTER/data-repair waves.
 pub(super) const BOOTSTRAP_SOURCES: &[&str] = &[include_str!("sql/bootstrap.sql")];
 
-pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 27] = [
+pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 26] = [
     "book_microstructure_1m",
     "book_microstructure_1m_mv",
     "book_microstructure_1s",
@@ -26,7 +26,6 @@ pub(super) const REQUIRED_SCHEMA_OBJECTS: [&str; 27] = [
     "quant_feature_parity_event",
     "quant_model_input_event",
     "quant_position_event",
-    "quant_recommendation_attribution_event",
     "quant_report_recommendation_fact",
     "quant_report_market_funnel",
     "quant_serving_evidence_completion",
@@ -176,6 +175,21 @@ mod tests {
             .join("\n");
         assert!(ddl.contains("book_microstructure_1m_mv"));
         assert!(ddl.contains("max(available_at) AS available_at"));
+    }
+
+    #[test]
+    fn market_resolution_uses_aligned_decimal_payout_vectors() {
+        let ddl = BOOTSTRAP_SOURCES
+            .iter()
+            .flat_map(|source| split_statements(source))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let normalized_ddl = ddl.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(normalized_ddl.contains("`token_ids` Array(String)"));
+        assert!(normalized_ddl.contains("`payout_ratios` Array(Decimal(20, 18))"));
+        assert!(!normalized_ddl.contains("`winning_token_id` String"));
+        assert!(!normalized_ddl.contains("`winning_outcome` String"));
     }
 
     #[test]

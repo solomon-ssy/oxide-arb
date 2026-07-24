@@ -16,11 +16,11 @@ use quant_pivot_models::domain::{
 use quant_pivot_repository::{
     clickhouse::ChFeatureParityEventRepository,
     traits::{
-        AccountSnapshotRepository, AttributionRepository, BasisAlertRepository,
-        CalibrationArtifactRepository, CatalogLedgerRepository, DomainSourceCursorRepository,
-        DomainSourceExpectationRepository, EntryConditionRepository, EquitySnapshotRepository,
-        ExecutionOrderRepository, FeatureParityEventRepository, FeatureRepository, MenuRepository,
-        OperationLogRepository, OrderIntentRepository, PolicyRepository, PositionRepository,
+        AccountSnapshotRepository, BasisAlertRepository, CalibrationArtifactRepository,
+        CatalogLedgerRepository, DomainSourceCursorRepository, DomainSourceExpectationRepository,
+        EntryConditionRepository, EquitySnapshotRepository, ExecutionOrderRepository,
+        FeatureParityEventRepository, FeatureRepository, MenuRepository, OperationLogRepository,
+        OrderIntentRepository, PolicyRepository, PositionRepository,
         RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
         ReportRunRepository, ResearchReadinessEvidenceRepository, RoleMenuRepository,
         RolePermissionRepository, RoleRepository, ServingEvidenceRepository, TradePolicyRepository,
@@ -350,7 +350,6 @@ fn build_web_execution_ports(ctx: &AppContext) -> WebExecutionPorts {
     let execution_read = Arc::new(CoreExecutionReadPort::new(
         Arc::clone(&repos.execution_order) as Arc<dyn ExecutionOrderRepository>,
         Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
-        Arc::clone(&repos.attribution) as Arc<dyn AttributionRepository>,
         Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
         Arc::clone(&repos.settlement_redeem) as Arc<dyn SettlementRedeemRepository>,
     ));

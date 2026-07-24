@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    enums::quant::{DataQualityStatus, FillRequirement},
+    enums::quant::{DataQualityStatus, FillRequirement, OutcomeSide},
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, ExposureBreakdown, ModelVersionId,
         Probability, Usd,
@@ -174,9 +174,9 @@ fn process_tick(
         ) else {
             continue;
         };
-        if !outcome.matured {
+        let Some(yes_payout_ratio) = outcome.yes_payout_ratio else {
             continue;
-        }
+        };
         let Some(allocation) = alloc_by_id.get(&candidate.signal_candidate_id.to_string()) else {
             continue;
         };
@@ -218,14 +218,19 @@ fn process_tick(
         if fill.outcome == BookWalkOutcome::Unfilled {
             continue;
         }
+        let token_payout_ratio = match candidate.outcome_side {
+            OutcomeSide::Yes => yes_payout_ratio,
+            OutcomeSide::No => yes_payout_ratio.complement(),
+        };
         let settlement =
-            simulator::settle_executed_buy(&fill, candidate.outcome_side, outcome.settled_yes)
-                .map_err(|error| ResearchError::ValidationMethodology {
+            simulator::settle_executed_buy(&fill, token_payout_ratio).map_err(|error| {
+                ResearchError::ValidationMethodology {
                     detail: format!(
                         "backtest executable settlement failed for token {}: {error:?}",
                         candidate.token_id
                     ),
-                })?;
+                }
+            })?;
         let allocated_usd = settlement.economics.cash_outlay;
         let realized = settlement.realized_return_bps.inner();
         let liquidity_feasible = allocation.liquidity_feasible;
@@ -244,7 +249,7 @@ fn process_tick(
             confidence: candidate.confidence,
             expected_return_bps: candidate.expected_return_bps,
             realized_return_bps: realized,
-            settled_yes: outcome.settled_yes,
+            token_payout_ratio,
             max_adverse_excursion_bps: outcome.max_adverse_excursion_bps,
             allocated_usd,
             entry_fee_usd: settlement.economics.entry_fee,
@@ -497,8 +502,8 @@ mod tests {
         runtime_config::FactorCrossSectionConfig,
         types::{
             BacktestReportId, Bps, DecisionPolicySnapshotId, FactorDefinitionId, MarketId,
-            ModelInputContract, ModelRunId, ModelVersionId, Price, Probability, Shares, TokenId,
-            Usd, builtin_research_profiles,
+            ModelInputContract, ModelRunId, ModelVersionId, PayoutRatio, Price, Probability,
+            Shares, TokenId, Usd, builtin_research_profiles,
         },
     };
     use rust_decimal::Decimal;
@@ -635,14 +640,12 @@ mod tests {
             outcomes: vec![
                 MarketOutcome {
                     market_id: MarketId::new("0xbull"),
-                    settled_yes: true,
-                    matured: true,
+                    yes_payout_ratio: Some(PayoutRatio::ONE),
                     max_adverse_excursion_bps: None,
                 },
                 MarketOutcome {
                     market_id: MarketId::new("0xbear"),
-                    settled_yes: false,
-                    matured: true,
+                    yes_payout_ratio: Some(PayoutRatio::ZERO),
                     max_adverse_excursion_bps: None,
                 },
             ],

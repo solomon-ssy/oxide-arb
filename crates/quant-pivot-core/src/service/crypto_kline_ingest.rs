@@ -941,11 +941,12 @@ mod isolation_tests {
         clickhouse::DomainObservationRow,
         config::DomainSourcesConfig,
         domain::data_plane::{
-            DomainCursorStatus, DomainObservation, DomainSourceCursorInfo, UpsertDomainSourceCursor,
+            DomainCursorStatus, DomainObservation, DomainSourceCursorCasOutcome,
+            DomainSourceCursorInfo, UpsertDomainSourceCursor,
         },
         enums::domain::{DomainFamily, DomainMetric},
         runtime_config::DecisionPolicySnapshot,
-        types::{DomainInstrumentKey, DomainSourceId},
+        types::{ContentHash, DomainInstrumentKey, DomainSourceId},
     };
     use quant_pivot_repository::traits::{DomainSourceCursorRepository, FactWriter};
     use rust_decimal_macros::dec;
@@ -1027,6 +1028,45 @@ mod isolation_tests {
                 info.clone(),
             );
             Ok(info)
+        }
+
+        async fn compare_and_set(
+            &self,
+            expected_checkpoint_hash: Option<ContentHash>,
+            cursor: UpsertDomainSourceCursor,
+        ) -> Result<DomainSourceCursorCasOutcome, StorageError> {
+            cursor.validate().map_err(|detail| {
+                StorageError::invariant_violation(Some("quant_domain_source_cursor"), detail)
+            })?;
+            let key = (cursor.source_id.clone(), cursor.instrument_key.clone());
+            let mut rows = self.rows.lock().expect("lock");
+            if rows.get(&key).map(|current| current.checkpoint_hash) != expected_checkpoint_hash {
+                return rows
+                    .get(&key)
+                    .cloned()
+                    .map(DomainSourceCursorCasOutcome::Conflict)
+                    .ok_or_else(|| {
+                        StorageError::state_conflict(
+                            "quant_domain_source_cursor",
+                            Some(format!("{}/{}", key.0, key.1)),
+                            "cursor compare-and-set expected a durable row that is missing",
+                        )
+                    });
+            }
+            let now = Utc::now();
+            let info = DomainSourceCursorInfo {
+                source_id: cursor.source_id,
+                instrument_key: cursor.instrument_key,
+                checkpoint_json: cursor.checkpoint_json,
+                checkpoint_hash: cursor.checkpoint_hash,
+                status: cursor.status,
+                last_error: cursor.last_error,
+                created_at: rows.get(&key).map_or(now, |current| current.created_at),
+                updated_at: now,
+            };
+            rows.insert(key, info.clone());
+            drop(rows);
+            Ok(DomainSourceCursorCasOutcome::Advanced(info))
         }
 
         async fn list_all(&self) -> Result<Vec<DomainSourceCursorInfo>, StorageError> {

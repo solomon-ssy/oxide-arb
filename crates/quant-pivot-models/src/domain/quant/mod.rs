@@ -1,7 +1,6 @@
 //! Quant-pivot persistence DTOs for schema-first repositories.
 
 mod account;
-mod attribution;
 #[allow(clippy::needless_update)] // NewBacktestReport omits DB-managed created_at
 mod backtest;
 #[allow(clippy::needless_update)] // NewBacktestPathSet omits DB-managed created_at
@@ -25,15 +24,20 @@ mod factor;
 mod feature;
 #[allow(clippy::needless_update)] // Insert DTOs omit database-managed timestamps.
 mod feature_parity;
+mod feedback_cohort;
 #[allow(clippy::needless_update)] // NewModelGovernanceAudit omits DB-managed created_at
 mod governance_audit;
 #[allow(clippy::needless_update)] // NewMarketLinkage omits DB-managed created_at
 mod linkage;
 #[allow(clippy::needless_update)] // NewModelRun covers all ActiveModel columns
 mod model;
+mod outcome_reconciliation;
 mod portfolio;
 mod position;
 mod recommendation;
+mod recommendation_execution_outcome;
+#[allow(clippy::needless_update)] // Insert DTO omits DB-managed created_at.
+mod recommendation_resolution_outcome;
 mod reconciliation;
 mod report_data_quality;
 mod report_diff;
@@ -65,9 +69,6 @@ mod trade_policy_trial;
 pub use account::{
     AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery, LiveAccountSnapshot,
     NewAccountSnapshot, NewEquitySnapshot, capital_drawdown, capital_hwm, hwm_merge,
-};
-pub use attribution::{
-    InsertFinalOutcome, NewRecommendationAttribution, RecommendationAttributionInfo,
 };
 pub use backtest::{BacktestReportInfo, NewBacktestReport};
 pub use backtest_path_set::{BacktestPathSetInfo, NewBacktestPathSet};
@@ -110,6 +111,12 @@ pub use feature_parity::{
     model_version_parity_evidence_hash, parity_candidate_membership_hash, parity_selection_hash,
     report_parity_evidence_hash, report_parity_generation_hash,
 };
+pub use feedback_cohort::{
+    FEEDBACK_COHORT_PAGE_LIMIT, FeedbackCohortCandidate, FeedbackCohortContractError,
+    FeedbackCohortCursor, FeedbackCohortDecision, FeedbackCohortEvidence, FeedbackCohortPage,
+    FeedbackCohortPageQuery, FeedbackCohortWindow, FeedbackExecutionAttempt,
+    FeedbackExecutionEvidence, FeedbackRecommendationContext, FeedbackResolutionEvidence,
+};
 pub use governance_audit::{
     ModelGovernanceAuditDetail, ModelGovernanceAuditInfo, NewModelGovernanceAudit,
 };
@@ -124,10 +131,27 @@ pub use model::{
     ModelRunInfo, ModelSpecInfo, ModelVersionInfo, NewModelRun, NewModelSpec, NewModelVersion,
     PublishedModelCatalogInfo, QuantModelRunModel,
 };
+pub use outcome_reconciliation::{
+    ExecutionOutcomeDeferredReason, ExecutionOutcomeDerivation,
+    ExecutionOutcomeReconciliationError, ExecutionOutcomeReconciliationResult,
+    ExecutionOutcomeSourceGraph, RecommendationExecutionReconciliationCandidate,
+    RecommendationResolutionReconciliationCandidate,
+};
 pub use portfolio::{NewPortfolioPlan, PortfolioPlanInfo};
 pub use position::{NewPosition, PositionExit, PositionFill, PositionInfo};
 pub use recommendation::{
     NewRecommendation, NewRecommendationReport, RecommendationInfo, RecommendationReportInfo,
+};
+pub use recommendation_execution_outcome::{
+    NewRecommendationExecutionOutcome, RecommendationExecutionOutcomeContractError,
+    RecommendationExecutionOutcomeInfo,
+};
+pub use recommendation_resolution_outcome::{
+    InsertResolutionOutcomeResult, NewRecommendationResolutionOutcome,
+    RECOMMENDATION_RESOLUTION_OUTCOME_PAGE_LIMIT, RecommendationResolutionOutcomeContractError,
+    RecommendationResolutionOutcomeCursor, RecommendationResolutionOutcomeInfo,
+    RecommendationResolutionOutcomePage, RecommendationResolutionOutcomePageQuery,
+    RecommendationResolutionOutcomePageQueryError,
 };
 pub use reconciliation::{
     AppendReconciliationEvidence, CapitalReconcileSettlement, NewReconciliation,

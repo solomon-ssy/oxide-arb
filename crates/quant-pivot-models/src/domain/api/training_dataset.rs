@@ -75,7 +75,7 @@ pub struct BuildTrainingDatasetRequest {
     /// Feature schema version to materialize (defaults to v1).
     #[serde(default = "default_feature_schema_version")]
     pub feature_schema_version: SchemaVersion,
-    /// Sample sources to materialize. Defaults to historical PIT + live attribution.
+    /// Sample sources to materialize.
     #[serde(default = "default_sample_sources")]
     pub sample_sources: Vec<TrainingSampleSource>,
     /// Operator reason recorded on the operation log (UI should require non-empty).
@@ -104,7 +104,7 @@ pub struct TrainingDatasetPlanView {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     /// Number of `(as_of, market)` samples the build would iterate (spine size
-    /// plus live-attribution + exit-decision rows). An **upper bound**: the exact
+    /// plus exit-decision rows). An **upper bound**: the exact
     /// eligible count only emerges from the build's coverage (per-`as_of`
     /// liquidity/data-quality eligibility is applied during materialization).
     pub planned_samples: u64,

@@ -61,7 +61,7 @@ pub enum ChFactSource {
     WsBbo = 3,
     WsTickSize = 4,
     WsLastTrade = 5,
-    WsMarketResolved = 6,
+    ResolutionReconciliation = 6,
     QuantPipeline = 7,
     Execution = 8,
     WsShardStatus = 9,
@@ -216,17 +216,6 @@ pub enum ChPositionLedgerState {
     Closing = 2,
     Closed = 3,
     Settled = 4,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
-#[repr(i8)]
-pub enum ChRecommendationAttributionOutcome {
-    FilledExited = 1,
-    FilledSettled = 2,
-    ExpiredUnfilled = 3,
-    CancelledUnfilled = 4,
-    FailedUnfilled = 5,
-    SupersededUnfilled = 6,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]

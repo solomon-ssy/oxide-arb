@@ -221,7 +221,6 @@ pg_enum! {
         Expired => "expired",
         IntentCreated => "intent_created",
         Executed => "executed",
-        Attributed => "attributed",
     }
 }
 
@@ -232,33 +231,12 @@ impl RecommendationStatus {
         matches!(self, Self::Published | Self::IntentCreated)
     }
 
-    /// Whether the recommendation may participate in attribution truth.
-    ///
-    /// `Attributed` remains eligible for downstream dataset materialization;
-    /// idempotent final writes are still protected by the attribution unique key.
-    #[must_use]
-    pub const fn eligible_for_attribution(self) -> bool {
-        matches!(
-            self,
-            Self::IntentCreated
-                | Self::Superseded
-                | Self::Expired
-                | Self::Executed
-                | Self::Attributed
-        )
-    }
-
     /// Whether this recommendation no longer prevents report expiry roll-up.
     #[must_use]
     pub const fn completes_report_rollup(self) -> bool {
         matches!(
             self,
-            Self::Superseded
-                | Self::Obsolete
-                | Self::Revoked
-                | Self::Expired
-                | Self::Executed
-                | Self::Attributed
+            Self::Superseded | Self::Obsolete | Self::Revoked | Self::Expired | Self::Executed
         )
     }
 
@@ -266,13 +244,12 @@ impl RecommendationStatus {
     pub const NEW_INTENT_AUTHORITY: [Self; 2] = [Self::Published, Self::IntentCreated];
 
     /// Statuses that no longer block report expiry roll-up in SQL filters.
-    pub const REPORT_ROLLUP_COMPLETE: [Self; 6] = [
+    pub const REPORT_ROLLUP_COMPLETE: [Self; 5] = [
         Self::Superseded,
         Self::Obsolete,
         Self::Revoked,
         Self::Expired,
         Self::Executed,
-        Self::Attributed,
     ];
 }
 
@@ -433,7 +410,7 @@ impl OrderIntentStatus {
         Self::PartiallyFilled,
     ];
 
-    /// Terminal statuses with no fill (attribution / sweep eligibility).
+    /// Terminal intent statuses with no venue fill.
     pub const UNFILLED_TERMINAL: [Self; 6] = [
         Self::AdmissionRejected,
         Self::Rejected,
@@ -445,18 +422,6 @@ impl OrderIntentStatus {
 
     /// Terminal statuses with at least partial fill.
     pub const FILLED_TERMINAL: [Self; 2] = [Self::Filled, Self::PartiallyFilled];
-
-    /// Intent statuses eligible for final attribution sweeps.
-    pub const ATTRIBUTION_ELIGIBLE: [Self; 8] = [
-        Self::Filled,
-        Self::PartiallyFilled,
-        Self::Cancelled,
-        Self::Failed,
-        Self::Expired,
-        Self::Rejected,
-        Self::AdmissionRejected,
-        Self::Invalidated,
-    ];
 }
 
 pg_enum! {
@@ -958,21 +923,84 @@ impl ExecutionOrderState {
             Self::Filled | Self::PartiallyFilled | Self::Cancelled | Self::Failed
         )
     }
+}
 
-    /// Whether venue truth for this order is still unsettled — attribution must
-    /// defer until reconciliation or a terminal order state.
-    #[must_use]
-    pub const fn blocks_attribution(self) -> bool {
-        matches!(
-            self,
-            Self::Submitted | Self::CancelRequested | Self::Ambiguous
-        )
+pg_enum! {
+    type_name = "qp_recommendation_resolution_kind",
+    /// Shape of the authoritative resolved payout vector.
+    ///
+    /// Both variants are terminal. An unresolved or invalid source produces no
+    /// resolution-outcome row and therefore has no enum variant.
+    pub enum RecommendationResolutionKind {
+        /// Exactly one token pays `1` and every other token pays `0`.
+        WinnerTakeAll => "winner_take_all",
+        /// More than one token has a positive fractional payout.
+        SplitPayout => "split_payout",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_recommendation_execution_terminal_state",
+    /// Fill state after a real execution attempt reaches terminal venue truth.
+    ///
+    /// `ReportOnly` and recommendations never submitted to the venue have no
+    /// execution-outcome row; they are deliberately not represented as zero fill.
+    pub enum RecommendationExecutionTerminalState {
+        Unfilled => "unfilled",
+        PartiallyFilled => "partially_filled",
+        FullyFilled => "fully_filled",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_recommendation_execution_no_fill_reason",
+    /// Terminal venue evidence proving that a real entry attempt filled zero shares.
+    ///
+    /// Pre-submission rejection, missing execution authority, and ambiguous
+    /// placement are absence/censor states and therefore have no value here.
+    pub enum RecommendationExecutionNoFillReason {
+        VenueRejected => "venue_rejected",
+        VenueCancelled => "venue_cancelled",
+        VenueExpired => "venue_expired",
+        ReconciledNotFilled => "reconciled_not_filled",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_feedback_cohort",
+    /// Orthogonal point-in-time cohort produced for one feedback cycle.
+    pub enum FeedbackCohort {
+        /// Resolution labels for model training and calibration.
+        ModelLearning => "model_learning",
+        /// Real venue attempts for fill and execution-cost learning.
+        ExecutionLearning => "execution_learning",
+        /// Recommendation coverage and strategy-effect evaluation.
+        PolicyEvaluation => "policy_evaluation",
+    }
+}
+
+wire_enum! {
+    /// Stable reason a recommendation can never belong to a requested frozen cohort.
+    pub enum CohortExclusionReason {
+        RecommendationNotPublished => "recommendation_not_published",
+        NonPrimaryReport => "non_primary_report",
+        OutsideFrozenWindow => "outside_frozen_window",
+        ReportOnlyNoExecutionAuthority => "report_only_no_execution_authority",
+        ExecutionNotAttempted => "execution_not_attempted",
+    }
+}
+
+wire_enum! {
+    /// Stable reason an otherwise eligible sample is not mature at the frozen cutoff.
+    pub enum CohortCensorReason {
+        ResolutionUnavailableAtCutoff => "resolution_unavailable_at_cutoff",
+        ExecutionOutcomeUnavailableAtCutoff => "execution_outcome_unavailable_at_cutoff",
     }
 }
 
 pg_enum! {
     type_name = "qp_recommendation_outcome",
-    /// Recommendation attribution outcome.
+    /// Legacy ordinal label lifecycle pending replacement by payout-ratio labels.
     @derive(Default)
     pub enum RecommendationOutcome {
         #[default]
@@ -983,21 +1011,6 @@ pg_enum! {
         SupersededUnfilled => "superseded_unfilled",
         Cancelled => "cancelled",
         Unknown => "unknown",
-    }
-}
-
-pg_enum! {
-    type_name = "qp_recommendation_attribution_outcome",
-    /// Terminal, WORM attribution outcome for a recommendation.
-    @derive(Default)
-    pub enum RecommendationAttributionOutcome {
-        #[default]
-        FilledExited => "filled_exited",
-        FilledSettled => "filled_settled",
-        ExpiredUnfilled => "expired_unfilled",
-        SupersededUnfilled => "superseded_unfilled",
-        CancelledUnfilled => "cancelled_unfilled",
-        FailedUnfilled => "failed_unfilled",
     }
 }
 
@@ -1356,7 +1369,128 @@ wire_enum! {
 mod tests {
     use std::str::FromStr;
 
-    use super::{FeatureParityStage, OrderIntentStatus, RecommendationStatus};
+    use super::{
+        CohortCensorReason, CohortExclusionReason, FeatureParityStage, FeedbackCohort,
+        OrderIntentStatus, RecommendationExecutionTerminalState, RecommendationResolutionKind,
+        RecommendationStatus,
+    };
+
+    #[test]
+    fn feedback_outcome_enums_are_closed_and_wire_stable() {
+        for (state, wire) in [
+            (
+                RecommendationResolutionKind::WinnerTakeAll,
+                "winner_take_all",
+            ),
+            (RecommendationResolutionKind::SplitPayout, "split_payout"),
+        ] {
+            let exhaustive_wire = match state {
+                RecommendationResolutionKind::WinnerTakeAll => "winner_take_all",
+                RecommendationResolutionKind::SplitPayout => "split_payout",
+            };
+            assert_eq!(wire, exhaustive_wire);
+            assert_eq!(state.as_str(), wire);
+            assert_eq!(
+                serde_json::from_str::<RecommendationResolutionKind>(&format!("\"{wire}\""))
+                    .expect("deserialize resolution kind"),
+                state
+            );
+        }
+
+        for (state, wire) in [
+            (RecommendationExecutionTerminalState::Unfilled, "unfilled"),
+            (
+                RecommendationExecutionTerminalState::PartiallyFilled,
+                "partially_filled",
+            ),
+            (
+                RecommendationExecutionTerminalState::FullyFilled,
+                "fully_filled",
+            ),
+        ] {
+            let exhaustive_wire = match state {
+                RecommendationExecutionTerminalState::Unfilled => "unfilled",
+                RecommendationExecutionTerminalState::PartiallyFilled => "partially_filled",
+                RecommendationExecutionTerminalState::FullyFilled => "fully_filled",
+            };
+            assert_eq!(wire, exhaustive_wire);
+            assert_eq!(state.as_str(), wire);
+        }
+
+        for (cohort, wire) in [
+            (FeedbackCohort::ModelLearning, "model_learning"),
+            (FeedbackCohort::ExecutionLearning, "execution_learning"),
+            (FeedbackCohort::PolicyEvaluation, "policy_evaluation"),
+        ] {
+            let exhaustive_wire = match cohort {
+                FeedbackCohort::ModelLearning => "model_learning",
+                FeedbackCohort::ExecutionLearning => "execution_learning",
+                FeedbackCohort::PolicyEvaluation => "policy_evaluation",
+            };
+            assert_eq!(wire, exhaustive_wire);
+            assert_eq!(cohort.as_str(), wire);
+        }
+    }
+
+    #[test]
+    fn cohort_reason_codes_are_closed_and_disjoint() {
+        for (reason, wire) in [
+            (
+                CohortExclusionReason::RecommendationNotPublished,
+                "recommendation_not_published",
+            ),
+            (
+                CohortExclusionReason::NonPrimaryReport,
+                "non_primary_report",
+            ),
+            (
+                CohortExclusionReason::OutsideFrozenWindow,
+                "outside_frozen_window",
+            ),
+            (
+                CohortExclusionReason::ReportOnlyNoExecutionAuthority,
+                "report_only_no_execution_authority",
+            ),
+            (
+                CohortExclusionReason::ExecutionNotAttempted,
+                "execution_not_attempted",
+            ),
+        ] {
+            let exhaustive_wire = match reason {
+                CohortExclusionReason::RecommendationNotPublished => "recommendation_not_published",
+                CohortExclusionReason::NonPrimaryReport => "non_primary_report",
+                CohortExclusionReason::OutsideFrozenWindow => "outside_frozen_window",
+                CohortExclusionReason::ReportOnlyNoExecutionAuthority => {
+                    "report_only_no_execution_authority"
+                }
+                CohortExclusionReason::ExecutionNotAttempted => "execution_not_attempted",
+            };
+            assert_eq!(wire, exhaustive_wire);
+            assert_eq!(reason.as_str(), wire);
+        }
+
+        for (reason, wire) in [
+            (
+                CohortCensorReason::ResolutionUnavailableAtCutoff,
+                "resolution_unavailable_at_cutoff",
+            ),
+            (
+                CohortCensorReason::ExecutionOutcomeUnavailableAtCutoff,
+                "execution_outcome_unavailable_at_cutoff",
+            ),
+        ] {
+            let exhaustive_wire = match reason {
+                CohortCensorReason::ResolutionUnavailableAtCutoff => {
+                    "resolution_unavailable_at_cutoff"
+                }
+                CohortCensorReason::ExecutionOutcomeUnavailableAtCutoff => {
+                    "execution_outcome_unavailable_at_cutoff"
+                }
+            };
+            assert_eq!(wire, exhaustive_wire);
+            assert_eq!(reason.as_str(), wire);
+        }
+    }
 
     #[test]
     fn feature_parity_stage_wire_contract_includes_capture_and_data_quality() {
@@ -1374,23 +1508,17 @@ mod tests {
 
     #[test]
     fn recommendation_status_predicates_are_orthogonal_and_exhaustive() {
-        for (status, allows_new_intent, eligible_for_attribution, completes_rollup) in [
-            (RecommendationStatus::Prepared, false, false, false),
-            (RecommendationStatus::Published, true, false, false),
-            (RecommendationStatus::Superseded, false, true, true),
-            (RecommendationStatus::Obsolete, false, false, true),
-            (RecommendationStatus::Revoked, false, false, true),
-            (RecommendationStatus::Expired, false, true, true),
-            (RecommendationStatus::IntentCreated, true, true, false),
-            (RecommendationStatus::Executed, false, true, true),
-            (RecommendationStatus::Attributed, false, true, true),
+        for (status, allows_new_intent, completes_rollup) in [
+            (RecommendationStatus::Prepared, false, false),
+            (RecommendationStatus::Published, true, false),
+            (RecommendationStatus::Superseded, false, true),
+            (RecommendationStatus::Obsolete, false, true),
+            (RecommendationStatus::Revoked, false, true),
+            (RecommendationStatus::Expired, false, true),
+            (RecommendationStatus::IntentCreated, true, false),
+            (RecommendationStatus::Executed, false, true),
         ] {
             assert_eq!(status.allows_new_intent(), allows_new_intent, "{status:?}");
-            assert_eq!(
-                status.eligible_for_attribution(),
-                eligible_for_attribution,
-                "{status:?}"
-            );
             assert_eq!(
                 status.completes_report_rollup(),
                 completes_rollup,

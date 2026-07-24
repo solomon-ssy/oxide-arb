@@ -142,7 +142,7 @@ pub async fn realized_pnl_cumulative_matches_position_ledger_sum() {
         .realized_pnl_cumulative_usd()
         .await
         .expect("cumulative pnl");
-    assert_eq!(cumulative, Usd::new(dec!(-5)));
+    assert_eq!(cumulative, Usd::new(dec!(-3)));
 
     let open_lots = positions.find_open_lots().await.expect("open lots");
     assert!(open_lots.is_empty());

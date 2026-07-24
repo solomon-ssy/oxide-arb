@@ -548,23 +548,32 @@ pub struct ReconciliationPolicy {
     pub stale_open_secs: u64,
 }
 
+/// Runtime cadence and bounded work budget for outcome reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-pub struct AttributionPolicy {
-    /// Whether the final recommendation-attribution worker is enabled.
+pub struct OutcomeReconciliationPolicy {
+    /// Whether the outcome reconciliation worker is enabled.
     pub enabled: bool,
-    /// Attribution sweep interval in seconds.
+    /// Delay between reconciliation passes in seconds.
     pub sweep_secs: u64,
-    /// Maximum terminal recommendation/intent candidates processed per sweep.
-    pub batch_size: u64,
+    /// Maximum recommendations or intents processed by each lane per pass.
+    pub candidate_batch_size: u64,
+    /// Maximum finalized source blocks scanned per resolution pass.
+    pub source_block_span: u64,
 }
 
-impl Default for AttributionPolicy {
+impl OutcomeReconciliationPolicy {
+    pub const MAX_CANDIDATE_BATCH_SIZE: u64 = 10_000;
+    pub const MAX_SOURCE_BLOCK_SPAN: u64 = 10_000;
+}
+
+impl Default for OutcomeReconciliationPolicy {
     fn default() -> Self {
         Self {
             enabled: true,
             sweep_secs: 60,
-            batch_size: 256,
+            candidate_batch_size: 256,
+            source_block_span: 256,
         }
     }
 }

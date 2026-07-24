@@ -8,8 +8,6 @@ use quant_pivot_system_tests::postgres::with_postgres_suite;
 mod access_control;
 #[path = "repository/accounting/account_capital.rs"]
 mod account_capital;
-#[path = "repository/accounting/attribution.rs"]
-mod attribution;
 #[path = "repository/research/backtest_path_set.rs"]
 mod backtest_path_set;
 #[path = "repository/research/backtest_report.rs"]
@@ -24,6 +22,8 @@ mod catalog_ledger;
 mod comparison_report;
 #[path = "repository/catalog/domain_projection.rs"]
 mod domain_projection;
+#[path = "repository/catalog/domain_source_cursor.rs"]
+mod domain_source_cursor;
 #[path = "repository/catalog/domain_source_expectation.rs"]
 mod domain_source_expectation;
 #[path = "repository/execution/entry_condition_evaluation.rs"]
@@ -36,6 +36,8 @@ mod execution_submission;
 mod factor_revision;
 #[path = "repository/research/feature_parity.rs"]
 mod feature_parity;
+#[path = "repository/research/feedback_cohort.rs"]
+mod feedback_cohort;
 #[path = "repository/catalog/market_linkage.rs"]
 mod market_linkage;
 #[path = "repository/catalog/market_page.rs"]
@@ -50,6 +52,10 @@ mod model_registry;
 mod policy_governance;
 #[path = "repository/accounting/portfolio_optimizer.rs"]
 mod portfolio_optimizer;
+#[path = "repository/accounting/recommendation_execution_outcome.rs"]
+mod recommendation_execution_outcome;
+#[path = "repository/accounting/recommendation_resolution_outcome.rs"]
+mod recommendation_resolution_outcome;
 #[path = "repository/execution/report_scheduler.rs"]
 mod report_scheduler;
 #[path = "repository/research/research_job.rs"]
@@ -76,12 +82,7 @@ async fn repository_persistence_contracts_share_one_postgres_stack() {
         scenario("account_capital::find_expirable_returns_published_reports_before_cutoff_only", Box::pin(account_capital::find_expirable_returns_published_reports_before_cutoff_only())).await;
         scenario("account_capital::report_fact_delivery_recovers_retry_and_expired_lease_without_early_claim", Box::pin(account_capital::report_fact_delivery_recovers_retry_and_expired_lease_without_early_claim())).await;
         scenario("account_capital::execution_order_and_reconciliation_repositories_round_trip", Box::pin(account_capital::execution_order_and_reconciliation_repositories_round_trip())).await;
-        scenario("account_capital::capital_kill_switch_and_attribution_repositories_round_trip", Box::pin(account_capital::capital_kill_switch_and_attribution_repositories_round_trip())).await;
-        scenario("attribution::find_unfilled_attribution_candidates_succeeds_without_intent", Box::pin(attribution::find_unfilled_attribution_candidates_succeeds_without_intent())).await;
-        scenario("attribution::find_unfilled_attribution_candidates_includes_terminal_intent_only", Box::pin(attribution::find_unfilled_attribution_candidates_includes_terminal_intent_only())).await;
-        scenario("attribution::find_unfilled_attribution_candidates_excludes_non_terminal_intent", Box::pin(attribution::find_unfilled_attribution_candidates_excludes_non_terminal_intent())).await;
-        scenario("attribution::blocks_attribution_reflects_non_terminal_intent", Box::pin(attribution::blocks_attribution_reflects_non_terminal_intent())).await;
-        scenario("attribution::blocks_attribution_clear_without_intents", Box::pin(attribution::blocks_attribution_clear_without_intents())).await;
+        scenario("account_capital::capital_and_kill_switch_repositories_round_trip", Box::pin(account_capital::capital_and_kill_switch_repositories_round_trip())).await;
         scenario("equity_snapshot::equity_snapshot_repo_create_latest_hwm", Box::pin(equity_snapshot::equity_snapshot_repo_create_latest_hwm())).await;
         scenario("equity_snapshot::high_water_mark_is_monotonic_max", Box::pin(equity_snapshot::high_water_mark_is_monotonic_max())).await;
         scenario("equity_snapshot::drawdown_pct_is_hwm_minus_equity_over_hwm", Box::pin(equity_snapshot::drawdown_pct_is_hwm_minus_equity_over_hwm())).await;
@@ -225,6 +226,124 @@ async fn execution_identity_refs_are_atomic_unique_and_concurrent() {
     ))
     .await
     .expect("start execution identity PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recommendation_resolution_outcome_repository_contracts() {
+    Box::pin(with_postgres_suite(async {
+        scenario(
+            "recommendation_resolution_outcome::reconcile_fact_is_idempotent_and_conflicting_content_fails_closed",
+            Box::pin(
+                recommendation_resolution_outcome::reconcile_fact_is_idempotent_and_conflicting_content_fails_closed(),
+            ),
+        )
+        .await;
+        scenario(
+            "recommendation_resolution_outcome::database_owned_availability_and_tampering_are_enforced",
+            Box::pin(
+                recommendation_resolution_outcome::database_owned_availability_and_tampering_are_enforced(),
+            ),
+        )
+        .await;
+        scenario(
+            "recommendation_resolution_outcome::available_at_keyset_is_total_ordered_and_cutoff_bound",
+            Box::pin(
+                recommendation_resolution_outcome::available_at_keyset_is_total_ordered_and_cutoff_bound(),
+            ),
+        )
+        .await;
+        scenario(
+            "recommendation_resolution_outcome::reconciliation_candidates_are_terminal_keyset_and_outcome_aware",
+            Box::pin(
+                recommendation_resolution_outcome::reconciliation_candidates_are_terminal_keyset_and_outcome_aware(),
+            ),
+        )
+        .await;
+    }))
+    .await
+    .expect("start recommendation-resolution outcome PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recommendation_execution_outcome_repository_contracts() {
+    Box::pin(with_postgres_suite(async {
+        scenario(
+            "recommendation_execution_outcome::terminal_shapes_preserve_real_zero_and_null_semantics",
+            Box::pin(
+                recommendation_execution_outcome::terminal_shapes_preserve_real_zero_and_null_semantics(),
+            ),
+        )
+        .await;
+        scenario(
+            "recommendation_execution_outcome::invalid_state_and_report_only_fail_closed",
+            Box::pin(
+                recommendation_execution_outcome::invalid_state_and_report_only_fail_closed(),
+            ),
+        )
+        .await;
+        scenario(
+            "recommendation_execution_outcome::reconcile_is_idempotent_worm_and_tamper_evident",
+            Box::pin(
+                recommendation_execution_outcome::reconcile_is_idempotent_worm_and_tamper_evident(),
+            ),
+        )
+        .await;
+        scenario(
+            "recommendation_execution_outcome::reconciliation_candidates_require_submitted_terminal_source",
+            Box::pin(
+                recommendation_execution_outcome::reconciliation_candidates_require_submitted_terminal_source(),
+            ),
+        )
+        .await;
+    }))
+    .await
+    .expect("start recommendation-execution outcome PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_cohort_repository_contracts() {
+    Box::pin(with_postgres_suite(async {
+        scenario(
+            "feedback_cohort::candidate_page_is_keyset_ordered_and_cutoff_frozen",
+            Box::pin(feedback_cohort::candidate_page_is_keyset_ordered_and_cutoff_frozen()),
+        )
+        .await;
+        scenario(
+            "feedback_cohort::cohort_truth_planes_are_orthogonal_and_submission_exact",
+            Box::pin(feedback_cohort::cohort_truth_planes_are_orthogonal_and_submission_exact()),
+        )
+        .await;
+        scenario(
+            "feedback_cohort::cutoff_excludes_late_truth_and_late_candidates_across_pages",
+            Box::pin(
+                feedback_cohort::cutoff_excludes_late_truth_and_late_candidates_across_pages(),
+            ),
+        )
+        .await;
+        scenario(
+            "feedback_cohort::keyset_reads_more_than_ten_thousand_without_duplicates",
+            Box::pin(feedback_cohort::keyset_reads_more_than_ten_thousand_without_duplicates()),
+        )
+        .await;
+    }))
+    .await
+    .expect("start feedback-cohort PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn domain_source_cursor_repository_contracts() {
+    Box::pin(with_postgres_suite(async {
+        scenario(
+            "domain_source_cursor::compare_and_set_validates_hash_and_has_one_concurrent_winner",
+            Box::pin(
+                domain_source_cursor::compare_and_set_validates_hash_and_has_one_concurrent_winner(
+                ),
+            ),
+        )
+        .await;
+    }))
+    .await
+    .expect("start domain-source cursor PostgreSQL suite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -6,7 +6,8 @@ use sea_orm::entity::prelude::*;
 use super::{
     decision_policy_snapshot, quant_capital_allocation, quant_entry_condition_instance,
     quant_execution_account, quant_execution_order, quant_model_version, quant_position,
-    quant_recommendation, quant_settlement_inventory_lot, research_profile_artifact,
+    quant_recommendation, quant_recommendation_execution_outcome, quant_settlement_inventory_lot,
+    research_profile_artifact,
 };
 use crate::{
     enums::{
@@ -116,6 +117,8 @@ pub struct Model {
     pub position: HasOne<quant_position::Entity>,
     #[sea_orm(has_many, relation_enum = "SettlementInventoryLot")]
     pub settlement_inventory_lot: HasMany<quant_settlement_inventory_lot::Entity>,
+    #[sea_orm(has_one, relation_enum = "ExecutionOutcome")]
+    pub execution_outcome: HasOne<quant_recommendation_execution_outcome::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

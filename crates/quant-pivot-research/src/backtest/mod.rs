@@ -39,7 +39,7 @@ use quant_pivot_models::{
     runtime_config::PortfolioConfig,
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, EventId, MarketId, ModelVersionId,
-        Price, Probability, Shares, TokenId, Usd,
+        PayoutRatio, Price, Probability, Shares, TokenId, Usd,
         backtest::{CategoryMetric, ExpectedVsRealized, PnlSimulation},
     },
 };
@@ -104,11 +104,9 @@ pub struct BacktestMarketMeta {
 pub struct MarketOutcome {
     /// Market id.
     pub market_id: MarketId,
-    /// Whether the YES token won (`winning_token_id == yes_token_id`).
-    pub settled_yes: bool,
-    /// Whether the market had matured (resolved) by the resolution cutoff. An
-    /// unmatured market contributes no realized sample (never zero-filled).
-    pub matured: bool,
+    /// Exact YES-token payout when mature. `None` means no resolution was
+    /// available by the frozen cutoff; it never means a zero payout.
+    pub yes_payout_ratio: Option<PayoutRatio>,
     /// `max_adverse_excursion_bps` label value, when materialized: the
     /// calibration downside source and empirical worst intra-horizon
     /// unfavorable move, distinct from the binary settlement outcome).
@@ -269,9 +267,9 @@ pub struct SampleOutcome {
     pub expected_return_bps: Decimal,
     /// Realized return (bps).
     pub realized_return_bps: Decimal,
-    /// Whether the YES token won (side-independent ground truth;
-    /// `ProbabilityCalibrator` fits on this, not on realized-return sign).
-    pub settled_yes: bool,
+    /// Exact payout of the bought outcome token. Binary-only calibrators
+    /// explicitly exclude fractional values instead of coercing them.
+    pub token_payout_ratio: PayoutRatio,
     /// `max_adverse_excursion_bps` label value, when materialized; this is the
     /// `DownsideSource::MfeMae` input.
     pub max_adverse_excursion_bps: Option<Decimal>,

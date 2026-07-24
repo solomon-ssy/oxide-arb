@@ -27,19 +27,15 @@ use quant_pivot_models::{
         data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
         market::{MarketInfo, MarketRegistryInfo, fee::MarketFeeSchedule},
         quant::{
-            CompleteTrainingDatasetBuild, ExitTrainingLotRow, FeatureVectorInfo, JobProgressSink,
-            MarketSelectionMemberInfo, NewTrainingDatasetPlan, NoopProgressSink,
-            RecommendationAttributionInfo, RecommendationInfo, TrainingDatasetInfo,
+            CompleteTrainingDatasetBuild, ExitTrainingLotRow, JobProgressSink,
+            NewTrainingDatasetPlan, NoopProgressSink, TrainingDatasetInfo,
             TrainingDatasetMaterialization,
         },
         query::TimeWindow,
     },
     enums::{
         common::MarketCategory,
-        quant::{
-            DatasetPurpose, RecommendationAttributionOutcome, TradePolicyStatus,
-            TrainingDatasetStatus,
-        },
+        quant::{DatasetPurpose, TradePolicyStatus, TrainingDatasetStatus},
     },
     hashing::CanonicalDigest,
     runtime_config::{
@@ -48,28 +44,22 @@ use quant_pivot_models::{
     },
     types::{
         ArtifactUri, ClobMarketInfoVersion, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
-        DatasetCoverage, DatasetFeatureStateCounts, DatasetManifest, DecisionCaptureEvidence,
-        FeatureCellState, FeatureVectorId, MarketId, MarketSelectionId, ModelInputContract,
-        ModelSpecId, Price, RecommendationId, ResearchJobProgress, Shares, TokenId,
+        DatasetCoverage, DatasetFeatureStateCounts, DatasetManifest, FeatureCellState, MarketId,
+        ModelInputContract, ModelSpecId, Price, ResearchJobProgress, Shares, TokenId,
         TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId,
         TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
-        factor::FactorExplanation, stable_name::FactorName,
     },
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, CalibrationArtifactRepository, CatalogLedgerRepository,
-    ClobMarketInfoRepository, FeatureRepository, MarketLinkageRepository, MarketRepository,
-    MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
-    QuantFactReadRepository, RecommendationRepository, TradePolicyRepository,
-    TrainingDatasetRepository,
+    CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
+    MarketLinkageRepository, MarketRepository, ModelRegistryRepository, PositionRepository,
+    QuantFactReadRepository, TradePolicyRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     execution_semantics::BookFidelity,
-    factors::{
-        FactorEligibility, FactorEngine, FactorValue, MarketFactorOutcome, NormalizedFactor,
-    },
-    features::{ConfiguredFeatureBuilder, FeatureVector},
+    factors::{FactorEligibility, FactorEngine, FactorValue, MarketFactorOutcome},
+    features::ConfiguredFeatureBuilder,
     hashing::ResearchHasher,
     model::{
         FavoriteLongshotBiasTable,
@@ -112,7 +102,6 @@ use crate::{
     },
 };
 
-const LIVE_ATTRIBUTION_SAMPLE_LIMIT: u64 = 10_000;
 const DATASET_FAILURE_DETAIL_MAX_CHARS: usize = 2_048;
 
 fn bounded_failure_detail(detail: &str) -> String {
@@ -128,7 +117,7 @@ pub struct PlanCounts {
     /// Deterministic historical spine size (selection × alive instants) — an
     /// upper bound before point-in-time eligibility is applied.
     pub spine_upper_bound: u64,
-    /// Total samples across all requested sources (spine + attribution + exit),
+    /// Total samples across all requested sources (historical spine + exit),
     /// before point-in-time selection eligibility.
     pub total: u64,
     /// Whether the plan exceeds the configured `max_spine_samples` hard cap.
@@ -446,14 +435,6 @@ pub struct TrainingDatasetServiceDeps {
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Training-dataset ledger repository.
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
-    /// Final attribution rows used as live supervised samples.
-    pub attribution_repo: Arc<dyn AttributionRepository>,
-    /// Recommendation ledger for frozen evidence refs and factor breakdown.
-    pub recommendation_repo: Arc<dyn RecommendationRepository>,
-    /// Frozen feature-vector ledger referenced by recommendations.
-    pub feature_repo: Arc<dyn FeatureRepository>,
-    /// Immutable selection members referenced by live recommendations.
-    pub selection_repo: Arc<dyn MarketSelectionRepository>,
     /// Position ledger for closed-lot `ExitDecision` sampling.
     pub position_repo: Arc<dyn PositionRepository>,
     /// Append-only point-in-time CLOB market parameters and fee schedules.
@@ -525,10 +506,6 @@ pub struct TrainingDatasetService {
     market_repo: Arc<dyn MarketRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
-    attribution_repo: Arc<dyn AttributionRepository>,
-    recommendation_repo: Arc<dyn RecommendationRepository>,
-    feature_repo: Arc<dyn FeatureRepository>,
-    selection_repo: Arc<dyn MarketSelectionRepository>,
     position_repo: Arc<dyn PositionRepository>,
     clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
@@ -570,8 +547,7 @@ impl TrainingDatasetService {
             .any(|source| !matches!(source, TrainingSampleSource::HistoricalPit))
         {
             return Err(ResearchError::DatasetPlan {
-                detail: "Source Slice V1 Dataset builds currently accept only historical_pit; live_attribution and exit_decision require their complete immutable evidence graphs"
-                    .to_owned(),
+                detail: "Source Slice V1 Dataset builds currently accept only historical_pit; exit_decision requires its complete immutable lot evidence graph".to_owned(),
             }
             .into());
         }
@@ -692,10 +668,6 @@ impl TrainingDatasetService {
             market_repo: deps.market_repo,
             artifact_store: deps.artifact_store,
             dataset_repo: deps.dataset_repo,
-            attribution_repo: deps.attribution_repo,
-            recommendation_repo: deps.recommendation_repo,
-            feature_repo: deps.feature_repo,
-            selection_repo: deps.selection_repo,
             position_repo: deps.position_repo,
             clob_market_info_repo: deps.clob_market_info_repo,
             linkage_repo: deps.linkage_repo,
@@ -925,7 +897,7 @@ impl TrainingDatasetService {
     /// Cheap, non-materializing dry-run counts for the `plan` endpoint.
     ///
     /// Computes the historical spine size arithmetically (no grid allocation) and
-    /// adds bounded live-attribution + exit-decision counts, so a plan over the
+    /// adds bounded exit-decision counts, so a plan over the
     /// full catalog returns in milliseconds instead of allocating millions of rows.
     pub async fn count_plan(
         &self,
@@ -1011,25 +983,13 @@ impl TrainingDatasetService {
 
     async fn additional_plan_sample_count(&self, request: &DatasetPlanRequest) -> QuantResult<u64> {
         let mut total = 0_u64;
-        if wants_sample_source(request, TrainingSampleSource::LiveAttribution) {
-            let attributions = self
-                .attribution_repo
-                .find_label_available_between(
-                    request.window_start,
-                    request.window_end,
-                    LIVE_ATTRIBUTION_SAMPLE_LIMIT,
-                )
-                .await
-                .map_err(QuantError::from)?;
-            total = checked_sample_count_add(total, attributions.len(), "attribution")?;
-        }
         if wants_sample_source(request, TrainingSampleSource::ExitDecision) {
             let lots = self
                 .position_repo
                 .find_exit_training_lots(
                     request.window_start,
                     request.window_end,
-                    LIVE_ATTRIBUTION_SAMPLE_LIMIT,
+                    self.max_spine_samples,
                 )
                 .await
                 .map_err(QuantError::from)?;
@@ -1203,7 +1163,7 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
                 .find_exit_training_lots(
                     request.window_start,
                     request.window_end,
-                    LIVE_ATTRIBUTION_SAMPLE_LIMIT,
+                    self.max_spine_samples,
                 )
                 .await
                 .map_err(QuantError::from)?;
@@ -1235,20 +1195,8 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
 
 impl TrainingDatasetService {
     /// Dry-run sample count aligned with [`TrainingDatasetBuilder::build`] coverage.
-    pub async fn count_planned_samples(&self, plan: &DatasetPlan) -> QuantResult<u64> {
+    pub fn count_planned_samples(&self, plan: &DatasetPlan) -> QuantResult<u64> {
         let mut total = planned_historical_samples(plan);
-        if wants_sample_source(&plan.request, TrainingSampleSource::LiveAttribution) {
-            let attributions = self
-                .attribution_repo
-                .find_label_available_between(
-                    plan.request.window_start,
-                    plan.request.window_end,
-                    LIVE_ATTRIBUTION_SAMPLE_LIMIT,
-                )
-                .await
-                .map_err(QuantError::from)?;
-            total += attributions.len() as u64;
-        }
         if wants_sample_source(&plan.request, TrainingSampleSource::ExitDecision) {
             total += plan.lot_samples.len() as u64;
         }
@@ -1692,9 +1640,8 @@ impl TrainingDatasetService {
         })
     }
 
-    /// Append the live-attribution + exit-decision sources (bounded DB reads,
-    /// kept on the async runtime), then assert leakage-freedom, materialize the
-    /// Parquet artifact, and persist the ledger row.
+    /// Append exit-decision samples, then assert leakage-freedom, materialize
+    /// the Parquet artifact, and persist the ledger row.
     async fn assemble_and_finalize(
         &self,
         plan: DatasetPlan,
@@ -1716,16 +1663,6 @@ impl TrainingDatasetService {
             &self.domain,
             self.bias_table.as_ref().map(Arc::clone),
         );
-
-        if wants_sample_source(&plan.request, TrainingSampleSource::LiveAttribution) {
-            self.append_live_attribution_examples(
-                &plan,
-                &mut coverage,
-                &mut spine.examples,
-                &mut spine.market_set,
-            )
-            .await?;
-        }
 
         if wants_sample_source(&plan.request, TrainingSampleSource::ExitDecision) {
             coverage.exit_decision_candidates = plan.lot_samples.len() as u64;
@@ -1809,104 +1746,6 @@ impl TrainingDatasetService {
             data_quality: self.data_quality.clone(),
             bias_table: self.bias_table.as_ref().map(Arc::clone),
         }
-    }
-
-    async fn append_live_attribution_examples(
-        &self,
-        plan: &DatasetPlan,
-        coverage: &mut DatasetCoverage,
-        examples: &mut Vec<TrainingExample>,
-        market_set: &mut HashSet<MarketId>,
-    ) -> QuantResult<()> {
-        let attributions = self
-            .attribution_repo
-            .find_label_available_between(
-                plan.request.window_start,
-                plan.request.window_end,
-                LIVE_ATTRIBUTION_SAMPLE_LIMIT,
-            )
-            .await?;
-        coverage.live_attribution_candidates += attributions.len() as u64;
-
-        if attributions.is_empty() {
-            return Ok(());
-        }
-
-        let recommendation_ids: Vec<_> = attributions.iter().map(|a| a.recommendation_id).collect();
-        let recommendations = self
-            .recommendation_repo
-            .find_by_ids(&recommendation_ids)
-            .await?;
-        let recommendation_by_id: HashMap<_, _> = recommendations
-            .into_iter()
-            .map(|r| (r.recommendation_id, r))
-            .collect();
-
-        let feature_vector_ids: Vec<_> = recommendation_by_id
-            .values()
-            .map(|r| r.evidence_refs.feature_vector_id)
-            .collect();
-        let feature_infos = self.feature_repo.find_by_ids(&feature_vector_ids).await?;
-        let feature_by_id: HashMap<_, _> = feature_infos
-            .into_iter()
-            .map(|f| (f.feature_vector_id, f))
-            .collect();
-
-        let selection_ids = recommendation_by_id
-            .values()
-            .map(|recommendation| recommendation.evidence_refs.market_selection_id)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let selection_members = self
-            .selection_repo
-            .list_members_by_snapshot_ids(&selection_ids)
-            .await?;
-        let selection_by_key = selection_members
-            .into_iter()
-            .map(|member| {
-                (
-                    (member.market_selection_id, member.market_id.clone()),
-                    member,
-                )
-            })
-            .collect::<HashMap<_, _>>();
-
-        for attribution in attributions {
-            record_live_attribution_materialization(
-                materialize_live_attribution_example(
-                    &attribution,
-                    &recommendation_by_id,
-                    &feature_by_id,
-                    &selection_by_key,
-                ),
-                coverage,
-                examples,
-                market_set,
-            );
-        }
-        let accounted = coverage
-            .live_attribution_materialized
-            .checked_add(coverage.live_attribution_dropped_missing_evidence)
-            .and_then(|count| {
-                count.checked_add(coverage.live_attribution_censored_superseded_unfilled)
-            })
-            .ok_or_else(|| ResearchError::DatasetBuild {
-                detail: "live attribution coverage accounting overflowed".to_owned(),
-            })?;
-        if accounted != coverage.live_attribution_candidates {
-            return Err(ResearchError::DatasetBuild {
-                detail: format!(
-                    "live attribution coverage is unbalanced: candidates={}, materialized={}, missing_evidence={}, superseded_censors={}",
-                    coverage.live_attribution_candidates,
-                    coverage.live_attribution_materialized,
-                    coverage.live_attribution_dropped_missing_evidence,
-                    coverage.live_attribution_censored_superseded_unfilled,
-                ),
-            }
-            .into());
-        }
-        Ok(())
     }
 
     async fn append_exit_decision_examples(
@@ -2487,7 +2326,7 @@ fn build_labels_for(
 }
 
 /// Accumulated examples + distinct markets from the historical spine, merged
-/// with the live-attribution / exit-decision sources before finalization.
+/// with exit-decision samples before finalization.
 #[derive(Default)]
 struct HistoricalSpine {
     examples: Vec<TrainingExample>,
@@ -2829,369 +2668,6 @@ fn append_historical_examples(
         });
     }
     Ok(())
-}
-
-enum LiveAttributionMaterialization {
-    Example(Box<TrainingExample>),
-    CensoredSupersededUnfilled,
-    MissingEvidence,
-}
-
-fn record_live_attribution_materialization(
-    materialization: LiveAttributionMaterialization,
-    coverage: &mut DatasetCoverage,
-    examples: &mut Vec<TrainingExample>,
-    market_set: &mut HashSet<MarketId>,
-) {
-    match materialization {
-        LiveAttributionMaterialization::Example(example) => {
-            coverage.planned_samples += 1;
-            coverage.live_attribution_materialized += 1;
-            market_set.insert(example.market_id.clone());
-            coverage.labels_available += example.labels.len() as u64;
-            examples.push(*example);
-        }
-        LiveAttributionMaterialization::CensoredSupersededUnfilled => {
-            coverage.live_attribution_censored_superseded_unfilled += 1;
-        }
-        LiveAttributionMaterialization::MissingEvidence => {
-            coverage.planned_samples += 1;
-            coverage.live_attribution_dropped_missing_evidence += 1;
-        }
-    }
-}
-
-fn materialize_live_attribution_example(
-    attribution: &RecommendationAttributionInfo,
-    recommendations: &HashMap<RecommendationId, RecommendationInfo>,
-    features: &HashMap<FeatureVectorId, FeatureVectorInfo>,
-    selections: &HashMap<(MarketSelectionId, MarketId), MarketSelectionMemberInfo>,
-) -> LiveAttributionMaterialization {
-    if attribution.outcome == RecommendationAttributionOutcome::SupersededUnfilled {
-        return LiveAttributionMaterialization::CensoredSupersededUnfilled;
-    }
-    materialize_uncensored_live_attribution_example(
-        attribution,
-        recommendations,
-        features,
-        selections,
-    )
-    .map_or(LiveAttributionMaterialization::MissingEvidence, |example| {
-        LiveAttributionMaterialization::Example(Box::new(example))
-    })
-}
-
-fn materialize_uncensored_live_attribution_example(
-    attribution: &RecommendationAttributionInfo,
-    recommendations: &HashMap<RecommendationId, RecommendationInfo>,
-    features: &HashMap<FeatureVectorId, FeatureVectorInfo>,
-    selections: &HashMap<(MarketSelectionId, MarketId), MarketSelectionMemberInfo>,
-) -> Option<TrainingExample> {
-    let bindings = live_attribution_bindings(attribution, recommendations, features, selections)?;
-    let evidence = frozen_live_feature_evidence(bindings.recommendation, bindings.feature_info)?;
-    let recommendation = bindings.recommendation;
-    let Some(factor_values) = frozen_factor_values(recommendation) else {
-        tracing::warn!(
-            recommendation_id = %attribution.recommendation_id,
-            "live attribution sample dropped: frozen factor definitions are incomplete",
-        );
-        return None;
-    };
-
-    let labels = attribution_labels(attribution, recommendation);
-    Some(TrainingExample {
-        example_id: TrainingExampleId::from_v7(),
-        market_id: recommendation.market_id.clone(),
-        token_id: recommendation.token_id.clone(),
-        selected_market: selected_market_from_member(bindings.selection_member),
-        decision_boundary: evidence.decision_boundary,
-        sample_source: TrainingSampleSource::LiveAttribution,
-        source_refs: evidence.feature_vector.evidence_refs(),
-        decision_capture: Some(evidence.decision_capture),
-        feature_vector: evidence.feature_vector,
-        factor_values,
-        labels,
-        lot_context: None,
-        position_state: None,
-        book_fidelity: None,
-    })
-}
-
-struct LiveAttributionBindings<'a> {
-    recommendation: &'a RecommendationInfo,
-    feature_info: &'a FeatureVectorInfo,
-    selection_member: &'a MarketSelectionMemberInfo,
-}
-
-fn live_attribution_bindings<'a>(
-    attribution: &RecommendationAttributionInfo,
-    recommendations: &'a HashMap<RecommendationId, RecommendationInfo>,
-    features: &'a HashMap<FeatureVectorId, FeatureVectorInfo>,
-    selections: &'a HashMap<(MarketSelectionId, MarketId), MarketSelectionMemberInfo>,
-) -> Option<LiveAttributionBindings<'a>> {
-    let recommendation = recommendations
-        .get(&attribution.recommendation_id)
-        .or_else(|| {
-            tracing::warn!(
-                recommendation_id = %attribution.recommendation_id,
-                "live attribution sample dropped: recommendation not found",
-            );
-            None
-        })?;
-    if !recommendation.status.eligible_for_attribution() {
-        tracing::warn!(
-            recommendation_id = %attribution.recommendation_id,
-            "live attribution sample dropped: recommendation is not attribution-eligible",
-        );
-        return None;
-    }
-    let feature_info = features
-        .get(&recommendation.evidence_refs.feature_vector_id)
-        .or_else(|| {
-            tracing::warn!(
-                recommendation_id = %attribution.recommendation_id,
-                feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
-                "live attribution sample dropped: frozen feature vector not found",
-            );
-            None
-        })?;
-    let selection_key = (
-        recommendation.evidence_refs.market_selection_id,
-        recommendation.market_id.clone(),
-    );
-    let selection_member = selections.get(&selection_key).or_else(|| {
-        tracing::warn!(
-            recommendation_id = %attribution.recommendation_id,
-            market_selection_id = %recommendation.evidence_refs.market_selection_id,
-            market_id = %recommendation.market_id,
-            "live attribution sample dropped: frozen selection member not found",
-        );
-        None
-    })?;
-    if selection_member.primary_token_id != recommendation.token_id {
-        tracing::warn!(
-            recommendation_id = %attribution.recommendation_id,
-            selection_token_id = %selection_member.primary_token_id,
-            recommendation_token_id = %recommendation.token_id,
-            "live attribution sample dropped: selection token binding mismatch",
-        );
-        return None;
-    }
-    Some(LiveAttributionBindings {
-        recommendation,
-        feature_info,
-        selection_member,
-    })
-}
-
-struct FrozenLiveFeatureEvidence {
-    feature_vector: FeatureVector,
-    decision_boundary: DecisionBoundary,
-    decision_capture: DecisionCaptureEvidence,
-}
-
-fn frozen_live_feature_evidence(
-    recommendation: &RecommendationInfo,
-    feature_info: &FeatureVectorInfo,
-) -> Option<FrozenLiveFeatureEvidence> {
-    let feature_vector = frozen_feature_vector(feature_info).or_else(|| {
-        tracing::warn!(
-            recommendation_id = %recommendation.recommendation_id,
-            feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
-            "live attribution sample dropped: frozen feature vector payload is invalid",
-        );
-        None
-    })?;
-    let decision_boundary = feature_info.decision_boundary.clone();
-    let decision_capture = feature_info.decision_capture.clone();
-    if !valid_live_feature_evidence(feature_info, &decision_boundary, &decision_capture) {
-        tracing::warn!(
-            recommendation_id = %recommendation.recommendation_id,
-            feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
-            "live attribution sample dropped: decision boundary or capture commitment is invalid",
-        );
-        return None;
-    }
-    Some(FrozenLiveFeatureEvidence {
-        feature_vector,
-        decision_boundary,
-        decision_capture,
-    })
-}
-
-fn valid_live_feature_evidence(
-    feature_info: &FeatureVectorInfo,
-    boundary: &DecisionBoundary,
-    capture: &DecisionCaptureEvidence,
-) -> bool {
-    let capture_hash_matches = ResearchHasher::canonical(capture)
-        .ok()
-        .is_some_and(|actual| actual == feature_info.decision_capture_hash);
-    capture_hash_matches
-        && boundary.validate().is_ok()
-        && boundary.decision_at() == feature_info.decision_at
-}
-
-fn selected_market_from_member(member: &MarketSelectionMemberInfo) -> SelectedMarket {
-    SelectedMarket {
-        market_id: member.market_id.clone(),
-        event_id: member.event_id.clone(),
-        category: member.category,
-        primary_token_id: member.primary_token_id.clone(),
-        secondary_token_id: member.secondary_token_id.clone(),
-        liquidity_usd: member.liquidity_usd,
-        volume_24h_usd: member.volume_24h_usd,
-        source_refs: Vec::new(),
-    }
-}
-
-fn frozen_feature_vector(info: &FeatureVectorInfo) -> Option<FeatureVector> {
-    info.payload.validate().ok()?;
-    Some(FeatureVector {
-        market_id: info.market_id.clone(),
-        token_id: info.token_id.clone(),
-        decision_at: info.decision_at,
-        generic_schema_version: info.feature_schema_version,
-        generic: info.payload.generic.clone(),
-        domain: info.payload.domain.clone(),
-        data_quality: info.data_quality,
-    })
-}
-
-fn frozen_factor_values(recommendation: &RecommendationInfo) -> Option<Vec<FactorValue>> {
-    let mut values = Vec::with_capacity(recommendation.factor_breakdown.0.len());
-    for (index, entry) in recommendation.factor_breakdown.0.iter().enumerate() {
-        let definition_id = *recommendation
-            .evidence_refs
-            .factor_definition_versions
-            .get(index)?;
-        let normalization = match (
-            entry.normalized_score,
-            entry.normalization_source,
-            entry.indeterminate_reason,
-        ) {
-            (Some(score), Some(source), _) => NormalizedFactor::Scored {
-                score,
-                source,
-                clamp: None,
-            },
-            (_, _, Some(reason)) => NormalizedFactor::Indeterminate { reason },
-            _ => NormalizedFactor::MissingInput,
-        };
-        values.push(FactorValue {
-            definition_id,
-            name: FactorName::new(entry.factor_name.clone()),
-            family: entry.family,
-            raw_value: entry.raw_value,
-            normalization,
-            direction: entry.direction,
-            confidence: entry.confidence,
-            explanation: FactorExplanation {
-                headline: entry.explanation.clone(),
-                drivers: Vec::new(),
-            },
-            input_feature_refs: Vec::new(),
-        });
-    }
-    Some(values)
-}
-
-fn attribution_labels(
-    attribution: &RecommendationAttributionInfo,
-    recommendation: &RecommendationInfo,
-) -> Vec<TrainingLabel> {
-    // `label_available_at` is the authoritative `matured_at` for
-    // live-attribution labels; a live attribution row is only ever built once
-    // its outcome is known, so `created_at` (the row's own persistence time,
-    // necessarily at/after every value it carries became known) is the safe
-    // upper-bound fallback when the dedicated timestamp is absent — never an
-    // arbitrary/earlier default that would under-purge.
-    let matured_at = attribution
-        .label_available_at
-        .unwrap_or(attribution.created_at);
-    let mut labels = Vec::new();
-    if let Some(realized_pnl) = attribution.realized_pnl_usd {
-        push_label(
-            &mut labels,
-            "realized_pnl_usd",
-            realized_pnl.inner(),
-            matured_at,
-        );
-        if let Some(sizing) = recommendation.trade_plan.sizing()
-            && !sizing.suggested_usd.is_zero()
-        {
-            push_label(
-                &mut labels,
-                "realized_return_bps",
-                realized_pnl.inner() / sizing.suggested_usd.inner() * Decimal::from(10_000),
-                matured_at,
-            );
-        }
-    }
-    push_label(
-        &mut labels,
-        "entry_filled",
-        if attribution.entry_outcome_json.entry_filled {
-            Decimal::ONE
-        } else {
-            Decimal::ZERO
-        },
-        matured_at,
-    );
-    if let Some(slippage) = attribution.entry_outcome_json.entry_slippage_bps {
-        push_label(
-            &mut labels,
-            "entry_slippage_bps",
-            slippage.inner(),
-            matured_at,
-        );
-    }
-    if let Some(mfe) = attribution.max_favorable_excursion_bps {
-        push_label(&mut labels, "max_favorable_excursion_bps", mfe, matured_at);
-    }
-    if let Some(mae) = attribution.max_adverse_excursion_bps {
-        push_label(&mut labels, "max_adverse_excursion_bps", mae, matured_at);
-    }
-    push_label(
-        &mut labels,
-        "missed_return_bps",
-        if attribution.entry_outcome_json.entry_filled {
-            Decimal::ZERO
-        } else {
-            recommendation.expected_return_bps.inner()
-        },
-        matured_at,
-    );
-    if let Some(code) = recommendation_outcome_code(attribution.outcome) {
-        push_label(&mut labels, "recommendation_outcome", code, matured_at);
-    }
-    labels
-}
-
-fn push_label(
-    labels: &mut Vec<TrainingLabel>,
-    name: &'static str,
-    value: Decimal,
-    matured_at: DateTime<Utc>,
-) {
-    labels.push(TrainingLabel {
-        label_name: LabelName::from_static(name),
-        horizon_secs: 0,
-        value,
-        is_resolved: true,
-        matured_at,
-    });
-}
-
-fn recommendation_outcome_code(outcome: RecommendationAttributionOutcome) -> Option<Decimal> {
-    match outcome {
-        RecommendationAttributionOutcome::FilledExited => Some(Decimal::ONE),
-        RecommendationAttributionOutcome::FilledSettled => Some(Decimal::from(2)),
-        RecommendationAttributionOutcome::ExpiredUnfilled => Some(Decimal::NEGATIVE_ONE),
-        RecommendationAttributionOutcome::CancelledUnfilled => Some(Decimal::from(-2)),
-        RecommendationAttributionOutcome::FailedUnfilled => Some(Decimal::from(-3)),
-        RecommendationAttributionOutcome::SupersededUnfilled => None,
-    }
 }
 
 fn wants_sample_source(request: &DatasetPlanRequest, source: TrainingSampleSource) -> bool {
@@ -3667,85 +3143,6 @@ mod decision_book_tests {
             decision_book_quote_price(&book),
             Some(Price::new(Decimal::new(55, 2)))
         );
-    }
-}
-
-#[cfg(test)]
-mod attribution_censor_tests {
-    use std::collections::{HashMap, HashSet};
-
-    use chrono::Utc;
-    use quant_pivot_models::{
-        domain::quant::RecommendationAttributionInfo,
-        enums::quant::RecommendationAttributionOutcome,
-        types::{AttributionDetail, DatasetCoverage, EntryOutcome, ExitOutcome, RecommendationId},
-    };
-
-    use super::{
-        LiveAttributionMaterialization, materialize_live_attribution_example,
-        recommendation_outcome_code, record_live_attribution_materialization,
-    };
-
-    fn superseded_attribution() -> RecommendationAttributionInfo {
-        RecommendationAttributionInfo {
-            recommendation_id: RecommendationId::from_v7(),
-            outcome: RecommendationAttributionOutcome::SupersededUnfilled,
-            entry_outcome_json: EntryOutcome::default(),
-            exit_outcome_json: ExitOutcome::default(),
-            realized_pnl_usd: None,
-            max_adverse_excursion_bps: None,
-            max_favorable_excursion_bps: None,
-            label_available_at: Some(Utc::now()),
-            attribution_json: AttributionDetail::default(),
-            created_at: Utc::now(),
-        }
-    }
-
-    #[test]
-    fn superseded_unfilled_is_censored_from_training_dataset() {
-        let attribution = superseded_attribution();
-
-        assert!(matches!(
-            materialize_live_attribution_example(
-                &attribution,
-                &HashMap::new(),
-                &HashMap::new(),
-                &HashMap::new(),
-            ),
-            LiveAttributionMaterialization::CensoredSupersededUnfilled
-        ));
-        assert_eq!(
-            recommendation_outcome_code(RecommendationAttributionOutcome::SupersededUnfilled),
-            None
-        );
-    }
-
-    #[test]
-    fn superseded_unfilled_has_dedicated_censor_accounting() {
-        let mut coverage = DatasetCoverage {
-            live_attribution_candidates: 1,
-            ..DatasetCoverage::default()
-        };
-        let mut examples = Vec::new();
-        let mut markets = HashSet::new();
-        record_live_attribution_materialization(
-            materialize_live_attribution_example(
-                &superseded_attribution(),
-                &HashMap::new(),
-                &HashMap::new(),
-                &HashMap::new(),
-            ),
-            &mut coverage,
-            &mut examples,
-            &mut markets,
-        );
-
-        assert_eq!(coverage.live_attribution_censored_superseded_unfilled, 1);
-        assert_eq!(coverage.live_attribution_materialized, 0);
-        assert_eq!(coverage.live_attribution_dropped_missing_evidence, 0);
-        assert_eq!(coverage.planned_samples, 0);
-        assert!(examples.is_empty());
-        assert!(markets.is_empty());
     }
 }
 

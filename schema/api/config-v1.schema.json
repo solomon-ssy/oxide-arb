@@ -159,31 +159,6 @@
         "reason"
       ]
     },
-    "AttributionPolicy": {
-      "type": "object",
-      "properties": {
-        "batch_size": {
-          "description": "Maximum terminal recommendation/intent candidates processed per sweep.",
-          "type": "integer",
-          "format": "uint64",
-          "default": 256,
-          "minimum": 0
-        },
-        "enabled": {
-          "description": "Whether the final recommendation-attribution worker is enabled.",
-          "type": "boolean",
-          "default": true
-        },
-        "sweep_secs": {
-          "description": "Attribution sweep interval in seconds.",
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false
-    },
     "AutoExecutionConfig": {
       "description": "Auto-execution policy.",
       "type": "object",
@@ -1408,14 +1383,6 @@
       "description": "Immediate operational admission controls and notification routing.",
       "type": "object",
       "properties": {
-        "attribution": {
-          "$ref": "#/$defs/AttributionPolicy",
-          "default": {
-            "batch_size": 256,
-            "enabled": true,
-            "sweep_secs": 60
-          }
-        },
         "entry_condition": {
           "$ref": "#/$defs/EntryConditionWorkerConfig",
           "default": {
@@ -1442,6 +1409,15 @@
             "report_published": true
           }
         },
+        "outcome_reconciliation": {
+          "$ref": "#/$defs/OutcomeReconciliationPolicy",
+          "default": {
+            "candidate_batch_size": 256,
+            "enabled": true,
+            "source_block_span": 256,
+            "sweep_secs": 60
+          }
+        },
         "schema_version": {
           "$ref": "#/$defs/SchemaVersion",
           "default": 1,
@@ -1464,6 +1440,39 @@
           "description": "When true, the scorer runs and is audited but never submits an exit\n(fail-safe hold; SL/time/trailing/invalidation still apply).",
           "type": "boolean",
           "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "OutcomeReconciliationPolicy": {
+      "description": "Runtime cadence and bounded work budget for outcome reconciliation.",
+      "type": "object",
+      "properties": {
+        "candidate_batch_size": {
+          "description": "Maximum recommendations or intents processed by each lane per pass.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 256,
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "Whether the outcome reconciliation worker is enabled.",
+          "type": "boolean",
+          "default": true
+        },
+        "source_block_span": {
+          "description": "Maximum finalized source blocks scanned per resolution pass.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 256,
+          "minimum": 0
+        },
+        "sweep_secs": {
+          "description": "Delay between reconciliation passes in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
         }
       },
       "additionalProperties": false

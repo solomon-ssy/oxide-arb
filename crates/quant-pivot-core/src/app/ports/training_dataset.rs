@@ -28,11 +28,10 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, CalibrationArtifactRepository, CatalogLedgerRepository,
-    ClobMarketInfoRepository, FeatureRepository, MarketLinkageRepository, MarketRepository,
-    MarketSelectionRepository, ModelRegistryRepository, PolicyRepository, PositionRepository,
-    QuantFactReadRepository, RecommendationRepository, SourceSliceRepository,
-    TradePolicyRepository, TrainingDatasetRepository,
+    CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
+    MarketLinkageRepository, MarketRepository, ModelRegistryRepository, PolicyRepository,
+    PositionRepository, QuantFactReadRepository, SourceSliceRepository, TradePolicyRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, training::DatasetPlanRequest};
 use tokio_util::sync::CancellationToken;
@@ -59,10 +58,6 @@ pub struct CoreTrainingDatasetPort {
     market_repo: Arc<dyn MarketRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
-    attribution_repo: Arc<dyn AttributionRepository>,
-    recommendation_repo: Arc<dyn RecommendationRepository>,
-    feature_repo: Arc<dyn FeatureRepository>,
-    selection_repo: Arc<dyn MarketSelectionRepository>,
     position_repo: Arc<dyn PositionRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     model_registry: Arc<dyn ModelRegistryRepository>,
@@ -93,10 +88,6 @@ impl CoreTrainingDatasetPort {
             market_repo: Arc::clone(&research.market_repo),
             artifact_store: Arc::clone(&research.artifact_store),
             dataset_repo: Arc::clone(&research.training_dataset_repo),
-            attribution_repo: Arc::clone(&research.attribution_repo),
-            recommendation_repo: Arc::clone(&research.recommendation_repo),
-            feature_repo: Arc::clone(&research.feature_repo),
-            selection_repo: Arc::clone(&research.market_selection_repo),
             position_repo: Arc::clone(&research.position_repo),
             linkage_repo: Arc::clone(&research.market_linkage_repo),
             model_registry: Arc::clone(&research.model_registry_repo),
@@ -135,10 +126,6 @@ impl CoreTrainingDatasetPort {
                 market_repo: Arc::clone(&self.market_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
                 dataset_repo: Arc::clone(&self.dataset_repo),
-                attribution_repo: Arc::clone(&self.attribution_repo),
-                recommendation_repo: Arc::clone(&self.recommendation_repo),
-                feature_repo: Arc::clone(&self.feature_repo),
-                selection_repo: Arc::clone(&self.selection_repo),
                 position_repo: Arc::clone(&self.position_repo),
                 clob_market_info_repo: Arc::clone(&self.clob_market_info_repo),
                 linkage_repo: Arc::clone(&self.linkage_repo),
@@ -453,8 +440,7 @@ fn derive_dataset_source_identity(
 const fn sample_source_order(source: TrainingSampleSource) -> u8 {
     match source {
         TrainingSampleSource::HistoricalPit => 0,
-        TrainingSampleSource::LiveAttribution => 1,
-        TrainingSampleSource::ExitDecision => 2,
+        TrainingSampleSource::ExitDecision => 1,
     }
 }
 
@@ -488,7 +474,7 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         let plan = service
             .plan_with_frozen_source(plan_request, &frozen)
             .await?;
-        let planned_samples = service.count_planned_samples(&plan).await?;
+        let planned_samples = service.count_planned_samples(&plan)?;
         Ok(TrainingDatasetPlanView {
             training_dataset_id: plan.training_dataset_id,
             model_spec_id: request.model_spec_id,

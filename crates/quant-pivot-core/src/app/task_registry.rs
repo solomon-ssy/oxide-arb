@@ -718,6 +718,14 @@ mod tests {
         assert_eq!(TaskId::RiskAuditBatch.kind(), TaskKind::Audit);
         assert_eq!(TaskId::RiskAuditBatch.static_name(), "risk-audit-batch");
         assert_eq!(
+            TaskId::OutcomeReconciliationWorker.kind(),
+            TaskKind::Execution
+        );
+        assert_eq!(
+            TaskId::OutcomeReconciliationWorker.static_name(),
+            "outcome-reconciliation-worker"
+        );
+        assert_eq!(
             TaskId::ExecutionDispatcher.display_name(),
             "execution-dispatcher"
         );

@@ -15,9 +15,8 @@ use quant_pivot_models::{
     clickhouse::{
         QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
         QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow,
-        QuantModelInputEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
-        QuantReportRecommendationFactRow, QuantServingEvidenceCompletionRow,
-        QuantSignalCandidateEventRow, ReportMarketFunnelRow,
+        QuantModelInputEventRow, QuantPositionEventRow, QuantReportRecommendationFactRow,
+        QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow, ReportMarketFunnelRow,
     },
     types::ContentHash,
 };
@@ -233,19 +232,6 @@ impl QuantFactRepository for ChQuantFactRepository {
     ) -> Result<(), StorageError> {
         self.write_manager
             .write_batch(self.pool.client(), "quant_position_event", rows)
-            .await
-    }
-
-    async fn insert_recommendation_attribution_events(
-        &self,
-        rows: Vec<QuantRecommendationAttributionEventRow>,
-    ) -> Result<(), StorageError> {
-        self.write_manager
-            .write_batch(
-                self.pool.client(),
-                "quant_recommendation_attribution_event",
-                rows,
-            )
             .await
     }
 

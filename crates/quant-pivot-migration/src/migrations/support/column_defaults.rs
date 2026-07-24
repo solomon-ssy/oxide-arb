@@ -546,7 +546,12 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "quant_recommendation_attribution",
+        table: "quant_recommendation_execution_outcome",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_recommendation_resolution_outcome",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },

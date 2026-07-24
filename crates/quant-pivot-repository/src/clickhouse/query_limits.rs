@@ -90,7 +90,11 @@ pub const BOOK_LEDGER_SNAPSHOTS_BETWEEN: ClickHouseQueryLimits = ClickHouseQuery
     512 * MIB,
 );
 pub const RESOLUTION_AT: ClickHouseQueryLimits =
-    ClickHouseQueryLimits::new("ch.repository.resolution_at.v1", 1, 64 * KIB);
+    ClickHouseQueryLimits::new("ch.repository.resolution_at.v1", 2, 128 * KIB);
+pub const RESOLUTION_BY_CHECKPOINT: ClickHouseQueryLimits =
+    ClickHouseQueryLimits::new("ch.repository.resolution_by_checkpoint.v1", 2, 128 * KIB);
+pub const RESOLUTION_BY_MARKET: ClickHouseQueryLimits =
+    ClickHouseQueryLimits::new("ch.repository.resolution_by_market.v1", 2, 128 * KIB);
 pub const RESOLUTIONS_BETWEEN: ClickHouseQueryLimits = ClickHouseQueryLimits::new(
     "ch.repository.resolutions_between.v1",
     RESEARCH_ROWS,

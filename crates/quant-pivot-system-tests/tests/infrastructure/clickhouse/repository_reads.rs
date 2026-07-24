@@ -4,23 +4,25 @@ use std::{slice, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use clickhouse::Client;
+use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookMicrostructureRow, ChDecimal64, ChDigest, ChPrice, ChProbability,
-        ChSchemaVersion, ChShares, ChUsd, EntryConditionEvaluationEventRow, MarketResolutionRow,
-        QuantFeatureParityEventRow, QuantReportRecommendationFactRow, ReportMarketFunnelRow,
-        TradeTapeRow, WeatherForecastFactRow, WeatherObservationFactRow,
+        ChSchemaVersion, ChShares, ChUsd, EntryConditionEvaluationEventRow,
+        MarketResolutionFactInput, MarketResolutionRow, QuantFeatureParityEventRow,
+        QuantReportRecommendationFactRow, ReportMarketFunnelRow, TradeTapeRow,
+        WeatherForecastFactRow, WeatherObservationFactRow,
     },
     domain::api::FeatureParityEventListQuery,
     enums::clickhouse::{
-        ChCanonicalBookEventType, ChFactSource, ChOutcomeSide, ChTradeParticipantRole,
+        ChCanonicalBookEventType, ChOutcomeSide, ChTradeParticipantRole,
         ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId,
-        EntryConditionInstanceId, EventId, FeatureParityEventId, FeatureParityRunId, MarketId,
-        MarketSelectionId, ModelRunId, ModelVersionId, Price, RecommendationId,
-        RecommendationReportId, Shares, TokenId, Usd,
+        EntryConditionInstanceId, EventId, EvmBlockHash, EvmTransactionHash, FeatureParityEventId,
+        FeatureParityRunId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PayoutRatio,
+        Price, RecommendationId, RecommendationReportId, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -54,6 +56,37 @@ async fn insert_book_rows(client: &Client, rows: &[BookL2LedgerRow]) {
         insert.write(row).await.expect("write row");
     }
     insert.end().await.expect("end insert");
+}
+
+fn resolution_row(
+    market_id: MarketId,
+    token_ids: [TokenId; 2],
+    payout_ratios: [PayoutRatio; 2],
+    resolved_at: i64,
+    observed_at: i64,
+    source_byte: u8,
+) -> MarketResolutionRow {
+    MarketResolutionRow::seal(MarketResolutionFactInput {
+        market_id,
+        token_ids,
+        payout_ratios,
+        resolved_at,
+        observed_at,
+        source_block_number: u64::from(source_byte),
+        source_block_hash: EvmBlockHash::parse(format!(
+            "0x{}",
+            format!("{source_byte:02x}").repeat(32)
+        ))
+        .expect("resolution block hash"),
+        source_transaction_hash: EvmTransactionHash::parse(format!(
+            "0x{}",
+            format!("{:02x}", source_byte.saturating_add(64)).repeat(32)
+        ))
+        .expect("resolution transaction hash"),
+        source_log_index: u64::from(source_byte),
+        source_checkpoint_hash: ContentHash::from_bytes([source_byte; 32]),
+    })
+    .expect("sealed resolution row")
 }
 
 async fn insert_microstructure_rows(client: &Client, rows: &[BookMicrostructureRow]) {
@@ -713,49 +746,58 @@ pub async fn resolution_at_is_pit_bounded() {
     let (pool, client, _container) = setup_clickhouse().await;
     let read = ChQuantFactReadRepository::new(pool);
     let market_id = MarketId::new("0xchpit-res");
-    let yes = TokenId::new("ch-pit-yes");
-    let no = TokenId::new("ch-pit-no");
+    let late_observed_market_id = MarketId::new("0xchpit-res-late-observed");
+    let future_market_id = MarketId::new("0xchpit-res-future");
+    let conflicting_market_id = MarketId::new("0xchpit-res-conflicting-checkpoint");
+    let yes = TokenId::new("101");
+    let no = TokenId::new("202");
+    let half = PayoutRatio::try_new(Decimal::new(5, 1)).expect("half payout");
 
     let early = fresh_event_time_ms();
     let late = early + 10_000;
     let as_of = early + 5_000;
 
     let rows = vec![
-        MarketResolutionRow {
-            market_id: market_id.clone(),
-            winning_token_id: yes.clone(),
-            winning_outcome: "Yes".to_owned(),
-            asset_token_ids: vec![yes.clone(), no.clone()],
-            resolved_at: early,
-            observed_at: early,
-            source: ChFactSource::WsMarketResolved,
-            sequence: 1,
-            schema_version: ChSchemaVersion::FIRST,
-        },
-        MarketResolutionRow {
-            market_id: market_id.clone(),
-            winning_token_id: no.clone(),
-            winning_outcome: "No".to_owned(),
-            asset_token_ids: vec![yes.clone(), no.clone()],
-            // A correction whose economic time is in range but whose writer
-            // observation is not yet visible at `as_of`.
-            resolved_at: early + 1_000,
-            observed_at: as_of + 1_000,
-            source: ChFactSource::WsMarketResolved,
-            sequence: 3,
-            schema_version: ChSchemaVersion::FIRST,
-        },
-        MarketResolutionRow {
-            market_id: market_id.clone(),
-            winning_token_id: no.clone(),
-            winning_outcome: "No".to_owned(),
-            asset_token_ids: vec![yes.clone(), no.clone()],
-            resolved_at: late,
-            observed_at: late,
-            source: ChFactSource::WsMarketResolved,
-            sequence: 2,
-            schema_version: ChSchemaVersion::FIRST,
-        },
+        resolution_row(
+            market_id.clone(),
+            [yes.clone(), no.clone()],
+            [PayoutRatio::ONE, PayoutRatio::ZERO],
+            early,
+            early,
+            1,
+        ),
+        resolution_row(
+            late_observed_market_id.clone(),
+            [yes.clone(), no.clone()],
+            [half, half],
+            early + 1_000,
+            as_of + 1_000,
+            2,
+        ),
+        resolution_row(
+            future_market_id.clone(),
+            [yes.clone(), no.clone()],
+            [PayoutRatio::ZERO, PayoutRatio::ONE],
+            late,
+            late,
+            3,
+        ),
+        resolution_row(
+            conflicting_market_id.clone(),
+            [yes.clone(), no.clone()],
+            [PayoutRatio::ONE, PayoutRatio::ZERO],
+            early + 2_000,
+            early + 2_000,
+            4,
+        ),
+        resolution_row(
+            conflicting_market_id.clone(),
+            [yes.clone(), no.clone()],
+            [PayoutRatio::ZERO, PayoutRatio::ONE],
+            early + 2_000,
+            early + 3_000,
+            4,
+        ),
     ];
     let mut insert = client
         .insert::<MarketResolutionRow>("market_resolution_event")
@@ -764,6 +806,7 @@ pub async fn resolution_at_is_pit_bounded() {
     for row in &rows {
         insert.write(row).await.expect("write");
     }
+    insert.write(&rows[0]).await.expect("write exact duplicate");
     insert.end().await.expect("end");
 
     let resolved = read
@@ -772,26 +815,124 @@ pub async fn resolution_at_is_pit_bounded() {
         .expect("read")
         .expect("resolution");
     assert_eq!(resolved.resolved_at, early);
-    assert_eq!(resolved.winning_token_id, yes);
+    assert_eq!(
+        resolved.payout_for(&yes).expect("YES payout"),
+        PayoutRatio::ONE
+    );
+    assert_resolution_identity_queries(
+        &read,
+        &rows,
+        &market_id,
+        &conflicting_market_id,
+        early,
+        late,
+    )
+    .await;
 
-    let corrected = read
-        .resolution_at(&market_id, as_of, as_of + 1_000)
+    let hidden = read
+        .resolution_at(&late_observed_market_id, as_of, as_of)
         .await
-        .expect("read corrected")
-        .expect("corrected resolution");
-    assert_eq!(corrected.resolved_at, early + 1_000);
-    assert_eq!(corrected.winning_token_id, no);
+        .expect("read hidden resolution");
+    assert!(hidden.is_none());
 
-    let before_correction = read
-        .resolutions_between(vec![market_id.clone()], early, as_of, as_of)
+    let newly_visible = read
+        .resolution_at(&late_observed_market_id, as_of, as_of + 1_000)
+        .await
+        .expect("read newly visible")
+        .expect("newly visible resolution");
+    assert_eq!(
+        newly_visible.payout_for(&yes).expect("YES split payout"),
+        half
+    );
+    assert_eq!(
+        newly_visible.payout_for(&no).expect("NO split payout"),
+        half
+    );
+
+    assert!(
+        read.resolution_at(&future_market_id, as_of, late)
+            .await
+            .expect("read future resolution")
+            .is_none()
+    );
+
+    let before_visibility = read
+        .resolutions_between(
+            vec![
+                market_id.clone(),
+                late_observed_market_id.clone(),
+                future_market_id.clone(),
+            ],
+            early,
+            as_of,
+            as_of,
+        )
         .await
         .expect("bounded resolution range");
-    assert_eq!(before_correction.len(), 1);
-    let after_correction = read
-        .resolutions_between(vec![market_id], early, as_of, as_of + 1_000)
+    assert_eq!(before_visibility.len(), 1);
+    let after_visibility = read
+        .resolutions_between(
+            vec![market_id, late_observed_market_id, future_market_id],
+            early,
+            as_of,
+            as_of + 1_000,
+        )
         .await
-        .expect("visible corrected range");
-    assert_eq!(after_correction.len(), 2);
+        .expect("visible resolution range");
+    assert_eq!(after_visibility.len(), 2);
+}
+
+async fn assert_resolution_identity_queries(
+    read: &ChQuantFactReadRepository,
+    rows: &[MarketResolutionRow],
+    market_id: &MarketId,
+    conflicting_market_id: &MarketId,
+    early: i64,
+    late: i64,
+) {
+    let exact = read
+        .resolution_by_checkpoint(&rows[0].source_checkpoint_hash)
+        .await
+        .expect("read exact resolution checkpoint")
+        .expect("exact checkpoint exists");
+    assert_eq!(exact, rows[0]);
+    assert_eq!(
+        read.resolution_by_market(market_id)
+            .await
+            .expect("read one canonical resolution by market")
+            .expect("canonical market resolution exists"),
+        rows[0]
+    );
+    assert!(
+        read.resolution_by_market(&MarketId::new("0xchpit-res-missing"))
+            .await
+            .expect("read missing market resolution")
+            .is_none()
+    );
+    assert!(matches!(
+        read.resolution_by_checkpoint(&rows[3].source_checkpoint_hash)
+            .await
+            .expect_err("one checkpoint cannot bind conflicting resolution content"),
+        StorageError::InvariantViolation { .. }
+    ));
+    assert!(matches!(
+        read.resolution_by_market(conflicting_market_id)
+            .await
+            .expect_err("one market cannot bind conflicting resolution content"),
+        StorageError::InvariantViolation { .. }
+    ));
+    assert!(matches!(
+        read.resolution_at(conflicting_market_id, late, late)
+            .await
+            .expect_err("PIT lookup cannot choose between conflicting market truths"),
+        StorageError::InvariantViolation { .. }
+    ));
+    assert!(matches!(
+        read.resolutions_between(vec![conflicting_market_id.clone()], early, late, late,)
+            .await
+            .expect_err("range lookup cannot emit conflicting market truths"),
+        StorageError::InvariantViolation { .. }
+    ));
 }
 
 pub async fn weather_long_form_facts_are_pit_visible_and_revision_preserving() {

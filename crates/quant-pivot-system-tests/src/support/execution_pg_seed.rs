@@ -69,15 +69,16 @@ use quant_pivot_models::{
         FeatureParityStateId, FeatureVectorId, MarketContext, MarketId, MarketSelectionId,
         ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
         OperationDetailDocument, OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId,
-        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, PreparedFeeSchedule,
-        PreparedVenueOrder, Price, PriceCondition, Probability, RecommendationFactorBreakdown,
-        RecommendationId, RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
-        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
-        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
-        ResearchEvaluationTrack, ResearchJobId, ResearchProfileRef, ResearchReadinessEvidenceId,
-        ResidualSharePolicy, RiskEnvelope, RoleCode, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, SourceSliceManifestRef, StructuralVolatilityOosEvidence,
+        OrderIntentId, PendingScaleOut, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
+        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot,
+        PreparedFeeSchedule, PreparedVenueOrder, Price, PriceCondition, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
+        ReportDataQualityTokens, ReportSummary, ResearchEvaluationTrack, ResearchJobId,
+        ResearchProfileRef, ResearchReadinessEvidenceId, ResidualSharePolicy, RiskEnvelope,
+        RoleCode, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan,
+        SourceSliceManifestRef, StructuralVolatilityOosEvidence,
         TRADE_POLICY_ARTIFACT_FORMAT_VERSION, ThesisInvalidationPolicy, TokenId,
         TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateSpec,
         TradePolicyCohort, TradePolicyCohortDimension, TradePolicyCohortKey,
@@ -99,14 +100,15 @@ use quant_pivot_repository::{
         PgCalibrationArtifactRepository, PgEntryConditionRepository, PgEventRepository,
         PgExecutionAccountRepository, PgExecutionSubmissionRepository, PgFeatureParityRepository,
         PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgOrderIntentRepository, PgPolicyRepository,
+        PgModelRunRepository, PgOrderIntentRepository, PgPolicyRepository, PgPositionRepository,
         PgRuntimeControlRepository, PgTradePolicyRepository,
     },
     traits::{
         CalibrationArtifactRepository, EntryConditionRepository, EventRepository,
         ExecutionAccountRepository, ExecutionSubmissionRepository, FeatureParityRepository,
         MarketRepository, MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
-        OrderIntentRepository, PolicyRepository, RuntimeControlRepository, TradePolicyRepository,
+        OrderIntentRepository, PolicyRepository, PositionRepository, RuntimeControlRepository,
+        TradePolicyRepository,
     },
 };
 use quant_pivot_research::{
@@ -135,9 +137,14 @@ use super::{
     seeded_uuid,
 };
 
-/// shares (100) * `limit_price` (0.6).
-/// Weather `SemiAuto` fixtures use the profile's only governed total cash-budget tier.
+/// Total cash budget: 40 shares * 0.60 gross price + 1.00 observed fee.
+/// Weather `SemiAuto` fixtures use the profile's only governed cash-budget tier.
 pub const EXECUTION_NOTIONAL: Decimal = dec!(25);
+/// Venue-confirmed shares derived from the prepared order's gross cash amount.
+pub const ENTRY_FILLED_SHARES: Decimal = dec!(40);
+const ENTRY_GROSS_USD: Decimal = dec!(24);
+const ENTRY_FEE_USD: Decimal = dec!(1);
+const ENTRY_PRICE: Decimal = dec!(0.6);
 
 #[must_use]
 pub fn fixture_execution_account() -> NewExecutionAccount {
@@ -761,7 +768,7 @@ pub async fn seed_approved_intent(db: &DatabaseConnection, ids: &ExecutionTxnIds
 }
 
 /// Drive an approved intent's entry to a confirmed full fill: capital `Spent`,
-/// one open lot (100 @ 0.60), intent `Filled`.
+/// one open lot (40 @ 0.60 gross + 1.00 fee), intent `Filled`.
 pub async fn fill_entry_lot(
     db: &DatabaseConnection,
     submission: &PgExecutionSubmissionRepository,
@@ -776,6 +783,7 @@ pub async fn fill_entry_lot(
         )
         .await
         .expect("create entry order");
+    let filled_at = Utc::now();
     submission
         .record_submission_result(
             &order.execution_order_id,
@@ -785,22 +793,96 @@ pub async fn fill_entry_lot(
                 intent_status: OrderIntentStatus::Filled,
                 venue_order_id: Some(OrderId::new("venue-entry")),
                 venue_status: Some(VenueOrderStatus::Filled),
-                submitted_at: Utc::now(),
-                filled_at: Some(Utc::now()),
+                submitted_at: filled_at,
+                filled_at: Some(filled_at),
                 cancelled_at: None,
                 error_message: None,
                 capital: CapitalSettlement::SettleFull {
                     spent_usd: Usd::new(EXECUTION_NOTIONAL),
                 },
-                fill: Some(position_fill(ids, intent_id)),
-                reconciliation: Some(reconciliation_row(&order.execution_order_id, intent_id)),
+                fill: Some(position_fill(ids, intent_id, filled_at)),
+                reconciliation: Some(reconciliation_row(
+                    &order.execution_order_id,
+                    intent_id,
+                    filled_at,
+                )),
             },
         )
         .await
         .expect("record entry fill");
 }
 
-/// Full exit flow: entry fill then exit fill at 0.55 (realized -5), position `Closed`.
+/// Settle one real partial exchange exit against the current per-intent lot.
+pub async fn partial_exit_lot(
+    db: &DatabaseConnection,
+    submission: &PgExecutionSubmissionRepository,
+    ids: &ExecutionTxnIds,
+    intent_id: &OrderIntentId,
+    shares: Shares,
+    average_price: Price,
+) {
+    let position = PgPositionRepository::new(db.clone())
+        .find_by_intent(intent_id)
+        .await
+        .expect("load position before partial exit")
+        .expect("partial exit position exists");
+    assert!(
+        shares.is_positive() && shares < position.shares,
+        "partial exit shares must be strictly inside the open lot"
+    );
+    let proportional_cost =
+        Usd::new(position.cost_usd.inner() * shares.inner() / position.shares.inner());
+    let proceeds_usd = shares * average_price;
+    let realized_pnl_usd = proceeds_usd - proportional_cost;
+    let exit = submission
+        .create_exit_order_and_mark_closing(
+            exit_order(intent_id, ids, shares.inner(), average_price.inner()),
+            ExitReason::PartialExit,
+            Some(PendingScaleOut {
+                target_id: None,
+                target_cumulative_exit_pct: shares.inner() / position.shares.inner(),
+            }),
+        )
+        .await
+        .expect("create partial exit order");
+    let exited_at = Utc::now();
+    submission
+        .record_exit_result(
+            &exit.execution_order_id,
+            ExitLedgerWrite {
+                identity_refs: empty_identity_refs(),
+                order_state: ExecutionOrderState::Filled,
+                venue_order_id: Some(OrderId::new("venue-exit-partial")),
+                venue_status: Some(VenueOrderStatus::Filled),
+                filled_at: Some(exited_at),
+                cancelled_at: None,
+                error_message: None,
+                exit_state: ExitState::PartiallyExited,
+                exit_reason: ExitReason::PartialExit,
+                position_exit: Some(PositionExit {
+                    shares,
+                    avg_price: average_price,
+                    proceeds_usd,
+                    realized_pnl_usd,
+                    exited_at,
+                    reason: ExitReason::PartialExit,
+                }),
+                fully_exited: false,
+                revert_to_open: false,
+                reconciliation: Some(exit_reconciliation_row(
+                    &exit.execution_order_id,
+                    intent_id,
+                    shares,
+                    average_price,
+                    exited_at,
+                )),
+            },
+        )
+        .await
+        .expect("record partial exit");
+}
+
+/// Full exit flow: entry fill then exit fill at 0.55 (realized -3), position `Closed`.
 /// When `peak_mark_price` is set, seeds it on the exit monitor after entry fill.
 pub async fn close_position_full(
     db: &DatabaseConnection,
@@ -820,13 +902,14 @@ pub async fn close_position_full(
 
     let exit = submission
         .create_exit_order_and_mark_closing(
-            exit_order(intent_id, ids, dec!(100), dec!(0.55)),
+            exit_order(intent_id, ids, ENTRY_FILLED_SHARES, dec!(0.55)),
             ExitReason::StopLoss,
             None,
         )
         .await
         .expect("exit order");
 
+    let exited_at = Utc::now();
     submission
         .record_exit_result(
             &exit.execution_order_id,
@@ -835,22 +918,28 @@ pub async fn close_position_full(
                 order_state: ExecutionOrderState::Filled,
                 venue_order_id: Some(OrderId::new("venue-exit")),
                 venue_status: Some(VenueOrderStatus::Filled),
-                filled_at: Some(Utc::now()),
+                filled_at: Some(exited_at),
                 cancelled_at: None,
                 error_message: None,
                 exit_state: ExitState::Exited,
                 exit_reason: ExitReason::StopLoss,
                 position_exit: Some(PositionExit {
-                    shares: Shares::new(dec!(100)),
+                    shares: Shares::new(ENTRY_FILLED_SHARES),
                     avg_price: Price::new(dec!(0.55)),
-                    proceeds_usd: Usd::new(dec!(55)),
-                    realized_pnl_usd: Usd::new(dec!(-5)),
-                    exited_at: Utc::now(),
+                    proceeds_usd: Usd::new(dec!(22)),
+                    realized_pnl_usd: Usd::new(dec!(-3)),
+                    exited_at,
                     reason: ExitReason::StopLoss,
                 }),
                 fully_exited: true,
                 revert_to_open: false,
-                reconciliation: None,
+                reconciliation: Some(exit_reconciliation_row(
+                    &exit.execution_order_id,
+                    intent_id,
+                    Shares::new(ENTRY_FILLED_SHARES),
+                    Price::new(dec!(0.55)),
+                    exited_at,
+                )),
             },
         )
         .await
@@ -1009,6 +1098,7 @@ pub fn fixture_profile_ref() -> ResearchProfileRef {
 }
 
 pub fn prepared_order(
+    token_id: TokenId,
     side: Side,
     order_type: OrderType,
     venue_amount: VenueOrderAmount,
@@ -1026,7 +1116,7 @@ pub fn prepared_order(
     };
     PreparedVenueOrder {
         profile_ref: fixture_profile_ref(),
-        token_id: TokenId::new("1001"),
+        token_id,
         side,
         order_type,
         post_only: false,
@@ -1063,16 +1153,17 @@ fn new_execution_order(intent_id: &OrderIntentId, ids: &ExecutionTxnIds) -> NewE
         token_id: TokenId::new(&ids.token),
         side: Side::Buy,
         order_type: OrderTypeKind::Fak,
-        price: Price::new(dec!(0.6)),
-        shares: Shares::new(dec!(100)),
+        price: Price::new(ENTRY_PRICE),
+        shares: Shares::new(ENTRY_FILLED_SHARES),
         cost_usd: Usd::new(EXECUTION_NOTIONAL),
         prepared_order_json: prepared_order(
+            TokenId::new(&ids.token),
             Side::Buy,
             OrderType::Fak,
-            VenueOrderAmount::GrossUsd(Usd::new(dec!(24))),
-            Usd::new(dec!(1)),
-            Shares::new(dec!(40)),
-            Price::new(dec!(0.6)),
+            VenueOrderAmount::GrossUsd(Usd::new(ENTRY_GROSS_USD)),
+            Usd::new(ENTRY_FEE_USD),
+            Shares::new(ENTRY_FILLED_SHARES),
+            Price::new(ENTRY_PRICE),
         ),
         venue_order_id: None,
         venue_status: None,
@@ -1085,12 +1176,17 @@ fn new_execution_order(intent_id: &OrderIntentId, ids: &ExecutionTxnIds) -> NewE
     }
 }
 
-fn position_fill(ids: &ExecutionTxnIds, intent_id: &OrderIntentId) -> PositionFill {
+fn position_fill(
+    ids: &ExecutionTxnIds,
+    intent_id: &OrderIntentId,
+    filled_at: DateTime<Utc>,
+) -> PositionFill {
     position_fill_public(
         ids,
         intent_id,
-        Shares::new(dec!(100)),
+        Shares::new(ENTRY_FILLED_SHARES),
         Usd::new(EXECUTION_NOTIONAL),
+        filled_at,
     )
 }
 
@@ -1100,6 +1196,7 @@ pub fn position_fill_public(
     intent_id: &OrderIntentId,
     shares: Shares,
     cost_usd: Usd,
+    filled_at: DateTime<Utc>,
 ) -> PositionFill {
     PositionFill {
         order_intent_id: *intent_id,
@@ -1110,9 +1207,9 @@ pub fn position_fill_public(
         category: MarketCategory::Politics,
         side: OutcomeSide::Yes,
         shares,
-        price: Price::new(dec!(0.6)),
+        price: Price::new(ENTRY_PRICE),
         cost_usd,
-        filled_at: Utc::now(),
+        filled_at,
         source: AccountSource::Polymarket,
     }
 }
@@ -1120,31 +1217,66 @@ pub fn position_fill_public(
 fn reconciliation_row(
     execution_order_id: &ExecutionOrderId,
     intent_id: &OrderIntentId,
+    resolved_at: DateTime<Utc>,
 ) -> NewReconciliation {
     NewReconciliation {
         reconciliation_id: ReconciliationId::from_v7(),
         execution_order_id: *execution_order_id,
         order_intent_id: *intent_id,
-        result: ReconciliationResult::Unresolvable,
+        result: ReconciliationResult::Filled,
         evidence_json: ReconciliationEvidenceChain(vec![ReconciliationEvidence {
             kind: ReconciliationEvidenceKind::ClobOrderStatus,
-            observed_at: Utc::now(),
+            observed_at: resolved_at,
             detail: "submission result".to_owned(),
             venue_ref: None,
-            shares: None,
-            price: None,
+            shares: Some(Shares::new(ENTRY_FILLED_SHARES)),
+            price: Some(Price::new(ENTRY_PRICE)),
             fee_evidence: None,
         }]),
-        venue_filled_shares: None,
-        venue_avg_price: None,
+        venue_filled_shares: Some(Shares::new(ENTRY_FILLED_SHARES)),
+        venue_avg_price: Some(Price::new(ENTRY_PRICE)),
         expected_cash_delta_usd: None,
         venue_cash_delta_usd: None,
         realized_pnl_usd: None,
-        expected_fee_usd: None,
-        observed_fee_usd: None,
-        fee_delta_usd: None,
-        resolved_by: None,
-        resolved_at: None,
+        expected_fee_usd: Some(Usd::new(ENTRY_FEE_USD)),
+        observed_fee_usd: Some(Usd::new(ENTRY_FEE_USD)),
+        fee_delta_usd: Some(Usd::ZERO),
+        resolved_by: Some("venue_submit_response".to_owned()),
+        resolved_at: Some(resolved_at),
+    }
+}
+
+fn exit_reconciliation_row(
+    execution_order_id: &ExecutionOrderId,
+    intent_id: &OrderIntentId,
+    filled_shares: Shares,
+    average_price: Price,
+    resolved_at: DateTime<Utc>,
+) -> NewReconciliation {
+    NewReconciliation {
+        reconciliation_id: ReconciliationId::from_v7(),
+        execution_order_id: *execution_order_id,
+        order_intent_id: *intent_id,
+        result: ReconciliationResult::Filled,
+        evidence_json: ReconciliationEvidenceChain(vec![ReconciliationEvidence {
+            kind: ReconciliationEvidenceKind::ClobOrderStatus,
+            observed_at: resolved_at,
+            detail: "confirmed exit submission result".to_owned(),
+            venue_ref: Some("venue-exit".to_owned()),
+            shares: Some(filled_shares),
+            price: Some(average_price),
+            fee_evidence: None,
+        }]),
+        venue_filled_shares: Some(filled_shares),
+        venue_avg_price: Some(average_price),
+        expected_cash_delta_usd: None,
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: Some(Usd::ZERO),
+        observed_fee_usd: Some(Usd::ZERO),
+        fee_delta_usd: Some(Usd::ZERO),
+        resolved_by: Some("venue_submit_response".to_owned()),
+        resolved_at: Some(resolved_at),
     }
 }
 
@@ -1166,6 +1298,7 @@ fn exit_order(
         shares: Shares::new(shares),
         cost_usd: Shares::new(shares) * Price::new(price),
         prepared_order_json: prepared_order(
+            TokenId::new(&ids.token),
             Side::Sell,
             OrderType::Gtc,
             VenueOrderAmount::Shares(Shares::new(shares)),
@@ -2039,7 +2172,7 @@ fn entry_plan() -> EntryPlan {
 fn sizing_plan() -> SizingPlan {
     SizingPlan {
         suggested_usd: Usd::new(EXECUTION_NOTIONAL),
-        suggested_shares: Shares::new(dec!(100)),
+        suggested_shares: Shares::new(ENTRY_FILLED_SHARES),
         max_usd: Usd::new(dec!(500)),
         min_usd: Usd::new(dec!(10)),
         portfolio_weight_pct: dec!(0.025),

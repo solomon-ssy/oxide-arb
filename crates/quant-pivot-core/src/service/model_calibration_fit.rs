@@ -2,11 +2,12 @@
 //!
 //! Reuses the existing PIT backtest-replay engine
 //! (`BacktestService::run_for_calibration`) to harvest per-sample
-//! `(composite_score, settled_yes, max_adverse_excursion_bps)` triples over an
+//! `(composite_score, token_payout_ratio, max_adverse_excursion_bps)` triples over an
 //! **independent, disjoint + embargoed** `purpose = Calibration` dataset —
 //! never the model's own training spine — then fits a
 //! [`ProbabilityCalibrator`] and persists the unified `CalibrationArtifact`
-//! (`kind = ModelScore`).
+//! (`kind = ModelScore`). The current calibrators are Bernoulli estimators, so
+//! fractional split-payout samples are explicitly excluded rather than coerced.
 
 use std::sync::Arc;
 
@@ -25,12 +26,10 @@ use quant_pivot_models::{
         },
         query::TimeWindow,
     },
-    enums::quant::{
-        CalibrationKind, CalibrationMethod, DatasetPurpose, OutcomeSide, TrainingDatasetStatus,
-    },
+    enums::quant::{CalibrationKind, CalibrationMethod, DatasetPurpose, TrainingDatasetStatus},
     types::{
-        CalibrationArtifactId, DecisionPolicySnapshotId, ModelVersionId, TrainingDatasetId,
-        calibration::ModelScoreCalibrationPayload,
+        CalibrationArtifactId, DecisionPolicySnapshotId, ModelVersionId, PayoutRatio,
+        TrainingDatasetId, calibration::ModelScoreCalibrationPayload,
     },
 };
 use quant_pivot_repository::traits::{
@@ -442,14 +441,23 @@ impl ModelCalibrationFitService {
         fit_window: &TimeWindow,
         samples: &[SampleOutcome],
     ) -> QuantResult<ModelCalibrationFitOutcome> {
+        let binary_samples = samples
+            .iter()
+            .filter(|sample| {
+                sample.token_payout_ratio == PayoutRatio::ZERO
+                    || sample.token_payout_ratio == PayoutRatio::ONE
+            })
+            .collect::<Vec<_>>();
         let min_samples = match request.method {
             CalibrationMethod::Isotonic => policy.min_samples_isotonic,
             CalibrationMethod::Platt => 10,
         };
-        if samples.len() < min_samples {
+        if binary_samples.len() < min_samples {
             return Err(QuantError::from(ResearchError::DatasetBuild {
                 detail: format!(
-                    "calibration split has {} samples, below the {} floor for method `{}`",
+                    "calibration split has {} binary-payout samples ({} total), below the {} floor \
+                     for method `{}`",
+                    binary_samples.len(),
                     samples.len(),
                     min_samples,
                     request.method.as_str()
@@ -457,8 +465,14 @@ impl ModelCalibrationFitService {
             }));
         }
 
-        let scores: Vec<Decimal> = samples.iter().map(|s| s.composite_score.inner()).collect();
-        let outcomes: Vec<bool> = samples.iter().map(sample_won).collect();
+        let scores: Vec<Decimal> = binary_samples
+            .iter()
+            .map(|sample| sample.composite_score.inner())
+            .collect();
+        let outcomes: Vec<bool> = binary_samples
+            .iter()
+            .map(|sample| sample.token_payout_ratio == PayoutRatio::ONE)
+            .collect();
 
         let mapping = match request.method {
             CalibrationMethod::Isotonic => {
@@ -467,7 +481,7 @@ impl ModelCalibrationFitService {
             CalibrationMethod::Platt => PlattCalibrator.fit(&scores, &outcomes)?,
         };
 
-        let reliability_samples: Vec<ReliabilitySample> = samples
+        let reliability_samples: Vec<ReliabilitySample> = binary_samples
             .iter()
             .zip(&outcomes)
             .map(|(sample, &won)| ReliabilitySample {
@@ -481,7 +495,7 @@ impl ModelCalibrationFitService {
 
         let split_hash = calibration_split_hash(
             fit_window,
-            samples
+            binary_samples
                 .iter()
                 .map(|s| (s.market_id.to_string(), s.decision_at)),
         )?;
@@ -498,11 +512,11 @@ impl ModelCalibrationFitService {
         let content_hash = model_score_content_hash(fit_window, &split_hash, &payload)?;
 
         let sample_count =
-            i64::try_from(samples.len()).map_err(|error| ResearchError::DatasetBuild {
+            i64::try_from(binary_samples.len()).map_err(|error| ResearchError::DatasetBuild {
                 detail: format!("calibration sample count exceeds Postgres bigint: {error}"),
             })?;
         let outcome_sample_count =
-            u64::try_from(samples.len()).map_err(|error| ResearchError::DatasetBuild {
+            u64::try_from(binary_samples.len()).map_err(|error| ResearchError::DatasetBuild {
                 detail: format!("calibration sample count exceeds u64: {error}"),
             })?;
         let artifact_id = CalibrationArtifactId::from_v7();
@@ -527,14 +541,5 @@ impl ModelCalibrationFitService {
             artifact_id: Some(artifact_id),
             sample_count: outcome_sample_count,
         })
-    }
-}
-
-/// Whether the bought side won: `Yes` bets win iff `settled_yes`, `No` bets
-/// win iff `!settled_yes`.
-const fn sample_won(sample: &SampleOutcome) -> bool {
-    match sample.outcome_side {
-        OutcomeSide::Yes => sample.settled_yes,
-        OutcomeSide::No => !sample.settled_yes,
     }
 }

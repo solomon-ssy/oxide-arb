@@ -38,13 +38,14 @@ use serde_json::{Error as SerdeJsonError, Value};
 use thiserror::Error;
 pub use validation::validate_runtime_config;
 pub use wire::{
-    AttributionPolicy, CapitalPolicy, ConfidenceSizeCurve, CorrelationConfig, DecimalValue,
-    DrawdownMultiplierPolicy, EmergencyExitKind, EmergencyExitPolicy, EntryOrderPolicy,
-    ExecutionBreakerConfig, ExitMonitorPolicy, ExitSignalReinferencePolicy, FactorWeights,
-    FeatureFamily, FeatureStalenessPolicy, KillSwitchPolicy, MASKED_SECRET, MissingFactorPolicy,
-    ModelVersionRef, NeutralizeDimension, NotificationPolicies, OpportunisticSellPolicy,
-    PortfolioOptimizerConfig, RankLossKind, ReconciliationPolicy, ReportDeliveryPolicy,
-    ScheduleCadence, SizingModelConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
+    CapitalPolicy, ConfidenceSizeCurve, CorrelationConfig, DecimalValue, DrawdownMultiplierPolicy,
+    EmergencyExitKind, EmergencyExitPolicy, EntryOrderPolicy, ExecutionBreakerConfig,
+    ExitMonitorPolicy, ExitSignalReinferencePolicy, FactorWeights, FeatureFamily,
+    FeatureStalenessPolicy, KillSwitchPolicy, MASKED_SECRET, MissingFactorPolicy, ModelVersionRef,
+    NeutralizeDimension, NotificationPolicies, OpportunisticSellPolicy,
+    OutcomeReconciliationPolicy, PortfolioOptimizerConfig, RankLossKind, ReconciliationPolicy,
+    ReportDeliveryPolicy, ScheduleCadence, SizingModelConfig, SmallCrossSectionPolicy,
+    TrainingOptimizerKind,
 };
 
 use crate::{
@@ -157,7 +158,7 @@ pub struct OperationalControl {
     pub schema_version: SchemaVersion,
     pub entry_condition: EntryConditionWorkerConfig,
     pub kill_switch: KillSwitchPolicy,
-    pub attribution: AttributionPolicy,
+    pub outcome_reconciliation: OutcomeReconciliationPolicy,
     pub notifications: NotificationPolicies,
 }
 
@@ -167,7 +168,7 @@ impl Default for OperationalControl {
             schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
             entry_condition: EntryConditionWorkerConfig::default(),
             kill_switch: KillSwitchPolicy::default(),
-            attribution: AttributionPolicy::default(),
+            outcome_reconciliation: OutcomeReconciliationPolicy::default(),
             notifications: NotificationPolicies::default(),
         }
     }

@@ -17,7 +17,8 @@ use crate::{
     clickhouse::{ChDecimal64, ChSchemaVersion, DomainObservationRow},
     entities::quant_domain_source_cursor,
     enums::domain::{DomainFamily, DomainMetric},
-    types::{ContentHash, DomainInstrumentKey, DomainSourceId},
+    hashing::CanonicalDigest,
+    types::{ContentHash, DomainInstrumentKey, DomainSourceId, EvmBlockHash},
 };
 
 /// One normalized external-source metric reading.
@@ -100,6 +101,11 @@ crate::pg_enum! {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum DomainSourceCheckpoint {
+    PolymarketCtfResolution {
+        finalized_block: u64,
+        block_hash: EvmBlockHash,
+        block_time: DateTime<Utc>,
+    },
     BinanceKline {
         close_time: DateTime<Utc>,
     },
@@ -209,6 +215,7 @@ impl DomainSourceCheckpoint {
     #[must_use]
     pub const fn event_time(&self) -> DateTime<Utc> {
         match self {
+            Self::PolymarketCtfResolution { block_time, .. } => *block_time,
             Self::BinanceKline { close_time } => *close_time,
             Self::BinanceAggTrade { event_time, .. } => *event_time,
             Self::ChainlinkDataStreams {
@@ -307,6 +314,27 @@ info_from_model!(
     }
 );
 
+impl DomainSourceCursorInfo {
+    /// Revalidate persisted checkpoint content and status/error semantics.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_cursor_content(
+            &self.checkpoint_json,
+            self.checkpoint_hash,
+            self.status,
+            self.last_error.as_deref(),
+        )
+    }
+}
+
+/// Result of an atomic domain-source cursor compare-and-set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DomainSourceCursorCasOutcome {
+    /// The supplied checkpoint became the durable cursor.
+    Advanced(DomainSourceCursorInfo),
+    /// The expected checkpoint no longer matched; contains the durable winner.
+    Conflict(DomainSourceCursorInfo),
+}
+
 /// Upsert payload for the durable domain-source cursor.
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_domain_source_cursor::ActiveModel")]
@@ -320,6 +348,41 @@ pub struct UpsertDomainSourceCursor {
     /// success so a resolved error never lingers in the read view.
     pub last_error: Option<String>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl UpsertDomainSourceCursor {
+    /// Validate content addressing and the closed status/error shape.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_cursor_content(
+            &self.checkpoint_json,
+            self.checkpoint_hash,
+            self.status,
+            self.last_error.as_deref(),
+        )
+    }
+}
+
+fn validate_cursor_content(
+    checkpoint: &DomainSourceCheckpoint,
+    checkpoint_hash: ContentHash,
+    status: DomainCursorStatus,
+    last_error: Option<&str>,
+) -> Result<(), String> {
+    let expected_hash = CanonicalDigest::content_hash_json(checkpoint)
+        .map_err(|error| format!("failed to hash domain-source checkpoint: {error}"))?;
+    if checkpoint_hash != expected_hash {
+        return Err("domain-source checkpoint hash does not match checkpoint content".to_owned());
+    }
+    match (status, last_error) {
+        (DomainCursorStatus::Failed, Some(detail)) if !detail.trim().is_empty() => Ok(()),
+        (DomainCursorStatus::Failed, _) => {
+            Err("failed domain-source cursor requires a non-empty error".to_owned())
+        }
+        (_, None) => Ok(()),
+        (_, Some(_)) => {
+            Err("non-failed domain-source cursor cannot retain an error detail".to_owned())
+        }
+    }
 }
 
 fn millis_to_utc(timestamp_ms: i64) -> Option<DateTime<Utc>> {

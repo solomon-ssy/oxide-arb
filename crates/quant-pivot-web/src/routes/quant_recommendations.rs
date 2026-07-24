@@ -1,4 +1,4 @@
-//! Recommendation, evidence, and attribution HTTP endpoints.
+//! Recommendation and evidence HTTP endpoints.
 //!
 //! # UI integration contract
 //!
@@ -8,7 +8,6 @@
 //! | GET | `/quant/recommendations/{id}/evidence` | `quant_report:read` | Replay handles |
 //! | GET | `/quant/recommendations/{id}/entry-condition` | `quant_report:read` | Durable condition state and tree |
 //! | GET | `/quant/recommendations/{id}/entry-condition/audits` | `quant_report:read` | WORM condition timeline |
-//! | GET | `/quant/recommendations/{id}/attribution` | `recommendation_attribution:read` | Final WORM attribution |
 //!
 //! Creating an order intent from a recommendation is `POST /api/quant/intents`
 //! (see [`super::quant_intents`]), the governed execution surface.
@@ -24,7 +23,7 @@ use quant_pivot_models::{
         EntryConditionArtifactView, EntryConditionAuditView, EntryConditionDetailView,
         EntryConditionEvaluationView, EntryConditionInstanceSummaryView,
         EntryConditionLeafEvidenceView, EntryConditionSourceCheckpointView, QuantEvidenceView,
-        QuantRecommendationView, RecommendationAttributionView,
+        QuantRecommendationView,
     },
     enums::{
         quant::EntryConditionState,
@@ -55,12 +54,6 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/quant/recommendations/{id}/evidence",
             Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
             evidence,
-        ),
-        spec(
-            Method::GET,
-            "/quant/recommendations/{id}/attribution",
-            Rule::ResourceOp(ResourceType::RecommendationAttribution, Operation::Read),
-            attribution,
         ),
         spec(
             Method::GET,
@@ -306,19 +299,6 @@ pub async fn evidence(
         .await?
         .ok_or_else(|| WebError::NotFound(format!("recommendation not found: {id}")))?;
     Ok(WebResponse::ok(view))
-}
-
-/// `GET /api/quant/recommendations/{id}/attribution` — final WORM attribution.
-pub async fn attribution(
-    state: Data<AppState>,
-    id: Path<RecommendationId>,
-) -> Result<WebResponse<RecommendationAttributionView>, WebError> {
-    let info = state
-        .execution_read
-        .get_recommendation_attribution(&id)
-        .await?
-        .ok_or_else(|| WebError::NotFound(format!("recommendation attribution not found: {id}")))?;
-    Ok(WebResponse::ok(RecommendationAttributionView::from(info)))
 }
 
 #[cfg(test)]

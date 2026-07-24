@@ -1,10 +1,10 @@
 //! `ClickHouse`-backed read repository for quant facts (feature window inputs +
 //! historical point-in-time state).
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity::MARKET_RESOLUTION_EVENT};
 use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, CryptoPriceReportRow,
@@ -14,7 +14,7 @@ use quant_pivot_models::{
     },
     enums::clickhouse::{ChTradeReconciliationStatus, ChTradeTapeSource},
     types::{
-        DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
+        ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
         RecommendationReportId, TokenId,
     },
 };
@@ -28,8 +28,9 @@ use crate::{
         CRYPTO_REPORT_AT, CRYPTO_REPORTS_AVAILABLE, CRYPTO_REPORTS_BETWEEN, DOMAIN_OBSERVATION_AT,
         DOMAIN_OBSERVATIONS_BETWEEN, ENTRY_EVALUATION_LATEST, LAST_TRADES, MICROSTRUCTURE_SERIES,
         MICROSTRUCTURE_WINDOW, MID_PRICE_SERIES, OBSERVED_MARKETS_BETWEEN, REPORT_FUNNEL_COUNT,
-        REPORT_FUNNEL_COUNTS, REPORT_FUNNEL_PAGE, RESOLUTION_AT, RESOLUTIONS_BETWEEN,
-        TRADE_TAPE_WINDOW, WEATHER_FORECASTS_BETWEEN, WEATHER_OBSERVATIONS_BETWEEN,
+        REPORT_FUNNEL_COUNTS, REPORT_FUNNEL_PAGE, RESOLUTION_AT, RESOLUTION_BY_CHECKPOINT,
+        RESOLUTION_BY_MARKET, RESOLUTIONS_BETWEEN, TRADE_TAPE_WINDOW, WEATHER_FORECASTS_BETWEEN,
+        WEATHER_OBSERVATIONS_BETWEEN,
     },
     traits::QuantFactReadRepository,
 };
@@ -45,6 +46,14 @@ impl ChQuantFactReadRepository {
     pub const fn new(pool: Arc<ClickHousePool>) -> Self {
         Self { pool }
     }
+}
+
+fn validate_market_resolution(row: &MarketResolutionRow) -> Result<(), StorageError> {
+    row.validate()
+        .map_err(|error| StorageError::InvariantViolation {
+            entity: Some(MARKET_RESOLUTION_EVENT),
+            detail: error.to_string(),
+        })
 }
 
 #[async_trait]
@@ -568,7 +577,8 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .bind(decision_at_ms)
             .fetch_all::<BookL2LedgerRow>()
             .await?;
-        Ok(rows.into_iter().next())
+        let row = rows.into_iter().next();
+        Ok(row)
     }
 
     async fn book_l2_ledger_from(
@@ -740,19 +750,59 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         let rows = RESOLUTION_AT
             .query(
                 self.pool.client(),
-                "SELECT ?fields FROM market_resolution_event \
+                "SELECT DISTINCT ?fields FROM market_resolution_event \
                  WHERE market_id = ? \
                  AND resolved_at <= fromUnixTimestamp64Milli(?) \
                  AND observed_at <= fromUnixTimestamp64Milli(?) \
-                 ORDER BY resolved_at DESC, observed_at DESC, sequence DESC \
-                 LIMIT 1",
+                 ORDER BY resolved_at DESC, observed_at DESC, source_block_number DESC, \
+                 source_log_index DESC, resolution_fact_hash DESC \
+                 LIMIT 2",
             )
             .bind(market_id.clone())
             .bind(source_cutoff_ms)
             .bind(decision_at_ms)
             .fetch_all::<MarketResolutionRow>()
             .await?;
-        Ok(rows.into_iter().next())
+        validated_unique_resolution(&rows, &format!("market {market_id} at PIT cutoff"))
+    }
+
+    async fn resolution_by_checkpoint(
+        &self,
+        source_checkpoint_hash: &ContentHash,
+    ) -> Result<Option<MarketResolutionRow>, StorageError> {
+        let rows = RESOLUTION_BY_CHECKPOINT
+            .query(
+                self.pool.client(),
+                "SELECT DISTINCT ?fields FROM market_resolution_event \
+                 WHERE source_checkpoint_hash = ? \
+                 ORDER BY resolution_fact_hash \
+                 LIMIT 2",
+            )
+            .bind(*source_checkpoint_hash)
+            .fetch_all::<MarketResolutionRow>()
+            .await?;
+        validated_unique_resolution(
+            &rows,
+            &format!("source checkpoint {source_checkpoint_hash}"),
+        )
+    }
+
+    async fn resolution_by_market(
+        &self,
+        market_id: &MarketId,
+    ) -> Result<Option<MarketResolutionRow>, StorageError> {
+        let rows = RESOLUTION_BY_MARKET
+            .query(
+                self.pool.client(),
+                "SELECT DISTINCT ?fields FROM market_resolution_event \
+                 WHERE market_id = ? \
+                 ORDER BY resolution_fact_hash \
+                 LIMIT 2",
+            )
+            .bind(market_id.clone())
+            .fetch_all::<MarketResolutionRow>()
+            .await?;
+        validated_unique_resolution(&rows, &format!("market {market_id}"))
     }
 
     async fn resolutions_between(
@@ -768,12 +818,13 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         let rows = RESOLUTIONS_BETWEEN
             .query(
                 self.pool.client(),
-                "SELECT ?fields FROM market_resolution_event \
+                "SELECT DISTINCT ?fields FROM market_resolution_event \
                  WHERE market_id IN ? \
                  AND resolved_at >= fromUnixTimestamp64Milli(?) \
                  AND resolved_at <= fromUnixTimestamp64Milli(?) \
                  AND observed_at <= fromUnixTimestamp64Milli(?) \
-                 ORDER BY market_id, resolved_at, observed_at, sequence",
+                 ORDER BY market_id, resolved_at, observed_at, source_block_number, \
+                 source_log_index, resolution_fact_hash",
             )
             .bind(market_ids)
             .bind(from_ms)
@@ -781,6 +832,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .bind(decision_at_ms)
             .fetch_all::<MarketResolutionRow>()
             .await?;
+        validate_unique_resolution_markets(&rows)?;
         Ok(rows)
     }
 
@@ -887,6 +939,49 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .await?;
         Ok(row)
     }
+}
+
+fn validated_unique_resolution(
+    rows: &[MarketResolutionRow],
+    identity: &str,
+) -> Result<Option<MarketResolutionRow>, StorageError> {
+    for row in rows {
+        validate_market_resolution(row)?;
+    }
+    match rows {
+        [] => Ok(None),
+        [row] => Ok(Some(row.clone())),
+        [first, second] => Err(StorageError::invariant_violation(
+            Some(MARKET_RESOLUTION_EVENT),
+            format!(
+                "{identity} binds conflicting resolution facts {} and {}",
+                first.resolution_fact_hash, second.resolution_fact_hash
+            ),
+        )),
+        _ => Err(StorageError::invariant_violation(
+            Some(MARKET_RESOLUTION_EVENT),
+            "bounded exact resolution query returned more than two rows",
+        )),
+    }
+}
+
+fn validate_unique_resolution_markets(rows: &[MarketResolutionRow]) -> Result<(), StorageError> {
+    let mut facts = HashMap::with_capacity(rows.len());
+    for row in rows {
+        validate_market_resolution(row)?;
+        if let Some(existing) = facts.insert(row.market_id.clone(), row.resolution_fact_hash)
+            && existing != row.resolution_fact_hash
+        {
+            return Err(StorageError::invariant_violation(
+                Some(MARKET_RESOLUTION_EVENT),
+                format!(
+                    "market {} binds conflicting resolution facts {} and {}",
+                    row.market_id, existing, row.resolution_fact_hash
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Single-column projection for [`ChQuantFactReadRepository::observed_markets_between`].

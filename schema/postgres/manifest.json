@@ -10319,7 +10319,7 @@
       "nullable": false,
       "ordinal": 1,
       "storage": "p",
-      "table": "quant_recommendation_attribution",
+      "table": "quant_recommendation_execution_outcome",
       "type": "uuid"
     },
     {
@@ -10328,12 +10328,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "outcome",
+      "name": "order_intent_id",
       "nullable": false,
       "ordinal": 2,
       "storage": "p",
-      "table": "quant_recommendation_attribution",
-      "type": "qp_recommendation_attribution_outcome"
+      "table": "quant_recommendation_execution_outcome",
+      "type": "uuid"
     },
     {
       "collation": null,
@@ -10341,12 +10341,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "entry_outcome_json",
+      "name": "entry_execution_order_id",
       "nullable": false,
       "ordinal": 3,
-      "storage": "x",
-      "table": "quant_recommendation_attribution",
-      "type": "jsonb"
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "uuid"
     },
     {
       "collation": null,
@@ -10354,12 +10354,272 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "exit_outcome_json",
+      "name": "entry_reconciliation_id",
       "nullable": false,
       "ordinal": 4,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "position_id",
+      "nullable": true,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_account_id",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "market_id",
+      "nullable": false,
+      "ordinal": 7,
       "storage": "x",
-      "table": "quant_recommendation_attribution",
-      "type": "jsonb"
+      "table": "quant_recommendation_execution_outcome",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "token_id",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "runtime_mode",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "qp_quant_runtime_mode"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "terminal_state",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "qp_recommendation_execution_terminal_state"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "no_fill_reason",
+      "nullable": true,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "qp_recommendation_execution_no_fill_reason"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "entry_order_state",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "qp_execution_order_state"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "requested_shares",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "m",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "numeric(38,18)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "filled_shares",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "m",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "numeric(38,18)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "entry_avg_price",
+      "nullable": true,
+      "ordinal": 15,
+      "storage": "m",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "numeric(20,18)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "entry_fee_usd",
+      "nullable": true,
+      "ordinal": 16,
+      "storage": "m",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "numeric(28,8)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "entry_filled_at",
+      "nullable": true,
+      "ordinal": 17,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "position_terminal_state",
+      "nullable": true,
+      "ordinal": 18,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "qp_position_ledger_state"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "exit_reason",
+      "nullable": true,
+      "ordinal": 19,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "qp_exit_reason"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "exit_filled_shares",
+      "nullable": true,
+      "ordinal": 20,
+      "storage": "m",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "numeric(38,18)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "exit_avg_price",
+      "nullable": true,
+      "ordinal": 21,
+      "storage": "m",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "numeric(20,18)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "exit_fee_usd",
+      "nullable": true,
+      "ordinal": 22,
+      "storage": "m",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "numeric(28,8)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "exit_at",
+      "nullable": true,
+      "ordinal": 23,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "settlement_payout_usd",
+      "nullable": true,
+      "ordinal": 24,
+      "storage": "m",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "numeric(28,8)"
     },
     {
       "collation": null,
@@ -10369,10 +10629,10 @@
       "identity": "",
       "name": "realized_pnl_usd",
       "nullable": true,
-      "ordinal": 5,
+      "ordinal": 25,
       "storage": "m",
-      "table": "quant_recommendation_attribution",
-      "type": "numeric"
+      "table": "quant_recommendation_execution_outcome",
+      "type": "numeric(28,8)"
     },
     {
       "collation": null,
@@ -10382,10 +10642,10 @@
       "identity": "",
       "name": "max_adverse_excursion_bps",
       "nullable": true,
-      "ordinal": 6,
+      "ordinal": 26,
       "storage": "m",
-      "table": "quant_recommendation_attribution",
-      "type": "numeric"
+      "table": "quant_recommendation_execution_outcome",
+      "type": "numeric(10,4)"
     },
     {
       "collation": null,
@@ -10395,10 +10655,10 @@
       "identity": "",
       "name": "max_favorable_excursion_bps",
       "nullable": true,
-      "ordinal": 7,
+      "ordinal": 27,
       "storage": "m",
-      "table": "quant_recommendation_attribution",
-      "type": "numeric"
+      "table": "quant_recommendation_execution_outcome",
+      "type": "numeric(10,4)"
     },
     {
       "collation": null,
@@ -10406,11 +10666,11 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "label_available_at",
-      "nullable": true,
-      "ordinal": 8,
+      "name": "terminal_at",
+      "nullable": false,
+      "ordinal": 28,
       "storage": "p",
-      "table": "quant_recommendation_attribution",
+      "table": "quant_recommendation_execution_outcome",
       "type": "timestamp with time zone"
     },
     {
@@ -10419,12 +10679,77 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "attribution_json",
+      "name": "source_observed_at",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 29,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "available_at",
+      "nullable": false,
+      "ordinal": 30,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_checkpoint_hash",
+      "nullable": false,
+      "ordinal": 31,
       "storage": "x",
-      "table": "quant_recommendation_attribution",
-      "type": "jsonb"
+      "table": "quant_recommendation_execution_outcome",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_fact_hash",
+      "nullable": false,
+      "ordinal": 32,
+      "storage": "x",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "execution_fact_schema_version",
+      "nullable": false,
+      "ordinal": 33,
+      "storage": "p",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "integer"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "outcome_hash",
+      "nullable": false,
+      "ordinal": 34,
+      "storage": "x",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "character varying"
     },
     {
       "collation": null,
@@ -10434,9 +10759,9 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 35,
       "storage": "p",
-      "table": "quant_recommendation_attribution",
+      "table": "quant_recommendation_execution_outcome",
       "type": "timestamp with time zone"
     },
     {
@@ -10801,6 +11126,188 @@
       "ordinal": 28,
       "storage": "p",
       "table": "quant_recommendation_report",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "recommendation_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "market_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "x",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "token_id",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "resolution_kind",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "qp_recommendation_resolution_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "token_payout_ratio",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "m",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "numeric(20,18)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "resolved_at",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_observed_at",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "available_at",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_checkpoint_hash",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "resolution_fact_hash",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "resolution_fact_log_index",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "resolution_fact_schema_version",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "integer"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "outcome_hash",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "x",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "quant_recommendation_resolution_outcome",
       "type": "timestamp with time zone"
     },
     {
@@ -18328,6 +18835,15 @@
     },
     {
       "deferrable": false,
+      "definition": "UNIQUE (execution_order_id, order_intent_id, market_id, token_id)",
+      "initially_deferred": false,
+      "name": "uq_quant_execution_order_execution_outcome_lineage",
+      "table": "quant_execution_order",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK (((char_length(venue_trade_id) >= 1) AND (char_length(venue_trade_id) <= 256) AND ((transaction_hash IS NULL) OR (transaction_hash ~ '^0x[0-9a-f]{64}$'::text)) AND ((trade_status IS NULL) OR (trade_status <> ALL (ARRAY['mined'::qp_venue_trade_status, 'confirmed'::qp_venue_trade_status])) OR (transaction_hash IS NOT NULL))))",
       "initially_deferred": false,
       "name": "ck_quant_execution_trade_ref_identity",
@@ -19147,6 +19663,15 @@
     },
     {
       "deferrable": false,
+      "definition": "UNIQUE (order_intent_id, recommendation_id, execution_account_id, runtime_mode)",
+      "initially_deferred": false,
+      "name": "uq_quant_order_intent_execution_outcome_lineage",
+      "table": "quant_order_intent",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (market_selection_id) REFERENCES quant_market_selection(market_selection_id)",
       "initially_deferred": false,
       "name": "fk-quant_portfolio_plan-market_selection_id",
@@ -19228,6 +19753,15 @@
     },
     {
       "deferrable": false,
+      "definition": "UNIQUE (position_id, order_intent_id, execution_account_id, market_id, token_id)",
+      "initially_deferred": false,
+      "name": "uq_quant_position_execution_outcome_lineage",
+      "table": "quant_position",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "UNIQUE (position_id, order_intent_id, execution_account_id)",
       "initially_deferred": false,
       "name": "uq_quant_position_inventory_lineage",
@@ -19282,10 +19816,109 @@
     },
     {
       "deferrable": false,
+      "definition": "UNIQUE (recommendation_id, market_id, token_id)",
+      "initially_deferred": false,
+      "name": "uq_quant_recommendation_identity",
+      "table": "quant_recommendation",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((char_length(market_id) > 0) AND (char_length(token_id) > 0) AND (runtime_mode = ANY (ARRAY['semi_auto'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode])) AND (requested_shares > (0)::numeric) AND (filled_shares >= (0)::numeric) AND (filled_shares <= requested_shares) AND ((entry_avg_price IS NULL) OR ((entry_avg_price >= (0)::numeric) AND (entry_avg_price <= (1)::numeric))) AND ((exit_avg_price IS NULL) OR ((exit_avg_price >= (0)::numeric) AND (exit_avg_price <= (1)::numeric))) AND ((entry_fee_usd IS NULL) OR (entry_fee_usd >= (0)::numeric)) AND ((exit_fee_usd IS NULL) OR (exit_fee_usd >= (0)::numeric)) AND ((settlement_payout_usd IS NULL) OR (settlement_payout_usd >= (0)::numeric)) AND ((max_adverse_excursion_bps IS NULL) OR (max_adverse_excursion_bps <= (0)::numeric)) AND ((max_favorable_excursion_bps IS NULL) OR (max_favorable_excursion_bps >= (0)::numeric)) AND (terminal_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND (execution_fact_schema_version > 0) AND ((source_checkpoint_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((execution_fact_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((outcome_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND (((terminal_state = 'unfilled'::qp_recommendation_execution_terminal_state) AND (filled_shares = (0)::numeric) AND (no_fill_reason IS NOT NULL) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state])) AND (position_id IS NULL) AND (entry_avg_price IS NULL) AND (entry_filled_at IS NULL) AND (position_terminal_state IS NULL) AND (exit_reason IS NULL) AND (exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL) AND (settlement_payout_usd IS NULL) AND (realized_pnl_usd IS NULL) AND (max_adverse_excursion_bps IS NULL) AND (max_favorable_excursion_bps IS NULL)) OR ((terminal_state = ANY (ARRAY['partially_filled'::qp_recommendation_execution_terminal_state, 'fully_filled'::qp_recommendation_execution_terminal_state])) AND (no_fill_reason IS NULL) AND (position_id IS NOT NULL) AND (entry_avg_price IS NOT NULL) AND (entry_filled_at IS NOT NULL) AND (entry_filled_at <= terminal_at) AND (position_terminal_state = ANY (ARRAY['closed'::qp_position_ledger_state, 'settled'::qp_position_ledger_state])) AND (realized_pnl_usd IS NOT NULL) AND (((terminal_state = 'partially_filled'::qp_recommendation_execution_terminal_state) AND (filled_shares > (0)::numeric) AND (filled_shares < requested_shares) AND (entry_order_state = 'partially_filled'::qp_execution_order_state)) OR ((terminal_state = 'fully_filled'::qp_recommendation_execution_terminal_state) AND (filled_shares = requested_shares) AND (entry_order_state = 'filled'::qp_execution_order_state))) AND (((position_terminal_state = 'closed'::qp_position_ledger_state) AND (exit_reason IS NOT NULL) AND (exit_reason <> 'resolution_redeem'::qp_exit_reason) AND (exit_filled_shares = filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at = terminal_at) AND (settlement_payout_usd IS NULL)) OR ((position_terminal_state = 'settled'::qp_position_ledger_state) AND (exit_reason = 'resolution_redeem'::qp_exit_reason) AND (settlement_payout_usd IS NOT NULL) AND (((exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL)) OR ((exit_filled_shares > (0)::numeric) AND (exit_filled_shares < filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at IS NOT NULL) AND (exit_at <= terminal_at)))))))))",
+      "initially_deferred": false,
+      "name": "ck_quant_recommendation_execution_outcome_contract",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (entry_execution_order_id) REFERENCES quant_execution_order(execution_order_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_execution_outcome-entry_execution_order",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (entry_reconciliation_id) REFERENCES quant_reconciliation(reconciliation_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_execution_outcome-entry_reconciliation_",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (order_intent_id) REFERENCES quant_order_intent(order_intent_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_execution_outcome-order_intent_id",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (position_id) REFERENCES quant_position(position_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_execution_outcome-position_id",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (recommendation_id) REFERENCES quant_recommendation(recommendation_id)",
       "initially_deferred": false,
-      "name": "fk-quant_recommendation_attribution-recommendation_id",
-      "table": "quant_recommendation_attribution",
+      "name": "fk-quant_recommendation_execution_outcome-recommendation_id",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (entry_execution_order_id, order_intent_id, market_id, token_id) REFERENCES quant_execution_order(execution_order_id, order_intent_id, market_id, token_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_recommendation_execution_outcome_entry_order_lineage",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (entry_reconciliation_id, entry_execution_order_id, order_intent_id) REFERENCES quant_reconciliation(reconciliation_id, execution_order_id, order_intent_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_recommendation_execution_outcome_entry_reconciliation_",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (order_intent_id, recommendation_id, execution_account_id, runtime_mode) REFERENCES quant_order_intent(order_intent_id, recommendation_id, execution_account_id, runtime_mode)",
+      "initially_deferred": false,
+      "name": "fk_quant_recommendation_execution_outcome_intent_lineage",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (position_id, order_intent_id, execution_account_id, market_id, token_id) REFERENCES quant_position(position_id, order_intent_id, execution_account_id, market_id, token_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_recommendation_execution_outcome_position_lineage",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recommendation_id, market_id, token_id) REFERENCES quant_recommendation(recommendation_id, market_id, token_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_recommendation_execution_outcome_recommendation_identi",
+      "table": "quant_recommendation_execution_outcome",
       "type": "f",
       "validated": true
     },
@@ -19293,9 +19926,45 @@
       "deferrable": false,
       "definition": "PRIMARY KEY (recommendation_id)",
       "initially_deferred": false,
-      "name": "quant_recommendation_attribution_pkey",
-      "table": "quant_recommendation_attribution",
+      "name": "quant_recommendation_execution_outcome_pkey",
+      "table": "quant_recommendation_execution_outcome",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (entry_execution_order_id)",
+      "initially_deferred": false,
+      "name": "uq_quant_recommendation_execution_outcome_entry_order",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (entry_reconciliation_id)",
+      "initially_deferred": false,
+      "name": "uq_quant_recommendation_execution_outcome_entry_reconciliation",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (order_intent_id)",
+      "initially_deferred": false,
+      "name": "uq_quant_recommendation_execution_outcome_intent",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (position_id)",
+      "initially_deferred": false,
+      "name": "uq_quant_recommendation_execution_outcome_position",
+      "table": "quant_recommendation_execution_outcome",
+      "type": "u",
       "validated": true
     },
     {
@@ -19552,6 +20221,51 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((char_length(market_id) > 0) AND (char_length(token_id) > 0) AND (resolved_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND (resolution_fact_log_index >= 0) AND (resolution_fact_schema_version > 0) AND ((source_checkpoint_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((resolution_fact_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((outcome_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND (token_payout_ratio >= (0)::numeric) AND (token_payout_ratio <= (1)::numeric) AND (((resolution_kind = 'winner_take_all'::qp_recommendation_resolution_kind) AND (token_payout_ratio = ANY (ARRAY[(0)::numeric, (1)::numeric]))) OR ((resolution_kind = 'split_payout'::qp_recommendation_resolution_kind) AND (token_payout_ratio > (0)::numeric) AND (token_payout_ratio < (1)::numeric)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_recommendation_resolution_outcome_contract",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (market_id) REFERENCES market(market_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_resolution_outcome-market_id",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recommendation_id) REFERENCES quant_recommendation(recommendation_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_recommendation_resolution_outcome-recommendation_id",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (recommendation_id, market_id, token_id) REFERENCES quant_recommendation(recommendation_id, market_id, token_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_recommendation_resolution_outcome_identity",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (recommendation_id)",
+      "initially_deferred": false,
+      "name": "quant_recommendation_resolution_outcome_pkey",
+      "table": "quant_recommendation_resolution_outcome",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (execution_order_id) REFERENCES quant_execution_order(execution_order_id)",
       "initially_deferred": false,
       "name": "fk-quant_reconciliation-execution_order_id",
@@ -19575,6 +20289,15 @@
       "name": "quant_reconciliation_pkey",
       "table": "quant_reconciliation",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (reconciliation_id, execution_order_id, order_intent_id)",
+      "initially_deferred": false,
+      "name": "uq_quant_reconciliation_execution_outcome_lineage",
+      "table": "quant_reconciliation",
+      "type": "u",
       "validated": true
     },
     {
@@ -21610,14 +22333,20 @@
     },
     {
       "labels": [
-        "filled_exited",
-        "filled_settled",
-        "expired_unfilled",
-        "superseded_unfilled",
-        "cancelled_unfilled",
-        "failed_unfilled"
+        "venue_rejected",
+        "venue_cancelled",
+        "venue_expired",
+        "reconciled_not_filled"
       ],
-      "name": "qp_recommendation_attribution_outcome"
+      "name": "qp_recommendation_execution_no_fill_reason"
+    },
+    {
+      "labels": [
+        "unfilled",
+        "partially_filled",
+        "fully_filled"
+      ],
+      "name": "qp_recommendation_execution_terminal_state"
     },
     {
       "labels": [
@@ -21632,6 +22361,13 @@
     },
     {
       "labels": [
+        "winner_take_all",
+        "split_payout"
+      ],
+      "name": "qp_recommendation_resolution_kind"
+    },
+    {
+      "labels": [
         "prepared",
         "published",
         "superseded",
@@ -21639,8 +22375,7 @@
         "revoked",
         "expired",
         "intent_created",
-        "executed",
-        "attributed"
+        "executed"
       ],
       "name": "qp_recommendation_status"
     },
@@ -21790,7 +22525,6 @@
         "order_intent",
         "execution_order",
         "position",
-        "recommendation_attribution",
         "reconciliation",
         "settlement_redeem",
         "factor_definition",
@@ -25099,49 +25833,49 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_recommendation_attribution",
+      "object_name": "quant_recommendation_execution_outcome",
       "privilege": "DELETE"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_recommendation_attribution",
+      "object_name": "quant_recommendation_execution_outcome",
       "privilege": "INSERT"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_recommendation_attribution",
+      "object_name": "quant_recommendation_execution_outcome",
       "privilege": "REFERENCES"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_recommendation_attribution",
+      "object_name": "quant_recommendation_execution_outcome",
       "privilege": "SELECT"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_recommendation_attribution",
+      "object_name": "quant_recommendation_execution_outcome",
       "privilege": "TRIGGER"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_recommendation_attribution",
+      "object_name": "quant_recommendation_execution_outcome",
       "privilege": "TRUNCATE"
     },
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
-      "object_name": "quant_recommendation_attribution",
+      "object_name": "quant_recommendation_execution_outcome",
       "privilege": "UPDATE"
     },
     {
@@ -25191,6 +25925,55 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_recommendation_report",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_resolution_outcome",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_resolution_outcome",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_resolution_outcome",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_resolution_outcome",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_resolution_outcome",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_resolution_outcome",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_recommendation_resolution_outcome",
       "privilege": "UPDATE"
     },
     {
@@ -28080,6 +28863,16 @@
       "valid": true
     },
     {
+      "definition": "CREATE UNIQUE INDEX uq_quant_execution_order_execution_outcome_lineage ON public.quant_execution_order USING btree (execution_order_id, order_intent_id, market_id, token_id)",
+      "method": "btree",
+      "name": "uq_quant_execution_order_execution_outcome_lineage",
+      "primary": false,
+      "ready": true,
+      "table": "quant_execution_order",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_execution_trade_ref_order ON public.quant_execution_trade_ref USING btree (execution_order_id)",
       "method": "btree",
       "name": "idx_quant_execution_trade_ref_order",
@@ -28780,6 +29573,16 @@
       "valid": true
     },
     {
+      "definition": "CREATE UNIQUE INDEX uq_quant_order_intent_execution_outcome_lineage ON public.quant_order_intent USING btree (order_intent_id, recommendation_id, execution_account_id, runtime_mode)",
+      "method": "btree",
+      "name": "uq_quant_order_intent_execution_outcome_lineage",
+      "primary": false,
+      "ready": true,
+      "table": "quant_order_intent",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_portfolio_plan_decision_at ON public.quant_portfolio_plan USING btree (decision_at DESC)",
       "method": "btree",
       "name": "idx_quant_portfolio_plan_decision_at",
@@ -28840,6 +29643,16 @@
       "valid": true
     },
     {
+      "definition": "CREATE UNIQUE INDEX uq_quant_position_execution_outcome_lineage ON public.quant_position USING btree (position_id, order_intent_id, execution_account_id, market_id, token_id)",
+      "method": "btree",
+      "name": "uq_quant_position_execution_outcome_lineage",
+      "primary": false,
+      "ready": true,
+      "table": "quant_position",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE UNIQUE INDEX uq_quant_position_intent_account ON public.quant_position USING btree (order_intent_id, execution_account_id)",
       "method": "btree",
       "name": "uq_quant_position_intent_account",
@@ -28870,6 +29683,16 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_recommendation_profile_available_id ON public.quant_recommendation USING btree (research_profile_artifact_id, created_at, recommendation_id)",
+      "method": "btree",
+      "name": "idx_quant_recommendation_profile_available_id",
+      "primary": false,
+      "ready": true,
+      "table": "quant_recommendation",
+      "unique": false,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_recommendation_status_valid_until ON public.quant_recommendation USING btree (status, valid_until)",
       "method": "btree",
       "name": "idx_quant_recommendation_status_valid_until",
@@ -28884,6 +29707,16 @@
       "method": "btree",
       "name": "quant_recommendation_pkey",
       "primary": true,
+      "ready": true,
+      "table": "quant_recommendation",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_recommendation_identity ON public.quant_recommendation USING btree (recommendation_id, market_id, token_id)",
+      "method": "btree",
+      "name": "uq_quant_recommendation_identity",
+      "primary": false,
       "ready": true,
       "table": "quant_recommendation",
       "unique": true,
@@ -28910,12 +29743,62 @@
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX quant_recommendation_attribution_pkey ON public.quant_recommendation_attribution USING btree (recommendation_id)",
+      "definition": "CREATE INDEX idx_quant_recommendation_execution_outcome_available ON public.quant_recommendation_execution_outcome USING btree (available_at, recommendation_id)",
       "method": "btree",
-      "name": "quant_recommendation_attribution_pkey",
+      "name": "idx_quant_recommendation_execution_outcome_available",
+      "primary": false,
+      "ready": true,
+      "table": "quant_recommendation_execution_outcome",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_recommendation_execution_outcome_pkey ON public.quant_recommendation_execution_outcome USING btree (recommendation_id)",
+      "method": "btree",
+      "name": "quant_recommendation_execution_outcome_pkey",
       "primary": true,
       "ready": true,
-      "table": "quant_recommendation_attribution",
+      "table": "quant_recommendation_execution_outcome",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_recommendation_execution_outcome_entry_order ON public.quant_recommendation_execution_outcome USING btree (entry_execution_order_id)",
+      "method": "btree",
+      "name": "uq_quant_recommendation_execution_outcome_entry_order",
+      "primary": false,
+      "ready": true,
+      "table": "quant_recommendation_execution_outcome",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_recommendation_execution_outcome_entry_reconciliation ON public.quant_recommendation_execution_outcome USING btree (entry_reconciliation_id)",
+      "method": "btree",
+      "name": "uq_quant_recommendation_execution_outcome_entry_reconciliation",
+      "primary": false,
+      "ready": true,
+      "table": "quant_recommendation_execution_outcome",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_recommendation_execution_outcome_intent ON public.quant_recommendation_execution_outcome USING btree (order_intent_id)",
+      "method": "btree",
+      "name": "uq_quant_recommendation_execution_outcome_intent",
+      "primary": false,
+      "ready": true,
+      "table": "quant_recommendation_execution_outcome",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_recommendation_execution_outcome_position ON public.quant_recommendation_execution_outcome USING btree (position_id)",
+      "method": "btree",
+      "name": "uq_quant_recommendation_execution_outcome_position",
+      "primary": false,
+      "ready": true,
+      "table": "quant_recommendation_execution_outcome",
       "unique": true,
       "valid": true
     },
@@ -29000,6 +29883,26 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_recommendation_resolution_outcome_available ON public.quant_recommendation_resolution_outcome USING btree (available_at, recommendation_id)",
+      "method": "btree",
+      "name": "idx_quant_recommendation_resolution_outcome_available",
+      "primary": false,
+      "ready": true,
+      "table": "quant_recommendation_resolution_outcome",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_recommendation_resolution_outcome_pkey ON public.quant_recommendation_resolution_outcome USING btree (recommendation_id)",
+      "method": "btree",
+      "name": "quant_recommendation_resolution_outcome_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_recommendation_resolution_outcome",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_reconciliation_result ON public.quant_reconciliation USING btree (result)",
       "method": "btree",
       "name": "idx_quant_reconciliation_result",
@@ -29023,6 +29926,16 @@
       "definition": "CREATE UNIQUE INDEX uq_quant_reconciliation_execution_order ON public.quant_reconciliation USING btree (execution_order_id)",
       "method": "btree",
       "name": "uq_quant_reconciliation_execution_order",
+      "primary": false,
+      "ready": true,
+      "table": "quant_reconciliation",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_reconciliation_execution_outcome_lineage ON public.quant_reconciliation USING btree (reconciliation_id, execution_order_id, order_intent_id)",
+      "method": "btree",
+      "name": "uq_quant_reconciliation_execution_outcome_lineage",
       "primary": false,
       "ready": true,
       "table": "quant_reconciliation",
@@ -30407,7 +31320,7 @@
     },
     {
       "kind": "r",
-      "name": "quant_recommendation_attribution",
+      "name": "quant_recommendation_execution_outcome",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -30415,6 +31328,13 @@
     {
       "kind": "r",
       "name": "quant_recommendation_report",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_recommendation_resolution_outcome",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -30902,10 +31822,16 @@
       "table": "quant_position"
     },
     {
-      "definition": "CREATE TRIGGER trg_quant_recommendation_attribution_append_only BEFORE DELETE OR UPDATE ON public.quant_recommendation_attribution FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "definition": "CREATE TRIGGER trg_quant_recommendation_execution_outcome_append_only BEFORE DELETE OR UPDATE ON public.quant_recommendation_execution_outcome FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
-      "name": "trg_quant_recommendation_attribution_append_only",
-      "table": "quant_recommendation_attribution"
+      "name": "trg_quant_recommendation_execution_outcome_append_only",
+      "table": "quant_recommendation_execution_outcome"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_recommendation_resolution_outcome_append_only BEFORE DELETE OR UPDATE ON public.quant_recommendation_resolution_outcome FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_recommendation_resolution_outcome_append_only",
+      "table": "quant_recommendation_resolution_outcome"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_reconciliation_updated_at BEFORE UPDATE ON public.quant_reconciliation FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",

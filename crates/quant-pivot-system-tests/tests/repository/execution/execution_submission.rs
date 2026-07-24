@@ -2363,6 +2363,7 @@ fn new_execution_order(intent_id: &OrderIntentId, ids: &TxnIds) -> NewExecutionO
         shares: Shares::new(dec!(100)),
         cost_usd: Usd::new(NOTIONAL),
         prepared_order_json: prepared_order(
+            TokenId::new("token-1"),
             Side::Buy,
             OrderType::Gtc,
             VenueOrderAmount::Shares(Shares::new(dec!(100))),
@@ -3341,6 +3342,7 @@ fn exit_order(
         shares: Shares::new(shares),
         cost_usd: Shares::new(shares) * Price::new(price),
         prepared_order_json: prepared_order(
+            TokenId::new("token-1"),
             Side::Sell,
             OrderType::Gtc,
             VenueOrderAmount::Shares(Shares::new(shares)),

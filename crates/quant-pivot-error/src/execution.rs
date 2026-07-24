@@ -59,6 +59,14 @@ pub enum ExecutionError {
     #[error("reconciliation unresolvable: {reason}")]
     ReconciliationUnresolvable { reason: String },
 
+    /// The canonical finalized resolution source could not be read or verified.
+    #[error("outcome reconciliation source failed: {reason}")]
+    OutcomeReconciliationSource { reason: String },
+
+    /// Cross-store outcome source/cursor/fact invariants did not hold.
+    #[error("outcome reconciliation invariant failed: {reason}")]
+    OutcomeReconciliationInvariant { reason: String },
+
     /// Settlement redemption service invariant failed.
     #[error("settlement redeem invariant failed: {reason}")]
     SettlementRedeemInvariant { reason: String },

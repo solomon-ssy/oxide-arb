@@ -13,10 +13,14 @@ use serde::{
     de::{Error as DeError, Visitor},
 };
 
-use crate::types::{Bps, ContentHash, Price, Probability, SchemaVersion, Shares, Usd};
+use crate::types::{
+    Bps, ContentHash, PayoutRatio, PayoutRatioError, Price, Probability, SchemaVersion, Shares, Usd,
+};
 
 const PRICE_SCALE: u32 = 8;
 const MONEY_SCALE: u32 = 18;
+const PAYOUT_RATIO_SCALE: u32 = 18;
+const PAYOUT_RATIO_ONE_SCALED: i128 = 1_000_000_000_000_000_000;
 const BPS_SCALE: u32 = 4;
 const UNIX_EPOCH_FROM_CE_DAYS: i32 = 719_163;
 
@@ -41,6 +45,13 @@ pub struct ChUsd(i128);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChShares(i128);
+
+/// `Decimal(20, 18)` boundary value for a resolved token payout ratio.
+///
+/// Construction and deserialization preserve the domain `0..=1` invariant;
+/// corrupt `ClickHouse` bytes cannot enter a resolution row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChPayoutRatio(i128);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -263,6 +274,28 @@ impl From<Decimal> for ChShares {
     }
 }
 
+impl ChPayoutRatio {
+    #[must_use]
+    pub const fn scaled_i128(self) -> i128 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn is_one(self) -> bool {
+        self.0 == PAYOUT_RATIO_ONE_SCALED
+    }
+
+    pub fn try_to_payout_ratio(self) -> Result<PayoutRatio, PayoutRatioError> {
+        PayoutRatio::try_new(decimal_from_i128(self.0, PAYOUT_RATIO_SCALE))
+    }
+}
+
+impl From<PayoutRatio> for ChPayoutRatio {
+    fn from(value: PayoutRatio) -> Self {
+        Self(decimal_to_i128(value.inner(), PAYOUT_RATIO_SCALE))
+    }
+}
+
 fn serialize_scaled_i128<S: Serializer>(value: i128, serializer: S) -> Result<S::Ok, S::Error> {
     if serializer.is_human_readable() {
         serializer.serialize_str(&value.to_string())
@@ -333,6 +366,25 @@ impl<'de> Deserialize<'de> for ChShares {
     }
 }
 
+impl Serialize for ChPayoutRatio {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serialize_scaled_i128(self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChPayoutRatio {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = deserialize_scaled_i128(deserializer)?;
+        if (0..=PAYOUT_RATIO_ONE_SCALED).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(DeError::custom(format!(
+                "scaled payout ratio must be within 0..={PAYOUT_RATIO_ONE_SCALED}, got {value}"
+            )))
+        }
+    }
+}
+
 impl ChDecimal64 {
     #[must_use]
     pub fn to_decimal(self) -> Decimal {
@@ -396,8 +448,8 @@ mod tests {
     use quant_pivot_error::hashing::CanonicalDigestError;
     use rust_decimal_macros::dec;
 
-    use super::{ChDigest, ChEpochDay, ChPrice, ChSchemaVersion, ChShares, ChUsd};
-    use crate::types::{ContentHash, Price, SchemaVersion, Shares, Usd};
+    use super::{ChDigest, ChEpochDay, ChPayoutRatio, ChPrice, ChSchemaVersion, ChShares, ChUsd};
+    use crate::types::{ContentHash, PayoutRatio, Price, SchemaVersion, Shares, Usd};
 
     #[test]
     fn digest_maps_content_hash_to_fixed_32_bytes() {
@@ -459,6 +511,33 @@ mod tests {
     fn shares_roundtrips_scaled_decimal128() {
         let shares = Shares::new(dec!(1000.000000000000000001));
         assert_eq!(ChShares::from(shares).to_shares(), shares);
+    }
+
+    #[test]
+    fn payout_ratio_roundtrips_decimal128_without_range_drift() {
+        for payout in [
+            PayoutRatio::ZERO,
+            PayoutRatio::try_new(dec!(0.5)).expect("half payout"),
+            PayoutRatio::ONE,
+        ] {
+            assert_eq!(
+                ChPayoutRatio::from(payout)
+                    .try_to_payout_ratio()
+                    .expect("valid ClickHouse payout"),
+                payout
+            );
+        }
+    }
+
+    #[test]
+    fn payout_ratio_clickhouse_wire_rejects_out_of_range_scaled_values() {
+        let encoded = serde_json::to_string(&ChPayoutRatio::from(
+            PayoutRatio::try_new(dec!(0.5)).expect("half payout"),
+        ))
+        .expect("serialize payout");
+        assert_eq!(encoded, r#""500000000000000000""#);
+        assert!(serde_json::from_str::<ChPayoutRatio>(r#""-1""#).is_err());
+        assert!(serde_json::from_str::<ChPayoutRatio>(r#""1000000000000000001""#).is_err());
     }
 
     #[test]

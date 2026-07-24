@@ -390,6 +390,12 @@ validated_token! {
 // ── DomainInstrumentKey canonical constructors ──────────────────────────────
 
 impl DomainInstrumentKey {
+    /// Canonical Polygon Conditional Tokens resolution event stream.
+    #[must_use]
+    pub fn polymarket_ctf_resolution() -> Self {
+        Self::new("POLYMARKET_CTF:137:CONDITION_RESOLUTION")
+    }
+
     /// Canonical key for a Binance kline series: `BINANCE:{symbol}:{interval}`.
     #[must_use]
     pub fn binance_kline(symbol: &BinanceSymbol, interval: KlineInterval) -> Self {
@@ -548,6 +554,7 @@ impl DomainInstrumentKey {
     #[must_use]
     pub fn source_id(&self) -> Option<DomainSourceId> {
         match self.as_str().split_once(':')?.0 {
+            "POLYMARKET_CTF" => Some(DomainSourceId::polymarket_ctf_resolution()),
             "BINANCE" => Some(DomainSourceId::binance()),
             "BINANCE_AGG_TRADE" => Some(DomainSourceId::binance_agg_trade()),
             "BINANCE_USDM_FUTURES" => Some(DomainSourceId::binance_usdm_futures()),

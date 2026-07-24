@@ -1325,7 +1325,7 @@ fn base_observations(
                     &example.market_id,
                     &initial_signal.token_id,
                     boundary,
-                ),
+                )?,
             })
         })
         .collect()
@@ -1447,22 +1447,48 @@ fn resolution_at(
     market_id: &MarketId,
     token_id: &TokenId,
     boundary: &DecisionBoundary,
-) -> Option<PolicyReplayResolution> {
-    page.resolutions
-        .iter()
-        .filter_map(|row| {
-            let resolved_at = DateTime::from_timestamp_millis(row.resolved_at)?;
-            let observed_at = DateTime::from_timestamp_millis(row.observed_at)?;
-            (&row.market_id == market_id
-                && resolved_at <= boundary.knowledge_cutoff()
-                && observed_at <= boundary.decision_at())
-            .then_some(PolicyReplayResolution {
-                winning_token: &row.winning_token_id == token_id,
-                resolved_at,
-                observed_at,
+) -> QuantResult<Option<PolicyReplayResolution>> {
+    let mut selected = None;
+    for row in &page.resolutions {
+        if &row.market_id != market_id {
+            continue;
+        }
+        let resolved_at = DateTime::from_timestamp_millis(row.resolved_at).ok_or_else(|| {
+            methodology(format!(
+                "market resolution `{market_id}` has invalid resolved_at {}",
+                row.resolved_at
+            ))
+        })?;
+        let observed_at = DateTime::from_timestamp_millis(row.observed_at).ok_or_else(|| {
+            methodology(format!(
+                "market resolution `{market_id}` has invalid observed_at {}",
+                row.observed_at
+            ))
+        })?;
+        if resolved_at > boundary.knowledge_cutoff() || observed_at > boundary.decision_at() {
+            continue;
+        }
+        let token_payout_ratio = row.payout_for(token_id).map_err(|error| {
+            methodology(format!(
+                "market resolution `{market_id}` cannot settle token `{token_id}`: {error}"
+            ))
+        })?;
+        let candidate = PolicyReplayResolution {
+            token_payout_ratio,
+            resolved_at,
+            observed_at,
+        };
+        if selected
+            .as_ref()
+            .is_none_or(|current: &PolicyReplayResolution| {
+                (candidate.observed_at, candidate.resolved_at)
+                    > (current.observed_at, current.resolved_at)
             })
-        })
-        .max_by_key(|resolution| (resolution.observed_at, resolution.resolved_at))
+        {
+            selected = Some(candidate);
+        }
+    }
+    Ok(selected)
 }
 
 fn weather_linkage_at<'a>(

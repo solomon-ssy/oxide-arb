@@ -1,0 +1,649 @@
+//! Point-in-time feedback-cohort repository contracts.
+
+use std::collections::HashSet;
+
+use chrono::{DateTime, Duration, Utc};
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
+    clickhouse::{MarketResolutionFactInput, MarketResolutionRow},
+    domain::quant::{
+        ExecutionOutcomeReconciliationResult, FeedbackCohortCandidate, FeedbackCohortCursor,
+        FeedbackCohortPage, FeedbackCohortPageQuery, FeedbackCohortWindow,
+        FeedbackExecutionAttempt, InsertResolutionOutcomeResult, NewReconciliation,
+        RecommendationExecutionOutcomeInfo,
+    },
+    entities::{
+        quant_execution_order::Entity as QuantExecutionOrderEntity,
+        quant_order_intent::{
+            ActiveModel as QuantOrderIntentActiveModel, Entity as QuantOrderIntentEntity,
+        },
+        quant_reconciliation::Entity as QuantReconciliationEntity,
+    },
+    enums::{
+        execution::{ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus},
+        quant::{ExecutionOrderState, FeedbackCohort, OrderIntentStatus},
+    },
+    types::{
+        ContentHash, EventId, EvmBlockHash, EvmTransactionHash, ExecutionOrderId, OrderIntentId,
+        PayoutRatio, RecommendationId, ReconciliationEvidence, ReconciliationEvidenceChain,
+        ReconciliationId, Shares, TokenId, Usd,
+    },
+};
+use quant_pivot_repository::{
+    postgres::{
+        PgFeedbackCohortRepository, PgRecommendationExecutionOutcomeRepository,
+        PgRecommendationResolutionOutcomeRepository,
+    },
+    traits::{
+        FeedbackCohortRepository, RecommendationExecutionOutcomeRepository,
+        RecommendationResolutionOutcomeRepository,
+    },
+};
+use quant_pivot_system_tests::{
+    postgres::setup_pg,
+    support::execution_pg_seed::{
+        ExecutionTxnIds, ReportSeedConfig, SharedDemoInfra, entry_execution_order,
+        fixture_profile_ref, seed_approved_intent, seed_report_fixture, seed_report_on_infra,
+        seed_settlement_report_fixture, seed_shared_demo_infra,
+    },
+};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
+    IntoActiveModel, Statement,
+};
+
+const SCALE_REPORT_COUNT: usize = 11;
+const SCALE_RECOMMENDATIONS_PER_REPORT: usize = 1_000;
+const SCALE_EXPECTED_RECOMMENDATIONS: usize = SCALE_REPORT_COUNT * SCALE_RECOMMENDATIONS_PER_REPORT;
+
+pub async fn candidate_page_is_keyset_ordered_and_cutoff_frozen() {
+    let (pool, _database) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let cutoff = Utc::now();
+    let window = feedback_window(ids.decision_at - Duration::minutes(1), cutoff);
+    let repository = PgFeedbackCohortRepository::new(db);
+
+    let page = repository
+        .list_page(page_query(
+            FeedbackCohort::PolicyEvaluation,
+            window,
+            None,
+            1,
+        ))
+        .await
+        .expect("read first feedback page");
+
+    assert_eq!(page.candidates().len(), 1);
+    assert_eq!(
+        page.candidates()[0].context().recommendation_id(),
+        ids.recommendation
+    );
+    assert_eq!(page.next_cursor(), None);
+}
+
+pub async fn cohort_truth_planes_are_orthogonal_and_submission_exact() {
+    let (pool, _database) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_settlement_report_fixture(&db).await;
+    let resolution_repository = PgRecommendationResolutionOutcomeRepository::new(db.clone());
+    resolution_repository
+        .reconcile_fact(
+            &ids.recommendation,
+            &resolution_fact(
+                &ids,
+                Utc::now() - Duration::minutes(2),
+                Utc::now() - Duration::minutes(1),
+                71,
+            ),
+        )
+        .await
+        .expect("seal visible resolution outcome");
+    let execution = seed_unfilled_execution_outcome(&db, &ids).await;
+    let cutoff = Utc::now();
+    let window_start = ids.decision_at - Duration::minutes(1);
+    let repository = PgFeedbackCohortRepository::new(db.clone());
+
+    let model = only_candidate(
+        &repository
+            .list_page(page_query(
+                FeedbackCohort::ModelLearning,
+                feedback_window(window_start, cutoff),
+                None,
+                10,
+            ))
+            .await
+            .expect("read model-learning plane"),
+    );
+    assert!(model.execution_attempt().is_none());
+    assert!(model.resolution_outcome().is_some());
+    assert!(model.execution_outcome().is_none());
+
+    let execution_candidate = only_candidate(
+        &repository
+            .list_page(page_query(
+                FeedbackCohort::ExecutionLearning,
+                feedback_window(window_start, cutoff),
+                None,
+                10,
+            ))
+            .await
+            .expect("read execution-learning plane"),
+    );
+    assert_eq!(
+        execution_candidate.execution_attempt(),
+        Some(FeedbackExecutionAttempt::Submitted {
+            order_intent_id: execution.order_intent_id,
+            entry_execution_order_id: execution.entry_execution_order_id,
+            submitted_at: execution.submitted_at,
+        })
+    );
+    assert!(execution_candidate.resolution_outcome().is_none());
+    assert_eq!(
+        execution_candidate
+            .execution_outcome()
+            .expect("visible execution outcome")
+            .outcome_hash,
+        execution.outcome.outcome_hash
+    );
+
+    let policy = only_candidate(
+        &repository
+            .list_page(page_query(
+                FeedbackCohort::PolicyEvaluation,
+                feedback_window(window_start, cutoff),
+                None,
+                10,
+            ))
+            .await
+            .expect("read policy-evaluation plane"),
+    );
+    assert!(policy.execution_attempt().is_some());
+    assert!(policy.resolution_outcome().is_some());
+    assert!(policy.execution_outcome().is_some());
+
+    corrupt_execution_outcome_hash(&db, ids.recommendation).await;
+    assert!(
+        repository
+            .list_page(page_query(
+                FeedbackCohort::ModelLearning,
+                feedback_window(window_start, cutoff),
+                None,
+                10,
+            ))
+            .await
+            .is_ok(),
+        "an execution-plane corruption must not block ModelLearning"
+    );
+    assert!(matches!(
+        repository
+            .list_page(page_query(
+                FeedbackCohort::ExecutionLearning,
+                feedback_window(window_start, cutoff),
+                None,
+                10,
+            ))
+            .await
+            .expect_err("consumed execution corruption must fail closed"),
+        StorageError::InvariantViolation { .. }
+    ));
+}
+
+pub async fn cutoff_excludes_late_truth_and_late_candidates_across_pages() {
+    let (pool, _database) = setup_pg().await;
+    let db = pool.connection().clone();
+    let infra = seed_shared_demo_infra(&db).await;
+    let first = seed_feedback_report(&db, &infra, 1).await;
+    let second = seed_feedback_report(&db, &infra, 2).await;
+    let window_start = first.decision_at.min(second.decision_at) - Duration::minutes(1);
+    let cutoff = Utc::now();
+    let repository = PgFeedbackCohortRepository::new(db.clone());
+    let first_page = repository
+        .list_page(page_query(
+            FeedbackCohort::PolicyEvaluation,
+            feedback_window(window_start, cutoff),
+            None,
+            1,
+        ))
+        .await
+        .expect("read first frozen page");
+    let first_candidate = only_candidate(&first_page);
+    let first_cursor = first_page.next_cursor().expect("one remaining candidate");
+    let late_target = if first_candidate.context().recommendation_id() == first.recommendation {
+        &second
+    } else {
+        &first
+    };
+
+    let late_outcome = PgRecommendationResolutionOutcomeRepository::new(db.clone())
+        .reconcile_fact(
+            &late_target.recommendation,
+            &resolution_fact(
+                late_target,
+                cutoff - Duration::minutes(2),
+                cutoff - Duration::minutes(1),
+                72,
+            ),
+        )
+        .await
+        .expect("seal truth after the frozen cutoff");
+    let late_available_at = match late_outcome {
+        InsertResolutionOutcomeResult::Inserted(outcome)
+        | InsertResolutionOutcomeResult::AlreadyPresent(outcome) => outcome.available_at,
+    };
+    assert!(late_available_at > cutoff);
+    let third = seed_feedback_report(&db, &infra, 3).await;
+
+    let old_page = repository
+        .list_page(page_query(
+            FeedbackCohort::ModelLearning,
+            feedback_window(window_start, cutoff),
+            Some(first_cursor),
+            2,
+        ))
+        .await
+        .expect("resume old frozen window");
+    assert_eq!(old_page.candidates().len(), 1);
+    assert_eq!(
+        old_page.candidates()[0].context().recommendation_id(),
+        late_target.recommendation
+    );
+    assert!(old_page.candidates()[0].resolution_outcome().is_none());
+    assert_eq!(old_page.next_cursor(), None);
+
+    let new_cutoff = Utc::now();
+    let new_page = repository
+        .list_page(page_query(
+            FeedbackCohort::ModelLearning,
+            feedback_window(window_start, new_cutoff),
+            Some(first_cursor),
+            2,
+        ))
+        .await
+        .expect("resume under next cycle cutoff");
+    assert_eq!(new_page.candidates().len(), 2);
+    assert!(
+        new_page
+            .candidates()
+            .iter()
+            .find(|candidate| {
+                candidate.context().recommendation_id() == late_target.recommendation
+            })
+            .expect("late-truth recommendation")
+            .resolution_outcome()
+            .is_some()
+    );
+    assert!(
+        new_page
+            .candidates()
+            .iter()
+            .any(|candidate| candidate.context().recommendation_id() == third.recommendation)
+    );
+}
+
+pub async fn keyset_reads_more_than_ten_thousand_without_duplicates() {
+    let (pool, _database) = setup_pg().await;
+    let db = pool.connection().clone();
+    let infra = seed_shared_demo_infra(&db).await;
+    let mut reports = Vec::with_capacity(SCALE_REPORT_COUNT);
+    for ordinal in 0..SCALE_REPORT_COUNT {
+        reports.push(seed_feedback_report(&db, &infra, ordinal + 100).await);
+    }
+    let window_start = reports
+        .iter()
+        .map(|ids| ids.decision_at)
+        .min()
+        .expect("scale reports")
+        - Duration::minutes(1);
+    seed_scale_recommendations(&db, &reports, window_start, Utc::now()).await;
+    let cutoff = Utc::now();
+    let repository = PgFeedbackCohortRepository::new(db);
+    let mut after = None;
+    let mut seen = HashSet::with_capacity(SCALE_EXPECTED_RECOMMENDATIONS);
+    let mut previous = None;
+    let mut page_count = 0_usize;
+
+    loop {
+        let page = repository
+            .list_page(page_query(
+                FeedbackCohort::PolicyEvaluation,
+                feedback_window(window_start, cutoff),
+                after,
+                257,
+            ))
+            .await
+            .expect("read scale keyset page");
+        assert!(!page.candidates().is_empty());
+        assert!(page.candidates().len() <= 257);
+        for candidate in page.candidates() {
+            let cursor = candidate.cursor();
+            if let Some(previous_cursor) = previous {
+                assert!(previous_cursor < cursor);
+            }
+            previous = Some(cursor);
+            assert!(seen.insert(candidate.context().recommendation_id()));
+        }
+        page_count += 1;
+        let Some(next) = page.next_cursor() else {
+            break;
+        };
+        assert_eq!(
+            Some(next),
+            page.candidates()
+                .last()
+                .map(FeedbackCohortCandidate::cursor)
+        );
+        after = Some(next);
+    }
+
+    assert_eq!(seen.len(), SCALE_EXPECTED_RECOMMENDATIONS);
+    assert_eq!(page_count, SCALE_EXPECTED_RECOMMENDATIONS.div_ceil(257));
+}
+
+fn page_query(
+    cohort: FeedbackCohort,
+    window: FeedbackCohortWindow,
+    after: Option<FeedbackCohortCursor>,
+    limit: u32,
+) -> FeedbackCohortPageQuery {
+    FeedbackCohortPageQuery::try_new(cohort, window, after, limit)
+        .expect("valid feedback page query")
+}
+
+fn feedback_window(window_start: DateTime<Utc>, cutoff: DateTime<Utc>) -> FeedbackCohortWindow {
+    FeedbackCohortWindow::try_new(fixture_profile_ref(), window_start, cutoff)
+        .expect("valid feedback window")
+}
+
+fn only_candidate(page: &FeedbackCohortPage) -> FeedbackCohortCandidate {
+    assert_eq!(page.candidates().len(), 1);
+    page.candidates().first().expect("one candidate").clone()
+}
+
+fn hash(seed: char) -> ContentHash {
+    ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("valid hash")
+}
+
+fn resolution_fact(
+    ids: &ExecutionTxnIds,
+    resolved_at: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
+    log_index: u64,
+) -> MarketResolutionRow {
+    MarketResolutionRow::seal(MarketResolutionFactInput {
+        market_id: ids.market.as_str().into(),
+        token_ids: [TokenId::new(&ids.token), TokenId::new("999999")],
+        payout_ratios: [PayoutRatio::ONE, PayoutRatio::ZERO],
+        resolved_at: resolved_at.timestamp_millis(),
+        observed_at: observed_at.timestamp_millis(),
+        source_block_number: 71,
+        source_block_hash: EvmBlockHash::parse(format!("0x{}", "71".repeat(32)))
+            .expect("block hash"),
+        source_transaction_hash: EvmTransactionHash::parse(format!("0x{}", "72".repeat(32)))
+            .expect("transaction hash"),
+        source_log_index: log_index,
+        source_checkpoint_hash: hash('7'),
+    })
+    .expect("sealed resolution fact")
+}
+
+struct UnfilledExecution {
+    order_intent_id: OrderIntentId,
+    entry_execution_order_id: ExecutionOrderId,
+    submitted_at: DateTime<Utc>,
+    outcome: RecommendationExecutionOutcomeInfo,
+}
+
+async fn seed_unfilled_execution_outcome(
+    db: &DatabaseConnection,
+    ids: &ExecutionTxnIds,
+) -> UnfilledExecution {
+    let order_intent_id = seed_approved_intent(db, ids).await;
+    let terminal_at = Utc::now() - Duration::seconds(1);
+    let submitted_at = terminal_at - Duration::seconds(1);
+    let mut order = entry_execution_order(&order_intent_id, ids);
+    order.state = ExecutionOrderState::Failed;
+    order.venue_status = Some(VenueOrderStatus::Rejected);
+    order.submitted_at = Some(submitted_at);
+    order.cancelled_at = Some(terminal_at);
+    let entry_execution_order_id = order.execution_order_id;
+    QuantExecutionOrderEntity::insert(order.into_active_model())
+        .exec(db)
+        .await
+        .expect("persist submitted unfilled entry order");
+    QuantReconciliationEntity::insert(
+        NewReconciliation {
+            reconciliation_id: ReconciliationId::from_v7(),
+            execution_order_id: entry_execution_order_id,
+            order_intent_id,
+            result: ReconciliationResult::NotFilled,
+            evidence_json: ReconciliationEvidenceChain(vec![ReconciliationEvidence {
+                kind: ReconciliationEvidenceKind::ClobOrderStatus,
+                observed_at: terminal_at,
+                detail: "feedback cohort unfilled execution".to_owned(),
+                venue_ref: None,
+                shares: Some(Shares::ZERO),
+                price: None,
+                fee_evidence: None,
+            }]),
+            venue_filled_shares: Some(Shares::ZERO),
+            venue_avg_price: None,
+            expected_cash_delta_usd: None,
+            venue_cash_delta_usd: None,
+            realized_pnl_usd: None,
+            expected_fee_usd: None,
+            observed_fee_usd: Some(Usd::ZERO),
+            fee_delta_usd: None,
+            resolved_by: Some("feedback-cohort-contract".to_owned()),
+            resolved_at: Some(terminal_at),
+        }
+        .into_active_model(),
+    )
+    .exec(db)
+    .await
+    .expect("persist unfilled entry reconciliation");
+    let intent = QuantOrderIntentEntity::find_by_id(order_intent_id)
+        .one(db)
+        .await
+        .expect("read submitted intent")
+        .expect("submitted intent");
+    let mut active: QuantOrderIntentActiveModel = intent.into_active_model();
+    active.status = ActiveValue::Set(OrderIntentStatus::Rejected);
+    active.updated_at = ActiveValue::Set(terminal_at);
+    active.update(db).await.expect("mark intent rejected");
+
+    let outcome = match PgRecommendationExecutionOutcomeRepository::new(db.clone())
+        .reconcile_intent(&order_intent_id)
+        .await
+        .expect("seal unfilled execution outcome")
+    {
+        ExecutionOutcomeReconciliationResult::Inserted(outcome) => outcome,
+        ExecutionOutcomeReconciliationResult::AlreadyPresent(_)
+        | ExecutionOutcomeReconciliationResult::Deferred(_) => {
+            panic!("complete isolated execution source must insert")
+        }
+    };
+    UnfilledExecution {
+        order_intent_id,
+        entry_execution_order_id,
+        submitted_at,
+        outcome,
+    }
+}
+
+async fn corrupt_execution_outcome_hash(
+    db: &DatabaseConnection,
+    recommendation_id: RecommendationId,
+) {
+    db.execute_unprepared(
+        "ALTER TABLE quant_recommendation_execution_outcome \
+         DISABLE TRIGGER trg_quant_recommendation_execution_outcome_append_only",
+    )
+    .await
+    .expect("disable WORM trigger for corruption fixture");
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE quant_recommendation_execution_outcome \
+         SET outcome_hash = $1 WHERE recommendation_id = $2",
+        [hash('f').into(), recommendation_id.into()],
+    ))
+    .await
+    .expect("corrupt execution outcome hash");
+    db.execute_unprepared(
+        "ALTER TABLE quant_recommendation_execution_outcome \
+         ENABLE TRIGGER trg_quant_recommendation_execution_outcome_append_only",
+    )
+    .await
+    .expect("restore WORM trigger");
+}
+
+async fn seed_feedback_report(
+    db: &DatabaseConnection,
+    infra: &SharedDemoInfra,
+    ordinal: usize,
+) -> ExecutionTxnIds {
+    seed_report_on_infra(
+        db,
+        infra,
+        ReportSeedConfig {
+            event_id: format!("feedback-event-{ordinal}"),
+            market_id: format!("0xfeedback-market-{ordinal}"),
+            market_question: format!("Will feedback fixture {ordinal} settle?"),
+            market_slug: format!("feedback-fixture-{ordinal}"),
+            token_id: format!("{}", 80_000 + ordinal),
+            trigger_key: format!("feedback-cohort:{ordinal}"),
+        },
+    )
+    .await
+}
+
+async fn seed_scale_recommendations(
+    db: &DatabaseConnection,
+    reports: &[ExecutionTxnIds],
+    window_start: DateTime<Utc>,
+    cutoff: DateTime<Utc>,
+) {
+    let profile_artifact_id = fixture_profile_ref().artifact_id();
+    let shared_event_id = EventId::new(&reports[0].event);
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r"
+        INSERT INTO market (
+            market_id, event_id, question, slug, description, categories, status,
+            filter_reasons, outcome, yes_token_id, no_token_id, tick_size, neg_risk,
+            start_date, end_date, resolved_at, content_hash, created_at, updated_at
+        )
+        SELECT
+            'feedback-scale-market-' || ordinal,
+            template.event_id,
+            'Feedback scale market ' || ordinal,
+            'feedback-scale-market-' || ordinal,
+            template.description,
+            template.categories,
+            template.status,
+            template.filter_reasons,
+            template.outcome,
+            'feedback-scale-yes-' || ordinal,
+            'feedback-scale-no-' || ordinal,
+            template.tick_size,
+            template.neg_risk,
+            template.start_date,
+            template.end_date,
+            template.resolved_at,
+            template.content_hash,
+            template.created_at,
+            template.updated_at
+        FROM market AS template
+        CROSS JOIN generate_series(2, 1000) AS ordinal
+        WHERE template.market_id = $1
+        ",
+        [reports[0].market.clone().into()],
+    ))
+    .await
+    .expect("seed scale catalog FK rows");
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r"
+        UPDATE quant_recommendation_report
+        SET top_n = 1000
+        WHERE research_profile_artifact_id = $1
+          AND decision_at >= $2
+          AND decision_at <= $3
+        ",
+        [
+            profile_artifact_id.clone().into(),
+            window_start.into(),
+            cutoff.into(),
+        ],
+    ))
+    .await
+    .expect("align scale report cardinality");
+    let result = db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r"
+            WITH templates AS (
+                SELECT recommendation.*
+                FROM quant_recommendation AS recommendation
+                INNER JOIN quant_recommendation_report AS report
+                    ON report.recommendation_report_id =
+                       recommendation.recommendation_report_id
+                WHERE recommendation.research_profile_artifact_id = $1
+                  AND recommendation.rank = 1
+                  AND report.decision_at >= $2
+                  AND report.decision_at <= $3
+            )
+            INSERT INTO quant_recommendation (
+                recommendation_id, research_profile_artifact_id,
+                recommendation_report_id, rank, market_id, event_id, token_id,
+                outcome_side, composite_score, risk_adjusted_score, confidence,
+                expected_return_bps, downside_bps, identity, market_context,
+                rank_before_portfolio, liquidity_score, data_quality_score,
+                model_score_percentile, trade_plan, factor_breakdown, evidence_refs,
+                execution_eligibility, valid_from, valid_until, status, created_at
+            )
+            SELECT
+                md5(template.recommendation_report_id::text || ':' || ordinal)::uuid,
+                template.research_profile_artifact_id,
+                template.recommendation_report_id,
+                ordinal,
+                'feedback-scale-market-' || ordinal,
+                $4,
+                'feedback-scale-yes-' || ordinal,
+                template.outcome_side,
+                template.composite_score,
+                template.risk_adjusted_score,
+                template.confidence,
+                template.expected_return_bps,
+                template.downside_bps,
+                template.identity,
+                template.market_context,
+                ordinal,
+                template.liquidity_score,
+                template.data_quality_score,
+                template.model_score_percentile,
+                template.trade_plan,
+                template.factor_breakdown,
+                template.evidence_refs,
+                template.execution_eligibility,
+                template.valid_from,
+                template.valid_until,
+                template.status,
+                template.created_at
+            FROM templates AS template
+            CROSS JOIN generate_series(2, 1000) AS ordinal
+            ",
+            [
+                profile_artifact_id.into(),
+                window_start.into(),
+                cutoff.into(),
+                shared_event_id.into(),
+            ],
+        ))
+        .await
+        .expect("seed scale recommendations");
+    assert_eq!(
+        usize::try_from(result.rows_affected()).expect("bounded affected rows"),
+        SCALE_REPORT_COUNT * (SCALE_RECOMMENDATIONS_PER_REPORT - 1)
+    );
+}

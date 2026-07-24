@@ -47,7 +47,7 @@ use crate::{
     execution::{
         admission::pit_fee_schedule,
         breaker::ExecutionBreaker,
-        dispatcher::{gtd_expiration_at, order_type_kind},
+        dispatcher::{gtd_expiration_at, order_type_kind, submit_response_resolution},
         exit_monitor::ExitOrderSpec,
         order_client::{PolymarketOrderClient, VenueOrder, VenueOutcome, VenueSubmitResult},
     },
@@ -490,6 +490,9 @@ fn exit_reconciliation_row(
     execution_order: &ExecutionOrderInfo,
     outcome: VenueOutcome,
 ) -> NewReconciliation {
+    let reconciliation_result = outcome.reconciliation_result();
+    let (resolved_by, resolved_at) =
+        submit_response_resolution(reconciliation_result, result.responded_at);
     let detail = format!(
         "exit venue outcome {outcome:?}; order_id={:?}; filled={}",
         result.venue_order_id, result.filled_shares
@@ -507,7 +510,7 @@ fn exit_reconciliation_row(
         reconciliation_id: ReconciliationId::from_v7(),
         execution_order_id: execution_order.execution_order_id,
         order_intent_id: execution_order.order_intent_id,
-        result: outcome.reconciliation_result(),
+        result: reconciliation_result,
         evidence_json: evidence,
         venue_filled_shares: Some(result.filled_shares),
         venue_avg_price: result.avg_fill_price,
@@ -519,7 +522,7 @@ fn exit_reconciliation_row(
         expected_fee_usd: Some(result.expected_fee),
         observed_fee_usd: result.observed_fee,
         fee_delta_usd: result.observed_fee.map(|fee| fee - result.expected_fee),
-        resolved_by: None,
-        resolved_at: None,
+        resolved_by,
+        resolved_at,
     }
 }

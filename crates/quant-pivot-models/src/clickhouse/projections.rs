@@ -4,13 +4,13 @@ use crate::enums::{
     clickhouse::{
         ChCapitalAllocationState, ChExecutionSide, ChFactorDirection, ChFactorValueState,
         ChFeatureSourceKind, ChFeatureValueKind, ChNormalizationSource, ChOutcomeSide,
-        ChPositionLedgerState, ChRecommendationAttributionOutcome,
+        ChPositionLedgerState,
     },
     common::Side,
     execution::{CapitalAllocationState, PositionLedgerState},
     factor::{FactorValueState, NormalizationSource},
     feature::{EvidenceSourceKind, FeatureValueKind},
-    quant::{FactorDirection, OutcomeSide, RecommendationAttributionOutcome},
+    quant::{FactorDirection, OutcomeSide},
 };
 
 impl From<Side> for ChExecutionSide {
@@ -50,19 +50,6 @@ impl From<PositionLedgerState> for ChPositionLedgerState {
             PositionLedgerState::Closing => Self::Closing,
             PositionLedgerState::Closed => Self::Closed,
             PositionLedgerState::Settled => Self::Settled,
-        }
-    }
-}
-
-impl From<RecommendationAttributionOutcome> for ChRecommendationAttributionOutcome {
-    fn from(value: RecommendationAttributionOutcome) -> Self {
-        match value {
-            RecommendationAttributionOutcome::FilledExited => Self::FilledExited,
-            RecommendationAttributionOutcome::FilledSettled => Self::FilledSettled,
-            RecommendationAttributionOutcome::ExpiredUnfilled => Self::ExpiredUnfilled,
-            RecommendationAttributionOutcome::SupersededUnfilled => Self::SupersededUnfilled,
-            RecommendationAttributionOutcome::CancelledUnfilled => Self::CancelledUnfilled,
-            RecommendationAttributionOutcome::FailedUnfilled => Self::FailedUnfilled,
         }
     }
 }

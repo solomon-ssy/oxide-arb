@@ -18,7 +18,7 @@ use crate::{
         pagination::PageRequest,
         quant::{
             EntryConditionArtifactInfo, EntryConditionAuditInfo, EntryConditionInstanceInfo,
-            ExecutionOrderInfo, OrderIntentInfo, PositionInfo, RecommendationAttributionInfo,
+            ExecutionOrderInfo, OrderIntentInfo, PositionInfo,
         },
     },
     enums::{
@@ -29,17 +29,16 @@ use crate::{
         },
         quant::{
             ApprovalStatus, EntryConditionAuditAction, EntryConditionState, ExecutionOrderState,
-            OrderIntentStatus, QuantRuntimeMode, RecommendationAttributionOutcome,
+            OrderIntentStatus, QuantRuntimeMode,
         },
     },
     types::{
-        AttributionDetail, ConditionLeafEvidence, ConditionNodeEvaluation, ConditionTruth,
-        ConditionUnavailableReason, ContentHash, DecisionPolicySnapshotId,
-        EntryConditionArtifactId, EntryConditionArtifactV1, EntryConditionAuditId,
-        EntryConditionInstanceId, EntryConditionNode, EntryOrderSpec, EntryOutcome,
-        ExecutionOrderId, ExitOutcome, ExitPolicySpec, ExitReinferenceObservation, MarketId,
-        ModelVersionId, NextScaleOutProjection, OrderAmount, OrderId, OrderIntentId, PositionId,
-        Price, RecommendationId, ScaleOutState, Shares, TokenId, Usd, UserId,
+        ConditionLeafEvidence, ConditionNodeEvaluation, ConditionTruth, ConditionUnavailableReason,
+        ContentHash, DecisionPolicySnapshotId, EntryConditionArtifactId, EntryConditionArtifactV1,
+        EntryConditionAuditId, EntryConditionInstanceId, EntryConditionNode, EntryOrderSpec,
+        ExecutionOrderId, ExitPolicySpec, ExitReinferenceObservation, MarketId, ModelVersionId,
+        NextScaleOutProjection, OrderAmount, OrderId, OrderIntentId, PositionId, Price,
+        RecommendationId, ScaleOutState, Shares, TokenId, Usd, UserId,
     },
 };
 
@@ -369,8 +368,8 @@ impl From<ExecutionOrderInfo> for ExecutionOrderView {
 /// Read-port aggregate: one position lot with its originating recommendation.
 ///
 /// The lot row (`PositionInfo`) carries only `order_intent_id`; the read path
-/// joins in `recommendation_id` so the operator can deep-link a lot straight to
-/// its recommendation attribution without a second hop through the intent.
+/// joins in `recommendation_id` so the operator can open the originating
+/// recommendation without a second hop through the intent.
 #[derive(Debug, Clone)]
 pub struct PositionSummary {
     pub position: PositionInfo,
@@ -384,7 +383,7 @@ pub struct PositionView {
     pub position_plane: &'static str,
     pub position_id: PositionId,
     pub order_intent_id: OrderIntentId,
-    /// Originating recommendation (attribution deep-link target).
+    /// Originating recommendation.
     pub recommendation_id: RecommendationId,
     pub token_id: TokenId,
     pub market_id: MarketId,
@@ -428,38 +427,6 @@ impl From<PositionSummary> for PositionView {
 pub struct PositionDetailView {
     pub position: PositionView,
     pub exit_monitor_observation: ExitMonitorObservationView,
-}
-
-/// Outbound projection of the final WORM recommendation attribution.
-#[derive(Debug, Clone, Serialize)]
-pub struct RecommendationAttributionView {
-    pub recommendation_id: RecommendationId,
-    pub outcome: RecommendationAttributionOutcome,
-    pub realized_pnl_usd: Option<Usd>,
-    pub max_adverse_excursion_bps: Option<Decimal>,
-    pub max_favorable_excursion_bps: Option<Decimal>,
-    pub label_available_at: Option<DateTime<Utc>>,
-    pub entry_outcome: EntryOutcome,
-    pub exit_outcome: ExitOutcome,
-    pub attribution: AttributionDetail,
-    pub created_at: DateTime<Utc>,
-}
-
-impl From<RecommendationAttributionInfo> for RecommendationAttributionView {
-    fn from(info: RecommendationAttributionInfo) -> Self {
-        Self {
-            recommendation_id: info.recommendation_id,
-            outcome: info.outcome,
-            realized_pnl_usd: info.realized_pnl_usd,
-            max_adverse_excursion_bps: info.max_adverse_excursion_bps,
-            max_favorable_excursion_bps: info.max_favorable_excursion_bps,
-            label_available_at: info.label_available_at,
-            entry_outcome: info.entry_outcome_json,
-            exit_outcome: info.exit_outcome_json,
-            attribution: info.attribution_json,
-            created_at: info.created_at,
-        }
-    }
 }
 
 /// Paginated filter for listing order intents.

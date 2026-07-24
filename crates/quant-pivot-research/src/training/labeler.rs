@@ -3,7 +3,7 @@
 //! Four labels are horizon-dependent (`return_to_horizon`,
 //! `max_favorable_excursion_bps`, `max_adverse_excursion_bps`,
 //! `liquidity_exit_possible`); `settlement_outcome` is horizon-independent and
-//! keys on the authoritative `winning_token_id`. All forward data is pre-fetched
+//! reads the selected token's authoritative payout ratio. All forward data is pre-fetched
 //! into [`LabelBuildInput::forward`]; a labeler never reads a database.
 
 use chrono::{DateTime, Duration, Utc};
@@ -28,7 +28,7 @@ pub const MAX_ADVERSE_EXCURSION_BPS: LabelName =
     LabelName::from_static("max_adverse_excursion_bps");
 /// `liquidity_exit_possible`: whether sufficient exit depth existed in-horizon.
 pub const LIQUIDITY_EXIT_POSSIBLE: LabelName = LabelName::from_static("liquidity_exit_possible");
-/// `settlement_outcome`: terminal `settled_yes` (1.0) / `settled_no` (0.0).
+/// `settlement_outcome`: terminal payout ratio for the selected condition token.
 pub const SETTLEMENT_OUTCOME: LabelName = LabelName::from_static("settlement_outcome");
 pub const POLICY_NET_RETURN_BPS: LabelName = LabelName::from_static("policy_net_return_bps");
 pub const POLICY_NET_POSITIVE: LabelName = LabelName::from_static("policy_net_positive");
@@ -37,12 +37,6 @@ pub const POLICY_EXIT_FILL_RATIO: LabelName = LabelName::from_static("policy_exi
 /// `hold_vs_exit_alpha_bps`: bps advantage of exiting now (simulated fill @ t)
 /// over holding through the lot's terminal outcome.
 pub const HOLD_VS_EXIT_ALPHA_BPS: LabelName = LabelName::from_static("hold_vs_exit_alpha_bps");
-pub const REALIZED_RETURN_BPS: LabelName = LabelName::from_static("realized_return_bps");
-pub const REALIZED_PNL_USD: LabelName = LabelName::from_static("realized_pnl_usd");
-pub const ENTRY_FILLED: LabelName = LabelName::from_static("entry_filled");
-pub const ENTRY_SLIPPAGE_BPS: LabelName = LabelName::from_static("entry_slippage_bps");
-pub const MISSED_RETURN_BPS: LabelName = LabelName::from_static("missed_return_bps");
-pub const RECOMMENDATION_OUTCOME: LabelName = LabelName::from_static("recommendation_outcome");
 
 /// All label names this plane produces, in a stable order (for schema hashing).
 #[must_use]
@@ -73,18 +67,6 @@ pub fn label_names_for_sources(
                 POLICY_EXIT_FILL_RATIO,
             ]);
         }
-    }
-    if sources.contains(&TrainingSampleSource::LiveAttribution) {
-        labels.extend([
-            REALIZED_RETURN_BPS,
-            REALIZED_PNL_USD,
-            ENTRY_FILLED,
-            ENTRY_SLIPPAGE_BPS,
-            MAX_FAVORABLE_EXCURSION_BPS,
-            MAX_ADVERSE_EXCURSION_BPS,
-            MISSED_RETURN_BPS,
-            RECOMMENDATION_OUTCOME,
-        ]);
     }
     if sources.contains(&TrainingSampleSource::ExitDecision) {
         labels.extend([HOLD_VS_EXIT_ALPHA_BPS, LIQUIDITY_EXIT_POSSIBLE]);
@@ -401,7 +383,7 @@ impl Labeler for HoldVsExitProceedsLabeler {
     }
 }
 
-/// `settlement_outcome` labeler (horizon-independent; keys on `winning_token_id`).
+/// `settlement_outcome` labeler (horizon-independent token payout).
 pub struct SettlementOutcomeLabeler;
 
 impl Labeler for SettlementOutcomeLabeler {
@@ -426,15 +408,18 @@ impl Labeler for SettlementOutcomeLabeler {
                 reason: LabelDelayReason::SettlementPending,
             };
         }
-        let settled_yes = resolution.winning_token_id == *input.yes_token_id;
+        let payout = match resolution.payout_for(input.token_id) {
+            Ok(payout) => payout,
+            Err(reason) => {
+                return LabelBuildOutput::Invalid {
+                    detail: format!("invalid market resolution vector: {reason}"),
+                };
+            }
+        };
         LabelBuildOutput::Available(TrainingLabel {
             label_name: self.label_name(),
             horizon_secs: 0,
-            value: if settled_yes {
-                Decimal::ONE
-            } else {
-                Decimal::ZERO
-            },
+            value: payout.inner(),
             is_resolved: true,
             matured_at: resolution.resolved_at,
         })
@@ -448,7 +433,10 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
         domain::market::{BookLevel, BuilderFeeAttribution, MarketFeeSchedule},
-        types::{Bps, ClobMarketInfoVersionId, ContentHash, MarketId, Price, Shares, TokenId, Usd},
+        types::{
+            Bps, ClobMarketInfoVersionId, ContentHash, MarketId, PayoutRatio, Price, Shares,
+            TokenId, Usd,
+        },
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -590,28 +578,32 @@ mod tests {
     }
 
     #[test]
-    fn settlement_keys_on_winning_token() {
+    fn settlement_uses_exact_token_payout_ratio() {
         let market = MarketId::new("m");
-        let yes = TokenId::new("yes");
+        let yes = TokenId::new("101");
+        let no = TokenId::new("202");
+        let half = PayoutRatio::try_new(dec!(0.5)).expect("half payout");
         let resolved = forward(
             Vec::new(),
             120,
             Some(MarketResolution {
-                winning_token_id: yes.clone(),
+                token_ids: vec![yes.clone(), no.clone()],
+                payout_ratios: vec![half, half],
                 resolved_at: at(30),
                 observed_at: at(30),
             }),
         );
         let out = SettlementOutcomeLabeler.build_label(&input(&market, &yes, None, 60, &resolved));
         assert!(
-            matches!(out, LabelBuildOutput::Available(l) if l.value == Decimal::ONE && l.horizon_secs == 0)
+            matches!(out, LabelBuildOutput::Available(l) if l.value == dec!(0.5) && l.horizon_secs == 0)
         );
 
         let pre_as_of = forward(
             Vec::new(),
             120,
             Some(MarketResolution {
-                winning_token_id: yes.clone(),
+                token_ids: vec![yes.clone(), no],
+                payout_ratios: vec![PayoutRatio::ONE, PayoutRatio::ZERO],
                 resolved_at: at(-10),
                 observed_at: at(-5),
             }),

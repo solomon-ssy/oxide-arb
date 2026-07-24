@@ -36,7 +36,7 @@ use quant_pivot_models::{
     domain::{
         api::settlement_redeem::SettlementRedeemListQuery,
         quant::{
-            NewExecutionAccount, PositionInfo,
+            ExecutionOutcomeReconciliationResult, NewExecutionAccount, PositionInfo,
             settlement::{
                 ApproveSettlementAuthorization, BeginSettlementDispatch,
                 NewSettlementChainSubmission, NewSettlementRedeem,
@@ -85,10 +85,10 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, EvmAddress, EvmBlockHash, EvmCalldataHash, EvmCodeHash, EvmTransactionHash,
-        EvmUint256, ExecutionAccountId, MarketId, OrderIntentId, SettlementActionIdempotencyKey,
-        SettlementChainSubmissionId, SettlementEvidenceVersion, SettlementExternalCursorId,
-        SettlementGovernedActionId, SettlementInventoryLotId, SettlementRedeemId, Shares, TokenId,
-        Usd, UserId, WorkerId,
+        EvmUint256, ExecutionAccountId, MarketId, OrderIntentId, Price,
+        SettlementActionIdempotencyKey, SettlementChainSubmissionId, SettlementEvidenceVersion,
+        SettlementExternalCursorId, SettlementGovernedActionId, SettlementInventoryLotId,
+        SettlementRedeemId, Shares, TokenId, Usd, UserId, WorkerId,
         settlement_payload::{
             SettlementBalanceEvidence, SettlementChainReceiptEvidence, SettlementFailureHistory,
             SettlementMinedCallEvidence, SettlementOperatorApprovalReceiptEvidence,
@@ -101,7 +101,7 @@ use quant_pivot_repository::{
     postgres::{
         PgCapitalAllocationRepository, PgEventRepository, PgExecutionAccountRepository,
         PgExecutionSubmissionRepository, PgMarketRepository, PgOrderIntentRepository,
-        PgPositionRepository, PgUserRepository,
+        PgPositionRepository, PgRecommendationExecutionOutcomeRepository, PgUserRepository,
         quant::{
             settlement_governance::PgSettlementGovernanceRepository,
             settlement_redeem::PgSettlementRedeemRepository,
@@ -109,7 +109,8 @@ use quant_pivot_repository::{
     },
     traits::{
         CapitalAllocationRepository, EventRepository, ExecutionAccountRepository, MarketRepository,
-        OrderIntentRepository, PositionRepository, UserRepository,
+        OrderIntentRepository, PositionRepository, RecommendationExecutionOutcomeRepository,
+        UserRepository,
         quant::{
             settlement_governance::{
                 SettlementExternalCursorRepository, SettlementGovernanceRepository,
@@ -123,11 +124,12 @@ use quant_pivot_system_tests::{
     support::{
         catalog_fixtures::{make_event, make_market},
         execution_pg_seed::{
-            enable_entry_admission_for_test, fill_entry_lot, seed_approved_intent,
-            seed_settlement_report_fixture,
+            ENTRY_FILLED_SHARES, enable_entry_admission_for_test, fill_entry_lot, partial_exit_lot,
+            seed_approved_intent, seed_settlement_report_fixture,
         },
     },
 };
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
@@ -135,6 +137,10 @@ use sea_orm::{
 };
 
 const MARKET_ID: &str = "settlement-persistence-market";
+const WINNING_TOKEN_RAW_BALANCE: &str = "40000000";
+const MIXED_WINNING_TOKEN_RAW_BALANCE: &str = "30000000";
+const SETTLEMENT_PAYOUT_USD: Decimal = ENTRY_FILLED_SHARES;
+const MIXED_SETTLEMENT_PAYOUT_USD: Decimal = dec!(30);
 const CURRENT_STANDARD: &str = "0xada100db00ca00073811820692005400218fce1f";
 const CURRENT_STANDARD_CODE_HASH: &str =
     "0x93b965351d01c1a128821ac79fc98a18105daefb46bda0d1e5b52306d713aa4f";
@@ -161,6 +167,15 @@ async fn settlement_confirmation_atomically_closes_accounting_and_enqueues_outbo
     Box::pin(with_postgres_suite(settlement_confirmation_scenario()))
         .await
         .expect("start disposable PostgreSQL settlement confirmation suite");
+}
+
+#[tokio::test]
+async fn partial_exchange_exit_then_resolution_balances_one_execution_outcome() {
+    Box::pin(with_postgres_suite(
+        partial_exchange_then_resolution_scenario(),
+    ))
+    .await
+    .expect("start mixed exchange/settlement outcome suite");
 }
 
 #[tokio::test]
@@ -881,8 +896,8 @@ async fn governed_canary_consumption_scenario() {
 async fn settlement_confirmation_scenario() {
     let (pool, mismatch_database) = setup_pg().await;
     let db = pool.connection().clone();
+    let fixture = prepare_confirmation_fixture(&db).await;
     let confirmed_at = Utc::now();
-    let fixture = prepare_confirmation_fixture(&db, confirmed_at).await;
     let settlement = PgSettlementRedeemRepository::new(db.clone());
     let confirmation_worker = WorkerId::from_v7();
     settlement
@@ -933,8 +948,8 @@ async fn settlement_confirmation_scenario() {
 
     let (pool, _confirmation_container) = setup_pg().await;
     let db = pool.connection().clone();
+    let fixture = prepare_confirmation_fixture(&db).await;
     let confirmed_at = Utc::now();
-    let fixture = prepare_confirmation_fixture(&db, confirmed_at).await;
     let position_repository = PgPositionRepository::new(db.clone());
     let settlement = PgSettlementRedeemRepository::new(db.clone());
     let confirmation_worker = WorkerId::from_v7();
@@ -998,6 +1013,54 @@ async fn settlement_confirmation_scenario() {
     .await;
 }
 
+async fn partial_exchange_then_resolution_scenario() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let fixture = prepare_partial_exchange_confirmation_fixture(&db).await;
+    let confirmed_at = Utc::now();
+    let settlement = PgSettlementRedeemRepository::new(db.clone());
+    let confirmation_worker = WorkerId::from_v7();
+    settlement
+        .claim_next_recovery(
+            &confirmation_worker,
+            confirmed_at,
+            confirmed_at + TimeDelta::seconds(30),
+        )
+        .await
+        .expect("claim mixed confirmation")
+        .expect("mixed confirmation submission is active");
+    let write = build_settlement_confirmation(
+        &fixture.redeem,
+        &fixture.submission,
+        fixture.positions,
+        settlement
+            .list_current_inventory(&fixture.redeem.settlement_redeem_id)
+            .await
+            .expect("load mixed frozen settlement inventory"),
+        fixture.confirmation,
+        confirmed_at,
+        confirmation_worker,
+    )
+    .expect("build mixed settlement accounting command");
+    settlement
+        .confirm(write)
+        .await
+        .expect("confirm mixed exchange/settlement accounting");
+
+    let outcome = PgRecommendationExecutionOutcomeRepository::new(db)
+        .reconcile_intent(&fixture.intent_id)
+        .await
+        .expect("seal mixed execution outcome");
+    let outcome = match outcome {
+        ExecutionOutcomeReconciliationResult::Inserted(outcome) => outcome,
+        other => panic!("expected inserted mixed execution outcome, got {other:?}"),
+    };
+    assert_eq!(outcome.exit_filled_shares, Some(Shares::new(dec!(10))));
+    assert_eq!(outcome.exit_avg_price, Some(Price::new(dec!(0.5))));
+    assert_eq!(outcome.settlement_payout_usd, Some(Usd::new(dec!(30))));
+    assert_eq!(outcome.realized_pnl_usd, Some(Usd::new(dec!(10))));
+}
+
 struct SettlementConfirmationFixture {
     intent_id: OrderIntentId,
     positions: Vec<PositionInfo>,
@@ -1006,9 +1069,29 @@ struct SettlementConfirmationFixture {
     confirmation: VerifiedSettlementConfirmation,
 }
 
-async fn prepare_confirmation_fixture(
+async fn prepare_confirmation_fixture(db: &DatabaseConnection) -> SettlementConfirmationFixture {
+    prepare_confirmation_fixture_for_shape(db, ConfirmationFixtureShape::ResolutionOnly).await
+}
+
+async fn prepare_partial_exchange_confirmation_fixture(
     db: &DatabaseConnection,
-    observed_at: DateTime<Utc>,
+) -> SettlementConfirmationFixture {
+    prepare_confirmation_fixture_for_shape(
+        db,
+        ConfirmationFixtureShape::PartialExchangeThenResolution,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum ConfirmationFixtureShape {
+    ResolutionOnly,
+    PartialExchangeThenResolution,
+}
+
+async fn prepare_confirmation_fixture_for_shape(
+    db: &DatabaseConnection,
+    shape: ConfirmationFixtureShape,
 ) -> SettlementConfirmationFixture {
     seed_execution_accounts(db, &[0x75]).await;
     let ids = seed_settlement_report_fixture(db).await;
@@ -1016,6 +1099,33 @@ async fn prepare_confirmation_fixture(
     let intent_id = seed_approved_intent(db, &ids).await;
     let execution = PgExecutionSubmissionRepository::new(db.clone());
     fill_entry_lot(db, &execution, &ids, &intent_id).await;
+    if matches!(
+        shape,
+        ConfirmationFixtureShape::PartialExchangeThenResolution
+    ) {
+        partial_exit_lot(
+            db,
+            &execution,
+            &ids,
+            &intent_id,
+            Shares::new(dec!(10)),
+            Price::new(dec!(0.5)),
+        )
+        .await;
+    }
+    let observed_at = Utc::now();
+    let (raw_balance, redeem_shares, payout_usd) = match shape {
+        ConfirmationFixtureShape::ResolutionOnly => (
+            WINNING_TOKEN_RAW_BALANCE,
+            Shares::new(ENTRY_FILLED_SHARES),
+            Usd::new(SETTLEMENT_PAYOUT_USD),
+        ),
+        ConfirmationFixtureShape::PartialExchangeThenResolution => (
+            MIXED_WINNING_TOKEN_RAW_BALANCE,
+            Shares::new(MIXED_SETTLEMENT_PAYOUT_USD),
+            Usd::new(MIXED_SETTLEMENT_PAYOUT_USD),
+        ),
+    };
     let position_repository = PgPositionRepository::new(db.clone());
     let market = MarketEntity::find_by_id(MarketId::new(&ids.market))
         .one(db)
@@ -1037,8 +1147,8 @@ async fn prepare_confirmation_fixture(
     new_case.balance_before_json = Some(SettlementBalanceEvidence {
         yes: SettlementTokenBalance {
             token_id: TokenId::new(&ids.token),
-            raw_balance: EvmUint256::parse("100000000").expect("YES raw balance"),
-            shares: Shares::new(dec!(100)),
+            raw_balance: EvmUint256::parse(raw_balance).expect("YES raw balance"),
+            shares: redeem_shares,
         },
         no: SettlementTokenBalance {
             token_id: market.no_token_id.clone(),
@@ -1046,7 +1156,7 @@ async fn prepare_confirmation_fixture(
             shares: Shares::ZERO,
         },
     });
-    new_case.expected_payout_usd = Some(Usd::new(dec!(100)));
+    new_case.expected_payout_usd = Some(payout_usd);
     new_case.attempt_count = 1;
     new_case.submitted_at = Some(observed_at);
     let redeem = insert_case_fixture(db, &settlement, new_case)
@@ -1061,7 +1171,7 @@ async fn prepare_confirmation_fixture(
         .await
         .expect("insert finality-tracked submission");
     let confirmation = VerifiedSettlementConfirmation {
-        receipt: receipt_evidence(&submission, observed_at, Usd::new(dec!(100))),
+        receipt: receipt_evidence(&submission, observed_at, raw_balance, payout_usd),
         balances_after: SettlementBalanceEvidence {
             yes: SettlementTokenBalance {
                 token_id: TokenId::new(&ids.token),
@@ -1074,7 +1184,7 @@ async fn prepare_confirmation_fixture(
                 shares: Shares::ZERO,
             },
         },
-        actual_payout_usd: Usd::new(dec!(100)),
+        actual_payout_usd: payout_usd,
         gas_fee_pol: dec!(0.003),
     };
     SettlementConfirmationFixture {
@@ -1178,7 +1288,10 @@ async fn assert_confirmed_accounting(
     confirmed: &SettlementRedeemInfo,
 ) {
     assert_eq!(confirmed.state, SettlementCaseState::Confirmed);
-    assert_eq!(confirmed.actual_payout_usd, Some(Usd::new(dec!(100))));
+    assert_eq!(
+        confirmed.actual_payout_usd,
+        Some(Usd::new(SETTLEMENT_PAYOUT_USD))
+    );
     let durable_submission = settlement
         .find_submission_by_id(&submission.settlement_chain_submission_id)
         .await
@@ -1204,7 +1317,7 @@ async fn assert_confirmed_accounting(
             .expect("reload closed position")
             .expect("position exists")
             .state,
-        PositionLedgerState::Closed
+        PositionLedgerState::Settled
     );
     assert_eq!(
         PgCapitalAllocationRepository::new(db.clone())
@@ -1224,6 +1337,23 @@ async fn assert_confirmed_accounting(
             .exit_state,
         ExitState::Exited
     );
+    let execution_outcome = PgRecommendationExecutionOutcomeRepository::new(db.clone())
+        .reconcile_intent(intent_id)
+        .await
+        .expect("seal settled execution outcome");
+    let execution_outcome = match execution_outcome {
+        ExecutionOutcomeReconciliationResult::Inserted(outcome) => outcome,
+        other => panic!("expected inserted settled execution outcome, got {other:?}"),
+    };
+    assert_eq!(
+        execution_outcome.position_terminal_state,
+        Some(PositionLedgerState::Settled)
+    );
+    assert_eq!(
+        execution_outcome.settlement_payout_usd,
+        Some(Usd::new(SETTLEMENT_PAYOUT_USD))
+    );
+    assert_eq!(execution_outcome.realized_pnl_usd, Some(Usd::new(dec!(15))));
     assert_eq!(
         QuantDomainEventOutboxEntity::find()
             .all(db)
@@ -1985,8 +2115,9 @@ async fn persist_ready_preflight(
             balance_before: Some(SettlementBalanceEvidence {
                 yes: SettlementTokenBalance {
                     token_id: redeem.yes_token_id.clone(),
-                    raw_balance: EvmUint256::parse("100000000").expect("automatic YES raw balance"),
-                    shares: Shares::new(dec!(100)),
+                    raw_balance: EvmUint256::parse(WINNING_TOKEN_RAW_BALANCE)
+                        .expect("automatic YES raw balance"),
+                    shares: Shares::new(ENTRY_FILLED_SHARES),
                 },
                 no: SettlementTokenBalance {
                     token_id: redeem.no_token_id.clone(),
@@ -1994,7 +2125,7 @@ async fn persist_ready_preflight(
                     shares: Shares::ZERO,
                 },
             }),
-            expected_payout_usd: Some(Usd::new(dec!(100))),
+            expected_payout_usd: Some(Usd::new(SETTLEMENT_PAYOUT_USD)),
             failure_code: None,
             next_attempt_at: None,
             observed_at,
@@ -2391,7 +2522,8 @@ fn payout_vector() -> SettlementPayoutVector {
 fn receipt_evidence(
     submission: &SettlementChainSubmissionInfo,
     observed_at: DateTime<Utc>,
-    payout: Usd,
+    raw_payout: &str,
+    payout_usd: Usd,
 ) -> SettlementReceiptEvidence {
     SettlementReceiptEvidence {
         chain_id: 137,
@@ -2418,8 +2550,8 @@ fn receipt_evidence(
             from: EvmAddress::parse("0x0000000000000000000000000000000000000000")
                 .expect("zero address"),
             to: address(0x75),
-            raw_amount: EvmUint256::parse("100000000").expect("payout raw amount"),
-            amount_usd: payout,
+            raw_amount: EvmUint256::parse(raw_payout).expect("payout raw amount"),
+            amount_usd: payout_usd,
             log_index: 3,
         },
         wrapped_payout: SettlementWrappedPayoutEvidence {
@@ -2429,8 +2561,8 @@ fn receipt_evidence(
             asset: EvmAddress::parse("0x2791bca1f2de4661ed88a30c99a7a9449aa84174")
                 .expect("USDC.e address"),
             to: address(0x75),
-            raw_amount: EvmUint256::parse("100000000").expect("payout raw amount"),
-            amount_usd: payout,
+            raw_amount: EvmUint256::parse(raw_payout).expect("payout raw amount"),
+            amount_usd: payout_usd,
             log_index: 4,
         },
         canonical_checked_at: observed_at,

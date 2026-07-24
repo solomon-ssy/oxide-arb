@@ -20,7 +20,8 @@ pub use domain_event::{
 pub use domain_observation::{
     DomainCursorStatus, DomainCursorStatusEnum, DomainCursorStatusIter,
     DomainCursorStatusParseError, DomainCursorStatusVariant, DomainCursorStatusVariantIter,
-    DomainObservation, DomainSourceCheckpoint, DomainSourceCursorInfo, UpsertDomainSourceCursor,
+    DomainObservation, DomainSourceCheckpoint, DomainSourceCursorCasOutcome,
+    DomainSourceCursorInfo, UpsertDomainSourceCursor,
 };
 pub use domain_source_expectation::{
     AffectedMarketIds, AffectedProfileIds, DomainSourceExpectationDefinition,

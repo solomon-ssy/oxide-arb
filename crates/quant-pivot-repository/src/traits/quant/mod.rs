@@ -1,7 +1,6 @@
 //! Quant-pivot repository traits.
 
 mod account_snapshot;
-mod attribution;
 mod backtest_path_set;
 mod backtest_report;
 mod basis_alert;
@@ -22,6 +21,7 @@ mod fact_read;
 mod factor;
 mod feature;
 mod feature_parity;
+mod feedback_cohort;
 mod governance_audit;
 mod market_linkage;
 mod model;
@@ -30,7 +30,9 @@ mod order_intent;
 mod portfolio_plan;
 mod position;
 mod recommendation;
+mod recommendation_execution_outcome;
 mod recommendation_report;
+mod recommendation_resolution_outcome;
 mod reconciliation;
 mod report_run;
 mod research_job;
@@ -45,7 +47,6 @@ mod trade_policy;
 mod trade_tape_block_cursor;
 
 pub use account_snapshot::AccountSnapshotRepository;
-pub use attribution::AttributionRepository;
 pub use backtest_path_set::BacktestPathSetRepository;
 pub use backtest_report::BacktestReportRepository;
 pub use basis_alert::BasisAlertRepository;
@@ -69,6 +70,7 @@ pub use feature_parity::{
     EnqueueFrozenFeatureParityOutcome, FeatureParityEventRepository, FeatureParityLatchActor,
     FeatureParityRepository, ServingEvidenceRepository,
 };
+pub use feedback_cohort::FeedbackCohortRepository;
 pub use governance_audit::ModelGovernanceAuditRepository;
 pub use market_linkage::MarketLinkageRepository;
 pub use model::ModelRunRepository;
@@ -80,7 +82,9 @@ pub use order_intent::OrderIntentRepository;
 pub use portfolio_plan::PortfolioPlanRepository;
 pub use position::PositionRepository;
 pub use recommendation::RecommendationRepository;
+pub use recommendation_execution_outcome::RecommendationExecutionOutcomeRepository;
 pub use recommendation_report::RecommendationReportRepository;
+pub use recommendation_resolution_outcome::RecommendationResolutionOutcomeRepository;
 pub use reconciliation::ReconciliationRepository;
 pub use report_run::ReportRunRepository;
 pub use research_job::{KindRunningCount, ReclaimOutcome, ResearchJobRepository};

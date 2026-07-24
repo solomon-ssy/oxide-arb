@@ -10,7 +10,7 @@
 //! by event time plus the persisted `ingestion_time` / `sequence` tie-breakers,
 //! so replay is deterministic.
 
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity::MARKET_RESOLUTION_EVENT};
 use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, CryptoPriceReportRow,
@@ -19,7 +19,7 @@ use quant_pivot_models::{
         WeatherForecastFactRow, WeatherObservationFactRow,
     },
     types::{
-        DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
+        ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
         RecommendationReportId, TokenId,
     },
 };
@@ -280,16 +280,42 @@ pub trait QuantFactReadRepository: Send + Sync {
         available_by_ms: i64,
     ) -> Result<Vec<BookL2LedgerRow>, StorageError>;
 
-    /// The latest resolution whose economic timestamp is at or before
+    /// The canonical resolution whose economic timestamp is at or before
     /// `source_cutoff_ms` and whose writer observation is visible by
-    /// `decision_at_ms`, or `None` when no such row exists. Stable
-    /// `resolved_at DESC, observed_at DESC, sequence DESC` tie-break.
+    /// `decision_at_ms`, or `None` when no such row exists. Exact physical
+    /// retries collapse; distinct content for one market fails closed.
     async fn resolution_at(
         &self,
         market_id: &MarketId,
         source_cutoff_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Option<MarketResolutionRow>, StorageError>;
+
+    /// Exact source-checkpoint lookup used to recover a crash after durable
+    /// insert without creating a second `observed_at` identity.
+    async fn resolution_by_checkpoint(
+        &self,
+        _source_checkpoint_hash: &ContentHash,
+    ) -> Result<Option<MarketResolutionRow>, StorageError> {
+        Err(StorageError::invariant_violation(
+            Some(MARKET_RESOLUTION_EVENT),
+            "repository does not implement exact resolution checkpoint lookup",
+        ))
+    }
+
+    /// Exact all-time market lookup for the single canonical resolution truth.
+    ///
+    /// Exact duplicate rows collapse to one result; distinct content for the
+    /// same market is an invariant violation rather than last-write-wins.
+    async fn resolution_by_market(
+        &self,
+        _market_id: &MarketId,
+    ) -> Result<Option<MarketResolutionRow>, StorageError> {
+        Err(StorageError::invariant_violation(
+            Some(MARKET_RESOLUTION_EVENT),
+            "repository does not implement exact resolution market lookup",
+        ))
+    }
 
     /// All settlement events for `market_ids` with `resolved_at` in the inclusive
     /// range `[from_ms, to_ms]` and observed by `decision_at_ms`, ordered by

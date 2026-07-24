@@ -968,17 +968,40 @@ pub fn forward_window(
         let resolved_at = timestamp_millis(row.resolved_at, "resolution resolved_at")?;
         let observed_at = timestamp_millis(row.observed_at, "resolution observed_at")?;
         if resolved_at > as_of {
-            decoded_resolutions.push((row, resolved_at, observed_at));
+            row.validate().map_err(|error| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "market resolution `{}` violates the canonical payout contract: {error}",
+                        row.market_id
+                    ),
+                })
+            })?;
+            let payout_ratios = row
+                .payout_ratios
+                .iter()
+                .copied()
+                .map(|payout| {
+                    payout.try_to_payout_ratio().map_err(|error| {
+                        QuantError::from(ResearchError::DatasetBuild {
+                            detail: format!(
+                                "market resolution `{}` contains an invalid payout: {error}",
+                                row.market_id
+                            ),
+                        })
+                    })
+                })
+                .collect::<QuantResult<Vec<_>>>()?;
+            decoded_resolutions.push(ResearchMarketResolution {
+                token_ids: row.token_ids.clone(),
+                payout_ratios,
+                resolved_at,
+                observed_at,
+            });
         }
     }
     let resolution = decoded_resolutions
         .into_iter()
-        .max_by_key(|(_, resolved_at, observed_at)| (*resolved_at, *observed_at))
-        .map(|(row, resolved_at, observed_at)| ResearchMarketResolution {
-            winning_token_id: row.winning_token_id.clone(),
-            resolved_at,
-            observed_at,
-        });
+        .max_by_key(|resolution| (resolution.resolved_at, resolution.observed_at));
     Ok(ForwardWindow {
         anchor: as_of,
         data_available_until,

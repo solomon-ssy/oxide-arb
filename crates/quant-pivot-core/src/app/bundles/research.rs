@@ -14,14 +14,14 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
     traits::{
-        AttributionRepository, BacktestPathSetRepository, BacktestReportRepository,
-        BasisAlertRepository, CalibrationArtifactRepository, CatalogLedgerRepository,
-        ClobMarketInfoRepository, FactWriter, FactorRepository, FeatureParityRepository,
-        FeatureRepository, MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
+        BacktestPathSetRepository, BacktestReportRepository, BasisAlertRepository,
+        CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
+        FactWriter, FactorRepository, FeatureParityRepository, FeatureRepository,
+        MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
         ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
         ModelRunRepository, PolicyRepository, PositionRepository, QuantFactReadRepository,
-        RecommendationRepository, ShadowComparisonRepository, SourceSliceRepository,
-        TradePolicyRepository, TradeTapeBlockCursorRepository, TrainingDatasetRepository,
+        ShadowComparisonRepository, SourceSliceRepository, TradePolicyRepository,
+        TradeTapeBlockCursorRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -111,10 +111,6 @@ pub struct ResearchBundle {
     pub source_slice_repo: Arc<dyn SourceSliceRepository>,
     /// Governed executable trade-policy catalog.
     pub trade_policy_repo: Arc<dyn TradePolicyRepository>,
-    /// Final attribution rows available for supervised live samples.
-    pub attribution_repo: Arc<dyn AttributionRepository>,
-    /// Recommendation rows carrying frozen evidence refs for live attribution samples.
-    pub recommendation_repo: Arc<dyn RecommendationRepository>,
     /// Append-only backtest-report ledger persistence.
     pub backtest_report_repo: Arc<dyn BacktestReportRepository>,
     /// Append-only CPCV + trial-grid path-set ledger persistence.
@@ -156,8 +152,6 @@ pub struct ResearchBundle {
 
 struct OfflineResearchRepos {
     training_dataset: Arc<dyn TrainingDatasetRepository>,
-    attribution: Arc<dyn AttributionRepository>,
-    recommendation: Arc<dyn RecommendationRepository>,
     backtest_report: Arc<dyn BacktestReportRepository>,
     backtest_path_set: Arc<dyn BacktestPathSetRepository>,
     comparison_report: Arc<dyn ModelComparisonReportRepository>,
@@ -305,8 +299,6 @@ impl ResearchBundle {
             training_dataset_repo: offline.training_dataset,
             source_slice_repo: Arc::clone(&repos.source_slice) as Arc<dyn SourceSliceRepository>,
             trade_policy_repo: Arc::clone(&repos.trade_policy) as Arc<dyn TradePolicyRepository>,
-            attribution_repo: offline.attribution,
-            recommendation_repo: offline.recommendation,
             backtest_report_repo: offline.backtest_report,
             backtest_path_set_repo: Arc::clone(&offline.backtest_path_set),
             comparison_report_repo: offline.comparison_report,
@@ -346,10 +338,6 @@ impl ResearchBundle {
                 market_repo: Arc::clone(&self.market_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
                 dataset_repo: Arc::clone(&self.training_dataset_repo),
-                attribution_repo: Arc::clone(&self.attribution_repo),
-                recommendation_repo: Arc::clone(&self.recommendation_repo),
-                feature_repo: Arc::clone(&self.feature_repo),
-                selection_repo: Arc::clone(&self.market_selection_repo),
                 position_repo: Arc::clone(&self.position_repo),
                 clob_market_info_repo: Arc::clone(&self.clob_market_info_repo),
                 linkage_repo: Arc::clone(&self.market_linkage_repo),
@@ -392,8 +380,6 @@ impl ResearchBundle {
         OfflineResearchRepos {
             training_dataset: Arc::clone(&repos.training_dataset)
                 as Arc<dyn TrainingDatasetRepository>,
-            attribution: Arc::clone(&repos.attribution) as Arc<dyn AttributionRepository>,
-            recommendation: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
             backtest_report: Arc::clone(&repos.backtest_report)
                 as Arc<dyn BacktestReportRepository>,
             backtest_path_set: Arc::clone(&repos.backtest_path_set)

@@ -800,12 +800,12 @@
     {
       "name": "market_resolution_event",
       "engine": "MergeTree",
-      "engine_full": "MergeTree PARTITION BY toYYYYMM(resolved_date) ORDER BY (market_id, resolved_at, observed_at, sequence) SETTINGS index_granularity = 8192",
+      "engine_full": "MergeTree PARTITION BY toYYYYMM(resolved_date) ORDER BY (market_id, resolved_at, observed_at, source_block_number, source_log_index, resolution_fact_hash) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "partition_key": "toYYYYMM(resolved_date)",
-      "sorting_key": "market_id, resolved_at, observed_at, sequence",
-      "primary_key": "market_id, resolved_at, observed_at, sequence",
+      "sorting_key": "market_id, resolved_at, observed_at, source_block_number, source_log_index, resolution_fact_hash",
+      "primary_key": "market_id, resolved_at, observed_at, source_block_number, source_log_index, resolution_fact_hash",
       "sampling_key": "",
-      "create_table_query": "CREATE TABLE market_resolution_event (`market_id` String, `winning_token_id` String, `winning_outcome` String, `asset_token_ids` Array(String), `resolved_at` DateTime64(3, 'UTC'), `observed_at` DateTime64(3, 'UTC'), `source` Enum8('WsSnapshot' = 1, 'WsDelta' = 2, 'WsBbo' = 3, 'WsTickSize' = 4, 'WsLastTrade' = 5, 'WsMarketResolved' = 6, 'QuantPipeline' = 7, 'Execution' = 8, 'WsShardStatus' = 9), `sequence` UInt64, `schema_version` UInt32, `resolved_date` Date MATERIALIZED toDate(resolved_at)) ENGINE = MergeTree PARTITION BY toYYYYMM(resolved_date) ORDER BY (market_id, resolved_at, observed_at, sequence) SETTINGS index_granularity = 8192",
+      "create_table_query": "CREATE TABLE market_resolution_event (`market_id` String, `token_ids` Array(String), `payout_ratios` Array(Decimal(20, 18)), `resolved_at` DateTime64(3, 'UTC'), `observed_at` DateTime64(3, 'UTC'), `source` Enum8('WsSnapshot' = 1, 'WsDelta' = 2, 'WsBbo' = 3, 'WsTickSize' = 4, 'WsLastTrade' = 5, 'ResolutionReconciliation' = 6, 'QuantPipeline' = 7, 'Execution' = 8, 'WsShardStatus' = 9), `source_block_number` UInt64, `source_block_hash` String, `source_transaction_hash` String, `source_log_index` UInt64, `source_checkpoint_hash` String, `resolution_fact_hash` String, `schema_version` UInt32, `resolved_date` Date MATERIALIZED toDate(resolved_at)) ENGINE = MergeTree PARTITION BY toYYYYMM(resolved_date) ORDER BY (market_id, resolved_at, observed_at, source_block_number, source_log_index, resolution_fact_hash) SETTINGS non_replicated_deduplication_window = 10000, index_granularity = 8192",
       "columns": [
         {
           "position": 1,
@@ -817,30 +817,22 @@
         },
         {
           "position": 2,
-          "name": "winning_token_id",
-          "column_type": "String",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 3,
-          "name": "winning_outcome",
-          "column_type": "String",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 4,
-          "name": "asset_token_ids",
+          "name": "token_ids",
           "column_type": "Array(String)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
-          "position": 5,
+          "position": 3,
+          "name": "payout_ratios",
+          "column_type": "Array(Decimal(20, 18))",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 4,
           "name": "resolved_at",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -848,7 +840,7 @@
           "compression_codec": ""
         },
         {
-          "position": 6,
+          "position": 5,
           "name": "observed_at",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",
@@ -856,23 +848,63 @@
           "compression_codec": ""
         },
         {
-          "position": 7,
+          "position": 6,
           "name": "source",
-          "column_type": "Enum8('WsSnapshot' = 1, 'WsDelta' = 2, 'WsBbo' = 3, 'WsTickSize' = 4, 'WsLastTrade' = 5, 'WsMarketResolved' = 6, 'QuantPipeline' = 7, 'Execution' = 8, 'WsShardStatus' = 9)",
+          "column_type": "Enum8('WsSnapshot' = 1, 'WsDelta' = 2, 'WsBbo' = 3, 'WsTickSize' = 4, 'WsLastTrade' = 5, 'ResolutionReconciliation' = 6, 'QuantPipeline' = 7, 'Execution' = 8, 'WsShardStatus' = 9)",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
-          "position": 8,
-          "name": "sequence",
+          "position": 7,
+          "name": "source_block_number",
           "column_type": "UInt64",
           "default_kind": "",
           "default_expression": "",
           "compression_codec": ""
         },
         {
+          "position": 8,
+          "name": "source_block_hash",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
           "position": 9,
+          "name": "source_transaction_hash",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 10,
+          "name": "source_log_index",
+          "column_type": "UInt64",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 11,
+          "name": "source_checkpoint_hash",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 12,
+          "name": "resolution_fact_hash",
+          "column_type": "String",
+          "default_kind": "",
+          "default_expression": "",
+          "compression_codec": ""
+        },
+        {
+          "position": 13,
           "name": "schema_version",
           "column_type": "UInt32",
           "default_kind": "",
@@ -880,7 +912,7 @@
           "compression_codec": ""
         },
         {
-          "position": 10,
+          "position": 14,
           "name": "resolved_date",
           "column_type": "Date",
           "default_kind": "MATERIALIZED",
@@ -3069,82 +3101,6 @@
         },
         {
           "position": 13,
-          "name": "ingestion_time",
-          "column_type": "DateTime64(3, 'UTC')",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        }
-      ]
-    },
-    {
-      "name": "quant_recommendation_attribution_event",
-      "engine": "MergeTree",
-      "engine_full": "MergeTree ORDER BY (recommendation_id, event_time, ingestion_time) SETTINGS index_granularity = 8192",
-      "partition_key": "",
-      "sorting_key": "recommendation_id, event_time, ingestion_time",
-      "primary_key": "recommendation_id, event_time, ingestion_time",
-      "sampling_key": "",
-      "create_table_query": "CREATE TABLE quant_recommendation_attribution_event (`event_time` DateTime64(3, 'UTC'), `recommendation_id` String, `outcome` Enum8('filled_exited' = 1, 'filled_settled' = 2, 'expired_unfilled' = 3, 'cancelled_unfilled' = 4, 'failed_unfilled' = 5, 'superseded_unfilled' = 6), `realized_pnl_usd` Decimal(38, 18), `max_adverse_excursion_bps` Nullable(Decimal(18, 8)), `max_favorable_excursion_bps` Decimal(18, 8), `label_available_at` DateTime64(3, 'UTC'), `ingestion_time` DateTime64(3, 'UTC')) ENGINE = MergeTree ORDER BY (recommendation_id, event_time, ingestion_time) SETTINGS index_granularity = 8192",
-      "columns": [
-        {
-          "position": 1,
-          "name": "event_time",
-          "column_type": "DateTime64(3, 'UTC')",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 2,
-          "name": "recommendation_id",
-          "column_type": "String",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 3,
-          "name": "outcome",
-          "column_type": "Enum8('filled_exited' = 1, 'filled_settled' = 2, 'expired_unfilled' = 3, 'cancelled_unfilled' = 4, 'failed_unfilled' = 5, 'superseded_unfilled' = 6)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 4,
-          "name": "realized_pnl_usd",
-          "column_type": "Decimal(38, 18)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 5,
-          "name": "max_adverse_excursion_bps",
-          "column_type": "Nullable(Decimal(18, 8))",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 6,
-          "name": "max_favorable_excursion_bps",
-          "column_type": "Decimal(18, 8)",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 7,
-          "name": "label_available_at",
-          "column_type": "DateTime64(3, 'UTC')",
-          "default_kind": "",
-          "default_expression": "",
-          "compression_codec": ""
-        },
-        {
-          "position": 8,
           "name": "ingestion_time",
           "column_type": "DateTime64(3, 'UTC')",
           "default_kind": "",

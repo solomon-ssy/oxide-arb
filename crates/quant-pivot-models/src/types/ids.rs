@@ -102,6 +102,12 @@ pub struct ReportScheduleId(Arc<str>);
 pub struct DiagnosticCode(Arc<str>);
 
 impl DomainSourceId {
+    /// Finalized Polygon Conditional Tokens resolution source.
+    #[must_use]
+    pub fn polymarket_ctf_resolution() -> Self {
+        Self::new("polymarket_ctf_resolution")
+    }
+
     /// Internal finalized Polymarket settlement accounting source.
     #[must_use]
     pub fn polymarket_settlement() -> Self {

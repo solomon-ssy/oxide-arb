@@ -1070,21 +1070,43 @@ pub enum QpQuantRuntimeMode {
 #[sea_orm(
     rs_type = "Enum",
     db_type = "Enum",
-    enum_name = "qp_recommendation_attribution_outcome"
+    enum_name = "qp_recommendation_execution_no_fill_reason"
 )]
-pub enum QpRecommendationAttributionOutcome {
-    #[sea_orm(string_value = "filled_exited")]
-    FilledExited,
-    #[sea_orm(string_value = "filled_settled")]
-    FilledSettled,
-    #[sea_orm(string_value = "expired_unfilled")]
-    ExpiredUnfilled,
-    #[sea_orm(string_value = "superseded_unfilled")]
-    SupersededUnfilled,
-    #[sea_orm(string_value = "cancelled_unfilled")]
-    CancelledUnfilled,
-    #[sea_orm(string_value = "failed_unfilled")]
-    FailedUnfilled,
+pub enum QpRecommendationExecutionNoFillReason {
+    #[sea_orm(string_value = "venue_rejected")]
+    VenueRejected,
+    #[sea_orm(string_value = "venue_cancelled")]
+    VenueCancelled,
+    #[sea_orm(string_value = "venue_expired")]
+    VenueExpired,
+    #[sea_orm(string_value = "reconciled_not_filled")]
+    ReconciledNotFilled,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_recommendation_execution_terminal_state"
+)]
+pub enum QpRecommendationExecutionTerminalState {
+    #[sea_orm(string_value = "unfilled")]
+    Unfilled,
+    #[sea_orm(string_value = "partially_filled")]
+    PartiallyFilled,
+    #[sea_orm(string_value = "fully_filled")]
+    FullyFilled,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_recommendation_resolution_kind"
+)]
+pub enum QpRecommendationResolutionKind {
+    #[sea_orm(string_value = "winner_take_all")]
+    WinnerTakeAll,
+    #[sea_orm(string_value = "split_payout")]
+    SplitPayout,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
@@ -1129,8 +1151,6 @@ pub enum QpRecommendationStatus {
     IntentCreated,
     #[sea_orm(string_value = "executed")]
     Executed,
-    #[sea_orm(string_value = "attributed")]
-    Attributed,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
@@ -1395,8 +1415,6 @@ pub enum QpResourceType {
     ExecutionOrder,
     #[sea_orm(string_value = "position")]
     Position,
-    #[sea_orm(string_value = "recommendation_attribution")]
-    RecommendationAttribution,
     #[sea_orm(string_value = "reconciliation")]
     Reconciliation,
     #[sea_orm(string_value = "settlement_redeem")]

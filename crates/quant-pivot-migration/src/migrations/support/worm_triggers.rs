@@ -243,8 +243,14 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::SetUpdatedAt,
     },
     TriggerSpec {
-        name: "trg_quant_recommendation_attribution_append_only",
-        table: "quant_recommendation_attribution",
+        name: "trg_quant_recommendation_execution_outcome_append_only",
+        table: "quant_recommendation_execution_outcome",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_recommendation_resolution_outcome_append_only",
+        table: "quant_recommendation_resolution_outcome",
         events: TriggerEvents::DeleteOrUpdate,
         program: TriggerProgram::DenyWrite,
     },

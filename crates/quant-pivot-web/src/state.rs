@@ -119,7 +119,7 @@ pub struct AppState {
     pub order_intents: Arc<dyn OrderIntentPort>,
     /// Recommendation-owned condition state and WORM audit timeline.
     pub entry_conditions: Arc<dyn EntryConditionRepository>,
-    /// Execution order, position, and attribution read API.
+    /// Execution-order and position read API.
     pub execution_read: Arc<dyn ExecutionReadPort>,
     /// Live settlement deployment truth and governed authorization mutations.
     pub settlement_control: Arc<dyn SettlementControlPort>,

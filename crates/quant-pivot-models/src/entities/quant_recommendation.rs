@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    event, market, quant_order_intent, quant_recommendation_attribution,
-    quant_recommendation_report, research_profile_artifact,
+    event, market, quant_order_intent, quant_recommendation_report,
+    quant_recommendation_resolution_outcome, research_profile_artifact,
 };
 use crate::{
     enums::quant::{OutcomeSide, RecommendationStatus},
@@ -86,8 +86,8 @@ pub struct Model {
     pub event: BelongsTo<event::Entity>,
     #[sea_orm(has_many, relation_enum = "OrderIntent")]
     pub order_intent: HasMany<quant_order_intent::Entity>,
-    #[sea_orm(has_one, relation_enum = "Attribution")]
-    pub attribution: HasOne<quant_recommendation_attribution::Entity>,
+    #[sea_orm(has_one, relation_enum = "ResolutionOutcome")]
+    pub resolution_outcome: HasOne<quant_recommendation_resolution_outcome::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

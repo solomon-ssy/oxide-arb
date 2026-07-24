@@ -22,8 +22,8 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storag
 use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChDecimal64, ChDigest,
-        ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow, MarketResolutionRow,
-        MidPriceBucketRow, TradeTapeRow,
+        ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow, MarketResolutionFactInput,
+        MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
     },
     domain::{
         data_plane::{DecisionBoundary, DecisionSource},
@@ -48,9 +48,7 @@ use quant_pivot_models::{
         catalog::{
             CatalogChangeType, CatalogFilterReasonSet, CatalogSyncKind, CatalogTimestampQuality,
         },
-        clickhouse::{
-            ChCanonicalBookEventType, ChFactSource, ChStreamSessionEndReason, ChStreamSessionState,
-        },
+        clickhouse::{ChCanonicalBookEventType, ChStreamSessionEndReason, ChStreamSessionState},
         common::{CategorySet, MarketCategory, TickSize},
         domain::{
             BinanceMarketSegment, DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole,
@@ -71,21 +69,19 @@ use quant_pivot_models::{
         ArtifactUri, BinanceSymbol, CatalogEventChangeId, CatalogEventObjectId,
         CatalogMarketChangeId, CatalogMarketObjectId, CatalogSyncBatchId, ContentHash, CryptoAsset,
         CryptoQuote, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage, DatasetManifest,
-        DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId, EventId, MarketId,
-        ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, Price, Probability,
-        ResolverVersion, SchemaVersion, Shares, TokenId, TrainingDatasetId, TrainingHorizonsSecs,
-        TrainingSampleSource, TrainingSampleSources, Usd, default_sample_sources,
-        model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
-        stable_name::FeatureName,
+        DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId, EventId, EvmBlockHash,
+        EvmTransactionHash, MarketId, ModelInputContract, ModelSpecId, ModelTrainingContract,
+        ModelVersionId, PayoutRatio, Price, Probability, ResolverVersion, SchemaVersion, Shares,
+        TokenId, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSource,
+        TrainingSampleSources, Usd, default_sample_sources, model_metrics::ModelVersionMetrics,
+        model_training::ModelTrainingObjective, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgAttributionRepository, PgCalibrationArtifactRepository, PgCatalogLedgerRepository,
-        PgClobMarketInfoRepository, PgFeatureRepository, PgMarketLinkageRepository,
-        PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
-        PgPositionRepository, PgRecommendationRepository, PgTradePolicyRepository,
-        PgTrainingDatasetRepository,
+        PgCalibrationArtifactRepository, PgCatalogLedgerRepository, PgClobMarketInfoRepository,
+        PgMarketLinkageRepository, PgMarketRepository, PgModelRegistryRepository,
+        PgPositionRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
         CatalogLedgerRepository, MarketLinkageRepository, ModelRegistryRepository,
@@ -121,10 +117,39 @@ use uuid::Uuid;
 
 const EVENT_ID: &str = "evt-dataset-e2e";
 const MARKET_ID: &str = "0xdatasete2e";
-const YES_TOKEN: &str = "dataset-yes";
-const NO_TOKEN: &str = "dataset-no";
+const YES_TOKEN: &str = "101";
+const NO_TOKEN: &str = "202";
 
 const SETTLEMENT_LABEL: LabelName = LabelName::from_static("settlement_outcome");
+
+fn resolution_row(
+    payout_ratios: [PayoutRatio; 2],
+    resolved_at: i64,
+    observed_at: i64,
+    source_byte: u8,
+) -> MarketResolutionRow {
+    MarketResolutionRow::seal(MarketResolutionFactInput {
+        market_id: MarketId::new(MARKET_ID),
+        token_ids: [TokenId::new(YES_TOKEN), TokenId::new(NO_TOKEN)],
+        payout_ratios,
+        resolved_at,
+        observed_at,
+        source_block_number: u64::from(source_byte),
+        source_block_hash: EvmBlockHash::parse(format!(
+            "0x{}",
+            format!("{source_byte:02x}").repeat(32)
+        ))
+        .expect("resolution block hash"),
+        source_transaction_hash: EvmTransactionHash::parse(format!(
+            "0x{}",
+            format!("{:02x}", source_byte.saturating_add(64)).repeat(32)
+        ))
+        .expect("resolution transaction hash"),
+        source_log_index: u64::from(source_byte),
+        source_checkpoint_hash: ContentHash::from_bytes([source_byte; 32]),
+    })
+    .expect("sealed resolution row")
+}
 
 async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotId {
     bootstrap_default_policy_bundle(db, "dataset-e2e", "dataset e2e").await
@@ -375,7 +400,15 @@ impl QuantFactReadRepository for ControllableFactRead {
                 .filter(|row| {
                     row.resolved_at <= source_cutoff_ms && row.observed_at <= decision_at_ms
                 })
-                .max_by_key(|row| (row.resolved_at, row.observed_at, row.sequence))
+                .max_by_key(|row| {
+                    (
+                        row.resolved_at,
+                        row.observed_at,
+                        row.source_block_number,
+                        row.source_log_index,
+                        row.resolution_fact_hash,
+                    )
+                })
                 .cloned()
         }))
     }
@@ -987,10 +1020,6 @@ fn service_with_selection_and_linkage(
             market_repo: Arc::new(PgMarketRepository::new(db.clone())),
             artifact_store: store,
             dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
-            attribution_repo: Arc::new(PgAttributionRepository::new(db.clone())),
-            recommendation_repo: Arc::new(PgRecommendationRepository::new(db.clone())),
-            feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
-            selection_repo: Arc::new(PgMarketSelectionRepository::new(db.clone())),
             position_repo: Arc::new(PgPositionRepository::new(db.clone())),
             clob_market_info_repo: Arc::new(PgClobMarketInfoRepository::new(db.clone())),
             linkage_repo,
@@ -1738,17 +1767,15 @@ pub async fn settlement_label_available_after_resolution() {
     let mut fact = pit_scenario(as_of_ms);
     fact.resolutions.insert(
         MarketId::new(MARKET_ID),
-        vec![MarketResolutionRow {
-            market_id: MarketId::new(MARKET_ID),
-            winning_token_id: TokenId::new(YES_TOKEN),
-            winning_outcome: "Yes".to_owned(),
-            asset_token_ids: vec![TokenId::new(YES_TOKEN), TokenId::new(NO_TOKEN)],
-            resolved_at: as_of_ms + 30_000,
-            observed_at: as_of_ms + 30_000,
-            sequence: 1,
-            source: ChFactSource::WsMarketResolved,
-            schema_version: ChSchemaVersion::FIRST,
-        }],
+        vec![resolution_row(
+            [
+                PayoutRatio::try_new(Decimal::new(5, 1)).expect("half payout"),
+                PayoutRatio::try_new(Decimal::new(5, 1)).expect("half payout"),
+            ],
+            as_of_ms + 30_000,
+            as_of_ms + 30_000,
+            1,
+        )],
     );
     let scenario = Arc::new(Mutex::new(fact));
     let store = temp_artifact_store();
@@ -1762,12 +1789,11 @@ pub async fn settlement_label_available_after_resolution() {
     let artifact = svc.build(plan).await.expect("build");
     assert!(
         artifact.examples.iter().any(|example| {
-            example
-                .labels
-                .iter()
-                .any(|label| label.label_name == SETTLEMENT_LABEL)
+            example.labels.iter().any(|label| {
+                label.label_name == SETTLEMENT_LABEL && label.value == Decimal::new(5, 1)
+            })
         }),
-        "expected settlement label after resolution is visible in forward window"
+        "expected exact split-payout label after resolution is visible in forward window"
     );
 }
 
@@ -1934,17 +1960,12 @@ pub async fn settlement_label_visible_without_micro_past_resolution() {
         )]),
         resolutions: HashMap::from([(
             MarketId::new(MARKET_ID),
-            vec![MarketResolutionRow {
-                market_id: MarketId::new(MARKET_ID),
-                winning_token_id: TokenId::new(YES_TOKEN),
-                winning_outcome: "Yes".to_owned(),
-                asset_token_ids: vec![TokenId::new(YES_TOKEN), TokenId::new(NO_TOKEN)],
-                resolved_at: as_of_ms + 30_000,
-                observed_at: as_of_ms + 30_000,
-                sequence: 1,
-                source: ChFactSource::WsMarketResolved,
-                schema_version: ChSchemaVersion::FIRST,
-            }],
+            vec![resolution_row(
+                [PayoutRatio::ONE, PayoutRatio::ZERO],
+                as_of_ms + 30_000,
+                as_of_ms + 30_000,
+                2,
+            )],
         )]),
         domain_observations: HashMap::new(),
     };
@@ -2106,11 +2127,9 @@ pub async fn plan_count_respects_sample_sources() {
 
     let default_count = svc
         .count_planned_samples(&default_plan)
-        .await
         .expect("default count");
     let historical_count = svc
         .count_planned_samples(&historical_only_plan)
-        .await
         .expect("historical count");
 
     assert_eq!(

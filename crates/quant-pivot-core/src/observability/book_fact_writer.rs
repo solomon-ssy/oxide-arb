@@ -6,7 +6,7 @@ use chrono::Utc;
 use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChBps, ChDecimal64, ChDigest,
-        ChPrice, ChSchemaVersion, ChShares, ChUsd, MarketResolutionRow,
+        ChPrice, ChSchemaVersion, ChShares, ChUsd,
     },
     domain::{
         data_plane::pipeline::{BookSnapshotCmd, IngressTrace, PriceDeltaCmd},
@@ -14,8 +14,8 @@ use quant_pivot_models::{
     },
     enums::{
         clickhouse::{
-            ChBookEventType, ChCanonicalBookEventType, ChFactSource, ChLedgerTradeSide,
-            ChStreamSessionEndReason, ChStreamSessionState,
+            ChBookEventType, ChCanonicalBookEventType, ChLedgerTradeSide, ChStreamSessionEndReason,
+            ChStreamSessionState,
         },
         common::{Side, TickSize},
     },
@@ -34,7 +34,6 @@ pub struct BookFactWriter {
     ledger: LedgerPersistenceHandle,
     sessions: Arc<DurableWriter<BookStreamSessionRow>>,
     microstructure_1s: Arc<AsyncWriter<BookMicrostructureRow>>,
-    resolutions: Arc<AsyncWriter<MarketResolutionRow>>,
 }
 
 /// Partition-owned one-second telemetry accumulator for one token.
@@ -59,13 +58,11 @@ impl BookFactWriter {
         ledger: LedgerPersistenceHandle,
         session_writer: Arc<DurableWriter<BookStreamSessionRow>>,
         microstructure_1s_writer: Arc<AsyncWriter<BookMicrostructureRow>>,
-        resolution_writer: Arc<AsyncWriter<MarketResolutionRow>>,
     ) -> Self {
         Self {
             ledger,
             sessions: session_writer,
             microstructure_1s: microstructure_1s_writer,
-            resolutions: resolution_writer,
         }
     }
 
@@ -177,34 +174,6 @@ impl BookFactWriter {
         ledger_row.trade_size = fact.trade_size.map(ChShares::from);
         ledger_row.fee_rate_bps = fact.fee_rate_bps.map(ChBps::from);
         seal_ledger_row(ledger_row)
-    }
-
-    /// Append the authoritative settlement event to the typed
-    /// `market_resolution_event` fact — the single point-in-time settlement truth
-    /// source consumed by training labels, backtest realized `PnL`, and historical
-    /// market-status resolution. The settlement key is `winning_token_id`
-    /// (label-agnostic); `winning_outcome` is informational only.
-    pub fn write_market_resolved(
-        &self,
-        market_id: &MarketId,
-        winning_token_id: &TokenId,
-        winning_outcome: &str,
-        asset_ids: &[TokenId],
-        timestamp_ms: u64,
-    ) {
-        let resolved_at = i64::try_from(timestamp_ms).unwrap_or(i64::MAX);
-        let observed_at = Utc::now().timestamp_millis();
-        self.resolutions.write(MarketResolutionRow {
-            market_id: market_id.clone(),
-            winning_token_id: winning_token_id.clone(),
-            winning_outcome: winning_outcome.to_owned(),
-            asset_token_ids: asset_ids.to_vec(),
-            resolved_at,
-            observed_at,
-            sequence: timestamp_ms,
-            source: ChFactSource::WsMarketResolved,
-            schema_version: ChSchemaVersion::FIRST,
-        });
     }
 
     pub async fn write_stream_session_open(

@@ -16,7 +16,9 @@
 //! Steps:
 //!
 //! 1. Enumerate markets observed in the fit window (`observed_markets_between`).
-//! 2. Load their settlements and reduce each market to its terminal resolution.
+//! 2. Load their settlements and reduce each market to its terminal resolution;
+//!    fractional split payouts are excluded because this estimator's Wilson
+//!    interval is a Bernoulli contract.
 //! 3. Batch-prefetch every settled market's YES-leg books into the PIT engine.
 //! 4. For each market, resolve the PIT YES-leg mid at each grid instant and pair
 //!    it with the realized `settled_yes` truth and residual ttr.
@@ -31,6 +33,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
+    clickhouse::MarketResolutionRow,
     domain::{
         api::CalibrationArtifactListQuery,
         data_plane::DecisionClock,
@@ -39,9 +42,9 @@ use quant_pivot_models::{
         quant::{CalibrationArtifactInfo, CalibrationArtifactPayload, JobProgressSink},
         query::{TimeWindow, WindowBoundsError},
     },
-    enums::common::MarketCategory,
+    enums::{common::MarketCategory, quant::RecommendationResolutionKind},
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FavoriteLongshotConfig},
-    types::{CalibrationArtifactId, MarketId, ResearchJobProgress, TokenId},
+    types::{CalibrationArtifactId, MarketId, PayoutRatio, ResearchJobProgress, TokenId},
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, MarketLinkageRepository,
@@ -231,19 +234,24 @@ impl BiasTableFitService {
             .map_err(QuantError::from)?;
 
         // Reduce to the terminal resolution per market (latest resolved/observed).
-        let mut terminal: BTreeMap<MarketId, (i64, TokenId)> = BTreeMap::new();
+        let mut terminal: BTreeMap<MarketId, MarketResolutionRow> = BTreeMap::new();
         let mut ordering: BTreeMap<MarketId, (i64, i64)> = BTreeMap::new();
         for row in resolutions {
+            row.validate().map_err(|error| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "bias-table resolution `{}` violates the payout contract: {error}",
+                        row.market_id
+                    ),
+                })
+            })?;
             let key = (row.resolved_at, row.observed_at);
             let entry = ordering
                 .entry(row.market_id.clone())
                 .or_insert((i64::MIN, i64::MIN));
             if key > *entry {
                 *entry = key;
-                terminal.insert(
-                    row.market_id.clone(),
-                    (row.resolved_at, row.winning_token_id),
-                );
+                terminal.insert(row.market_id.clone(), row);
             }
         }
         if terminal.is_empty() {
@@ -258,20 +266,53 @@ impl BiasTableFitService {
             .map_err(QuantError::from)?;
 
         let mut settled = Vec::with_capacity(infos.len());
+        let mut split_payout_markets = 0_u64;
         for info in &infos {
-            let Some((resolved_at_ms, winning_token_id)) = terminal.get(&info.market_id) else {
+            let Some(resolution) = terminal.get(&info.market_id) else {
                 continue;
             };
-            let Some(resolved_at) = DateTime::from_timestamp_millis(*resolved_at_ms) else {
+            if resolution.resolution_kind().map_err(|error| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "bias-table resolution `{}` has no valid kind: {error}",
+                        info.market_id
+                    ),
+                })
+            })? == RecommendationResolutionKind::SplitPayout
+            {
+                split_payout_markets = split_payout_markets.saturating_add(1);
                 continue;
-            };
+            }
+            let resolved_at =
+                DateTime::from_timestamp_millis(resolution.resolved_at).ok_or_else(|| {
+                    QuantError::from(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "bias-table resolution `{}` has invalid resolved_at {}",
+                            info.market_id, resolution.resolved_at
+                        ),
+                    })
+                })?;
+            let yes_payout = resolution.payout_for(&info.yes_token_id).map_err(|error| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "bias-table resolution `{}` cannot resolve YES token `{}`: {error}",
+                        info.market_id, info.yes_token_id
+                    ),
+                })
+            })?;
             settled.push(SettledMarket {
                 market_id: info.market_id.clone(),
                 yes_token_id: info.yes_token_id.clone(),
                 category: info.primary_category(),
                 resolved_at,
-                settled_yes: *winning_token_id == info.yes_token_id,
+                settled_yes: yes_payout == PayoutRatio::ONE,
             });
+        }
+        if split_payout_markets > 0 {
+            tracing::info!(
+                split_payout_markets,
+                "excluded split-payout markets from Bernoulli bias-table fit"
+            );
         }
         Ok(settled)
     }

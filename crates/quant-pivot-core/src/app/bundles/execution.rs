@@ -14,14 +14,14 @@ use crate::{
         CoreSettlementControlPort, CoreSettlementControlPortDeps, settlement_credentials,
     },
     execution::{
-        AdmissionInputBuilder, AdmissionInputBuilderDeps, AttributionService,
-        AttributionServiceDeps, ClobOrderClient, ClobReconciliationReader,
-        CompositeExitSignalEvaluator, CoreExecutionDispatcher, CoreExitDispatcher,
-        DefaultAdmissionEngine, DispatchWake, EvidenceCollector, ExecutionBreaker,
-        ExecutionDispatcherDeps, ExitDispatcherDeps, ExitMonitorHealthHandle, ExitMonitorService,
-        ExitMonitorServiceDeps, ExitSignalEvaluator, IntentLifecyclePublisher,
-        PolymarketOrderClient, ReconciliationService, ReconciliationServiceDeps,
-        VenueEvidenceCollector, VenueReconciliationReader,
+        AdmissionInputBuilder, AdmissionInputBuilderDeps, ClobOrderClient,
+        ClobReconciliationReader, CompositeExitSignalEvaluator, CoreExecutionDispatcher,
+        CoreExitDispatcher, DefaultAdmissionEngine, DispatchWake, EvidenceCollector,
+        ExecutionBreaker, ExecutionDispatcherDeps, ExitDispatcherDeps, ExitMonitorHealthHandle,
+        ExitMonitorService, ExitMonitorServiceDeps, ExitSignalEvaluator, IntentLifecyclePublisher,
+        OutcomeReconciliationService, OutcomeReconciliationServiceDeps, PolymarketOrderClient,
+        ReconciliationService, ReconciliationServiceDeps, VenueEvidenceCollector,
+        VenueReconciliationReader,
         settlement_discovery::SettlementDiscoveryService,
         settlement_discovery_wake::SettlementDiscoveryWake,
         settlement_executor::ProductionSettlementExecutor,
@@ -60,6 +60,7 @@ use quant_pivot_api::{
             AlloySettlementChainReader, ContractDeploymentVerifier, SettlementDeploymentCatalog,
         },
         external::ExternalSettlementScanner,
+        resolution::{AlloyFinalizedResolutionReader, ResolutionSourceReader},
     },
     wallet::WalletTopology,
 };
@@ -72,11 +73,13 @@ use quant_pivot_models::{
     types::WorkerId,
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, CapitalAllocationRepository, ClobMarketInfoRepository,
+    CapitalAllocationRepository, ClobMarketInfoRepository, DomainSourceCursorRepository,
     EntryConditionRepository, ExecutionOrderRepository, ExecutionSubmissionRepository,
-    FactorRepository, FeatureParityRepository, ModelRegistryRepository, OperationLogRepository,
-    OrderIntentRepository, PolicyRepository, PositionRepository, RecommendationReportRepository,
-    RecommendationRepository, ReconciliationRepository, TradePolicyRepository,
+    FactorRepository, FeatureParityRepository, MarketRepository, ModelRegistryRepository,
+    OperationLogRepository, OrderIntentRepository, PolicyRepository, PositionRepository,
+    RecommendationExecutionOutcomeRepository, RecommendationReportRepository,
+    RecommendationRepository, RecommendationResolutionOutcomeRepository, ReconciliationRepository,
+    TradePolicyRepository,
     quant::{
         settlement_governance::{
             SettlementExternalCursorRepository, SettlementGovernanceRepository,
@@ -113,10 +116,10 @@ pub struct ExecutionBundle {
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
     /// Reconciliation engine: resolves in-flight orders to venue truth.
     pub reconciliation: Arc<ReconciliationService>,
+    /// Produces orthogonal resolution and execution outcome truth.
+    pub outcome_reconciliation: Arc<OutcomeReconciliationService>,
     /// Exit-monitor engine: scans open lots and drives the exit ladder.
     pub exit_monitor: Arc<ExitMonitorService>,
-    /// Final WORM recommendation-attribution builder.
-    pub attribution: Arc<AttributionService>,
     /// Exit-monitor health hot read consumed by admission `#20`.
     pub exit_monitor_health: ExitMonitorHealthHandle,
     /// Approve→submit wake signal (shared by the intent service and the
@@ -226,7 +229,7 @@ impl ExecutionBundle {
             &breaker,
             exit_monitor_health.clone(),
         );
-        let attribution = build_attribution_service(infra);
+        let outcome_reconciliation = build_outcome_reconciliation_service(deps)?;
 
         Ok(Self {
             clob,
@@ -235,8 +238,8 @@ impl ExecutionBundle {
             breaker,
             submission,
             reconciliation,
+            outcome_reconciliation,
             exit_monitor,
-            attribution,
             exit_monitor_health,
             dispatch_wake: DispatchWake::new(),
             settlement_discovery: settlement.discovery,
@@ -378,17 +381,28 @@ fn build_execution_breaker(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Arc<Ex
     )?))
 }
 
-fn build_attribution_service(infra: &InfraBundle) -> Arc<AttributionService> {
-    let repos = &infra.repos;
-    Arc::new(AttributionService::new(AttributionServiceDeps {
-        attribution: Arc::clone(&repos.attribution) as Arc<dyn AttributionRepository>,
-        intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
-        recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
-        execution_orders: Arc::clone(&repos.execution_order) as Arc<dyn ExecutionOrderRepository>,
-        positions: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
-        reconciliation: Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
-        attribution_events: Arc::clone(&infra.attribution_event_writer),
-    }))
+fn build_outcome_reconciliation_service(
+    deps: &ExecutionBundleDeps<'_>,
+) -> QuantResult<Arc<OutcomeReconciliationService>> {
+    let repos = &deps.infra.repos;
+    let resolution_source = Arc::new(
+        AlloyFinalizedResolutionReader::connect(&deps.deploy.polymarket.onchain)
+            .map_err(|source| QuantError::config(source.to_string()))?,
+    ) as Arc<dyn ResolutionSourceReader>;
+    Ok(Arc::new(OutcomeReconciliationService::new(
+        OutcomeReconciliationServiceDeps {
+            resolution_source,
+            resolution_fact_writer: Arc::clone(&deps.infra.market_resolution_fact_writer),
+            resolution_facts: Arc::clone(&deps.infra.quant_fact_read),
+            cursors: Arc::clone(&repos.domain_source_cursor)
+                as Arc<dyn DomainSourceCursorRepository>,
+            markets: Arc::clone(&repos.market) as Arc<dyn MarketRepository>,
+            resolution_outcomes: Arc::clone(&repos.recommendation_resolution_outcome)
+                as Arc<dyn RecommendationResolutionOutcomeRepository>,
+            execution_outcomes: Arc::clone(&repos.recommendation_execution_outcome)
+                as Arc<dyn RecommendationExecutionOutcomeRepository>,
+        },
+    )))
 }
 
 /// Assemble the stateless admission input builder (real venue-health seam from

@@ -60,8 +60,9 @@ pub mod quant_order_intent;
 pub mod quant_portfolio_plan;
 pub mod quant_position;
 pub mod quant_recommendation;
-pub mod quant_recommendation_attribution;
+pub mod quant_recommendation_execution_outcome;
 pub mod quant_recommendation_report;
+pub mod quant_recommendation_resolution_outcome;
 pub mod quant_reconciliation;
 pub mod quant_report_data_quality_snapshot;
 pub mod quant_report_fact_delivery;
@@ -161,7 +162,8 @@ pub const TABLES: &[&str] = &[
     "quant_portfolio_plan",
     "quant_position",
     "quant_recommendation",
-    "quant_recommendation_attribution",
+    "quant_recommendation_execution_outcome",
+    "quant_recommendation_resolution_outcome",
     "quant_recommendation_report",
     "quant_reconciliation",
     "quant_report_data_quality_snapshot",
@@ -269,7 +271,9 @@ pub const ENUMS: &[&str] = &[
     "qp_quant_runtime_mode",
     "qp_redeem_policy",
     "qp_research_evaluation_track",
-    "qp_recommendation_attribution_outcome",
+    "qp_recommendation_execution_no_fill_reason",
+    "qp_recommendation_execution_terminal_state",
+    "qp_recommendation_resolution_kind",
     "qp_recommendation_report_status",
     "qp_recommendation_status",
     "qp_reconciliation_result",
@@ -379,8 +383,9 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_portfolio_plan.rs"),
     include_bytes!("quant_position.rs"),
     include_bytes!("quant_recommendation.rs"),
-    include_bytes!("quant_recommendation_attribution.rs"),
+    include_bytes!("quant_recommendation_execution_outcome.rs"),
     include_bytes!("quant_recommendation_report.rs"),
+    include_bytes!("quant_recommendation_resolution_outcome.rs"),
     include_bytes!("quant_reconciliation.rs"),
     include_bytes!("quant_report_data_quality_snapshot.rs"),
     include_bytes!("quant_report_fact_delivery.rs"),

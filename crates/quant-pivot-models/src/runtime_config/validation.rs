@@ -10,8 +10,8 @@ use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidati
 use rust_decimal::Decimal;
 
 use super::{
-    DecimalValue, DecisionPolicySnapshot, PolicyValidationConfig, ResearchValidationConfig,
-    ResearchValidationTrialsConfig, SizingModelConfig,
+    DecimalValue, DecisionPolicySnapshot, OutcomeReconciliationPolicy, PolicyValidationConfig,
+    ResearchValidationConfig, ResearchValidationTrialsConfig, SizingModelConfig,
     sections::{FeaturesConfig, KellySafetyConfig, MAX_REPORT_TOP_N},
     validate_schedule_cadence,
 };
@@ -1005,6 +1005,37 @@ fn validate_execution(config: &DecisionPolicySnapshot, report: &mut ConfigValida
             detail: "must be less than lease_duration_secs".to_owned(),
         });
     }
+    let outcome_reconciliation = &config.operational_control.outcome_reconciliation;
+    if outcome_reconciliation.sweep_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "operational_control.outcome_reconciliation.sweep_secs",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
+    if outcome_reconciliation.candidate_batch_size == 0
+        || outcome_reconciliation.candidate_batch_size
+            > OutcomeReconciliationPolicy::MAX_CANDIDATE_BATCH_SIZE
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "operational_control.outcome_reconciliation.candidate_batch_size",
+            detail: format!(
+                "must be in 1..={}",
+                OutcomeReconciliationPolicy::MAX_CANDIDATE_BATCH_SIZE
+            ),
+        });
+    }
+    if outcome_reconciliation.source_block_span == 0
+        || outcome_reconciliation.source_block_span
+            > OutcomeReconciliationPolicy::MAX_SOURCE_BLOCK_SPAN
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "operational_control.outcome_reconciliation.source_block_span",
+            detail: format!(
+                "must be in 1..={}",
+                OutcomeReconciliationPolicy::MAX_SOURCE_BLOCK_SPAN
+            ),
+        });
+    }
     if config.execution_authorization.semi_auto.approval_ttl_secs == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.approval_ttl_secs",
@@ -1425,8 +1456,8 @@ mod tests {
     use crate::{
         enums::factor::FactorFamily,
         runtime_config::{
-            DecimalValue, FeatureFamily, MAX_REPORT_TOP_N, POLICY_RESOURCE_SCHEMA_VERSION,
-            ReportScheduleConfig, ScheduleCadence,
+            DecimalValue, FeatureFamily, MAX_REPORT_TOP_N, OutcomeReconciliationPolicy,
+            POLICY_RESOURCE_SCHEMA_VERSION, ReportScheduleConfig, ScheduleCadence,
         },
         types::CalibrationArtifactId,
     };
@@ -1435,6 +1466,58 @@ mod tests {
     fn default_runtime_config_is_valid() {
         let report = validate_runtime_config(&DecisionPolicySnapshot::default());
         assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn outcome_reconciliation_policy_is_bounded() {
+        let mut zero = DecisionPolicySnapshot::default();
+        zero.operational_control.outcome_reconciliation.sweep_secs = 0;
+        zero.operational_control
+            .outcome_reconciliation
+            .candidate_batch_size = 0;
+        zero.operational_control
+            .outcome_reconciliation
+            .source_block_span = 0;
+        let zero_report = validate_runtime_config(&zero);
+        for field in [
+            "operational_control.outcome_reconciliation.sweep_secs",
+            "operational_control.outcome_reconciliation.candidate_batch_size",
+            "operational_control.outcome_reconciliation.source_block_span",
+        ] {
+            assert!(zero_report.errors.iter().any(|error| matches!(
+                error,
+                ConfigValidationError::InvalidValue {
+                    field: actual,
+                    ..
+                } if *actual == field
+            )));
+        }
+
+        let mut oversized = DecisionPolicySnapshot::default();
+        oversized
+            .operational_control
+            .outcome_reconciliation
+            .candidate_batch_size = OutcomeReconciliationPolicy::MAX_CANDIDATE_BATCH_SIZE + 1;
+        oversized
+            .operational_control
+            .outcome_reconciliation
+            .source_block_span = OutcomeReconciliationPolicy::MAX_SOURCE_BLOCK_SPAN + 1;
+        let oversized_report = validate_runtime_config(&oversized);
+        assert_eq!(
+            oversized_report
+                .errors
+                .iter()
+                .filter(|error| matches!(
+                    error,
+                    ConfigValidationError::InvalidValue {
+                        field: "operational_control.outcome_reconciliation.candidate_batch_size"
+                            | "operational_control.outcome_reconciliation.source_block_span",
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
     }
 
     #[test]

@@ -60,19 +60,4 @@ pub trait RecommendationRepository: Send + Sync {
         expired_at: DateTime<Utc>,
         operation_log: NewOperationLog,
     ) -> Result<(RecommendationInfo, Vec<OrderIntentInfo>), StorageError>;
-
-    /// Expired or superseded recommendations with no final attribution row.
-    /// Covers report-only rows that reached an unfilled terminal state without
-    /// ever creating an intent.
-    async fn find_unfilled_attribution_candidates(
-        &self,
-        limit: u64,
-    ) -> Result<Vec<RecommendationInfo>, StorageError>;
-
-    /// Returns `true` when execution ledger truth is still ambiguous and final
-    /// attribution must defer.
-    async fn recommendation_blocks_final_attribution(
-        &self,
-        recommendation_id: &RecommendationId,
-    ) -> Result<bool, StorageError>;
 }

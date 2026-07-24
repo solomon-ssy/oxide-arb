@@ -9,23 +9,20 @@ use quant_pivot_models::{
     },
     entities::{
         operation_log::Entity as OperationLogEntity,
-        quant_recommendation::{Column, Entity, Relation},
-        quant_recommendation_attribution::Column as QuantRecommendationAttributionColumn,
+        quant_recommendation::{Column, Entity},
     },
     enums::{execution::ApprovalInvalidation, quant::RecommendationStatus},
     types::{RecommendationId, RecommendationReportId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait, TransactionTrait,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 
 use crate::{
     postgres::{
-        error,
-        quant::{attribution, order_intent::invalidate_pre_submission_for_recommendation},
-        query::find_models_by_id_chunks,
-        state_hash,
+        error, quant::order_intent::invalidate_pre_submission_for_recommendation,
+        query::find_models_by_id_chunks, state_hash,
     },
     traits::RecommendationRepository,
 };
@@ -160,40 +157,5 @@ impl RecommendationRepository for PgRecommendationRepository {
             .map_err(StorageError::from)?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok((model.into(), invalidated))
-    }
-
-    async fn find_unfilled_attribution_candidates(
-        &self,
-        limit: u64,
-    ) -> Result<Vec<RecommendationInfo>, StorageError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let mut query = Entity::find()
-            .join(JoinType::LeftJoin, Relation::Attribution.def())
-            .filter(Column::Status.is_in([
-                RecommendationStatus::Expired,
-                RecommendationStatus::Superseded,
-            ]))
-            .filter(QuantRecommendationAttributionColumn::RecommendationId.is_null())
-            .order_by_asc(Column::ValidUntil)
-            .limit(limit);
-        for guard in attribution::expired_ledger_filters() {
-            query = query.filter(guard);
-        }
-        query
-            .all(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .map(|rows| rows.into_iter().map(Into::into).collect())
-    }
-
-    async fn recommendation_blocks_final_attribution(
-        &self,
-        recommendation_id: &RecommendationId,
-    ) -> Result<bool, StorageError> {
-        attribution::blocks_attribution(&self.db, recommendation_id)
-            .await
-            .map_err(StorageError::from)
     }
 }

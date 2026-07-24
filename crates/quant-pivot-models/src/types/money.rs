@@ -21,14 +21,19 @@
 //! `PRECISION` associated constant, consumed by the schema column builders.
 
 use std::{
-    fmt,
+    fmt::{self, Display, Formatter, Result as FmtResult},
     iter::Sum,
     ops::{Add, AddAssign, Div, Mul, Neg, Sub, SubAssign},
 };
 
 use rust_decimal::Decimal;
-use sea_orm::DeriveValueType;
-use serde::{Deserialize, Serialize};
+use sea_orm::{
+    ActiveValue, ColIdx, DbErr, DeriveValueType, IntoActiveValue, QueryResult, TryGetError,
+    TryGetable,
+    sea_query::{ArrayType, ColumnType, Nullable, Value, ValueType, ValueTypeErr},
+};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as SerdeDeError};
+use thiserror::Error;
 
 macro_rules! decimal_newtype {
     ($(#[$meta:meta])* $name:ident, precision = ($precision:expr, $scale:expr)) => {
@@ -190,6 +195,146 @@ decimal_newtype!(
     precision = (20, 18)
 );
 
+/// Redemption value of one resolved outcome token, in collateral units.
+///
+/// Unlike the historical unconstrained [`Probability`] and [`Price`] wrappers,
+/// this type validates every untrusted boundary. A corrupt database value or
+/// wire payload outside the closed interval `0..=1` is rejected rather than
+/// becoming a training label. Split resolutions such as `0.5` are preserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct PayoutRatio(Decimal);
+
+impl PayoutRatio {
+    pub const ZERO: Self = Self(Decimal::ZERO);
+    pub const ONE: Self = Self(Decimal::ONE);
+
+    /// Canonical `PostgreSQL` `NUMERIC` precision for payout ratios.
+    pub const PRECISION: (u32, u32) = (20, 18);
+
+    /// Validate and construct a payout ratio.
+    pub fn try_new(value: Decimal) -> Result<Self, PayoutRatioError> {
+        if (Decimal::ZERO..=Decimal::ONE).contains(&value) {
+            let normalized = value.normalize();
+            let scale = normalized.scale();
+            if scale <= Self::PRECISION.1 {
+                return Ok(Self(normalized));
+            }
+            return Err(PayoutRatioError::UnsupportedScale {
+                value,
+                scale,
+                maximum_scale: Self::PRECISION.1,
+            });
+        }
+        Err(PayoutRatioError::OutOfRange { value })
+    }
+
+    #[must_use]
+    pub const fn inner(self) -> Decimal {
+        self.0
+    }
+
+    /// Complementary payout for the other token in a binary condition.
+    #[must_use]
+    pub fn complement(self) -> Self {
+        Self(Decimal::ONE - self.0)
+    }
+}
+
+impl Display for PayoutRatio {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for PayoutRatio {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = <Decimal as Deserialize>::deserialize(deserializer)?;
+        Self::try_new(value).map_err(SerdeDeError::custom)
+    }
+}
+
+impl TryFrom<Decimal> for PayoutRatio {
+    type Error = PayoutRatioError;
+
+    fn try_from(value: Decimal) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<PayoutRatio> for Decimal {
+    fn from(value: PayoutRatio) -> Self {
+        value.inner()
+    }
+}
+
+impl From<PayoutRatio> for Value {
+    fn from(value: PayoutRatio) -> Self {
+        Self::Decimal(Some(value.inner()))
+    }
+}
+
+impl From<&PayoutRatio> for Value {
+    fn from(value: &PayoutRatio) -> Self {
+        Self::Decimal(Some(value.inner()))
+    }
+}
+
+impl TryGetable for PayoutRatio {
+    fn try_get_by<I: ColIdx>(result: &QueryResult, index: I) -> Result<Self, TryGetError> {
+        let value = <Decimal as TryGetable>::try_get_by(result, index)?;
+        Self::try_new(value).map_err(|error| TryGetError::DbErr(DbErr::Type(error.to_string())))
+    }
+}
+
+impl ValueType for PayoutRatio {
+    fn try_from(value: Value) -> Result<Self, ValueTypeErr> {
+        match value {
+            Value::Decimal(Some(value)) => Self::try_new(value).map_err(|_| ValueTypeErr),
+            _ => Err(ValueTypeErr),
+        }
+    }
+
+    fn type_name() -> String {
+        stringify!(PayoutRatio).to_owned()
+    }
+
+    fn array_type() -> ArrayType {
+        ArrayType::Decimal
+    }
+
+    fn column_type() -> ColumnType {
+        ColumnType::Decimal(Some(Self::PRECISION))
+    }
+}
+
+impl Nullable for PayoutRatio {
+    fn null() -> Value {
+        Value::Decimal(None)
+    }
+}
+
+impl IntoActiveValue<Self> for PayoutRatio {
+    fn into_active_value(self) -> ActiveValue<Self> {
+        ActiveValue::Set(self)
+    }
+}
+
+/// Validation failure for a payout ratio read from an external boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum PayoutRatioError {
+    #[error("payout ratio must be within the closed interval [0, 1], got {value}")]
+    OutOfRange { value: Decimal },
+    #[error(
+        "payout ratio {value} has scale {scale}, exceeding the canonical maximum {maximum_scale}"
+    )]
+    UnsupportedScale {
+        value: Decimal,
+        scale: u32,
+        maximum_scale: u32,
+    },
+}
+
 // ── Cross-type arithmetic ───────────────────────────────────────────────
 
 impl Mul<Price> for Shares {
@@ -297,8 +442,74 @@ impl Bps {
 #[cfg(test)]
 mod tests {
     use rust_decimal_macros::dec;
+    use sea_orm::sea_query::{Value, ValueType};
 
     use super::*;
+
+    #[test]
+    fn payout_ratio_accepts_closed_interval_and_split_payout() {
+        for value in [dec!(0), dec!(0.5), dec!(1)] {
+            let ratio = PayoutRatio::try_new(value).expect("valid payout ratio");
+            assert_eq!(ratio.inner(), value);
+        }
+    }
+
+    #[test]
+    fn payout_ratio_rejects_values_outside_closed_interval() {
+        for value in [dec!(-0.000000000000000001), dec!(1.000000000000000001)] {
+            assert_eq!(
+                PayoutRatio::try_new(value),
+                Err(PayoutRatioError::OutOfRange { value })
+            );
+        }
+    }
+
+    #[test]
+    fn payout_ratio_normalizes_and_rejects_unpersistable_scale() {
+        assert_eq!(
+            PayoutRatio::try_new(dec!(0.5000000000000000000))
+                .expect("canonical half")
+                .inner(),
+            dec!(0.5)
+        );
+        let value = dec!(0.1234567890123456789);
+        assert_eq!(
+            PayoutRatio::try_new(value),
+            Err(PayoutRatioError::UnsupportedScale {
+                value,
+                scale: 19,
+                maximum_scale: 18,
+            })
+        );
+    }
+
+    #[test]
+    fn payout_ratio_serde_is_validated_decimal_string() {
+        let split = PayoutRatio::try_new(dec!(0.5)).expect("valid split payout");
+        assert_eq!(
+            serde_json::to_string(&split).expect("serialize payout ratio"),
+            r#""0.5""#
+        );
+        assert_eq!(
+            serde_json::from_str::<PayoutRatio>(r#""0.5""#).expect("deserialize payout ratio"),
+            split
+        );
+        assert!(serde_json::from_str::<PayoutRatio>(r#""-0.1""#).is_err());
+        assert!(serde_json::from_str::<PayoutRatio>(r#""1.1""#).is_err());
+    }
+
+    #[test]
+    fn payout_ratio_seaorm_roundtrip_and_read_validation() {
+        let split = PayoutRatio::try_new(dec!(0.5)).expect("valid split payout");
+        let value: Value = split.into();
+        assert_eq!(
+            <PayoutRatio as ValueType>::try_from(value).expect("roundtrip payout ratio"),
+            split
+        );
+        assert!(<PayoutRatio as ValueType>::try_from(Value::Decimal(Some(dec!(-0.1)))).is_err());
+        assert!(<PayoutRatio as ValueType>::try_from(Value::Decimal(Some(dec!(1.1)))).is_err());
+        assert!(<PayoutRatio as ValueType>::try_from(Value::Decimal(None)).is_err());
+    }
 
     #[test]
     fn shares_times_price_equals_usd() {

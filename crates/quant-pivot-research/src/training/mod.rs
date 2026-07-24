@@ -59,9 +59,9 @@ pub(crate) use quant_pivot_models::{
     types::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
         DatasetManifest, DecisionPolicySnapshotId, MarketId, ModelSpecId, OrderIntentId,
-        PositionId, Price, ResearchProfileRef, SchemaVersion, Shares, SourceSliceManifestRef,
-        TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId,
-        TrainingExampleId, TrainingSampleSource, Usd, default_sample_sources,
+        PayoutRatio, PositionId, Price, ResearchProfileRef, SchemaVersion, Shares,
+        SourceSliceManifestRef, TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload,
+        TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd, default_sample_sources,
     },
 };
 use rust_decimal::Decimal;
@@ -315,12 +315,46 @@ pub struct ForwardSample {
 /// Authoritative settlement for a market, resolved point-in-time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketResolution {
-    /// The winning outcome token (label-agnostic settlement key).
-    pub winning_token_id: TokenId,
+    /// Complete condition-token vector in canonical source order.
+    pub token_ids: Vec<TokenId>,
+    /// Payouts positionally aligned with [`Self::token_ids`].
+    pub payout_ratios: Vec<PayoutRatio>,
     /// Economic settlement time.
     pub resolved_at: DateTime<Utc>,
     /// When the resolution was observed (ingested).
     pub observed_at: DateTime<Utc>,
+}
+
+impl MarketResolution {
+    /// Read one token's payout while rechecking the deserialized vector contract.
+    ///
+    /// The persisted `ClickHouse` boundary performs the stronger token-format
+    /// validation. This compute boundary repeats the structural checks so a
+    /// tampered serialized research input cannot silently become a label.
+    pub fn payout_for(&self, token_id: &TokenId) -> Result<PayoutRatio, &'static str> {
+        if self.token_ids.len() != 2 {
+            return Err("resolution must contain exactly two tokens");
+        }
+        if self.token_ids.len() != self.payout_ratios.len() {
+            return Err("resolution token and payout cardinalities differ");
+        }
+        if self.token_ids[0] == self.token_ids[1] {
+            return Err("resolution contains duplicate tokens");
+        }
+        let payout_total = self
+            .payout_ratios
+            .iter()
+            .fold(Decimal::ZERO, |total, payout| total + payout.inner())
+            .normalize();
+        if payout_total != Decimal::ONE {
+            return Err("resolution payouts do not sum to one");
+        }
+        self.token_ids
+            .iter()
+            .position(|candidate| candidate == token_id)
+            .map(|index| self.payout_ratios[index])
+            .ok_or("requested token is absent from resolution")
+    }
 }
 
 /// A pre-fetched, strictly-forward window of observations for one sample.
@@ -701,9 +735,7 @@ fn validate_example_boundary(
         }
         .into());
     }
-    if !matches!(example.sample_source, TrainingSampleSource::LiveAttribution)
-        && boundary.knowledge_lag_secs() != manifest.knowledge_lag_secs
-    {
+    if boundary.knowledge_lag_secs() != manifest.knowledge_lag_secs {
         return Err(ResearchError::DatasetBuild {
             detail: format!(
                 "example {} knowledge lag {} does not match manifest {}",

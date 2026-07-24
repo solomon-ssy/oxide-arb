@@ -8,7 +8,7 @@ use crate::{
         ChCapitalAllocationState, ChExecutionSide, ChExitSignalEvaluatorKind, ChExitSignalVerdict,
         ChFactorDirection, ChFactorValueState, ChFeatureCellState, ChFeatureSourceKind,
         ChFeatureValueKind, ChNormalizationSource, ChOutcomeSide, ChPositionLedgerState,
-        ChQuantLedgerEventKind, ChRecommendationAttributionOutcome,
+        ChQuantLedgerEventKind,
     },
     types::{
         CapitalAllocationId, DecisionPolicySnapshotId, EventId, ExecutionOrderId,
@@ -332,19 +332,5 @@ pub struct QuantExitSignalEvaluationEventRow {
     pub shadow: u8,
     /// Human-readable verdict detail / reason.
     pub detail: String,
-    pub ingestion_time: i64,
-}
-
-/// Final recommendation attribution fact.
-#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
-pub struct QuantRecommendationAttributionEventRow {
-    pub event_time: i64,
-    pub recommendation_id: RecommendationId,
-    pub outcome: ChRecommendationAttributionOutcome,
-    pub realized_pnl_usd: ChUsd,
-    /// `None` when PG stores `NULL` (filled-path MAE deferred to book replay).
-    pub max_adverse_excursion_bps: Option<ChDecimal64>,
-    pub max_favorable_excursion_bps: ChDecimal64,
-    pub label_available_at: i64,
     pub ingestion_time: i64,
 }

@@ -18,6 +18,10 @@ mod model_governance;
 mod model_runtime;
 #[path = "core/model_training_backtest.rs"]
 mod model_training_backtest;
+#[path = "core/outcome_reconciliation.rs"]
+mod outcome_reconciliation;
+#[path = "core/outcome_reconciliation_producer.rs"]
+mod outcome_reconciliation_producer;
 #[path = "core/participant_concentration.rs"]
 mod participant_concentration;
 #[path = "core/report_pipeline.rs"]

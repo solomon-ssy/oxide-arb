@@ -13,12 +13,11 @@ use crate::{
         quant::CalibrationMethod,
     },
     runtime_config::wire::{
-        AttributionPolicy, CapitalPolicy, CorrelationConfig, DecimalValue, EntryOrderPolicy,
-        ExecutionBreakerConfig, ExitMonitorPolicy, FactorWeights, FeatureFamily,
-        FeatureStalenessPolicy, KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef,
-        NeutralizeDimension, PortfolioOptimizerConfig, RankLossKind, ReconciliationPolicy,
-        ReportDeliveryPolicy, ScheduleCadence, SizingModelConfig, SmallCrossSectionPolicy,
-        TrainingOptimizerKind,
+        CapitalPolicy, CorrelationConfig, DecimalValue, EntryOrderPolicy, ExecutionBreakerConfig,
+        ExitMonitorPolicy, FactorWeights, FeatureFamily, FeatureStalenessPolicy, KillSwitchPolicy,
+        MissingFactorPolicy, ModelVersionRef, NeutralizeDimension, PortfolioOptimizerConfig,
+        RankLossKind, ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence,
+        SizingModelConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
     },
     types::{ReportScheduleId, SchemaVersion, Usd},
 };
@@ -1076,8 +1075,6 @@ pub struct ExecutionConfig {
     pub capital: CapitalPolicy,
     /// Reconciliation policy document.
     pub reconciliation: ReconciliationPolicy,
-    /// Recommendation attribution worker policy.
-    pub attribution: AttributionPolicy,
     /// Execution-breaker thresholds (venue health + auto kill-switch trip).
     pub breaker: ExecutionBreakerConfig,
 }

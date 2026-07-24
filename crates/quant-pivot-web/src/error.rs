@@ -207,7 +207,8 @@ impl From<ExecutionError> for WebError {
     fn from(error: ExecutionError) -> Self {
         match error {
             ExecutionError::CapitalRecoveryFailed { .. }
-            | ExecutionError::AdmissionDeferred { .. } => {
+            | ExecutionError::AdmissionDeferred { .. }
+            | ExecutionError::OutcomeReconciliationSource { .. } => {
                 Self::ServiceUnavailable(error.to_string())
             }
             ExecutionError::ReportOnlyMode
@@ -225,7 +226,8 @@ impl From<ExecutionError> for WebError {
             ExecutionError::ReconciliationResolveInvalid { .. } => {
                 Self::BadRequest(error.to_string())
             }
-            ExecutionError::SettlementRedeemInvariant { .. }
+            ExecutionError::OutcomeReconciliationInvariant { .. }
+            | ExecutionError::SettlementRedeemInvariant { .. }
             | ExecutionError::TimeConversion { .. } => Self::Internal(error.to_string()),
         }
     }
@@ -339,5 +341,25 @@ mod tests {
             reason: "book snapshot stale".to_owned(),
         }));
         assert_eq!(web.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn outcome_reconciliation_source_maps_to_503() {
+        let web = WebError::from(QuantError::from(
+            ExecutionError::OutcomeReconciliationSource {
+                reason: "finalized RPC unavailable".to_owned(),
+            },
+        ));
+        assert_eq!(web.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn outcome_reconciliation_invariant_maps_to_500() {
+        let web = WebError::from(QuantError::from(
+            ExecutionError::OutcomeReconciliationInvariant {
+                reason: "durable fact readback mismatch".to_owned(),
+            },
+        ));
+        assert_eq!(web.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

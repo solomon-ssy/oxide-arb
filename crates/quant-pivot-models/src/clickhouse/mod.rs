@@ -20,16 +20,15 @@ pub use domain_event::{
     WeatherObservationFactRow,
 };
 pub use domain_observation::DomainObservationRow;
-pub use market_resolution::MarketResolutionRow;
+pub use market_resolution::{MarketResolutionFactInput, MarketResolutionRow};
 pub use quant_facts::{
     QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
     QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow, QuantModelInputEventRow,
-    QuantPositionEventRow, QuantRecommendationAttributionEventRow,
-    QuantReportRecommendationFactRow, QuantServingEvidenceCompletionRow,
+    QuantPositionEventRow, QuantReportRecommendationFactRow, QuantServingEvidenceCompletionRow,
     QuantSignalCandidateEventRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
 };
 pub use trade_tape::TradeTapeRow;
 pub use types::{
-    ChBps, ChDecimal64, ChDigest, ChEpochDay, ChFactor, ChPrice, ChProbability, ChSchemaVersion,
-    ChShares, ChUsd,
+    ChBps, ChDecimal64, ChDigest, ChEpochDay, ChFactor, ChPayoutRatio, ChPrice, ChProbability,
+    ChSchemaVersion, ChShares, ChUsd,
 };

@@ -49,11 +49,16 @@ pub struct SystemStack {
 }
 
 impl SystemStack {
-    /// Start all services concurrently, deploy both database schemas, and fail
-    /// before returning if any readiness or schema contract is incomplete.
+    /// Start each service within its own readiness budget, deploy both database
+    /// schemas, and fail before returning if any contract is incomplete.
     pub async fn start() -> Result<Self> {
-        let (postgres, redis, clickhouse) =
-            tokio::try_join!(start_postgres(), start_redis(), start_clickhouse(),)?;
+        // Docker Desktop can report individual containers ready while host port
+        // forwarding for concurrently started siblings is still settling.
+        // Sequential startup keeps the disposable harness deterministic without
+        // weakening any service-specific readiness deadline.
+        let postgres = start_postgres().await?;
+        let redis = start_redis().await?;
+        let clickhouse = start_clickhouse().await?;
         Ok(Self {
             postgres_config: postgres.0,
             postgres: postgres.1,

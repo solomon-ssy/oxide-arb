@@ -39,7 +39,7 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
     ctx.register_reconciliation_worker(&mut runner);
     ctx.register_settlement_workers(&mut runner);
     ctx.register_exit_monitor_worker(&mut runner);
-    ctx.register_attribution_worker(&mut runner);
+    ctx.register_outcome_reconciliation_worker(&mut runner);
 
     // Durable async research-job engine: the enqueue port (HTTP) and the worker
     // (execution + crash recovery) share one engine so cancellation tokens, the

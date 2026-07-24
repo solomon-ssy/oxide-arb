@@ -95,7 +95,6 @@ pg_enum! {
         OrderIntent => "order_intent",
         ExecutionOrder => "execution_order",
         Position => "position",
-        RecommendationAttribution => "recommendation_attribution",
         Reconciliation => "reconciliation",
         SettlementRedeem => "settlement_redeem",
         FactorDefinition => "factor_definition",
@@ -249,7 +248,6 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
     ),
     (ResourceType::ExecutionOrder, &[Operation::Read]),
     (ResourceType::Position, &[Operation::Read]),
-    (ResourceType::RecommendationAttribution, &[Operation::Read]),
     (
         ResourceType::Reconciliation,
         &[Operation::Read, Operation::Resolve],

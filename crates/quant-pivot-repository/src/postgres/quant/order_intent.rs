@@ -478,32 +478,6 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             .await
             .map_err(StorageError::from)
     }
-
-    async fn find_attribution_candidates(
-        &self,
-        statuses: Vec<OrderIntentStatus>,
-        limit: u64,
-    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
-        if statuses.is_empty() || limit == 0 {
-            return Ok(Vec::new());
-        }
-        let eligible_state = Condition::any()
-            .add(Column::Status.is_in(OrderIntentStatus::UNFILLED_TERMINAL))
-            .add(Column::Status.is_in(OrderIntentStatus::FILLED_TERMINAL));
-        // Inner-join recommendation so orphaned intents never enter the sweep.
-        // Position is intentionally not joined: eligibility is status-driven and
-        // the builder re-loads the lot (if any) before writing WORM attribution.
-        QuantOrderIntentEntity::find()
-            .join(JoinType::InnerJoin, Relation::Recommendation.def())
-            .filter(Column::Status.is_in(statuses))
-            .filter(eligible_state)
-            .order_by_asc(Column::UpdatedAt)
-            .limit(limit)
-            .all(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .map(|rows| rows.into_iter().map(Into::into).collect())
-    }
 }
 
 fn validate_new_intent_and_allocation(

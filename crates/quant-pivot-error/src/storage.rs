@@ -27,8 +27,12 @@ pub mod entity {
 
     /// `quant_recommendation`.
     pub const QUANT_RECOMMENDATION: &str = "quant_recommendation";
-    /// `quant_recommendation_attribution`.
-    pub const QUANT_RECOMMENDATION_ATTRIBUTION: &str = "quant_recommendation_attribution";
+    /// `quant_recommendation_execution_outcome`.
+    pub const QUANT_RECOMMENDATION_EXECUTION_OUTCOME: &str =
+        "quant_recommendation_execution_outcome";
+    /// `quant_recommendation_resolution_outcome`.
+    pub const QUANT_RECOMMENDATION_RESOLUTION_OUTCOME: &str =
+        "quant_recommendation_resolution_outcome";
     /// `quant_recommendation_report`.
     pub const QUANT_RECOMMENDATION_REPORT: &str = "quant_recommendation_report";
     /// `quant_report_run`.
@@ -87,6 +91,8 @@ pub mod entity {
     pub const QUANT_FEATURE_PARITY_RUN: &str = "quant_feature_parity_run";
     /// `quant_feature_parity_state`.
     pub const QUANT_FEATURE_PARITY_STATE: &str = "quant_feature_parity_state";
+    /// `ClickHouse` `market_resolution_event`.
+    pub const MARKET_RESOLUTION_EVENT: &str = "market_resolution_event";
     /// `quant_model_spec`.
     pub const QUANT_MODEL_SPEC: &str = "quant_model_spec";
     /// `quant_model_version`.

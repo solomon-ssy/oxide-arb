@@ -10,7 +10,7 @@ use quant_pivot_models::{
             OrderIntentInfo,
         },
     },
-    enums::{execution::ApprovalInvalidation, quant::OrderIntentStatus},
+    enums::execution::ApprovalInvalidation,
     types::{EntryOrderSpec, OrderIntentId, RecommendationId, RecommendationReportId, Usd},
 };
 
@@ -143,13 +143,4 @@ pub trait OrderIntentRepository: Send + Sync {
     /// Count intents currently open (capital-holding or in-flight, i.e.
     /// [`OrderIntentStatus::OPEN`]). Feeds the admission concurrency cap (`#21`).
     async fn count_open(&self) -> Result<u64, StorageError>;
-
-    /// Terminal / near-terminal intents whose parent recommendation has not yet
-    /// received a final attribution row. Used by the attribution worker; the
-    /// builder still re-checks execution / position state before writing WORM.
-    async fn find_attribution_candidates(
-        &self,
-        statuses: Vec<OrderIntentStatus>,
-        limit: u64,
-    ) -> Result<Vec<OrderIntentInfo>, StorageError>;
 }

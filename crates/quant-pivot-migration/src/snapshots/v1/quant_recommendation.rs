@@ -77,7 +77,8 @@ pub struct Model {
     #[sea_orm(has_many)]
     pub quant_order_intents: HasMany<super::quant_order_intent::Entity>,
     #[sea_orm(has_one)]
-    pub quant_recommendation_attribution: HasOne<super::quant_recommendation_attribution::Entity>,
+    pub quant_recommendation_resolution_outcome:
+        HasOne<super::quant_recommendation_resolution_outcome::Entity>,
     #[sea_orm(
         belongs_to,
         from = "recommendation_report_id",

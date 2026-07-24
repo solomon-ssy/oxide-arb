@@ -1452,30 +1452,33 @@ impl PartitionActor {
                 ..
             } => {
                 let known = self.market_registry.get_market(&market_id).is_some();
-                tracing::info!(%market_id, known, "Market resolved via WS (ingest only)");
                 self.metrics.markets_resolved_ws.inc();
-                let Some(winning_token_id) = self.market_registry.token_id(winning_token) else {
+                let winning_token_registered =
+                    self.market_registry.token_id(winning_token).is_some();
+                let registered_token_count = tokens
+                    .iter()
+                    .filter(|token| self.market_registry.token_id(**token).is_some())
+                    .count();
+                tracing::info!(
+                    %market_id,
+                    known,
+                    winning_token_registered,
+                    event_token_count = tokens.len(),
+                    registered_token_count,
+                    winning_outcome,
+                    timestamp_ms,
+                    "observed winner-only WS resolution signal; canonical payout reconciliation required"
+                );
+                if !winning_token_registered {
                     tracing::error!(
                         ?winning_token,
                         "resolved event lost registered winning token"
                     );
                     return;
-                };
-                let asset_ids = tokens
-                    .iter()
-                    .filter_map(|token| self.market_registry.token_id(*token))
-                    .collect::<Vec<_>>();
-                if asset_ids.len() != tokens.len() {
-                    tracing::error!(%market_id, "resolved event lost registered outcome token");
-                    return;
                 }
-                self.book_fact_writer.write_market_resolved(
-                    &market_id,
-                    &winning_token_id,
-                    &winning_outcome,
-                    &asset_ids,
-                    timestamp_ms,
-                );
+                if registered_token_count != tokens.len() {
+                    tracing::error!(%market_id, "resolved event lost registered outcome token");
+                }
             }
 
             PipelineEvent::ShardStatus { shard_id, status } => {

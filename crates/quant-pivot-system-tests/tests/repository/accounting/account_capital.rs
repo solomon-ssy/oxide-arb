@@ -14,12 +14,12 @@ use quant_pivot_models::{
         governance::{NewOperationLog, RuntimeControlUpdate},
         patch::{NullablePatch, Patch},
         quant::{
-            AppendReconciliationEvidence, ExecutionOrderPatch, InsertFinalOutcome,
-            NewAccountSnapshot, NewCapitalAllocation, NewEntryConditionInstance, NewEquitySnapshot,
-            NewExecutionOrder, NewFeatureParityState, NewMarketSelection, NewModelRun,
-            NewModelVersion, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
-            NewRecommendationAttribution, NewRecommendationReport, NewReconciliation,
-            NewReportDataQualitySnapshot, NewReportTransaction, ReconciliationPatch,
+            AppendReconciliationEvidence, ExecutionOrderPatch, NewAccountSnapshot,
+            NewCapitalAllocation, NewEntryConditionInstance, NewEquitySnapshot, NewExecutionOrder,
+            NewFeatureParityState, NewMarketSelection, NewModelRun, NewModelVersion,
+            NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
+            NewReconciliation, NewReportDataQualitySnapshot, NewReportTransaction,
+            ReconciliationPatch,
         },
     },
     entities::{
@@ -40,25 +40,25 @@ use quant_pivot_models::{
             AccountSource, ApprovalStatus, BindingConstraint, EntryConditionState,
             ExecutionOrderState, ExitSettlementMode, FactorDirection, FeatureParityLatchState,
             FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OrderIntentStatus,
-            OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationAttributionOutcome,
-            RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
-            ReportFactDeliveryStatus, ReportKind, SizingModelKind,
+            OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationReportStatus,
+            RecommendationStatus, RedeemPolicy, ReportFactDeliveryStatus, ReportKind,
+            SizingModelKind,
         },
         rbac::ResourceType,
     },
     types::{
-        AccountPositions, AccountSnapshotId, AttributionDetail, BookSnapshotRef, Bps,
-        CapitalAllocationId, ConditionTruth, ConfidenceSummary, ContentHash, DataQualitySummary,
+        AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, CapitalAllocationId,
+        ConditionTruth, ConfidenceSummary, ContentHash, DataQualitySummary,
         DecisionPolicySnapshotId, EligibilitySummary, EntryConditionFoldState,
-        EntryConditionInstanceId, EntryConditionPlan, EntryOrderPolicy, EntryOrderSpec,
-        EntryOutcome, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility,
-        ExecutionOrderId, ExitOutcome, ExitPlan, ExitPolicySpec, ExposureBreakdown,
-        FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId, MarketContext, MarketId,
-        MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
-        ModelVersionId, OperationDetailDocument, OperationLogId, OpportunisticExitPolicy,
-        OrderAmount, OrderId, OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
-        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price,
-        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        EntryConditionInstanceId, EntryConditionPlan, EntryOrderPolicy, EntryOrderSpec, EntryPlan,
+        EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExecutionOrderId, ExitPlan,
+        ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
+        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
+        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationDetailDocument,
+        OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId, OrderIntentId,
+        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
         ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
         ReportDataQualityTokens, ReportSummary, ReportTriggerKey, RiskEnvelope, RoleCode,
@@ -70,16 +70,16 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgAccountSnapshotRepository, PgAttributionRepository, PgCapitalAllocationRepository,
-        PgEventRepository, PgExecutionOrderRepository, PgMarketRepository,
-        PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgOperationLogRepository, PgOrderIntentRepository, PgRecommendationReportRepository,
-        PgRecommendationRepository, PgReconciliationRepository, PgReportRunRepository,
-        PgReservedCapitalRepository, PgRuntimeControlRepository,
+        PgAccountSnapshotRepository, PgCapitalAllocationRepository, PgEventRepository,
+        PgExecutionOrderRepository, PgMarketRepository, PgMarketSelectionRepository,
+        PgModelRegistryRepository, PgModelRunRepository, PgOperationLogRepository,
+        PgOrderIntentRepository, PgRecommendationReportRepository, PgRecommendationRepository,
+        PgReconciliationRepository, PgReportRunRepository, PgReservedCapitalRepository,
+        PgRuntimeControlRepository,
     },
     traits::{
-        AccountSnapshotRepository, AttributionRepository, CapitalAllocationRepository,
-        EventRepository, ExecutionOrderRepository, MarketRepository, MarketSelectionRepository,
+        AccountSnapshotRepository, CapitalAllocationRepository, EventRepository,
+        ExecutionOrderRepository, MarketRepository, MarketSelectionRepository,
         ModelRegistryRepository, ModelRunRepository, OperationLogRepository, OrderIntentRepository,
         RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
         ReportRunRepository, ReservedCapitalRepository, RuntimeControlRepository,
@@ -676,6 +676,7 @@ async fn create_and_submit_execution_order(
             shares: Shares::new(dec!(100)),
             cost_usd: Usd::new(dec!(60)),
             prepared_order_json: prepared_order(
+                TokenId::new("token-1"),
                 Side::Buy,
                 OrderType::Gtc,
                 VenueOrderAmount::Shares(Shares::new(dec!(100))),
@@ -793,7 +794,7 @@ async fn append_and_resolve_reconciliation(
     );
 }
 
-pub async fn capital_kill_switch_and_attribution_repositories_round_trip() {
+pub async fn capital_and_kill_switch_repositories_round_trip() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -839,42 +840,6 @@ pub async fn capital_kill_switch_and_attribution_repositories_round_trip() {
             .kill_switch_state,
         KillSwitchState::ExitOnly
     );
-
-    let attribution_repo = PgAttributionRepository::new(db.clone());
-    let outcome = attribution_repo
-        .insert_final_and_mark_attributed(NewRecommendationAttribution {
-            recommendation_id: ids.recommendation,
-            outcome: RecommendationAttributionOutcome::FailedUnfilled,
-            entry_outcome_json: EntryOutcome::default(),
-            exit_outcome_json: ExitOutcome::default(),
-            realized_pnl_usd: Some(Usd::ZERO),
-            max_adverse_excursion_bps: None,
-            max_favorable_excursion_bps: None,
-            label_available_at: None,
-            attribution_json: AttributionDetail {
-                notes: vec!["test attribution".to_owned()],
-                ..AttributionDetail::default()
-            },
-        })
-        .await
-        .expect("insert final attribution");
-    assert!(matches!(outcome, InsertFinalOutcome::Written(_)));
-    let attribution = attribution_repo
-        .find_by_recommendation(&ids.recommendation)
-        .await
-        .expect("find attribution");
-    let attribution = attribution.expect("attribution present");
-    assert_eq!(
-        attribution.outcome,
-        RecommendationAttributionOutcome::FailedUnfilled
-    );
-
-    let recommendation = PgRecommendationRepository::new(db)
-        .find_by_id(&ids.recommendation)
-        .await
-        .expect("load recommendation")
-        .expect("recommendation row");
-    assert_eq!(recommendation.status, RecommendationStatus::Attributed);
 }
 
 async fn seed_report_fixture(db: &DatabaseConnection) -> TxnIds {

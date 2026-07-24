@@ -58,16 +58,6 @@ pub struct DatasetCoverage {
     pub labels_unavailable: u64,
     /// Samples dropped because feature inputs were insufficient.
     pub samples_dropped_insufficient: u64,
-    /// Live attribution rows considered for dataset materialization.
-    #[serde(default)]
-    pub live_attribution_candidates: u64,
-    /// Live attribution rows successfully materialized into training examples.
-    pub live_attribution_materialized: u64,
-    /// Live attribution rows dropped because frozen recommendation evidence was incomplete.
-    #[serde(default)]
-    pub live_attribution_dropped_missing_evidence: u64,
-    /// Valid supersession censors intentionally excluded from training targets.
-    pub live_attribution_censored_superseded_unfilled: u64,
     /// Book snapshot rows skipped due to malformed JSON or invalid level pairs.
     pub book_decode_failures: u64,
     /// `ExitDecision` lot-timeline candidates considered.

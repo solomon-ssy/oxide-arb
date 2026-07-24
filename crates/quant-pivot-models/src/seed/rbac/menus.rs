@@ -329,8 +329,8 @@ fn build_trading(t: &mut MenuTree) {
         permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
         icon: "lucide:file-text",
     });
-    // Full-screen recommendation detail (score / plans / factors / evidence /
-    // attribution), deep-linkable and reached from a report's recommendations.
+    // Full-screen recommendation detail (score / plans / factors / evidence),
+    // deep-linkable and reached from a report's recommendations.
     t.page_hidden(PageSpec {
         parent: &trading,
         name: "recommendation-detail",

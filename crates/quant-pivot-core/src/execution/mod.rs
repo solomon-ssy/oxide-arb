@@ -4,7 +4,6 @@
 //! their production boundaries.
 
 pub mod admission;
-pub mod attribution;
 pub mod breaker;
 pub mod dispatch_wake;
 pub mod dispatcher;
@@ -17,6 +16,7 @@ pub mod intent_lifecycle;
 pub mod intent_service;
 pub mod mode_gate;
 pub mod order_client;
+pub mod outcome_reconciliation;
 pub mod reconciliation;
 pub mod settlement_confirmation;
 pub mod settlement_discovery;
@@ -36,7 +36,6 @@ pub use admission::{
     AdmissionVenueMetadata, DefaultAdmissionEngine, ExecutionAdmissionEngine, StateVersion,
     VenueHealth, prepare_entry_order,
 };
-pub use attribution::{AttributionPassSummary, AttributionService, AttributionServiceDeps};
 pub use breaker::{ExecutionBreaker, VenueHealthHandle};
 pub use dispatch_wake::DispatchWake;
 pub use dispatcher::{CoreExecutionDispatcher, ExecutionDispatcherDeps};
@@ -61,6 +60,10 @@ pub use mode_gate::{DefaultRuntimeModeGate, IntentPolicyDecision, RuntimeModeGat
 pub use order_client::{
     ClobOrderClient, PolymarketOrderClient, VenueCancelResult, VenueOrder, VenueOutcome,
     VenueSubmitResult,
+};
+pub use outcome_reconciliation::{
+    OutcomeReconciliationPassConfig, OutcomeReconciliationPassSummary,
+    OutcomeReconciliationService, OutcomeReconciliationServiceDeps,
 };
 pub use reconciliation::{
     ClobReconciliationReader, CollectedReconciliation, EvidenceCollector,

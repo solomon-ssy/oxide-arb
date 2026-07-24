@@ -8,17 +8,16 @@ use prometheus::IntCounter;
 use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, ChBps, ChDecimal64, ChDigest, ChPrice, ChProbability, ChSchemaVersion,
-        ChShares, ChUsd, CryptoPriceReportRow, DomainEventRow,
-        QuantRecommendationAttributionEventRow, QuantReportRecommendationFactRow, TradeTapeRow,
+        ChShares, ChUsd, CryptoPriceReportRow, DomainEventRow, QuantReportRecommendationFactRow,
+        TradeTapeRow,
     },
     config::ClickHouseConfig,
     domain::data_plane::trade_tape_coverage::{
         FEE_RATE, MARKET_ID, PRICE, SIDE, SIZE, TOKEN_ID, TRADE_ID,
     },
     enums::clickhouse::{
-        ChCanonicalBookEventType, ChLedgerTradeSide, ChOutcomeSide,
-        ChRecommendationAttributionOutcome, ChTradeParticipantRole, ChTradeReconciliationStatus,
-        ChTradeSide, ChTradeTapeSource,
+        ChCanonicalBookEventType, ChLedgerTradeSide, ChOutcomeSide, ChTradeParticipantRole,
+        ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
     },
     hashing::CanonicalDigest,
     types::{
@@ -522,7 +521,7 @@ pub async fn domain_event_rust_row_matches_clickhouse_schema() {
     assert_eq!(count, 1);
 }
 
-pub async fn report_fact_schema_accepts_decision_snapshot_and_superseded_censor() {
+pub async fn report_fact_schema_accepts_immutable_decision_snapshot() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
     let lifecycle_status_columns: u64 = client
         .query(
@@ -567,29 +566,6 @@ pub async fn report_fact_schema_accepts_decision_snapshot_and_superseded_censor(
         .await
         .expect("commit recommendation decision");
 
-    let attribution = QuantRecommendationAttributionEventRow {
-        event_time: now,
-        recommendation_id,
-        outcome: ChRecommendationAttributionOutcome::SupersededUnfilled,
-        realized_pnl_usd: ChUsd::from(Usd::ZERO),
-        max_adverse_excursion_bps: None,
-        max_favorable_excursion_bps: ChDecimal64::from(dec!(0)),
-        label_available_at: now,
-        ingestion_time: now,
-    };
-    let mut attribution_insert = client
-        .insert::<QuantRecommendationAttributionEventRow>("quant_recommendation_attribution_event")
-        .await
-        .expect("start superseded censor insert");
-    attribution_insert
-        .write(&attribution)
-        .await
-        .expect("write superseded censor");
-    attribution_insert
-        .end()
-        .await
-        .expect("commit superseded censor");
-
     let decision_count: u64 = client
         .query(
             "SELECT count() FROM quant_report_recommendation_fact \
@@ -600,17 +576,7 @@ pub async fn report_fact_schema_accepts_decision_snapshot_and_superseded_censor(
         .fetch_one()
         .await
         .expect("read recommendation decision");
-    let outcome_code: i8 = client
-        .query(
-            "SELECT toInt8(outcome) FROM quant_recommendation_attribution_event \
-             WHERE recommendation_id = ?",
-        )
-        .bind(recommendation_id)
-        .fetch_one()
-        .await
-        .expect("read superseded censor outcome code");
     assert_eq!(decision_count, 1);
-    assert_eq!(outcome_code, 6);
 
     let ddl: TableDdl = client
         .query("SHOW CREATE TABLE quant_report_recommendation_fact")

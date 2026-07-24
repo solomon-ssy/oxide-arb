@@ -1,5 +1,4 @@
 pub mod account;
-pub mod attribution_payload;
 pub mod backtest;
 pub mod book_snapshot_ref;
 pub mod calibration;
@@ -49,7 +48,6 @@ pub mod training;
 pub mod venue_fill;
 
 pub use account::{AccountPositions, ExposureBreakdown, PositionSnapshot};
-pub use attribution_payload::{AttributionDetail, EntryOutcome, ExitOutcome};
 pub use book_snapshot_ref::{BookSnapshotRef, BookSnapshotRefParseError, BookSnapshotSource};
 pub use catalog::CatalogMarketIds;
 pub use clob_market_info::{
@@ -138,7 +136,7 @@ pub use micro::{
 pub use model_input::{
     ModelInputContract, ModelInputRequiredness, ModelInputSpec, ModelTrainingContract,
 };
-pub use money::{Bps, Price, Probability, Shares, Usd};
+pub use money::{Bps, PayoutRatio, PayoutRatioError, Price, Probability, Shares, Usd};
 pub use persistence_document::{
     ExternalJsonDocument, OperationDetailDocument, OperationDetailError,
 };

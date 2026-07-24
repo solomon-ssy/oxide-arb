@@ -8,7 +8,7 @@ use quant_pivot_models::{
     },
     enums::{clickhouse::ChTradeReconciliationStatus, common::Side, quant::FillRequirement},
     hashing::CanonicalDigest,
-    types::{Bps, ContentHash, Price, Probability, Shares, Usd},
+    types::{Bps, ContentHash, PayoutRatio, Price, Probability, Shares, Usd},
 };
 use rust_decimal::{Decimal, MathematicalOps, RoundingStrategy};
 use serde::{Deserialize, Serialize};
@@ -178,15 +178,11 @@ impl ResolutionBuyEconomics {
         }
     }
 
-    /// Settle the bought token at its binary `0`/`1` payout.
+    /// Settle the bought token at its exact resolved payout ratio.
     #[must_use]
-    pub fn settle(self, won: bool) -> ResolutionBuySettlement {
+    pub fn settle(self, payout_ratio: PayoutRatio) -> ResolutionBuySettlement {
         let cash_outlay = self.cash_outlay.inner();
-        let payout = if won {
-            self.filled_shares.inner()
-        } else {
-            Decimal::ZERO
-        };
+        let payout = self.filled_shares.inner() * payout_ratio.inner();
         let realized_pnl = payout - cash_outlay;
         ResolutionBuySettlement {
             economics: self,
@@ -206,7 +202,7 @@ pub struct ResolutionBuyEdge {
     pub full_kelly_fraction: Decimal,
 }
 
-/// Realized cash flows of an executable BUY held to binary resolution.
+/// Realized cash flows of an executable BUY held to resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionBuySettlement {
     pub economics: ResolutionBuyEconomics,

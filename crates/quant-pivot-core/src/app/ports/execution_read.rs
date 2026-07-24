@@ -14,24 +14,18 @@ use quant_pivot_models::{
         },
         pagination::Paginated,
         ports::ExecutionReadPort,
-        quant::{
-            ExecutionOrderInfo, PositionInfo, RecommendationAttributionInfo, ReconciliationInfo,
-        },
+        quant::{ExecutionOrderInfo, PositionInfo, ReconciliationInfo},
     },
-    types::{
-        ExecutionOrderId, OrderIntentId, PositionId, RecommendationId, ReconciliationId,
-        SettlementRedeemId,
-    },
+    types::{ExecutionOrderId, OrderIntentId, PositionId, ReconciliationId, SettlementRedeemId},
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, ExecutionOrderRepository, PositionRepository, ReconciliationRepository,
+    ExecutionOrderRepository, PositionRepository, ReconciliationRepository,
     quant::settlement_redeem::SettlementRedeemRepository,
 };
 
 pub struct CoreExecutionReadPort {
     execution_orders: Arc<dyn ExecutionOrderRepository>,
     positions: Arc<dyn PositionRepository>,
-    attribution: Arc<dyn AttributionRepository>,
     reconciliation: Arc<dyn ReconciliationRepository>,
     settlement_redeem: Arc<dyn SettlementRedeemRepository>,
 }
@@ -41,14 +35,12 @@ impl CoreExecutionReadPort {
     pub fn new(
         execution_orders: Arc<dyn ExecutionOrderRepository>,
         positions: Arc<dyn PositionRepository>,
-        attribution: Arc<dyn AttributionRepository>,
         reconciliation: Arc<dyn ReconciliationRepository>,
         settlement_redeem: Arc<dyn SettlementRedeemRepository>,
     ) -> Self {
         Self {
             execution_orders,
             positions,
-            attribution,
             reconciliation,
             settlement_redeem,
         }
@@ -91,16 +83,6 @@ impl ExecutionReadPort for CoreExecutionReadPort {
     ) -> QuantResult<Option<PositionInfo>> {
         self.positions
             .find_by_intent(intent_id)
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn get_recommendation_attribution(
-        &self,
-        id: &RecommendationId,
-    ) -> QuantResult<Option<RecommendationAttributionInfo>> {
-        self.attribution
-            .find_by_recommendation(id)
             .await
             .map_err(Into::into)
     }

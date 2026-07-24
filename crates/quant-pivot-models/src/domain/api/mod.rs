@@ -99,8 +99,7 @@ pub use quant_execution::{
     EntryConditionInstanceSummaryView, EntryConditionLeafEvidenceView,
     EntryConditionSourceCheckpointView, ExecutionOrderListQuery, ExecutionOrderView,
     ExitMonitorObservationView, OrderIntentListQuery, OrderIntentView, PositionDetailView,
-    PositionListQuery, PositionSummary, PositionView, RecommendationAttributionView,
-    RejectIntentRequest,
+    PositionListQuery, PositionSummary, PositionView, RejectIntentRequest,
 };
 pub use quant_model::{
     CreateModelSpecRequest, ModelPickerSide, ModelPublishedCatalogQuery, ModelSpecListQuery,
