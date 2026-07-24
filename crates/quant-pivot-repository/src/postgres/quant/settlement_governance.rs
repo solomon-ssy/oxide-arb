@@ -62,7 +62,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::{error, query::paginate_mapped},
+    postgres::query::paginate_mapped,
     traits::quant::settlement_governance::{
         SettlementExternalCursorRepository, SettlementGovernanceRepository,
     },
@@ -79,48 +79,56 @@ impl PgSettlementGovernanceRepository {
     }
 }
 
-async fn lock_governed_action(
-    txn: &DatabaseTransaction,
-    action_id: SettlementGovernedActionId,
-) -> Result<GovernedActionModel, StorageError> {
-    GovernedActionEntity::find_by_id(action_id)
-        .lock_exclusive()
-        .one(txn)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_SETTLEMENT_GOVERNED_ACTION, action_id))
-}
-
-async fn action_submission(
-    txn: &DatabaseTransaction,
-    action_id: SettlementGovernedActionId,
-) -> Result<Option<ChainSubmissionModel>, StorageError> {
-    ChainSubmissionEntity::find()
-        .filter(ChainSubmissionColumn::SettlementGovernedActionId.eq(action_id))
-        .one(txn)
-        .await
-        .map_err(StorageError::from)
-}
-
-async fn lock_action_submission(
-    txn: &DatabaseTransaction,
-    action_id: SettlementGovernedActionId,
-    submission_id: SettlementChainSubmissionId,
-) -> Result<ChainSubmissionModel, StorageError> {
-    let submission = ChainSubmissionEntity::find_by_id(submission_id)
-        .lock_exclusive()
-        .one(txn)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_SETTLEMENT_CHAIN_SUBMISSION, submission_id))?;
-    if submission.settlement_governed_action_id != Some(action_id) {
-        return Err(error::state_conflict(
-            QUANT_SETTLEMENT_CHAIN_SUBMISSION,
-            Some(submission_id),
-            "governed-action submission parent does not match",
-        ));
+impl PgSettlementGovernanceRepository {
+    async fn lock_governed_action(
+        txn: &DatabaseTransaction,
+        action_id: SettlementGovernedActionId,
+    ) -> Result<GovernedActionModel, StorageError> {
+        GovernedActionEntity::find_by_id(action_id)
+            .lock_exclusive()
+            .one(txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_SETTLEMENT_GOVERNED_ACTION, action_id))
     }
-    Ok(submission)
+}
+
+impl PgSettlementGovernanceRepository {
+    async fn action_submission(
+        txn: &DatabaseTransaction,
+        action_id: SettlementGovernedActionId,
+    ) -> Result<Option<ChainSubmissionModel>, StorageError> {
+        ChainSubmissionEntity::find()
+            .filter(ChainSubmissionColumn::SettlementGovernedActionId.eq(action_id))
+            .one(txn)
+            .await
+            .map_err(StorageError::from)
+    }
+}
+
+impl PgSettlementGovernanceRepository {
+    async fn lock_action_submission(
+        txn: &DatabaseTransaction,
+        action_id: SettlementGovernedActionId,
+        submission_id: SettlementChainSubmissionId,
+    ) -> Result<ChainSubmissionModel, StorageError> {
+        let submission = ChainSubmissionEntity::find_by_id(submission_id)
+            .lock_exclusive()
+            .one(txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::not_found(QUANT_SETTLEMENT_CHAIN_SUBMISSION, submission_id)
+            })?;
+        if submission.settlement_governed_action_id != Some(action_id) {
+            return Err(StorageError::state_conflict(
+                QUANT_SETTLEMENT_CHAIN_SUBMISSION,
+                Some(submission_id),
+                "governed-action submission parent does not match",
+            ));
+        }
+        Ok(submission)
+    }
 }
 
 fn require_live_action_claim(
@@ -133,7 +141,7 @@ fn require_live_action_claim(
             .lease_expires_at
             .is_none_or(|lease_expires_at| lease_expires_at <= now)
     {
-        return Err(error::state_conflict(
+        return Err(StorageError::state_conflict(
             QUANT_SETTLEMENT_GOVERNED_ACTION,
             Some(action.settlement_governed_action_id),
             "governed action lease is absent, expired, or owned by another worker",
@@ -152,7 +160,7 @@ fn governed_action_purpose(
         SettlementGovernedActionKind::OutcomeTokenRevocation => {
             Ok(SettlementSubmissionPurpose::OutcomeTokenRevocation)
         }
-        SettlementGovernedActionKind::CanaryGrant => Err(error::invariant_violation(
+        SettlementGovernedActionKind::CanaryGrant => Err(StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_GOVERNED_ACTION),
             "canary grant is consumed by a redeem submission and has no standalone transport",
         )),
@@ -181,7 +189,7 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| {
-                error::not_found(
+                StorageError::not_found(
                     QUANT_SETTLEMENT_GOVERNED_ACTION,
                     expected.settlement_governed_action_id,
                 )
@@ -201,7 +209,7 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
             && stored.authorized_by == expected.authorized_by
             && stored.expires_at == expected.expires_at;
         if !exact {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_GOVERNED_ACTION,
                 Some(stored.settlement_governed_action_id),
                 "governed action idempotency key was reused for another immutable scope",
@@ -241,7 +249,7 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         command: RevokeSettlementGovernedAction,
     ) -> Result<SettlementGovernedActionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let model = lock_governed_action(&txn, command.settlement_governed_action_id).await?;
+        let model = Self::lock_governed_action(&txn, command.settlement_governed_action_id).await?;
         if model.state == SettlementGovernedActionState::Revoked
             && model.scope_digest == command.expected_scope_digest
             && model.revoked_by == Some(command.actor)
@@ -256,23 +264,23 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
                 | SettlementGovernedActionState::RetryScheduled
         ) || model.scope_digest != command.expected_scope_digest
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_GOVERNED_ACTION,
                 Some(model.settlement_governed_action_id),
                 "governed action revocation state/scope compare-and-swap failed",
             ));
         }
         if command.revoked_at < model.authorized_at {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_GOVERNED_ACTION),
                 "governed action revocation cannot predate authorization",
             ));
         }
-        if action_submission(&txn, model.settlement_governed_action_id)
+        if Self::action_submission(&txn, model.settlement_governed_action_id)
             .await?
             .is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_GOVERNED_ACTION,
                 Some(model.settlement_governed_action_id),
                 "durable submission identity forbids governed action revocation",
@@ -392,7 +400,7 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         active.claim_owner = ActiveValue::Set(Some(*owner));
         active.lease_expires_at = ActiveValue::Set(Some(lease_expires_at));
         let claimed = active.update(&txn).await.map_err(StorageError::from)?;
-        let submission = action_submission(&txn, action_id).await?;
+        let submission = Self::action_submission(&txn, action_id).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(Some(SettlementGovernedActionWorkClaim {
             action: claimed.into(),
@@ -448,7 +456,8 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         command: PersistPreparedGovernedActionSubmission,
     ) -> Result<SettlementChainSubmissionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let action = lock_governed_action(&txn, command.settlement_governed_action_id).await?;
+        let action =
+            Self::lock_governed_action(&txn, command.settlement_governed_action_id).await?;
         require_live_action_claim(&action, &command.owner, command.persisted_at)?;
         let purpose = governed_action_purpose(action.kind)?;
         let submission = &command.submission;
@@ -477,17 +486,17 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
             && submission.signed_envelope_hash.is_some()
             && submission.prepared_nonce.is_some();
         if !exact_scope {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                 Some(submission.settlement_chain_submission_id),
                 "prepared governed-action submission does not match the authorized scope",
             ));
         }
-        if action_submission(&txn, action.settlement_governed_action_id)
+        if Self::action_submission(&txn, action.settlement_governed_action_id)
             .await?
             .is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_GOVERNED_ACTION,
                 Some(action.settlement_governed_action_id),
                 "governed action already has a durable submission identity",
@@ -506,9 +515,10 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         command: BeginGovernedActionDispatch,
     ) -> Result<SettlementChainSubmissionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let action = lock_governed_action(&txn, command.settlement_governed_action_id).await?;
+        let action =
+            Self::lock_governed_action(&txn, command.settlement_governed_action_id).await?;
         require_live_action_claim(&action, &command.owner, command.dispatching_at)?;
-        let submission = lock_action_submission(
+        let submission = Self::lock_action_submission(
             &txn,
             action.settlement_governed_action_id,
             command.settlement_chain_submission_id,
@@ -521,7 +531,7 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
             && submission.calldata_hash == command.expected_calldata_hash
             && submission.signed_envelope_hash == Some(command.expected_signed_envelope_hash);
         if !exact_scope {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                 Some(submission.settlement_chain_submission_id),
                 "governed action prepare-to-dispatch scope CAS failed",
@@ -540,9 +550,10 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         command: RecordGovernedActionEoaBroadcast,
     ) -> Result<SettlementChainSubmissionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let action = lock_governed_action(&txn, command.settlement_governed_action_id).await?;
+        let action =
+            Self::lock_governed_action(&txn, command.settlement_governed_action_id).await?;
         require_live_action_claim(&action, &command.owner, command.observed_at)?;
-        let submission = lock_action_submission(
+        let submission = Self::lock_action_submission(
             &txn,
             action.settlement_governed_action_id,
             command.settlement_chain_submission_id,
@@ -554,7 +565,7 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
             || submission.transaction_hash.is_none()
             || submission.relayer_transaction_id.is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                 Some(submission.settlement_chain_submission_id),
                 "governed EOA broadcast identity/state CAS failed",
@@ -573,9 +584,10 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         command: RecordGovernedActionRelayerAcceptance,
     ) -> Result<SettlementChainSubmissionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let action = lock_governed_action(&txn, command.settlement_governed_action_id).await?;
+        let action =
+            Self::lock_governed_action(&txn, command.settlement_governed_action_id).await?;
         require_live_action_claim(&action, &command.owner, command.observed_at)?;
-        let submission = lock_action_submission(
+        let submission = Self::lock_action_submission(
             &txn,
             action.settlement_governed_action_id,
             command.settlement_chain_submission_id,
@@ -587,7 +599,7 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
             || submission.transaction_hash.is_some()
             || submission.relayer_transaction_id.is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                 Some(submission.settlement_chain_submission_id),
                 "governed relayer acceptance identity/state CAS failed",
@@ -601,14 +613,15 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         Ok(awaiting.into())
     }
 
-    async fn record_action_relayer_chain_hash(
+    async fn record_relayer_chain_hash(
         &self,
         command: RecordGovernedActionRelayerChainHash,
     ) -> Result<SettlementChainSubmissionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let action = lock_governed_action(&txn, command.settlement_governed_action_id).await?;
+        let action =
+            Self::lock_governed_action(&txn, command.settlement_governed_action_id).await?;
         require_live_action_claim(&action, &command.owner, command.observed_at)?;
-        let submission = lock_action_submission(
+        let submission = Self::lock_action_submission(
             &txn,
             action.settlement_governed_action_id,
             command.settlement_chain_submission_id,
@@ -620,7 +633,7 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
                 != Some(&command.expected_relayer_transaction_id)
             || submission.transaction_hash.is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                 Some(submission.settlement_chain_submission_id),
                 "governed relayer chain-hash identity/state CAS failed",
@@ -640,7 +653,8 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         command: ScheduleGovernedActionRetry,
     ) -> Result<SettlementGovernedActionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let action = lock_governed_action(&txn, command.settlement_governed_action_id).await?;
+        let action =
+            Self::lock_governed_action(&txn, command.settlement_governed_action_id).await?;
         require_live_action_claim(&action, &command.owner, command.scheduled_at)?;
         if action.scope_digest != command.expected_scope_digest
             || !matches!(
@@ -649,14 +663,14 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
                     | SettlementGovernedActionState::RetryScheduled
             )
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_GOVERNED_ACTION,
                 Some(action.settlement_governed_action_id),
                 "governed action retry scope/state CAS failed",
             ));
         }
         let retry_count = action.retry_count.checked_add(1).ok_or_else(|| {
-            error::invariant_violation(
+            StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_GOVERNED_ACTION),
                 "governed action retry count overflow",
             )
@@ -679,13 +693,14 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         command: ScheduleGovernedActionWork,
     ) -> Result<SettlementGovernedActionInfo, StorageError> {
         if command.next_attempt_at <= command.scheduled_at {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_GOVERNED_ACTION),
                 "governed action next work time must be in the future",
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let action = lock_governed_action(&txn, command.settlement_governed_action_id).await?;
+        let action =
+            Self::lock_governed_action(&txn, command.settlement_governed_action_id).await?;
         require_live_action_claim(&action, &command.owner, command.scheduled_at)?;
         if action.scope_digest != command.expected_scope_digest
             || !matches!(
@@ -694,7 +709,7 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
                     | SettlementGovernedActionState::RetryScheduled
             )
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_GOVERNED_ACTION,
                 Some(action.settlement_governed_action_id),
                 "governed action polling schedule scope/state CAS failed",
@@ -714,7 +729,8 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         command: FailSettlementGovernedAction,
     ) -> Result<SettlementGovernedActionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let action = lock_governed_action(&txn, command.settlement_governed_action_id).await?;
+        let action =
+            Self::lock_governed_action(&txn, command.settlement_governed_action_id).await?;
         require_live_action_claim(&action, &command.owner, command.failed_at)?;
         if action.scope_digest != command.expected_scope_digest
             || !matches!(
@@ -722,11 +738,11 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
                 SettlementGovernedActionState::Authorized
                     | SettlementGovernedActionState::RetryScheduled
             )
-            || action_submission(&txn, action.settlement_governed_action_id)
+            || Self::action_submission(&txn, action.settlement_governed_action_id)
                 .await?
                 .is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_GOVERNED_ACTION,
                 Some(action.settlement_governed_action_id),
                 "governed action terminal failure scope/state CAS failed",
@@ -749,9 +765,10 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         command: ConfirmSettlementGovernedAction,
     ) -> Result<SettlementGovernedActionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let action = lock_governed_action(&txn, command.settlement_governed_action_id).await?;
+        let action =
+            Self::lock_governed_action(&txn, command.settlement_governed_action_id).await?;
         require_live_action_claim(&action, &command.owner, command.confirmed_at)?;
-        let submission = lock_action_submission(
+        let submission = Self::lock_action_submission(
             &txn,
             action.settlement_governed_action_id,
             command.settlement_chain_submission_id,
@@ -759,7 +776,7 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         .await?;
         let SettlementChainReceiptEvidence::OperatorApproval(evidence) = &command.receipt_evidence
         else {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_CHAIN_SUBMISSION),
                 "governed action confirmation requires operator-approval receipt evidence",
             ));
@@ -770,7 +787,7 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
             || !evidence.receipt_success
             || !evidence.operator_approved.eq(&evidence.desired_approval)
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_GOVERNED_ACTION,
                 Some(action.settlement_governed_action_id),
                 "governed action confirmation evidence/scope CAS failed",
@@ -805,16 +822,17 @@ impl SettlementGovernanceRepository for PgSettlementGovernanceRepository {
         command: RequireGovernedActionReconciliation,
     ) -> Result<SettlementGovernedActionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let action = lock_governed_action(&txn, command.settlement_governed_action_id).await?;
+        let action =
+            Self::lock_governed_action(&txn, command.settlement_governed_action_id).await?;
         require_live_action_claim(&action, &command.owner, command.observed_at)?;
-        let submission = lock_action_submission(
+        let submission = Self::lock_action_submission(
             &txn,
             action.settlement_governed_action_id,
             command.settlement_chain_submission_id,
         )
         .await?;
         if action.scope_digest != command.expected_scope_digest {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_GOVERNED_ACTION,
                 Some(action.settlement_governed_action_id),
                 "governed action reconciliation scope CAS failed",
@@ -928,7 +946,7 @@ impl SettlementExternalCursorRepository for PgSettlementGovernanceRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| {
-                error::not_found(
+                StorageError::not_found(
                     QUANT_SETTLEMENT_EXTERNAL_CURSOR,
                     expected.settlement_external_cursor_id,
                 )
@@ -938,7 +956,7 @@ impl SettlementExternalCursorRepository for PgSettlementGovernanceRepository {
             && stored.target_code_hash == expected.target_code_hash
             && stored.deployment_evidence_version == expected.deployment_evidence_version;
         if !exact {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_EXTERNAL_CURSOR,
                 Some(stored.settlement_external_cursor_id),
                 "external cursor deployment identity is inconsistent",
@@ -982,13 +1000,13 @@ impl SettlementExternalCursorRepository for PgSettlementGovernanceRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| {
-                error::not_found(
+                StorageError::not_found(
                     QUANT_SETTLEMENT_EXTERNAL_CURSOR,
                     command.cursor.settlement_external_cursor_id,
                 )
             })?;
         if cursor.next_block_number != command.cursor.expected_next_block_number {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_EXTERNAL_CURSOR,
                 Some(cursor.settlement_external_cursor_id),
                 "external cursor compare-and-swap lost",
@@ -997,7 +1015,7 @@ impl SettlementExternalCursorRepository for PgSettlementGovernanceRepository {
         for submission in command.submissions {
             validate_external_submission(&cursor, &submission)?;
             let redeem_id = submission.settlement_redeem_id.ok_or_else(|| {
-                error::invariant_violation(
+                StorageError::invariant_violation(
                     Some(QUANT_SETTLEMENT_CHAIN_SUBMISSION),
                     "external observation requires a settlement case parent",
                 )
@@ -1007,7 +1025,7 @@ impl SettlementExternalCursorRepository for PgSettlementGovernanceRepository {
                 .one(&txn)
                 .await
                 .map_err(StorageError::from)?
-                .ok_or_else(|| error::not_found(QUANT_SETTLEMENT_REDEEM, redeem_id))?;
+                .ok_or_else(|| StorageError::not_found(QUANT_SETTLEMENT_REDEEM, redeem_id))?;
             validate_external_case(&cursor, &redeem, &submission)?;
             let verified_block_number = submission.verified_block_number;
             let verified_block_hash = submission.verified_block_hash.clone();
@@ -1057,7 +1075,7 @@ fn validate_cursor_advance(command: &AdvanceSettlementExternalCursor) -> Result<
         || command.last_observed_block_number < command.expected_next_block_number
         || command.next_block_number != command.last_observed_block_number + 1
     {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_EXTERNAL_CURSOR),
             "external cursor must advance one contiguous canonical block range",
         ));
@@ -1092,7 +1110,7 @@ fn validate_external_submission(
                 || submission.failure_history_json.entries.is_empty()
                 || submission.last_error.is_none()))
     {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_CHAIN_SUBMISSION),
             "external submission does not match the exact cursor deployment scope",
         ));
@@ -1121,7 +1139,7 @@ fn validate_external_case(
         || (submission.state == SettlementSubmissionState::AwaitingFinality && !exact_ready_scope)
         || (submission.state == SettlementSubmissionState::Failed && exact_ready_scope)
     {
-        return Err(error::state_conflict(
+        return Err(StorageError::state_conflict(
             QUANT_SETTLEMENT_REDEEM,
             Some(redeem.settlement_redeem_id),
             "external redemption cannot be attached without exact frozen pre-redemption evidence",

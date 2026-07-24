@@ -122,7 +122,7 @@ pub trait OrderIntentRepository: Send + Sync {
 
     /// All active (pre-submission) intents for a recommendation — the
     /// per-recommendation expiry cascade (release reserved capital).
-    async fn find_active_intents_by_recommendation(
+    async fn find_active_intents(
         &self,
         recommendation_id: &RecommendationId,
     ) -> Result<Vec<OrderIntentInfo>, StorageError>;

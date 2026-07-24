@@ -34,12 +34,12 @@ impl OutcomeReconciliationWorker {
     pub async fn run_once(&self, config: OutcomeReconciliationPassConfig) -> QuantResult<()> {
         let execution = self.service.run_execution_pass(config).await;
         if let Ok(summary) = &execution {
-            log_execution_summary(*summary);
+            (*summary).log_execution_summary();
         }
 
         let resolution = self.service.run_resolution_pass(config).await;
         if let Ok(summary) = &resolution {
-            log_resolution_summary(*summary);
+            (*summary).log_resolution_summary();
         }
 
         match (execution, resolution) {
@@ -106,34 +106,38 @@ impl AppContext {
     }
 }
 
-fn log_execution_summary(summary: OutcomeReconciliationPassSummary) {
-    if summary.execution_candidates > 0 {
-        tracing::info!(
-            candidates = summary.execution_candidates,
-            inserted = summary.execution_inserted,
-            existing = summary.execution_existing,
-            deferred = summary.execution_deferred,
-            "execution outcome reconciliation completed"
-        );
+impl OutcomeReconciliationPassSummary {
+    fn log_execution_summary(self) {
+        if self.execution_candidates > 0 {
+            tracing::info!(
+                candidates = self.execution_candidates,
+                inserted = self.execution_inserted,
+                existing = self.execution_existing,
+                deferred = self.execution_deferred,
+                "execution outcome reconciliation completed"
+            );
+        }
     }
 }
 
-fn log_resolution_summary(summary: OutcomeReconciliationPassSummary) {
-    let observed_work =
-        summary.source_scans + summary.source_observations + summary.resolution_candidates;
-    if observed_work > 0 || summary.cursor_conflicted {
-        tracing::info!(
-            source_scans = summary.source_scans,
-            source_observations = summary.source_observations,
-            source_unknown_markets = summary.source_unknown_markets,
-            source_facts_written = summary.source_facts_written,
-            source_facts_recovered = summary.source_facts_recovered,
-            cursor_advanced = summary.cursor_advanced,
-            cursor_conflicted = summary.cursor_conflicted,
-            candidates = summary.resolution_candidates,
-            inserted = summary.resolution_inserted,
-            existing = summary.resolution_existing,
-            "resolution outcome reconciliation completed"
-        );
+impl OutcomeReconciliationPassSummary {
+    fn log_resolution_summary(self) {
+        let observed_work =
+            self.source_scans + self.source_observations + self.resolution_candidates;
+        if observed_work > 0 || self.cursor_conflicted {
+            tracing::info!(
+                source_scans = self.source_scans,
+                source_observations = self.source_observations,
+                source_unknown_markets = self.source_unknown_markets,
+                source_facts_written = self.source_facts_written,
+                source_facts_recovered = self.source_facts_recovered,
+                cursor_advanced = self.cursor_advanced,
+                cursor_conflicted = self.cursor_conflicted,
+                candidates = self.resolution_candidates,
+                inserted = self.resolution_inserted,
+                existing = self.resolution_existing,
+                "resolution outcome reconciliation completed"
+            );
+        }
     }
 }

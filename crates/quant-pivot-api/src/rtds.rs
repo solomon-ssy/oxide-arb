@@ -66,7 +66,7 @@ impl RtdsCryptoSource {
         match self {
             Self::Binance => {
                 let symbol = instrument
-                    .as_polymarket_rtds_binance_symbol()
+                    .polymarket_binance_symbol()
                     .filter(|symbol| SUPPORTED_BINANCE_SYMBOLS.contains(&symbol.as_str()))
                     .ok_or_else(|| {
                         QuantError::config(format!(
@@ -77,7 +77,7 @@ impl RtdsCryptoSource {
             }
             Self::Chainlink => {
                 let feed = instrument
-                    .as_polymarket_rtds_chainlink_feed()
+                    .polymarket_chainlink_feed()
                     .filter(|feed| SUPPORTED_CHAINLINK_FEEDS.contains(&feed.as_str()))
                     .ok_or_else(|| {
                         QuantError::config(format!(
@@ -479,7 +479,7 @@ mod tests {
     };
 
     #[test]
-    fn binance_and_chainlink_payloads_keep_distinct_provenance() {
+    fn binance_chainlink_keep_provenance() {
         let available_at = Utc.with_ymd_and_hms(2025, 7, 23, 20, 21, 4).unwrap();
         let binance = DomainInstrumentKey::polymarket_rtds_binance(
             &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn subscription_filters_match_the_official_source_shapes() {
+    fn subscription_filters_match_shapes() {
         let binance_symbols = ["btcusdt".to_owned()];
         let binance = subscription_message(RtdsCryptoSource::Binance, binance_symbols.iter())
             .expect("Binance subscription");
@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn wrong_topic_symbol_price_or_clock_fails_closed() {
+    fn wrong_topic_rejects_stream() {
         let instrument = DomainInstrumentKey::polymarket_rtds_binance(
             &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
         );
@@ -583,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn undocumented_asset_cannot_enter_public_rtds() {
+    fn undocumented_cannot_enter_rtds() {
         let unsupported = DomainInstrumentKey::polymarket_rtds_binance(
             &BinanceSymbol::parse("DOGEUSDT").expect("symbol"),
         );
@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn filtered_subscription_snapshot_is_control_data_not_a_live_fact() {
+    fn filtered_subscription_not_fact() {
         let snapshot = r#"{"topic":"crypto_prices","type":"subscribe","payload":{"symbol":"btcusdt","data":[{"timestamp":1753302063995,"value":67234.50}]}}"#;
         assert!(should_skip_message(RtdsCryptoSource::Binance, snapshot).expect("snapshot header"));
         assert!(

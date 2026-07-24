@@ -81,7 +81,7 @@ mod tests {
     use super::{DefaultModeTransitionGate, ModeTransitionGate};
 
     #[test]
-    fn matrix_allows_only_spec_edges() {
+    fn matrix_allows_only_edges() {
         let gate = DefaultModeTransitionGate::new();
         // Allowed upgrades.
         assert!(gate.check(ReportOnly, SemiAuto).is_ok());
@@ -95,7 +95,7 @@ mod tests {
     }
 
     #[test]
-    fn same_mode_is_allowed_by_matrix() {
+    fn same_mode_allowed_matrix() {
         let gate = DefaultModeTransitionGate::new();
         assert!(gate.check(ReportOnly, ReportOnly).is_ok());
         assert!(gate.check(SemiAuto, SemiAuto).is_ok());

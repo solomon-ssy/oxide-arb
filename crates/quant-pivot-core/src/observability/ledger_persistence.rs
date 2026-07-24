@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinator_aggregates_partitions_and_advances_persistent_cursors() {
+    async fn coordinator_aggregates_advances_cursors() {
         let sink = Arc::new(RecordingSink::default());
         let (handle, coordinator) = LedgerPersistenceCoordinator::new(
             Arc::clone(&sink) as Arc<dyn FactWriter<BookL2LedgerRow>>,
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_batch_advances_generation_and_next_batch_can_commit() {
+    async fn failed_batch_advances_commit() {
         let sink = Arc::new(RecordingSink::default());
         sink.failures_remaining.store(1, Ordering::Release);
         let (handle, coordinator) = LedgerPersistenceCoordinator::new(
@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cursor_observes_preexisting_jump_and_closed_state_without_race() {
+    async fn cursor_observes_without_race() {
         let (request_tx, _request_rx) = mpsc::channel::<QueuedLedgerWriteRequest>(1);
         let (commit_tx, commit_rx) = watch::channel(PartitionCommit::Pending);
         let mut client = PartitionLedgerClient {
@@ -520,7 +520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn late_commit_is_recovered_before_the_next_batch_is_submitted() {
+    async fn late_commit_before_submitted() {
         let (request_tx, mut request_rx) = mpsc::channel::<QueuedLedgerWriteRequest>(1);
         let (commit_tx, commit_rx) = watch::channel(PartitionCommit::Pending);
         let mut client = PartitionLedgerClient {
@@ -561,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn loom_cursor_check_then_wait_has_no_lost_notification() {
+    fn loom_cursor_no_notification() {
         loom::model(|| {
             let cursor = LoomArc::new((LoomMutex::new(0_u64), LoomCondvar::new()));
             let reader = LoomArc::clone(&cursor);

@@ -54,9 +54,9 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_MODEL_SPEC, plan.model_spec_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_MODEL_SPEC, plan.model_spec_id))?;
         if plan.model_spec_definition_hash != stored_definition_hash {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_TRAINING_DATASET),
                 format!(
                     "model_spec_definition_hash mismatch for {}: expected {stored_definition_hash}, got {}",
@@ -111,7 +111,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(
+            return Err(StorageError::not_found(
                 QUANT_TRAINING_DATASET,
                 training_dataset_id,
             ));
@@ -121,7 +121,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             return Ok(row.into());
         }
         if row.status != TrainingDatasetStatus::Planned {
-            return Err(error::illegal_transition(
+            return Err(StorageError::illegal_transition(
                 QUANT_TRAINING_DATASET,
                 Some(training_dataset_id),
                 row.status,
@@ -149,7 +149,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
                 | TrainingDatasetStatus::InsufficientLabels
                 | TrainingDatasetStatus::Failed
         ) {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_TRAINING_DATASET),
                 format!(
                     "complete_build requires ready, insufficient_labels, or failed; got {}",
@@ -164,13 +164,13 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(
+            return Err(StorageError::not_found(
                 QUANT_TRAINING_DATASET,
                 training_dataset_id,
             ));
         };
         if row.status != TrainingDatasetStatus::Building {
-            return Err(error::illegal_transition(
+            return Err(StorageError::illegal_transition(
                 QUANT_TRAINING_DATASET,
                 Some(training_dataset_id),
                 row.status,
@@ -212,7 +212,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(
+            return Err(StorageError::not_found(
                 QUANT_TRAINING_DATASET,
                 training_dataset_id,
             ));
@@ -225,7 +225,7 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             row.status,
             TrainingDatasetStatus::Planned | TrainingDatasetStatus::Building
         ) {
-            return Err(error::illegal_transition(
+            return Err(StorageError::illegal_transition(
                 QUANT_TRAINING_DATASET,
                 Some(training_dataset_id),
                 row.status,
@@ -255,13 +255,13 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(
+            return Err(StorageError::not_found(
                 QUANT_TRAINING_DATASET,
                 training_dataset_id,
             ));
         };
         if row.status != TrainingDatasetStatus::Ready {
-            return Err(error::illegal_transition(
+            return Err(StorageError::illegal_transition(
                 QUANT_TRAINING_DATASET,
                 Some(training_dataset_id),
                 row.status,
@@ -285,19 +285,19 @@ fn validate_manifest_binding(
 ) -> Result<(), StorageError> {
     let manifest = &completion.manifest_json;
     let knowledge_lag_secs = u64::try_from(row.knowledge_lag_secs).map_err(|error| {
-        error::invariant_violation(
+        StorageError::invariant_violation(
             Some(QUANT_TRAINING_DATASET),
             format!("persisted knowledge_lag_secs is invalid: {error}"),
         )
     })?;
     let sample_interval_secs = u64::try_from(row.sample_interval_secs).map_err(|error| {
-        error::invariant_violation(
+        StorageError::invariant_violation(
             Some(QUANT_TRAINING_DATASET),
             format!("persisted sample_interval_secs is invalid: {error}"),
         )
     })?;
     let sample_count = u64::try_from(completion.sample_count).map_err(|error| {
-        error::invariant_violation(
+        StorageError::invariant_violation(
             Some(QUANT_TRAINING_DATASET),
             format!("completed sample_count is invalid: {error}"),
         )
@@ -319,7 +319,7 @@ fn validate_manifest_binding(
         && manifest.semantic_dataset_hash == completion.dataset_hash
         && manifest.sample_count == sample_count;
     if !bound {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_TRAINING_DATASET),
             format!(
                 "manifest_json does not match frozen dataset plan and completion bindings for {}",

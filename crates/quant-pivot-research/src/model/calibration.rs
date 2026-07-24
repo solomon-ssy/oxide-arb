@@ -301,7 +301,13 @@ pub fn calibrate_substitution_rules(
     let clean = stratum_mean(samples.iter().filter(|s| s.substitution_reasons.is_empty()));
     let reason_means: Vec<Option<Decimal>> = reasons
         .iter()
-        .map(|reason| stratum_mean(samples.iter().filter(|s| has_reason(s, *reason))))
+        .map(|reason| {
+            stratum_mean(
+                samples
+                    .iter()
+                    .filter(|sample| sample.substitution_reasons.contains(reason)),
+            )
+        })
         .collect();
 
     let mut all_means = reason_means.clone();
@@ -338,7 +344,11 @@ pub fn calibrate_substitution_rules(
         .zip(&reason_means)
         .map(|(reason, mean)| SubstitutionStratumFit {
             bucket: SubstitutionCalibrationBucket::Reason { reason: *reason },
-            sample_count: count_in(samples.iter().filter(|s| has_reason(s, *reason))),
+            sample_count: count_in(
+                samples
+                    .iter()
+                    .filter(|sample| sample.substitution_reasons.contains(reason)),
+            ),
             mean_realized_bps: *mean,
         })
         .collect();
@@ -403,11 +413,6 @@ fn liquidity_tier_index(tiers: &[LiquidityTier], liquidity: Option<Decimal>) -> 
         .rev()
         .find(|(_, tier)| liquidity >= tier.min_liquidity_usd)
         .map(|(idx, _)| idx)
-}
-
-/// Whether a sample carried a given substitution reason.
-fn has_reason(sample: &CalibrationSample, reason: NullReason) -> bool {
-    sample.substitution_reasons.contains(&reason)
 }
 
 /// Fail-closed multiplier: the calibrated value is the baseline tightened toward
@@ -513,7 +518,7 @@ mod tests {
     /// A substitution reason whose samples underperform the clean baseline gets a
     /// tighter confidence multiplier, never above the governed baseline.
     #[test]
-    fn calibration_substitution_never_exceeds_baseline() {
+    fn calibration_substitution_never_baseline() {
         let baseline = SubstitutionConfidenceRules::conservative();
         let mut samples = Vec::new();
         for _ in 0..10 {
@@ -558,7 +563,7 @@ mod tests {
     /// The liquidity tiers are stratified by realized performance; deeper books
     /// keep the higher multiplier when they realize the best returns.
     #[test]
-    fn calibration_liquidity_tiers_are_stratified() {
+    fn calibration_liquidity_tiers_stratified() {
         let baseline = LiquidityMultipliers::conservative();
         let mut samples = Vec::new();
         for _ in 0..10 {

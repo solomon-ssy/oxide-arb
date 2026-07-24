@@ -16,10 +16,7 @@ use sea_orm::{
     IntoActiveValue, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 
-use crate::{
-    postgres::{error, query::paginate_mapped},
-    traits::ExecutionOrderRepository,
-};
+use crate::{postgres::query::paginate_mapped, traits::ExecutionOrderRepository};
 
 /// Postgres-backed execution-order repository.
 pub struct PgExecutionOrderRepository {
@@ -113,7 +110,10 @@ impl ExecutionOrderRepository for PgExecutionOrderRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(QUANT_EXECUTION_ORDER, execution_order_id));
+            return Err(StorageError::not_found(
+                QUANT_EXECUTION_ORDER,
+                execution_order_id,
+            ));
         };
 
         if let Some(next) = patch.state.into_option() {
@@ -191,7 +191,7 @@ pub fn validate_execution_order_transition(
     if valid {
         return Ok(());
     }
-    Err(error::illegal_transition(
+    Err(StorageError::illegal_transition(
         QUANT_EXECUTION_ORDER,
         Some(execution_order_id),
         current,

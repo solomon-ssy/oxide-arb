@@ -199,41 +199,24 @@ impl AssetRule {
 
     #[must_use]
     pub fn kline_instrument(&self, interval: KlineInterval) -> DomainInstrumentKey {
-        match self.binance_market {
-            BinanceMarketSegment::Spot => {
-                DomainInstrumentKey::binance_kline(&self.symbol(), interval)
-            }
-            BinanceMarketSegment::UsdmFutures => {
-                DomainInstrumentKey::binance_usdm_futures_kline(&self.symbol(), interval)
-            }
-        }
+        self.binance_market
+            .kline_instrument(&self.symbol(), interval)
     }
 
     #[must_use]
     pub fn kline_source_id(&self) -> DomainSourceId {
-        match self.binance_market {
-            BinanceMarketSegment::Spot => DomainSourceId::binance(),
-            BinanceMarketSegment::UsdmFutures => DomainSourceId::binance_usdm_futures(),
-        }
+        self.binance_market.kline_source()
     }
 
     /// Low-latency Binance event stream used only by Binance-bound markets.
     #[must_use]
     pub fn binance_event_instrument(&self) -> DomainInstrumentKey {
-        match self.binance_market {
-            BinanceMarketSegment::Spot => DomainInstrumentKey::binance_agg_trade(&self.symbol()),
-            BinanceMarketSegment::UsdmFutures => {
-                DomainInstrumentKey::binance_usdm_futures_agg_trade(&self.symbol())
-            }
-        }
+        self.binance_market.trade_instrument(&self.symbol())
     }
 
     #[must_use]
     pub fn binance_event_source_id(&self) -> DomainSourceId {
-        match self.binance_market {
-            BinanceMarketSegment::Spot => DomainSourceId::binance_agg_trade(),
-            BinanceMarketSegment::UsdmFutures => DomainSourceId::binance_usdm_futures_agg_trade(),
-        }
+        self.binance_market.trade_source()
     }
 
     /// Whether both public RTDS topics document this asset.
@@ -285,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_lookup_is_exact_and_scanning_prefers_earliest_longest() {
+    fn alias_lookup_exact_longest() {
         assert_eq!(rule_for_alias("btc").expect("btc").ticker, "BTC");
         assert_eq!(rule_for_alias("bitcoin").expect("bitcoin").ticker, "BTC");
         assert!(rule_for_alias("bitcorn").is_none());

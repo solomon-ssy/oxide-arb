@@ -191,7 +191,7 @@ mod tests {
     };
 
     #[test]
-    fn ws_skipped_during_warming_phases() {
+    fn ws_skipped_warming_phases() {
         assert_eq!(
             ws_probe_skipped(&OperationalPhase::CatalogWarming),
             Some("catalog_warming")
@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_probe_healthy_when_message_fresh() {
+    fn ws_probe_healthy_fresh() {
         let check = evaluate_ws_probe(
             Some(WS_MARKET_DATA_STALE_THRESHOLD_MS - 1),
             "all 1 WS shards connected",
@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_alert_on_healthy_transition() {
+    async fn recovery_alert_healthy_transition() {
         let recordings = Arc::new(Mutex::new(Vec::new()));
         let alerts = Arc::new(AlertDispatcher::with_recordings(Arc::clone(&recordings)));
         let state = HealthAlertState::default();

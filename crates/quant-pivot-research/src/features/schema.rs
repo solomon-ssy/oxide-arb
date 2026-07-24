@@ -428,20 +428,9 @@ impl FeatureSchema {
 
 // ── Static catalog ─────────────────────────────────────────────────────────
 
-const fn spec(
-    name: FeatureName,
-    family: FeatureFamily,
-    value_kind: FeatureValueKind,
-    source: SourceRequirement,
-    pit: PitRule,
-    staleness: StalenessRule,
-) -> FeatureSpecBuilder {
-    FeatureSpecBuilder::new(name, family, value_kind, source, pit, staleness)
-}
-
 fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             CATEGORY,
             FeatureFamily::MarketMetadata,
             FeatureValueKind::Category,
@@ -453,7 +442,7 @@ fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             TIME_TO_RESOLUTION_SECS,
             FeatureFamily::MarketMetadata,
             FeatureValueKind::Count,
@@ -466,7 +455,7 @@ fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             EVENT_AGE_SECS,
             FeatureFamily::MarketMetadata,
             FeatureValueKind::Count,
@@ -479,7 +468,7 @@ fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             NEG_RISK,
             FeatureFamily::MarketMetadata,
             FeatureValueKind::Bool,
@@ -491,7 +480,7 @@ fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             IS_ACTIVE,
             FeatureFamily::MarketMetadata,
             FeatureValueKind::Bool,
@@ -506,7 +495,7 @@ fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
 
 /// Shared (family, source, pit, staleness) for every price/book spec.
 const fn book_spec(name: FeatureName, kind: FeatureValueKind) -> FeatureSpecBuilder {
-    spec(
+    FeatureSpecBuilder::new(
         name,
         FeatureFamily::PriceBook,
         kind,
@@ -590,7 +579,7 @@ fn price_book_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
 fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     for window in &config.bar_windows_secs {
         out.push(
-            spec(
+            FeatureSpecBuilder::new(
                 FeatureName::ts_return(*window),
                 FeatureFamily::TimeSeries,
                 FeatureValueKind::Decimal,
@@ -603,7 +592,7 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
             .build(),
         );
         out.push(
-            spec(
+            FeatureSpecBuilder::new(
                 FeatureName::ts_spread_trend(*window),
                 FeatureFamily::TimeSeries,
                 FeatureValueKind::Decimal,
@@ -616,7 +605,7 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
             .build(),
         );
         out.push(
-            spec(
+            FeatureSpecBuilder::new(
                 FeatureName::ts_depth_trend(*window),
                 FeatureFamily::TimeSeries,
                 FeatureValueKind::Decimal,
@@ -632,7 +621,7 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     momentum_specs(config, out);
     for window in &config.volatility_windows_secs {
         out.push(
-            spec(
+            FeatureSpecBuilder::new(
                 FeatureName::ts_realized_vol(*window),
                 FeatureFamily::TimeSeries,
                 FeatureValueKind::Decimal,
@@ -646,7 +635,7 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
             .build(),
         );
         out.push(
-            spec(
+            FeatureSpecBuilder::new(
                 FeatureName::ts_vol_adjusted_return(*window),
                 FeatureFamily::TimeSeries,
                 FeatureValueKind::Decimal,
@@ -660,7 +649,7 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
         );
     }
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             PRICE_REVERSAL,
             FeatureFamily::TimeSeries,
             FeatureValueKind::Decimal,
@@ -679,7 +668,7 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
 fn momentum_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     for window in &config.momentum.roc_windows_secs {
         out.push(
-            spec(
+            FeatureSpecBuilder::new(
                 FeatureName::ts_momentum_roc(*window),
                 FeatureFamily::TimeSeries,
                 FeatureValueKind::Decimal,
@@ -694,7 +683,7 @@ fn momentum_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     }
     for window in &config.momentum.slope_windows_secs {
         out.push(
-            spec(
+            FeatureSpecBuilder::new(
                 FeatureName::ts_ema_slope(*window),
                 FeatureFamily::TimeSeries,
                 FeatureValueKind::Decimal,
@@ -708,7 +697,7 @@ fn momentum_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
         );
     }
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             MACD_NORM,
             FeatureFamily::TimeSeries,
             FeatureValueKind::Decimal,
@@ -747,7 +736,7 @@ fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
         ),
     ] {
         out.push(
-            spec(
+            FeatureSpecBuilder::new(
                 name,
                 FeatureFamily::Microstructure,
                 kind,
@@ -761,7 +750,7 @@ fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
         );
     }
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             STALE_QUOTE_FREQUENCY,
             FeatureFamily::Microstructure,
             FeatureValueKind::Probability,
@@ -785,7 +774,7 @@ fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
 /// — never a fabricated zero.
 fn structural_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             SHORT_RETURN,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
@@ -798,7 +787,7 @@ fn structural_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             SHOCK_RATIO,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
@@ -812,7 +801,7 @@ fn structural_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             PRICE_EXTREMITY,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
@@ -827,7 +816,7 @@ fn structural_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             BOOK_CHURN_INTENSITY,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
@@ -845,7 +834,7 @@ fn structural_specs(out: &mut Vec<FeatureSpec>) {
 
 fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             TRADE_TAPE_COUNT,
             FeatureFamily::Structural,
             FeatureValueKind::Count,
@@ -858,7 +847,7 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             PARTICIPANT_COUNT,
             FeatureFamily::Structural,
             FeatureValueKind::Count,
@@ -871,7 +860,7 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             TRADE_TAPE_NOTIONAL_USD,
             FeatureFamily::Structural,
             FeatureValueKind::Usd,
@@ -892,7 +881,7 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
         TAKER_GINI,
     ] {
         out.push(
-            spec(
+            FeatureSpecBuilder::new(
                 name,
                 FeatureFamily::Structural,
                 FeatureValueKind::Decimal,
@@ -910,7 +899,7 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
 
 fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             NEGRISK_LEG_ASK_SUM,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
@@ -923,7 +912,7 @@ fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             NEGRISK_LEG_BID_SUM,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
@@ -936,7 +925,7 @@ fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             NEGRISK_LEG_COUNT,
             FeatureFamily::Structural,
             FeatureValueKind::Count,
@@ -949,7 +938,7 @@ fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             NEGRISK_CONVERT_EDGE,
             FeatureFamily::Structural,
             FeatureValueKind::Decimal,
@@ -978,7 +967,7 @@ fn domain_specs(out: &mut Vec<FeatureSpec>) {
 
 fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             DISTANCE_TO_STRIKE,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
@@ -991,7 +980,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             UNDERLYING_MOMENTUM,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
@@ -1004,7 +993,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             UNDERLYING_REALIZED_VOL,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
@@ -1020,7 +1009,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
         // Intrinsically point-in-time: derived from the frozen subject's
         // observation instant, not from any observation feed.
-        spec(
+        FeatureSpecBuilder::new(
             TIME_TO_OBSERVATION,
             FeatureFamily::Domain,
             FeatureValueKind::Count,
@@ -1033,7 +1022,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             BASIS_VS_RESOLUTION_SOURCE,
             FeatureFamily::Domain,
             FeatureValueKind::Bps,
@@ -1049,7 +1038,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
 
 fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             ENSEMBLE_BIN_PROBABILITY,
             FeatureFamily::Domain,
             FeatureValueKind::Probability,
@@ -1063,7 +1052,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             ENSEMBLE_SPREAD,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
@@ -1076,7 +1065,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             OBSERVED_EXTREME_HEADROOM,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
@@ -1088,7 +1077,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
+        FeatureSpecBuilder::new(
             NOAA_RESOLUTION_BASIS_RISK,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
@@ -1117,35 +1106,40 @@ mod contract_tests {
         FeatureName, FeatureSpec, FeatureValueKind, names::book::SECONDARY_BEST_ASK,
     };
 
-    fn sample_spec() -> FeatureSpec {
-        FeatureSpecBuilder::new(
-            FeatureName::from_static("test.duplicate"),
-            FeatureFamily::MarketMetadata,
-            FeatureValueKind::Decimal,
-            SourceRequirement::GammaMetadata,
-            PitRule::MetadataVersionAtOrBeforeSourceCutoff,
-            StalenessRule::None,
-        )
-        .build()
+    impl FeatureSpec {
+        fn test_fixture() -> Self {
+            FeatureSpecBuilder::new(
+                FeatureName::from_static("test.duplicate"),
+                FeatureFamily::MarketMetadata,
+                FeatureValueKind::Decimal,
+                SourceRequirement::GammaMetadata,
+                PitRule::MetadataVersionAtOrBeforeSourceCutoff,
+                StalenessRule::None,
+            )
+            .build()
+        }
     }
 
     #[test]
-    fn duplicate_feature_names_fail_construction() {
-        let error = FeatureSchema::new(SchemaVersion::new(6), vec![sample_spec(), sample_spec()])
-            .expect_err("duplicate name must fail");
+    fn duplicate_features_fail_construction() {
+        let error = FeatureSchema::new(
+            SchemaVersion::new(6),
+            vec![FeatureSpec::test_fixture(), FeatureSpec::test_fixture()],
+        )
+        .expect_err("duplicate name must fail");
         assert!(error.to_string().contains("duplicate feature name"));
     }
 
     #[test]
-    fn compute_revision_participates_in_equality() {
-        let first = sample_spec();
+    fn compute_revision_participates_equality() {
+        let first = FeatureSpec::test_fixture();
         let mut second = first.clone();
         second.compute_revision += 1;
         assert_ne!(first, second);
     }
 
     #[test]
-    fn secondary_executable_ask_contract_is_explicit_and_non_substituting() {
+    fn secondary_executable_non_substituting() {
         let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
         let spec = schema
             .by_name(&SECONDARY_BEST_ASK)

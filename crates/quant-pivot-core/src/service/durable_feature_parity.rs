@@ -23,8 +23,8 @@ use quant_pivot_models::{
         quant::{
             FactorValueInfo, FeatureParityRunInfo, FeatureVectorInfo, FrozenFeatureParitySubject,
             FrozenFeatureParitySubjectId, MarketSelectionInfo, MarketSelectionMemberInfo,
-            ModelRunInfo, RecommendationReportInfo, ReportDataQualitySnapshotInfo, ReportRunInfo,
-            model_run_parity_evidence_hash, parity_candidate_membership_hash,
+            ModelRunInfo, ModelRunParityEvidence, RecommendationReportInfo,
+            ReportDataQualitySnapshotInfo, ReportRunInfo, parity_candidate_membership_hash,
             parity_selection_hash, report_parity_evidence_hash, report_parity_generation_hash,
         },
     },
@@ -363,13 +363,14 @@ impl DurableFeatureParitySource {
                         "frozen model run {model_run_id} no longer has an output hash"
                     ))
                 })?;
-                let evidence_hash = model_run_parity_evidence_hash(
-                    &model_run.model_run_id,
-                    &model_run.input_hash,
+                let evidence_hash = ModelRunParityEvidence {
+                    model_run_id: &model_run.model_run_id,
+                    input_hash: &model_run.input_hash,
                     output_hash,
-                    &model_run.model_version_id,
-                    &model_run.decision_policy_snapshot_id,
-                )?;
+                    model_version_id: &model_run.model_version_id,
+                    decision_policy_snapshot_id: &model_run.decision_policy_snapshot_id,
+                }
+                .content_hash()?;
                 if model_run.run_kind != ModelRunKind::LiveInference
                     || model_run.status != ModelRunStatus::Succeeded
                     || model_run.market_selection_id.as_ref() != Some(selection_id)
@@ -647,7 +648,7 @@ impl DurableFeatureParitySource {
                         report.data_quality_snapshot_ref,
                     )
                 })?;
-            let ceiling = validate_pre_inference_stage_evidence(&report, &members, &dq)?;
+            let ceiling = validate_pre_inference_evidence(&report, &members, &dq)?;
             let subject = FeatureParitySubject::PreInferenceReport(report.recommendation_report_id);
             if ceiling == PreInferenceStageCeiling::Selection {
                 candidates.push(FeatureParityCandidate {
@@ -885,7 +886,7 @@ impl DurableFeatureParitySource {
                     report.data_quality_snapshot_ref,
                 )
             })?;
-        let ceiling = validate_pre_inference_stage_evidence(&report, &members, &dq)?;
+        let ceiling = validate_pre_inference_evidence(&report, &members, &dq)?;
         let config_info = self
             .deps
             .runtime_configs
@@ -1016,7 +1017,7 @@ impl DurableFeatureParitySource {
             .into_iter()
             .map(|info| (info.feature_vector_id, info))
             .collect::<HashMap<_, _>>();
-        validate_report_dq_vector_bindings(report, dq, &feature_infos)?;
+        validate_report_dq_bindings(report, dq, &feature_infos)?;
         let boundary =
             boundary_from_report_features(report, &expected_boundary, &features, &feature_infos)?;
         Ok(ReportOnlineEvidenceOutcome::Ready(ReportOnlineEvidence {
@@ -1055,7 +1056,7 @@ impl DurableFeatureParitySource {
             )
             .await?;
         let vector_binding = feature_vector_binding(&prepared.online.features)?;
-        let replay_by_market = replay_vectors_by_market(&replay.cross_section);
+        let replay_by_market = replay.cross_section.replay_vectors_by_market();
         let mut comparisons = selection_comparisons(
             candidate,
             subject,
@@ -1126,7 +1127,7 @@ impl DurableFeatureParitySource {
         let report_id = self
             .deps
             .reports
-            .find_by_model_run_id(&run.model_run_id)
+            .find_by_model_run(&run.model_run_id)
             .await?
             .map(|report| report.recommendation_report_id);
 
@@ -1349,7 +1350,7 @@ impl DurableFeatureParitySource {
         let generic_version = self
             .deps
             .model_registry
-            .find_model_version_by_id(&configured_generic)
+            .find_model_version(&configured_generic)
             .await?
             .ok_or_else(|| StorageError::not_found("quant_model_version", configured_generic))?;
         let generic = factory.load(&generic_version, None).await?;
@@ -1365,7 +1366,7 @@ impl DurableFeatureParitySource {
             let version = self
                 .deps
                 .model_registry
-                .find_model_version_by_id(&version_id)
+                .find_model_version(&version_id)
                 .await?
                 .ok_or_else(|| StorageError::not_found("quant_model_version", version_id))?;
             let runtime = factory.load(&version, None).await?;
@@ -1406,7 +1407,7 @@ impl DurableFeatureParitySource {
 
         let model_vector_binding = vector_binding(online_inputs)?;
         let all_vector_binding = feature_vector_binding(online_features)?;
-        let replay_by_market = replay_vectors_by_market(&replay.cross_section);
+        let replay_by_market = replay.cross_section.replay_vectors_by_market();
         let comparison_subject = ComparisonSubject {
             report: context.report_id.as_ref(),
             model_run: Some(&run.model_run_id),
@@ -1528,7 +1529,7 @@ impl DurableFeatureParitySource {
             let version = self
                 .deps
                 .model_registry
-                .find_model_version_by_id(&version_id)
+                .find_model_version(&version_id)
                 .await?
                 .ok_or_else(|| StorageError::not_found("quant_model_version", version_id))?;
             let runtime = factory.load(&version, None).await?;
@@ -1551,7 +1552,7 @@ impl DurableFeatureParitySource {
                         "weighted runtime {version_id} lacks reference CDFs"
                     ))
                 })?;
-                request.factor_engine.compute_all_batch_with_references(
+                request.factor_engine.compute_batch_with_refs(
                     &route.vectors,
                     &factor_config,
                     references,
@@ -1690,7 +1691,7 @@ fn finish_replayed_model_output(
         },
         input_audit,
     };
-    let input_rows = project_replay_rows_from_audit(
+    let input_rows = project_replay_rows(
         &request.run.model_run_id,
         request.boundary,
         request.markets,
@@ -1705,7 +1706,7 @@ fn finish_replayed_model_output(
     })
 }
 
-fn project_replay_rows_from_audit(
+fn project_replay_rows(
     model_run_id: &ModelRunId,
     boundary: &DecisionBoundary,
     markets: &[SelectedMarket],
@@ -1954,16 +1955,15 @@ fn data_quality_comparison(
     }))
 }
 
-fn replay_vectors_by_market(
-    cross_section: &ReplayCrossSection,
-) -> HashMap<MarketId, FeatureVector> {
-    cross_section
-        .vectors
-        .iter()
-        .chain(&cross_section.rejected_vectors)
-        .cloned()
-        .map(|vector| (vector.market_id.clone(), vector))
-        .collect()
+impl ReplayCrossSection {
+    fn replay_vectors_by_market(&self) -> HashMap<MarketId, FeatureVector> {
+        self.vectors
+            .iter()
+            .chain(&self.rejected_vectors)
+            .cloned()
+            .map(|vector| (vector.market_id.clone(), vector))
+            .collect()
+    }
 }
 
 fn replay_admission_matches(
@@ -2874,7 +2874,7 @@ fn validate_pre_inference_report(
     Ok(())
 }
 
-fn validate_pre_inference_stage_evidence(
+fn validate_pre_inference_evidence(
     report: &RecommendationReportInfo,
     members: &[MarketSelectionMemberInfo],
     dq: &ReportDataQualitySnapshotInfo,
@@ -2962,7 +2962,7 @@ fn validate_report_selection_binding(
     Ok(())
 }
 
-fn validate_report_dq_vector_bindings(
+fn validate_report_dq_bindings(
     report: &RecommendationReportInfo,
     dq: &ReportDataQualitySnapshotInfo,
     infos: &HashMap<FeatureVectorId, FeatureVectorInfo>,
@@ -3167,7 +3167,7 @@ mod tests {
         DataQualityStatus, EmptyReportReason, FeatureParityCandidate, FeatureParityComparison,
         FeatureParityEvidence, FeatureParityStage, FeatureParitySubject, MarketId, ModelRunId,
         PreInferenceStageCeiling, RecommendationReportId, pending_completion,
-        representative_candidate, select_comparisons, validate_pre_inference_stage_evidence,
+        representative_candidate, select_comparisons, validate_pre_inference_evidence,
     };
     use crate::test_fixtures::report_fixtures;
 
@@ -3219,7 +3219,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_completion_marks_every_sampled_market_pending() {
+    fn missing_completion_marks_pending() {
         let run_id = ModelRunId::from_v7();
         let decision_at = Utc::now();
         let first = candidate(&run_id, "0xfirst", decision_at);
@@ -3240,13 +3240,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_run_group_returns_typed_error_instead_of_indexing() {
+    fn empty_returns_error_indexing() {
         let run_id = ModelRunId::from_v7();
         assert!(representative_candidate(&run_id.to_string(), &[]).is_err());
     }
 
     #[test]
-    fn replay_projects_market_rows_per_candidate_and_global_rows_once() {
+    fn replay_projects_market_once() {
         let run_id = ModelRunId::from_v7();
         let decision_at = Utc::now();
         let first = candidate(&run_id, "0xfirst", decision_at);
@@ -3286,7 +3286,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_inference_stage_ceiling_requires_exact_real_evidence() {
+    fn pre_inference_requires_evidence() {
         let report_id = RecommendationReportId::from_v7();
         let mut report = report_fixtures::report(
             report_id,
@@ -3314,7 +3314,7 @@ mod tests {
             created_at: report.created_at,
         };
         assert_eq!(
-            validate_pre_inference_stage_evidence(&report, slice::from_ref(&member), &dq)
+            validate_pre_inference_evidence(&report, slice::from_ref(&member), &dq)
                 .expect("selection-only evidence"),
             PreInferenceStageCeiling::Selection
         );
@@ -3333,12 +3333,12 @@ mod tests {
             missing_required: vec!["book.best_ask".to_owned()],
         }]);
         assert_eq!(
-            validate_pre_inference_stage_evidence(&report, &[member], &dq)
+            validate_pre_inference_evidence(&report, &[member], &dq)
                 .expect("feature-stage evidence"),
             PreInferenceStageCeiling::Feature
         );
 
         dq.tokens_json.0[0].status = DataQualityStatus::Fresh;
-        assert!(validate_pre_inference_stage_evidence(&report, &[], &dq).is_err());
+        assert!(validate_pre_inference_evidence(&report, &[], &dq).is_err());
     }
 }

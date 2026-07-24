@@ -226,36 +226,38 @@ fn not_auto_eligible() -> ExecutionEligibility {
     }
 }
 
-/// Non-empty `TopN` report with two published recommendations.
-#[must_use]
-pub fn non_empty_topn_report() -> TopNReportSnapshot {
-    let summary = snapshot_summary();
-    let report = QuantReportDetailView::from(base_report(
-        "snapshot-report-topn",
-        RecommendationReportStatus::Published,
-        summary,
-    ));
-    let recommendations = vec![
-        view(base_recommendation(
+impl TopNReportSnapshot {
+    /// Non-empty `TopN` report with two published recommendations.
+    #[must_use]
+    pub fn non_empty() -> Self {
+        let summary = snapshot_summary();
+        let report = QuantReportDetailView::from(base_report(
             "snapshot-report-topn",
-            "snapshot-rec-1",
-            1,
-            "0xmarketA",
-            OutcomeSide::Yes,
-            Usd::new(dec!(300)),
-        )),
-        view(base_recommendation(
-            "snapshot-report-topn",
-            "snapshot-rec-2",
-            2,
-            "0xmarketB",
-            OutcomeSide::No,
-            Usd::new(dec!(200)),
-        )),
-    ];
-    TopNReportSnapshot {
-        report,
-        recommendations,
+            RecommendationReportStatus::Published,
+            summary,
+        ));
+        let recommendations = vec![
+            view(base_recommendation(
+                "snapshot-report-topn",
+                "snapshot-rec-1",
+                1,
+                "0xmarketA",
+                OutcomeSide::Yes,
+                Usd::new(dec!(300)),
+            )),
+            view(base_recommendation(
+                "snapshot-report-topn",
+                "snapshot-rec-2",
+                2,
+                "0xmarketB",
+                OutcomeSide::No,
+                Usd::new(dec!(200)),
+            )),
+        ];
+        Self {
+            report,
+            recommendations,
+        }
     }
 }
 

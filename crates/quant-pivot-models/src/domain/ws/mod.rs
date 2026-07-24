@@ -20,5 +20,4 @@ pub mod sync;
 pub use channel::{ChannelScope, SubscriptionKey, UnknownChannel, WsChannel};
 pub use command::ClientCommand;
 pub use envelope::{ServerMessageKind, WsEnvelope};
-pub use mapping::event_envelope;
 pub use sync::SyncSnapshot;

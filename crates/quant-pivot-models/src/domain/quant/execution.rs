@@ -327,35 +327,37 @@ pub enum ApproveOrderIntentOutcome {
 ///
 /// Model retirement, data-quality thresholds, and envelope-hash recomputation
 /// are the admission engine's responsibility.
-#[must_use]
-pub fn evaluate_intent_approval_invalidation(
-    rec: &RecommendationInfo,
-    report: &RecommendationReportInfo,
-    kill_switch_allows_entry: bool,
-    active_config_version_id: &DecisionPolicySnapshotId,
-    intent_config_version_id: &DecisionPolicySnapshotId,
-    intent_risk_envelope_hash: &ContentHash,
-    now: DateTime<Utc>,
-) -> Option<ApprovalInvalidation> {
-    if rec.valid_until < now {
-        return Some(ApprovalInvalidation::RecommendationExpired);
+impl RecommendationInfo {
+    #[must_use]
+    pub fn approval_invalidation(
+        &self,
+        report: &RecommendationReportInfo,
+        kill_switch_allows_entry: bool,
+        active_config_version_id: &DecisionPolicySnapshotId,
+        intent_config_version_id: &DecisionPolicySnapshotId,
+        intent_risk_envelope_hash: &ContentHash,
+        now: DateTime<Utc>,
+    ) -> Option<ApprovalInvalidation> {
+        if self.valid_until < now {
+            return Some(ApprovalInvalidation::RecommendationExpired);
+        }
+        if report.status != RecommendationReportStatus::Published {
+            return Some(ApprovalInvalidation::ReportRevoked);
+        }
+        if !kill_switch_allows_entry {
+            return Some(ApprovalInvalidation::KillSwitchOpened);
+        }
+        if intent_config_version_id != active_config_version_id {
+            return Some(ApprovalInvalidation::RuntimeConfigChanged);
+        }
+        let Some((_, _, _, _, risk_envelope)) = self.trade_plan.frozen() else {
+            return Some(ApprovalInvalidation::RiskEnvelopeMismatch);
+        };
+        if *intent_risk_envelope_hash != risk_envelope.envelope_hash {
+            return Some(ApprovalInvalidation::RiskEnvelopeMismatch);
+        }
+        None
     }
-    if report.status != RecommendationReportStatus::Published {
-        return Some(ApprovalInvalidation::ReportRevoked);
-    }
-    if !kill_switch_allows_entry {
-        return Some(ApprovalInvalidation::KillSwitchOpened);
-    }
-    if intent_config_version_id != active_config_version_id {
-        return Some(ApprovalInvalidation::RuntimeConfigChanged);
-    }
-    let Some((_, _, _, _, risk_envelope)) = rec.trade_plan.frozen() else {
-        return Some(ApprovalInvalidation::RiskEnvelopeMismatch);
-    };
-    if *intent_risk_envelope_hash != risk_envelope.envelope_hash {
-        return Some(ApprovalInvalidation::RiskEnvelopeMismatch);
-    }
-    None
 }
 
 /// How a submission outcome settles the intent's capital allocation.

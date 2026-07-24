@@ -183,7 +183,7 @@ mod tests {
     use crate::factors::FactorName;
 
     #[test]
-    fn cdf_preserves_tie_mass_and_interpolates_unseen_values() {
+    fn cdf_preserves_tie_values() {
         let reference = FrozenReferenceCdf::fit(
             FactorName::new("momentum"),
             vec![dec!(3), dec!(1), dec!(2), dec!(2)],
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_duplicate_references_fail_closed() {
+    fn malformed_duplicate_references_rejects() {
         assert!(FrozenReferenceCdf::fit(FactorName::new("flat"), vec![dec!(1), dec!(1)]).is_err());
         let one = FrozenReferenceCdf::fit(FactorName::new("momentum"), vec![dec!(1), dec!(2)])
             .expect("one");

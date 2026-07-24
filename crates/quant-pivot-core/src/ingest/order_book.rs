@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_cow_refcount_without_level_copy() {
+    fn publish_cow_without_copy() {
         let mut ob = OrderBook::new(TokenId::new("t1"));
         ob.apply_snapshot(
             vec![lvl(dec!(0.5), dec!(10))],
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn delta_cow_clones_side_when_snapshot_shared() {
+    fn delta_cow_clones_shared() {
         let mut ob = OrderBook::new(TokenId::new("t1"));
         ob.apply_snapshot(
             vec![lvl(dec!(0.5), dec!(10))],
@@ -415,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn delta_reuses_unchanged_side_and_last_duplicate_wins() {
+    fn delta_reuses_duplicate_wins() {
         let mut ob = OrderBook::new(TokenId::new("t1"));
         ob.apply_snapshot(
             vec![lvl(dec!(0.5), dec!(10))],
@@ -446,7 +446,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn linear_merge_matches_reference_map(
+        fn linear_merge_matches_map(
             initial_bids in strategy_vec((1_u8..100, 1_u16..1_000), 0..80),
             initial_asks in strategy_vec((1_u8..100, 1_u16..1_000), 0..80),
             changes in strategy_vec((ANY_BOOL, 1_u8..100, 0_u16..1_000), 0..200),

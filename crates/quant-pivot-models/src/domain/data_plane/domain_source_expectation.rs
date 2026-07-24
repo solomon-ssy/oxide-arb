@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn definition_hash_is_canonical_and_identity_is_stable() {
+    fn definition_hash_canonical_stable() {
         let build = |profiles: Vec<&str>| {
             UpsertDomainSourceExpectation::new(
                 DomainSourceExpectationDefinition {
@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_changes_binding_without_changing_source_identity() {
+    fn coverage_changes_without_identity() {
         let build = |profiles: Vec<&str>| {
             UpsertDomainSourceExpectation::new(
                 DomainSourceExpectationDefinition {
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_rejects_false_health_and_missing_blocker_reason() {
+    fn lifecycle_rejects_missing_reason() {
         let invalid = DomainSourceExpectationTransition {
             expectation_id: DomainSourceExpectationId::from_v7(),
             from: DomainSourceExpectationStatus::CredentialBlocked,

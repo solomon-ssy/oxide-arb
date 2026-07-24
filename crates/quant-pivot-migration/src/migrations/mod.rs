@@ -15,5 +15,5 @@ impl MigratorTrait for Migrator {
 }
 
 pub(crate) fn specs() -> Vec<MigrationSpec> {
-    vec![m00000000_000001_bootstrap::spec()]
+    vec![m00000000_000001_bootstrap::Migration::spec()]
 }

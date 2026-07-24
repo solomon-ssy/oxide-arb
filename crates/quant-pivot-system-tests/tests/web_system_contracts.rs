@@ -118,7 +118,7 @@ struct Login {
 }
 
 #[tokio::test]
-async fn production_web_boundary_is_composed_end_to_end() -> Result<()> {
+async fn production_web_boundary_end() -> Result<()> {
     let stack = start_production_stack().await?;
     let artifacts = stack.run_dir().display().to_string();
     let result = exercise_web_boundary(stack.base_url()).await;
@@ -130,8 +130,8 @@ async fn production_web_boundary_is_composed_end_to_end() -> Result<()> {
 
 async fn exercise_web_boundary(base_url: &str) -> Result<()> {
     let api = ApiClient::new(base_url)?;
-    assert_public_probes(&api).await?;
-    assert_version_and_authentication_boundary(&api).await?;
+    api.assert_public_probes().await?;
+    api.assert_version_authentication_boundary().await?;
 
     let admin = api.login("admin", BOOTSTRAP_ADMIN_PASSWORD).await?;
     assert_hardened_refresh_cookie(&admin.refresh_cookie)?;
@@ -145,87 +145,93 @@ async fn exercise_web_boundary(base_url: &str) -> Result<()> {
     Ok(())
 }
 
-async fn assert_public_probes(api: &ApiClient) -> Result<()> {
-    for (path, expected) in [("/health", "ok"), ("/startup", "started")] {
-        let response = ensure_status(api.public_get(path).await?, StatusCode::OK, path).await?;
-        let body = response.json::<Value>().await?;
+impl ApiClient {
+    async fn assert_public_probes(&self) -> Result<()> {
+        for (path, expected) in [("/health", "ok"), ("/startup", "started")] {
+            let response =
+                ensure_status(self.public_get(path).await?, StatusCode::OK, path).await?;
+            let body = response.json::<Value>().await?;
+            ensure!(
+                body["data"]["status"] == expected,
+                "unexpected {path} body: {body}"
+            );
+        }
+
+        let ready =
+            ensure_status(self.public_get("/ready").await?, StatusCode::OK, "/ready").await?;
+        let ready = ready.json::<Value>().await?;
         ensure!(
-            body["data"]["status"] == expected,
-            "unexpected {path} body: {body}"
+            ready["data"]["status"] == "ready",
+            "unexpected readiness: {ready}"
         );
-    }
-
-    let ready = ensure_status(api.public_get("/ready").await?, StatusCode::OK, "/ready").await?;
-    let ready = ready.json::<Value>().await?;
-    ensure!(
-        ready["data"]["status"] == "ready",
-        "unexpected readiness: {ready}"
-    );
-    let checks = ready["data"]["checks"]
-        .as_array()
-        .context("readiness checks are not an array")?;
-    for required in ["postgresql", "redis"] {
+        let checks = ready["data"]["checks"]
+            .as_array()
+            .context("readiness checks are not an array")?;
+        for required in ["postgresql", "redis"] {
+            ensure!(
+                checks
+                    .iter()
+                    .any(|check| check["name"] == required && check["ok"] == true),
+                "readiness is missing successful {required} check: {ready}"
+            );
+        }
         ensure!(
-            checks
-                .iter()
-                .any(|check| check["name"] == required && check["ok"] == true),
-            "readiness is missing successful {required} check: {ready}"
+            checks.iter().any(|check| check["name"] == "catalog"),
+            "readiness is missing the catalog warming signal: {ready}"
         );
-    }
-    ensure!(
-        checks.iter().any(|check| check["name"] == "catalog"),
-        "readiness is missing the catalog warming signal: {ready}"
-    );
 
-    let metrics = ensure_status(
-        api.public_get("/metrics").await?,
-        StatusCode::OK,
-        "/metrics",
-    )
-    .await?;
-    ensure!(
-        metrics
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("text/plain")),
-        "metrics must use Prometheus text content type"
-    );
-    Ok(())
-}
-
-async fn assert_version_and_authentication_boundary(api: &ApiClient) -> Result<()> {
-    let no_version = api
-        .http
-        .get(format!("{}/api/auth/me", api.base_url))
-        .send()
-        .await?;
-    ensure!(
-        no_version.status() == StatusCode::NOT_FOUND,
-        "version guard must reject missing header"
-    );
-
-    ensure_status(
-        api.get("/api/auth/me", None).await?,
-        StatusCode::UNAUTHORIZED,
-        "unauthenticated /api/auth/me",
-    )
-    .await?;
-
-    let wrong = api
-        .post(
-            "/api/auth/login",
-            None,
-            json!({ "username": "admin", "password": "incorrect-password" }),
+        let metrics = ensure_status(
+            self.public_get("/metrics").await?,
+            StatusCode::OK,
+            "/metrics",
         )
         .await?;
-    let wrong = ensure_status(wrong, StatusCode::UNAUTHORIZED, "wrong password").await?;
-    let body = wrong.json::<Value>().await?;
-    ensure!(
-        body["message"] == "invalid credentials",
-        "credential errors must be generic: {body}"
-    );
-    Ok(())
+        ensure!(
+            metrics
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/plain")),
+            "metrics must use Prometheus text content type"
+        );
+        Ok(())
+    }
+}
+
+impl ApiClient {
+    async fn assert_version_authentication_boundary(&self) -> Result<()> {
+        let no_version = self
+            .http
+            .get(format!("{}/api/auth/me", self.base_url))
+            .send()
+            .await?;
+        ensure!(
+            no_version.status() == StatusCode::NOT_FOUND,
+            "version guard must reject missing header"
+        );
+
+        ensure_status(
+            self.get("/api/auth/me", None).await?,
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated /api/auth/me",
+        )
+        .await?;
+
+        let wrong = self
+            .post(
+                "/api/auth/login",
+                None,
+                json!({ "username": "admin", "password": "incorrect-password" }),
+            )
+            .await?;
+        let wrong = ensure_status(wrong, StatusCode::UNAUTHORIZED, "wrong password").await?;
+        let body = wrong.json::<Value>().await?;
+        ensure!(
+            body["message"] == "invalid credentials",
+            "credential errors must be generic: {body}"
+        );
+        Ok(())
+    }
 }
 
 fn assert_hardened_refresh_cookie(cookie: &str) -> Result<()> {

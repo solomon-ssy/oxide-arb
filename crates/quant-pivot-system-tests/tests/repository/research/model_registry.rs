@@ -71,7 +71,7 @@ fn new_version(model_spec_id: ModelSpecId, seed: char) -> NewModelVersion {
     }
 }
 
-pub async fn create_model_spec_duplicate_name_maps_to_storage_duplicate() {
+pub async fn create_model_duplicate_duplicate() {
     let (pool, _container) = setup_pg().await;
     let repo = PgModelRegistryRepository::new(pool.connection().clone());
 
@@ -91,7 +91,7 @@ pub async fn create_model_spec_duplicate_name_maps_to_storage_duplicate() {
     ));
 }
 
-pub async fn model_spec_rejects_forged_hash_and_is_append_only() {
+pub async fn model_spec_rejects_only() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgModelRegistryRepository::new(db.clone());
@@ -130,7 +130,7 @@ pub async fn model_spec_rejects_forged_hash_and_is_append_only() {
     );
 }
 
-pub async fn create_model_version_allocates_monotonic_versions_under_lock() {
+pub async fn create_model_version_lock() {
     let (pool, _container) = setup_pg().await;
     let repo = PgModelRegistryRepository::new(pool.connection().clone());
     let model_spec_id = ModelSpecId::from_v7();
@@ -160,7 +160,7 @@ pub async fn create_model_version_allocates_monotonic_versions_under_lock() {
     assert_eq!(second.model_family, ModelFamily::HoldVsExitWeighted);
 }
 
-pub async fn find_and_page_versions_join_model_family_from_spec() {
+pub async fn find_page_versions_spec() {
     let (pool, _container) = setup_pg().await;
     let repo = PgModelRegistryRepository::new(pool.connection().clone());
 
@@ -183,7 +183,7 @@ pub async fn find_and_page_versions_join_model_family_from_spec() {
         .expect("sell version");
 
     let found = repo
-        .find_model_version_by_id(&sell.model_version_id)
+        .find_model_version(&sell.model_version_id)
         .await
         .expect("find")
         .expect("present");
@@ -223,7 +223,7 @@ pub async fn find_and_page_versions_join_model_family_from_spec() {
     assert!(families.contains(&ModelFamily::HoldVsExitWeighted));
 }
 
-pub async fn model_version_typed_documents_fail_closed_at_database_boundary() {
+pub async fn model_version_rejects_boundary() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgModelRegistryRepository::new(db.clone());
@@ -342,14 +342,14 @@ pub async fn model_version_typed_documents_fail_closed_at_database_boundary() {
         .await
         .expect("test-only corruption may cross the relational shape constraint");
     assert!(
-        repo.find_model_version_by_id(&version.model_version_id)
+        repo.find_model_version(&version.model_version_id)
             .await
             .is_err(),
         "typed repository decode must reject unknown fields without fallback"
     );
 }
 
-pub async fn published_artifacts_coexist_until_model_routing_moves_and_retirement_is_explicit() {
+pub async fn published_artifacts_coexist_explicit() {
     let (pool, _container) = setup_pg().await;
     let repo = PgModelRegistryRepository::new(pool.connection().clone());
     let spec = repo
@@ -380,7 +380,7 @@ pub async fn published_artifacts_coexist_until_model_routing_moves_and_retiremen
     );
 }
 
-pub async fn published_picker_catalog_is_one_typed_join_with_side_and_scope_filters() {
+pub async fn published_picker_catalog_filters() {
     let (pool, _container) = setup_pg().await;
     let repo = PgModelRegistryRepository::new(pool.connection().clone());
     let buy_spec = repo

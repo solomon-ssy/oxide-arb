@@ -270,7 +270,7 @@ mod tests {
     use crate::enums::quant::{RecommendationReportStatus, RecommendationStatus, ReportRunStatus};
 
     #[test]
-    fn prepared_report_is_not_actionable_before_fact_verification() {
+    fn report_not_before_verification() {
         assert!(!RecommendationReportStatus::Prepared.is_current_authority());
         assert!(!RecommendationStatus::Prepared.allows_new_intent());
         assert!(RecommendationReportStatus::Published.is_current_authority());
@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn report_lifecycle_transition_table_is_closed() {
+    fn report_lifecycle_transition_closed() {
         let run_states = [
             ReportRunStatus::Queued,
             ReportRunStatus::Running,

@@ -308,7 +308,7 @@ impl ClassicalRuntime {
                 top_positive: Vec::new(),
                 top_negative: Vec::new(),
             },
-            rejection_warnings: candidate_warnings(context),
+            rejection_warnings: (context).candidate_warnings(),
             rank_before_portfolio: 0,
             liquidity_score: scores.liquidity_score,
             data_quality_score: scores.data_quality_score,
@@ -398,21 +398,23 @@ impl ClassicalRuntime {
     }
 }
 
-fn candidate_warnings(context: &MarketInferenceContext) -> Vec<SignalWarning> {
-    let mut warnings = vec![SignalWarning::Other(
+impl MarketInferenceContext {
+    fn candidate_warnings(&self) -> Vec<SignalWarning> {
+        let mut warnings = vec![SignalWarning::Other(
         "shadow_only: classical output has no independent probability-to-return/downside calibration"
             .to_owned(),
     )];
-    if context.liquidity_usd.is_none() {
-        warnings.push(SignalWarning::ThinLiquidity);
+        if self.liquidity_usd.is_none() {
+            warnings.push(SignalWarning::ThinLiquidity);
+        }
+        if !self.substitution_reasons.is_empty() {
+            warnings.push(SignalWarning::Other(format!(
+                "{} governed input substitutions applied",
+                self.substitution_reasons.len()
+            )));
+        }
+        warnings
     }
-    if !context.substitution_reasons.is_empty() {
-        warnings.push(SignalWarning::Other(format!(
-            "{} governed input substitutions applied",
-            context.substitution_reasons.len()
-        )));
-    }
-    warnings
 }
 
 #[async_trait]
@@ -439,7 +441,7 @@ impl QuantModelRuntime for ClassicalRuntime {
 
     async fn infer_batch(&self, input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
         let started = Instant::now();
-        let matrix = expect_feature_matrix(input)?;
+        let matrix = (input).expect_feature_matrix()?;
         let markets_scored =
             u32::try_from(matrix.rows.len()).map_err(|error| ResearchError::Inference {
                 detail: format!("classical market count does not fit u32: {error}"),
@@ -789,14 +791,17 @@ fn resolve_entry(row: &InferenceMatrixRow, outcome_side: OutcomeSide) -> Option<
     }
 }
 
-/// Extract the feature matrix input, rejecting a factor-table (weighted only).
-fn expect_feature_matrix(input: ModelRuntimeInput) -> QuantResult<InferenceMatrix> {
-    match input {
-        ModelRuntimeInput::FeatureMatrix(matrix) => Ok(matrix),
-        ModelRuntimeInput::FactorTable(_) => Err(ResearchError::Inference {
-            detail: "classical runtime requires a feature matrix, got a factor table".to_owned(),
+impl ModelRuntimeInput {
+    /// Extract the feature matrix input, rejecting a factor-table (weighted only).
+    fn expect_feature_matrix(self) -> QuantResult<InferenceMatrix> {
+        match self {
+            Self::FeatureMatrix(matrix) => Ok(matrix),
+            Self::FactorTable(_) => Err(ResearchError::Inference {
+                detail: "classical runtime requires a feature matrix, got a factor table"
+                    .to_owned(),
+            }
+            .into()),
         }
-        .into()),
     }
 }
 
@@ -867,80 +872,84 @@ mod tests {
     }
 
     /// A linearly separable matrix: label = 1 when feature-0 is high.
-    fn training_matrix() -> TrainingMatrix {
-        let rows = 40usize;
-        let mut labels = Array1::<f64>::zeros(rows);
-        let mut cells = Vec::with_capacity(rows);
-        for i in 0..rows {
-            let high = i % 2 == 0;
-            cells.push(vec![
-                ModelInputCell::Observed(if high { dec!(0.9) } else { dec!(0.1) }),
-                ModelInputCell::Observed(
-                    Decimal::from(u64::try_from(i % 5).expect("small remainder"))
-                        / Decimal::from(5),
-                ),
-            ]);
-            labels[i] = if high { 1.0 } else { 0.0 };
-        }
-        TrainingMatrix {
-            cells: RawInputMatrix::from_rows(cells).expect("raw input matrix"),
-            labels,
-            columns: vec![
-                FeatureColumnSpec {
-                    feature: FeatureName::new("f0"),
-                    unit: FeatureUnit::Ratio,
-                    value_kind: FeatureValueKind::Decimal,
-                    required: true,
-                },
-                FeatureColumnSpec {
-                    feature: FeatureName::new("f1"),
-                    unit: FeatureUnit::Ratio,
-                    value_kind: FeatureValueKind::Decimal,
-                    required: true,
-                },
-            ],
-            rejected_rows: 0,
-            row_decision_at: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
-            row_label_horizon_end: (0..rows)
-                .map(|i| fixture_ts(fixture_row_secs(i) + 60))
-                .collect(),
+    impl TrainingMatrix {
+        fn runtime_fixture() -> Self {
+            let rows = 40usize;
+            let mut labels = Array1::<f64>::zeros(rows);
+            let mut cells = Vec::with_capacity(rows);
+            for i in 0..rows {
+                let high = i % 2 == 0;
+                cells.push(vec![
+                    ModelInputCell::Observed(if high { dec!(0.9) } else { dec!(0.1) }),
+                    ModelInputCell::Observed(
+                        Decimal::from(u64::try_from(i % 5).expect("small remainder"))
+                            / Decimal::from(5),
+                    ),
+                ]);
+                labels[i] = if high { 1.0 } else { 0.0 };
+            }
+            Self {
+                cells: RawInputMatrix::from_rows(cells).expect("raw input matrix"),
+                labels,
+                columns: vec![
+                    FeatureColumnSpec {
+                        feature: FeatureName::new("f0"),
+                        unit: FeatureUnit::Ratio,
+                        value_kind: FeatureValueKind::Decimal,
+                        required: true,
+                    },
+                    FeatureColumnSpec {
+                        feature: FeatureName::new("f1"),
+                        unit: FeatureUnit::Ratio,
+                        value_kind: FeatureValueKind::Decimal,
+                        required: true,
+                    },
+                ],
+                rejected_rows: 0,
+                row_decision_at: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
+                row_label_horizon_end: (0..rows)
+                    .map(|i| fixture_ts(fixture_row_secs(i) + 60))
+                    .collect(),
+            }
         }
     }
 
-    fn artifact(output: &ClassicalTrainOutput) -> ClassicalModelArtifact {
-        ClassicalModelArtifact {
-            header: ModelArtifactHeader {
-                model_version_id: ModelVersionId::from_v7(),
-                model_spec_definition_hash: hash("spec"),
-                profile_ref: builtin_research_profiles()
-                    .expect("built-in profiles")
-                    .remove(0)
-                    .profile_ref,
-                model_family: ModelFamily::from_classical(ClassicalKind::RandomForest),
-                feature_schema_hash: hash("feat"),
-                factor_schema_hash: hash("fac"),
-                trade_policy_artifact_id: None,
-                trade_policy_hash: None,
-            },
-            artifact_id: ModelArtifactId::from_v7(),
-            kind: output.kind,
-            crate_name: output.crate_name.clone(),
-            crate_version: output.crate_version.clone(),
-            label_schema_hash: hash("lab"),
-            training_dataset_hash: hash("ds"),
-            prediction_horizon_secs: 3_600,
-            output_semantics: ClassicalOutputSemantics::ForwardReturnBps,
-            multipliers: ScoreMultiplierSpec::conservative(),
-            substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-            input_contract: output.input_contract.clone(),
-            input_contract_hash: output.input_contract_hash,
-            input_transform_hash: output.input_transform_hash,
-            training_input_hash: output.training_input_hash,
-            serialized_model_uri: ArtifactUri::parse("file:///tmp/model.bin").expect("uri"),
-            serialized_model_hash: output.model_bytes_hash,
-            serialization_format: output.serialization_format,
-            input_transform: output.input_transform.clone(),
-            metrics: output.metrics.clone(),
+    impl ClassicalTrainOutput {
+        fn artifact(&self) -> ClassicalModelArtifact {
+            ClassicalModelArtifact {
+                header: ModelArtifactHeader {
+                    model_version_id: ModelVersionId::from_v7(),
+                    model_spec_definition_hash: hash("spec"),
+                    profile_ref: builtin_research_profiles()
+                        .expect("built-in profiles")
+                        .remove(0)
+                        .profile_ref,
+                    model_family: ModelFamily::from_classical(ClassicalKind::RandomForest),
+                    feature_schema_hash: hash("feat"),
+                    factor_schema_hash: hash("fac"),
+                    trade_policy_artifact_id: None,
+                    trade_policy_hash: None,
+                },
+                artifact_id: ModelArtifactId::from_v7(),
+                kind: self.kind,
+                crate_name: self.crate_name.clone(),
+                crate_version: self.crate_version.clone(),
+                label_schema_hash: hash("lab"),
+                training_dataset_hash: hash("ds"),
+                prediction_horizon_secs: 3_600,
+                output_semantics: ClassicalOutputSemantics::ForwardReturnBps,
+                multipliers: ScoreMultiplierSpec::conservative(),
+                substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+                input_contract: self.input_contract.clone(),
+                input_contract_hash: self.input_contract_hash,
+                input_transform_hash: self.input_transform_hash,
+                training_input_hash: self.training_input_hash,
+                serialized_model_uri: ArtifactUri::parse("file:///tmp/model.bin").expect("uri"),
+                serialized_model_hash: self.model_bytes_hash,
+                serialization_format: self.serialization_format,
+                input_transform: self.input_transform.clone(),
+                metrics: self.metrics.clone(),
+            }
         }
     }
 
@@ -973,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn classical_no_projection_requires_the_exact_secondary_ask() {
+    fn classical_no_requires_ask() {
         let mut row = inference_row(dec!(0.1));
         row.context.no_price = None;
         let missing =
@@ -997,15 +1006,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn classical_adapter_train_predict_roundtrip() {
+    async fn classical_adapter_train_roundtrip() {
         let output = ClassicalAdapterRegistry::adapter_for(ClassicalKind::RandomForest)
-            .train(&training_matrix())
+            .train(&TrainingMatrix::runtime_fixture())
             .expect("train");
         assert_eq!(output.crate_name, CLASSICAL_CRATE_NAME);
         assert!(!output.model_bytes.is_empty(), "estimator serialized");
         assert_eq!(output.metrics.feature_importances.len(), 2);
 
-        let runtime = ClassicalRuntime::load(artifact(&output), &output.model_bytes).expect("load");
+        let runtime = ClassicalRuntime::load(output.artifact(), &output.model_bytes).expect("load");
         assert_eq!(
             runtime.model_family(),
             ModelFamily::from_classical(ClassicalKind::RandomForest)
@@ -1078,27 +1087,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn classical_artifact_serialize_and_reload_with_version_check() {
+    async fn classical_artifact_serialize_check() {
         let output = ClassicalAdapterRegistry::adapter_for(ClassicalKind::RandomForest)
-            .train(&training_matrix())
+            .train(&TrainingMatrix::runtime_fixture())
             .expect("train");
 
         // Correct version reloads.
-        let ok = ClassicalRuntime::load(artifact(&output), &output.model_bytes);
+        let ok = ClassicalRuntime::load(output.artifact(), &output.model_bytes);
         assert!(ok.is_ok(), "matching crate version reloads");
         assert_eq!(output.crate_version, CLASSICAL_CRATE_VERSION);
 
         // A version mismatch is rejected.
-        let mut tampered = artifact(&output);
+        let mut tampered = output.artifact();
         tampered.crate_version = "9.9".to_owned();
         let err = ClassicalRuntime::load(tampered, &output.model_bytes);
         assert!(err.is_err(), "crate version mismatch must be rejected");
     }
 
     #[test]
-    fn classical_artifact_freezes_the_typed_contract_and_rejects_drift() {
+    fn classical_freezes_rejects_drift() {
         let output = ClassicalAdapterRegistry::adapter_for(ClassicalKind::RandomForest)
-            .train(&training_matrix())
+            .train(&TrainingMatrix::runtime_fixture())
             .expect("train");
         assert_eq!(
             output.input_contract.inputs,
@@ -1112,14 +1121,14 @@ mod tests {
             model_input_contract_hash(&output.input_contract).expect("typed contract hash")
         );
 
-        let mut stale_hash = artifact(&output);
+        let mut stale_hash = output.artifact();
         stale_hash.input_contract.inputs[0].requiredness = ModelInputRequiredness::Optional;
         assert!(
             ClassicalRuntime::load(stale_hash, &output.model_bytes).is_err(),
             "requiredness drift without a new canonical hash must fail closed"
         );
 
-        let mut swapped = artifact(&output);
+        let mut swapped = output.artifact();
         swapped.input_contract.inputs.swap(0, 1);
         swapped.input_contract_hash =
             model_input_contract_hash(&swapped.input_contract).expect("swapped contract hash");
@@ -1128,7 +1137,7 @@ mod tests {
             "an internally hashed contract still cannot diverge from the fitted transform"
         );
 
-        let mut malformed = artifact(&output);
+        let mut malformed = output.artifact();
         malformed
             .input_contract
             .inputs
@@ -1138,14 +1147,14 @@ mod tests {
             "duplicate raw inputs must fail closed"
         );
 
-        let mut zero_horizon = artifact(&output);
+        let mut zero_horizon = output.artifact();
         zero_horizon.prediction_horizon_secs = 0;
         assert!(
             ClassicalRuntime::load(zero_horizon, &output.model_bytes).is_err(),
             "zero classical horizon must fail closed"
         );
 
-        let mut wrong_semantics = artifact(&output);
+        let mut wrong_semantics = output.artifact();
         wrong_semantics.output_semantics = ClassicalOutputSemantics::SettlementProbability;
         assert!(
             ClassicalRuntime::load(wrong_semantics, &output.model_bytes).is_err(),

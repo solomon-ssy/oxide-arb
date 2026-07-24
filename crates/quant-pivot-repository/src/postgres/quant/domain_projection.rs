@@ -141,7 +141,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         .await?;
         notify_input_change(&txn, "crypto").await?;
         txn.commit().await.map_err(StorageError::from)?;
-        crypto_info(model)
+        Self::crypto_info(model)
     }
 
     async fn apply_weather_report(
@@ -160,8 +160,9 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         let checkpoint_hash = hash_checkpoint(&checkpoint)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let observation_changed =
-            upsert_weather_observation(&txn, &report, &station, temperature, local_date).await?;
-        let projections = upsert_weather_daily_temperature_projections(
+            Self::upsert_weather_observation(&txn, &report, &station, temperature, local_date)
+                .await?;
+        let projections = Self::upsert_weather_projections(
             &txn,
             WeatherProjectionInput {
                 report: &report,
@@ -196,7 +197,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         txn.commit().await.map_err(StorageError::from)?;
         Ok(projections
             .into_iter()
-            .map(|(model, _)| weather_info(model))
+            .map(|(model, _)| Self::weather_info(model))
             .collect())
     }
 
@@ -240,7 +241,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         let mut updated = Vec::with_capacity(rows.len());
         for row in rows {
             if row.day_closed {
-                updated.push(weather_info(row));
+                updated.push(Self::weather_info(row));
                 continue;
             }
             let event = weather_close_event(
@@ -257,7 +258,7 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
             active.available_at = ActiveValue::Set(closed_at);
             let model = active.update(&txn).await.map_err(StorageError::from)?;
             insert_outbox(&txn, event).await?;
-            updated.push(weather_info(model));
+            updated.push(Self::weather_info(model));
         }
         if !updated.iter().all(|row| row.day_closed) {
             return Err(invariant(
@@ -462,65 +463,67 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
     }
 }
 
-async fn upsert_weather_observation(
-    txn: &DatabaseTransaction,
-    report: &WeatherObservationReport,
-    station: &IcaoStation,
-    temperature: TemperatureCelsius,
-    local_date: NaiveDate,
-) -> Result<bool, StorageError> {
-    let observation_key = (station.to_string(), local_date, report.observed_at);
-    let observation = QuantWeatherObservationCurrentEntity::find_by_id(observation_key)
-        .lock_exclusive()
-        .one(txn)
-        .await
-        .map_err(StorageError::from)?;
-    let changed = observation
-        .as_ref()
-        .is_none_or(|current| current.report_hash != report.report_hash);
-    match observation {
-        Some(current) if current.report_hash == report.report_hash => {}
-        Some(current) => {
-            if (
-                report.available_at,
-                report.published_at,
-                &report.report_hash,
-            ) <= (
-                current.available_at,
-                current.published_at,
-                &current.report_hash,
-            ) {
-                return Err(conflict(
-                    "weather correction is older than current observation",
-                ));
-            }
-            let revision = checked_add(current.revision, "weather observation revision")?;
-            let mut active = current.into_active_model();
-            active.temperature_celsius = ActiveValue::Set(temperature.value());
-            active.report_hash = ActiveValue::Set(report.report_hash);
-            active.revision = ActiveValue::Set(revision);
-            active.published_at = ActiveValue::Set(report.published_at);
-            active.available_at = ActiveValue::Set(report.available_at);
-            active.update(txn).await.map_err(StorageError::from)?;
-        }
-        None => {
-            QuantWeatherObservationCurrentActiveModel {
-                station: ActiveValue::Set(station.to_string()),
-                local_date: ActiveValue::Set(local_date),
-                observation_time: ActiveValue::Set(report.observed_at),
-                temperature_celsius: ActiveValue::Set(temperature.value()),
-                report_hash: ActiveValue::Set(report.report_hash),
-                revision: ActiveValue::Set(0),
-                published_at: ActiveValue::Set(report.published_at),
-                available_at: ActiveValue::Set(report.available_at),
-                ..Default::default()
-            }
-            .insert(txn)
+impl PgDomainProjectionRepository {
+    async fn upsert_weather_observation(
+        txn: &DatabaseTransaction,
+        report: &WeatherObservationReport,
+        station: &IcaoStation,
+        temperature: TemperatureCelsius,
+        local_date: NaiveDate,
+    ) -> Result<bool, StorageError> {
+        let observation_key = (station.to_string(), local_date, report.observed_at);
+        let observation = QuantWeatherObservationCurrentEntity::find_by_id(observation_key)
+            .lock_exclusive()
+            .one(txn)
             .await
             .map_err(StorageError::from)?;
+        let changed = observation
+            .as_ref()
+            .is_none_or(|current| current.report_hash != report.report_hash);
+        match observation {
+            Some(current) if current.report_hash == report.report_hash => {}
+            Some(current) => {
+                if (
+                    report.available_at,
+                    report.published_at,
+                    &report.report_hash,
+                ) <= (
+                    current.available_at,
+                    current.published_at,
+                    &current.report_hash,
+                ) {
+                    return Err(conflict(
+                        "weather correction is older than current observation",
+                    ));
+                }
+                let revision = checked_add(current.revision, "weather observation revision")?;
+                let mut active = current.into_active_model();
+                active.temperature_celsius = ActiveValue::Set(temperature.value());
+                active.report_hash = ActiveValue::Set(report.report_hash);
+                active.revision = ActiveValue::Set(revision);
+                active.published_at = ActiveValue::Set(report.published_at);
+                active.available_at = ActiveValue::Set(report.available_at);
+                active.update(txn).await.map_err(StorageError::from)?;
+            }
+            None => {
+                QuantWeatherObservationCurrentActiveModel {
+                    station: ActiveValue::Set(station.to_string()),
+                    local_date: ActiveValue::Set(local_date),
+                    observation_time: ActiveValue::Set(report.observed_at),
+                    temperature_celsius: ActiveValue::Set(temperature.value()),
+                    report_hash: ActiveValue::Set(report.report_hash),
+                    revision: ActiveValue::Set(0),
+                    published_at: ActiveValue::Set(report.published_at),
+                    available_at: ActiveValue::Set(report.available_at),
+                    ..Default::default()
+                }
+                .insert(txn)
+                .await
+                .map_err(StorageError::from)?;
+            }
         }
+        Ok(changed)
     }
-    Ok(changed)
 }
 
 struct WeatherProjectionInput<'a> {
@@ -535,20 +538,20 @@ struct WeatherProjectionInput<'a> {
     observation_changed: bool,
 }
 
-async fn upsert_weather_daily_temperature_projections(
-    txn: &DatabaseTransaction,
-    input: WeatherProjectionInput<'_>,
-) -> Result<Vec<(Model, Option<DomainEventEnvelope>)>, StorageError> {
-    let mut projections = Vec::with_capacity(2);
-    for statistic in [
-        WeatherTemperatureStatistic::Maximum,
-        WeatherTemperatureStatistic::Minimum,
-    ] {
-        let observations = QuantWeatherObservationCurrentEntity::find()
-            .filter(QuantWeatherObservationCurrentColumn::Station.eq(input.station.as_str()))
-            .filter(QuantWeatherObservationCurrentColumn::LocalDate.eq(input.local_date));
-        let extreme =
-            match statistic {
+impl PgDomainProjectionRepository {
+    async fn upsert_weather_projections(
+        txn: &DatabaseTransaction,
+        input: WeatherProjectionInput<'_>,
+    ) -> Result<Vec<(Model, Option<DomainEventEnvelope>)>, StorageError> {
+        let mut projections = Vec::with_capacity(2);
+        for statistic in [
+            WeatherTemperatureStatistic::Maximum,
+            WeatherTemperatureStatistic::Minimum,
+        ] {
+            let observations = QuantWeatherObservationCurrentEntity::find()
+                .filter(QuantWeatherObservationCurrentColumn::Station.eq(input.station.as_str()))
+                .filter(QuantWeatherObservationCurrentColumn::LocalDate.eq(input.local_date));
+            let extreme = match statistic {
                 WeatherTemperatureStatistic::Maximum => observations
                     .order_by_desc(QuantWeatherObservationCurrentColumn::TemperatureCelsius),
                 WeatherTemperatureStatistic::Minimum => observations
@@ -559,116 +562,121 @@ async fn upsert_weather_daily_temperature_projections(
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| invariant("weather daily projection has no current observations"))?;
-        let existing = QuantWeatherDailyTemperatureProjectionEntity::find_by_id((
-            input.report.source_id.clone(),
-            input.instrument_key.clone(),
-            input.local_date,
-            statistic,
-        ))
-        .lock_exclusive()
-        .one(txn)
-        .await
-        .map_err(StorageError::from)?;
-        let previous_extreme = existing.as_ref().map(|row| row.current_extreme_celsius);
-        let current_extreme = extreme.temperature_celsius;
-        let event = if input.observation_changed && previous_extreme != Some(current_extreme) {
-            Some(weather_change_event(WeatherChangeEventInput {
-                report: input.report,
-                local_date: input.local_date,
-                temperature_statistic: statistic,
-                previous_extreme,
-                current_extreme,
-                gap_generation: input.gap_generation,
-                checkpoint_hash: *input.checkpoint_hash,
-                supersedes_event_id: existing.as_ref().and_then(|row| row.last_event_id),
-            })?)
-        } else {
-            None
-        };
-        let model = match existing {
-            Some(existing) if !input.observation_changed => existing,
-            Some(existing) => {
-                update_weather_daily_temperature_projection(
-                    txn,
-                    existing,
-                    &input,
+            let existing = QuantWeatherDailyTemperatureProjectionEntity::find_by_id((
+                input.report.source_id.clone(),
+                input.instrument_key.clone(),
+                input.local_date,
+                statistic,
+            ))
+            .lock_exclusive()
+            .one(txn)
+            .await
+            .map_err(StorageError::from)?;
+            let previous_extreme = existing.as_ref().map(|row| row.current_extreme_celsius);
+            let current_extreme = extreme.temperature_celsius;
+            let event = if input.observation_changed && previous_extreme != Some(current_extreme) {
+                Some(weather_change_event(WeatherChangeEventInput {
+                    report: input.report,
+                    local_date: input.local_date,
+                    temperature_statistic: statistic,
                     previous_extreme,
                     current_extreme,
-                    event.as_ref(),
-                )
-                .await?
-            }
-            None => {
-                insert_weather_daily_temperature_projection(
-                    txn,
-                    &input,
-                    statistic,
-                    current_extreme,
-                    event.as_ref(),
-                )
-                .await?
-            }
-        };
-        projections.push((model, event));
+                    gap_generation: input.gap_generation,
+                    checkpoint_hash: *input.checkpoint_hash,
+                    supersedes_event_id: existing.as_ref().and_then(|row| row.last_event_id),
+                })?)
+            } else {
+                None
+            };
+            let model = match existing {
+                Some(existing) if !input.observation_changed => existing,
+                Some(existing) => {
+                    Self::update_weather_projection(
+                        txn,
+                        existing,
+                        &input,
+                        previous_extreme,
+                        current_extreme,
+                        event.as_ref(),
+                    )
+                    .await?
+                }
+                None => {
+                    Self::insert_weather_projection(
+                        txn,
+                        &input,
+                        statistic,
+                        current_extreme,
+                        event.as_ref(),
+                    )
+                    .await?
+                }
+            };
+            projections.push((model, event));
+        }
+        Ok(projections)
     }
-    Ok(projections)
 }
 
-async fn update_weather_daily_temperature_projection(
-    txn: &DatabaseTransaction,
-    existing: Model,
-    input: &WeatherProjectionInput<'_>,
-    previous_extreme: Option<Decimal>,
-    current_extreme: Decimal,
-    event: Option<&DomainEventEnvelope>,
-) -> Result<Model, StorageError> {
-    if existing.timezone != input.timezone {
-        return Err(conflict("weather station timezone binding drift"));
+impl PgDomainProjectionRepository {
+    async fn update_weather_projection(
+        txn: &DatabaseTransaction,
+        existing: Model,
+        input: &WeatherProjectionInput<'_>,
+        previous_extreme: Option<Decimal>,
+        current_extreme: Decimal,
+        event: Option<&DomainEventEnvelope>,
+    ) -> Result<Model, StorageError> {
+        if existing.timezone != input.timezone {
+            return Err(conflict("weather station timezone binding drift"));
+        }
+        let revision = checked_add(existing.revision, "weather daily revision")?;
+        let last_event_id = event.map_or_else(|| existing.last_event_id, |event| Some(event.id));
+        let mut active = existing.into_active_model();
+        active.previous_extreme_celsius = ActiveValue::Set(previous_extreme);
+        active.current_extreme_celsius = ActiveValue::Set(current_extreme);
+        active.last_observation_time = ActiveValue::Set(input.report.observed_at);
+        active.last_report_hash = ActiveValue::Set(input.report.report_hash);
+        active.last_event_id = ActiveValue::Set(last_event_id);
+        active.revision = ActiveValue::Set(revision);
+        active.gap_generation = ActiveValue::Set(input.gap_generation);
+        active.source_healthy = ActiveValue::Set(input.source_healthy);
+        active.available_at = ActiveValue::Set(input.report.available_at);
+        active.update(txn).await.map_err(StorageError::from)
     }
-    let revision = checked_add(existing.revision, "weather daily revision")?;
-    let last_event_id = event.map_or_else(|| existing.last_event_id, |event| Some(event.id));
-    let mut active = existing.into_active_model();
-    active.previous_extreme_celsius = ActiveValue::Set(previous_extreme);
-    active.current_extreme_celsius = ActiveValue::Set(current_extreme);
-    active.last_observation_time = ActiveValue::Set(input.report.observed_at);
-    active.last_report_hash = ActiveValue::Set(input.report.report_hash);
-    active.last_event_id = ActiveValue::Set(last_event_id);
-    active.revision = ActiveValue::Set(revision);
-    active.gap_generation = ActiveValue::Set(input.gap_generation);
-    active.source_healthy = ActiveValue::Set(input.source_healthy);
-    active.available_at = ActiveValue::Set(input.report.available_at);
-    active.update(txn).await.map_err(StorageError::from)
 }
 
-async fn insert_weather_daily_temperature_projection(
-    txn: &DatabaseTransaction,
-    input: &WeatherProjectionInput<'_>,
-    statistic: WeatherTemperatureStatistic,
-    current_extreme: Decimal,
-    event: Option<&DomainEventEnvelope>,
-) -> Result<Model, StorageError> {
-    QuantWeatherDailyTemperatureProjectionActiveModel {
-        source_id: ActiveValue::Set(input.report.source_id.clone()),
-        instrument_key: ActiveValue::Set(input.instrument_key.clone()),
-        station: ActiveValue::Set(input.station.to_string()),
-        local_date: ActiveValue::Set(input.local_date),
-        temperature_statistic: ActiveValue::Set(statistic),
-        timezone: ActiveValue::Set(input.timezone.to_owned()),
-        current_extreme_celsius: ActiveValue::Set(current_extreme),
-        previous_extreme_celsius: ActiveValue::Set(None),
-        last_observation_time: ActiveValue::Set(input.report.observed_at),
-        last_report_hash: ActiveValue::Set(input.report.report_hash),
-        last_event_id: ActiveValue::Set(event.map(|event| event.id)),
-        revision: ActiveValue::Set(0),
-        day_closed: ActiveValue::Set(false),
-        gap_generation: ActiveValue::Set(input.gap_generation),
-        source_healthy: ActiveValue::Set(input.source_healthy),
-        available_at: ActiveValue::Set(input.report.available_at),
-        ..Default::default()
+impl PgDomainProjectionRepository {
+    async fn insert_weather_projection(
+        txn: &DatabaseTransaction,
+        input: &WeatherProjectionInput<'_>,
+        statistic: WeatherTemperatureStatistic,
+        current_extreme: Decimal,
+        event: Option<&DomainEventEnvelope>,
+    ) -> Result<Model, StorageError> {
+        QuantWeatherDailyTemperatureProjectionActiveModel {
+            source_id: ActiveValue::Set(input.report.source_id.clone()),
+            instrument_key: ActiveValue::Set(input.instrument_key.clone()),
+            station: ActiveValue::Set(input.station.to_string()),
+            local_date: ActiveValue::Set(input.local_date),
+            temperature_statistic: ActiveValue::Set(statistic),
+            timezone: ActiveValue::Set(input.timezone.to_owned()),
+            current_extreme_celsius: ActiveValue::Set(current_extreme),
+            previous_extreme_celsius: ActiveValue::Set(None),
+            last_observation_time: ActiveValue::Set(input.report.observed_at),
+            last_report_hash: ActiveValue::Set(input.report.report_hash),
+            last_event_id: ActiveValue::Set(event.map(|event| event.id)),
+            revision: ActiveValue::Set(0),
+            day_closed: ActiveValue::Set(false),
+            gap_generation: ActiveValue::Set(input.gap_generation),
+            source_healthy: ActiveValue::Set(input.source_healthy),
+            available_at: ActiveValue::Set(input.report.available_at),
+            ..Default::default()
+        }
+        .insert(txn)
+        .await
+        .map_err(StorageError::from)
     }
-    .insert(txn)
-    .await
-    .map_err(StorageError::from)
 }
 
 struct EventBuildInput {
@@ -709,7 +717,7 @@ fn crypto_event(
         gap_generation: from_i64(gap_generation, "crypto gap generation")?,
         report_hash: report.report_hash,
     });
-    build_event(EventBuildInput {
+    (EventBuildInput {
         source: report.source_id.clone(),
         event_type: DomainEventType::CryptoPriceTransition,
         subject: report.instrument_key.to_string(),
@@ -720,6 +728,7 @@ fn crypto_event(
         source_checkpoint_hash: checkpoint_hash,
         payload,
     })
+    .build_event()
 }
 
 fn weather_change_event(
@@ -751,7 +760,7 @@ fn weather_change_event(
     } else {
         DomainEventPayload::WeatherDailyTemperatureExtremeAdvanced(change)
     };
-    build_event(EventBuildInput {
+    (EventBuildInput {
         source: input.report.source_id.clone(),
         event_type,
         subject: format!(
@@ -767,6 +776,7 @@ fn weather_change_event(
         source_checkpoint_hash: input.checkpoint_hash,
         payload,
     })
+    .build_event()
 }
 
 fn weather_close_event(
@@ -774,7 +784,7 @@ fn weather_close_event(
     closed_at: DateTime<Utc>,
     checkpoint_hash: ContentHash,
 ) -> Result<DomainEventEnvelope, StorageError> {
-    build_event(EventBuildInput {
+    (EventBuildInput {
         source: DomainSourceId::aviation_weather(),
         event_type: DomainEventType::WeatherObservationDayClosed,
         subject: format!(
@@ -795,36 +805,39 @@ fn weather_close_event(
             gap_generation: from_i64(row.gap_generation, "weather gap generation")?,
         }),
     })
+    .build_event()
 }
 
-fn build_event(input: EventBuildInput) -> Result<DomainEventEnvelope, StorageError> {
-    let payload_hash = CanonicalDigest::content_hash_json(&input.payload)
+impl EventBuildInput {
+    fn build_event(self) -> Result<DomainEventEnvelope, StorageError> {
+        let payload_hash = CanonicalDigest::content_hash_json(&self.payload)
+            .map_err(|error| invariant(error.to_string()))?;
+        let content_hash = CanonicalDigest::content_hash_json(&(
+            &self.source,
+            self.event_type,
+            &self.subject,
+            self.time,
+            &self.supersedes_event_id,
+            &payload_hash,
+            &self.source_checkpoint_hash,
+        ))
         .map_err(|error| invariant(error.to_string()))?;
-    let content_hash = CanonicalDigest::content_hash_json(&(
-        &input.source,
-        input.event_type,
-        &input.subject,
-        input.time,
-        &input.supersedes_event_id,
-        &payload_hash,
-        &input.source_checkpoint_hash,
-    ))
-    .map_err(|error| invariant(error.to_string()))?;
-    Ok(DomainEventEnvelope {
-        id: DomainEventId::from_content_hash(&content_hash),
-        source: input.source,
-        event_type: input.event_type,
-        subject: input.subject,
-        time: input.time,
-        schema_version: 1,
-        published_at: input.published_at,
-        available_at: input.available_at,
-        revision: 0,
-        supersedes_event_id: input.supersedes_event_id,
-        payload_hash,
-        source_checkpoint_hash: input.source_checkpoint_hash,
-        payload: input.payload,
-    })
+        Ok(DomainEventEnvelope {
+            id: DomainEventId::from_content_hash(&content_hash),
+            source: self.source,
+            event_type: self.event_type,
+            subject: self.subject,
+            time: self.time,
+            schema_version: 1,
+            published_at: self.published_at,
+            available_at: self.available_at,
+            revision: 0,
+            supersedes_event_id: self.supersedes_event_id,
+            payload_hash,
+            source_checkpoint_hash: self.source_checkpoint_hash,
+            payload: self.payload,
+        })
+    }
 }
 
 async fn insert_outbox<C: ConnectionTrait>(
@@ -934,39 +947,41 @@ fn hash_checkpoint(checkpoint: &DomainSourceCheckpoint) -> Result<ContentHash, S
     CanonicalDigest::content_hash_json(checkpoint).map_err(|error| invariant(error.to_string()))
 }
 
-fn crypto_info(
-    row: QuantCryptoPriceProjectionModel,
-) -> Result<CryptoPriceProjectionInfo, StorageError> {
-    Ok(CryptoPriceProjectionInfo {
-        source_id: row.source_id,
-        instrument_key: row.instrument_key,
-        previous_price: row.previous_price,
-        current_price: row.current_price,
-        source_sequence: from_i64(row.source_sequence, "crypto source sequence")?,
-        event_time: row.event_time,
-        available_at: row.available_at,
-        report_hash: row.report_hash,
-        gap_generation: row.gap_generation,
-        source_healthy: row.source_healthy,
-    })
-}
+impl PgDomainProjectionRepository {
+    fn crypto_info(
+        row: QuantCryptoPriceProjectionModel,
+    ) -> Result<CryptoPriceProjectionInfo, StorageError> {
+        Ok(CryptoPriceProjectionInfo {
+            source_id: row.source_id,
+            instrument_key: row.instrument_key,
+            previous_price: row.previous_price,
+            current_price: row.current_price,
+            source_sequence: from_i64(row.source_sequence, "crypto source sequence")?,
+            event_time: row.event_time,
+            available_at: row.available_at,
+            report_hash: row.report_hash,
+            gap_generation: row.gap_generation,
+            source_healthy: row.source_healthy,
+        })
+    }
 
-fn weather_info(row: Model) -> WeatherDailyTemperatureProjectionInfo {
-    WeatherDailyTemperatureProjectionInfo {
-        source_id: row.source_id,
-        instrument_key: row.instrument_key,
-        station: row.station,
-        local_date: row.local_date,
-        timezone: row.timezone,
-        temperature_statistic: row.temperature_statistic,
-        current_extreme: TemperatureCelsius::new(row.current_extreme_celsius),
-        last_observation_time: row.last_observation_time,
-        last_report_hash: row.last_report_hash,
-        revision: row.revision,
-        day_closed: row.day_closed,
-        gap_generation: row.gap_generation,
-        source_healthy: row.source_healthy,
-        available_at: row.available_at,
+    fn weather_info(row: Model) -> WeatherDailyTemperatureProjectionInfo {
+        WeatherDailyTemperatureProjectionInfo {
+            source_id: row.source_id,
+            instrument_key: row.instrument_key,
+            station: row.station,
+            local_date: row.local_date,
+            timezone: row.timezone,
+            temperature_statistic: row.temperature_statistic,
+            current_extreme: TemperatureCelsius::new(row.current_extreme_celsius),
+            last_observation_time: row.last_observation_time,
+            last_report_hash: row.last_report_hash,
+            revision: row.revision,
+            day_closed: row.day_closed,
+            gap_generation: row.gap_generation,
+            source_healthy: row.source_healthy,
+            available_at: row.available_at,
+        }
     }
 }
 
@@ -1014,7 +1029,7 @@ mod tests {
     use super::validate_weather_temperature_report;
 
     #[test]
-    fn weather_projection_preserves_receipt_before_nominal_observation_time() {
+    fn weather_preserves_before_time() {
         let station = IcaoStation::parse("KBKF").expect("station");
         let published_at = Utc.timestamp_millis_opt(1_752_802_715_000).unwrap();
         let observed_at = Utc.timestamp_millis_opt(1_752_802_800_000).unwrap();

@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn source_cutoff_uses_the_stricter_lag() {
+    fn source_cutoff_uses_lag() {
         let decision_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let boundary = DecisionClock::new(120)
             .boundary(decision_at)
@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_deriving_one_source_twice() {
+    fn rejects_deriving_one_twice() {
         let decision_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let boundary = DecisionClock::new(120)
             .boundary(decision_at)
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn serving_boundary_registers_every_governed_source() {
+    fn serving_boundary_registers_source() {
         let decision_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let boundary = DecisionClock::new(120)
             .serving_boundary(decision_at, 300, 600)
@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn rebase_preserves_every_effective_source_lag() {
+    fn rebase_preserves_effective_lag() {
         let original_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let rebased_at = original_at + Duration::hours(6);
         let original = DecisionClock::new(120)
@@ -373,7 +373,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn serving_and_replay_apply_each_governed_lag_exactly_once(
+        fn governed_lags_apply_once(
             epoch_secs in 946_684_800_i64..2_524_608_000_i64,
             rebase_delta_secs in -604_800_i64..604_800_i64,
             knowledge_lag_secs in 0_u32..1_000_000_u32,

@@ -132,7 +132,7 @@ fn new_account_snapshot() -> NewAccountSnapshot {
     }
 }
 
-pub async fn account_snapshot_repo_create_find() {
+pub async fn account_snapshot_repo_find() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     execution_pg_seed::ensure_fixture_execution_account(&db).await;
@@ -164,14 +164,14 @@ pub async fn account_snapshot_repo_create_find() {
     );
 }
 
-pub async fn reserved_capital_reader_returns_zero_when_empty() {
+pub async fn reserved_returns_zero_empty() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let reader = PgReservedCapitalRepository::new(db);
     assert_eq!(reader.sum_reserved_usd().await.expect("sum"), Usd::ZERO);
 }
 
-pub async fn report_transaction_persists_chain_and_reserved_capital_sums_pending_intents() {
+pub async fn report_transaction_persists_intents() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
 
@@ -183,7 +183,7 @@ pub async fn report_transaction_persists_chain_and_reserved_capital_sums_pending
     let market_selection_id = seed_market_selection(&db, &rc_id, market_id, event_id).await;
 
     let ids = TxnIds {
-        feature_parity_state_id: seed_clear_feature_parity_state(&db).await,
+        feature_parity_state_id: clear_feature_parity(&db).await,
         account_snapshot: AccountSnapshotId::from_v7(),
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
         portfolio_plan: PortfolioPlanId::from_v7(),
@@ -197,10 +197,10 @@ pub async fn report_transaction_persists_chain_and_reserved_capital_sums_pending
         market: market_id.to_owned(),
         event: event_id.to_owned(),
     };
-    create_and_assert_report_transaction(&db, &ids).await;
+    create_assert_report_transaction(&db, &ids).await;
     assert_recommendation_roundtrip(&db, &ids.report).await;
-    explicitly_enable_entry_for_test(&db).await;
-    assert_reserved_capital_tracks_pending_intent(
+    explicitly_enable_entry_test(&db).await;
+    assert_reserved_tracks_intent(
         &db,
         &ids.recommendation,
         &ids.condition_instance,
@@ -210,7 +210,7 @@ pub async fn report_transaction_persists_chain_and_reserved_capital_sums_pending
     .await;
 }
 
-pub async fn find_expirable_returns_published_reports_before_cutoff_only() {
+pub async fn find_returns_before_only() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
 
@@ -222,7 +222,7 @@ pub async fn find_expirable_returns_published_reports_before_cutoff_only() {
     let market_selection_id = seed_market_selection(&db, &rc_id, market_id, event_id).await;
 
     let ids = TxnIds {
-        feature_parity_state_id: seed_clear_feature_parity_state(&db).await,
+        feature_parity_state_id: clear_feature_parity(&db).await,
         account_snapshot: AccountSnapshotId::from_v7(),
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
         portfolio_plan: PortfolioPlanId::from_v7(),
@@ -240,8 +240,8 @@ pub async fn find_expirable_returns_published_reports_before_cutoff_only() {
     let report_repo = PgRecommendationReportRepository::new(db.clone());
     persist_prepared_report(
         &db,
-        build_report_transaction(&ids),
-        &report_trigger_key(&ids),
+        ids.build_report_transaction(),
+        &ids.report_trigger_key(),
         10,
     )
     .await;
@@ -288,7 +288,7 @@ pub async fn find_expirable_returns_published_reports_before_cutoff_only() {
     // Roll-up is gated on every recommendation being terminal; the report's
     // recommendation is still `Published`, so the roll-up is a no-op.
     let blocked = report_repo
-        .roll_up_to_expired(&ids.report, Utc::now(), report_operation_log(&ids))
+        .roll_up_to_expired(&ids.report, Utc::now(), ids.report_operation_log())
         .await
         .expect("roll up attempt");
     assert!(
@@ -299,11 +299,11 @@ pub async fn find_expirable_returns_published_reports_before_cutoff_only() {
     // Expire the recommendation, then the report rolls up to Expired.
     let recommendation_repo = PgRecommendationRepository::new(db.clone());
     recommendation_repo
-        .expire(&ids.recommendation, Utc::now(), report_operation_log(&ids))
+        .expire(&ids.recommendation, Utc::now(), ids.report_operation_log())
         .await
         .expect("expire recommendation");
     let rolled = report_repo
-        .roll_up_to_expired(&ids.report, Utc::now(), report_operation_log(&ids))
+        .roll_up_to_expired(&ids.report, Utc::now(), ids.report_operation_log())
         .await
         .expect("roll up");
     assert!(
@@ -337,7 +337,7 @@ pub async fn find_expirable_returns_published_reports_before_cutoff_only() {
     );
 }
 
-pub async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_claim() {
+pub async fn report_recovers_without_claim() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
 
@@ -348,7 +348,7 @@ pub async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early
     seed_market_catalog(&db, event_id, market_id).await;
     let market_selection_id = seed_market_selection(&db, &rc_id, market_id, event_id).await;
     let ids = TxnIds {
-        feature_parity_state_id: seed_clear_feature_parity_state(&db).await,
+        feature_parity_state_id: clear_feature_parity(&db).await,
         account_snapshot: AccountSnapshotId::from_v7(),
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
         portfolio_plan: PortfolioPlanId::from_v7(),
@@ -365,8 +365,8 @@ pub async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early
     let repo = PgRecommendationReportRepository::new(db.clone());
     persist_prepared_report(
         &db,
-        build_report_transaction(&ids),
-        &report_trigger_key(&ids),
+        ids.build_report_transaction(),
+        &ids.report_trigger_key(),
         10,
     )
     .await;
@@ -484,12 +484,12 @@ async fn seed_market_catalog(db: &DatabaseConnection, event_id: &str, market_id:
         .expect("seed market");
 }
 
-async fn create_and_assert_report_transaction(db: &DatabaseConnection, ids: &TxnIds) {
-    let trigger_key = report_trigger_key(ids);
+async fn create_assert_report_transaction(db: &DatabaseConnection, ids: &TxnIds) {
+    let trigger_key = (ids).report_trigger_key();
     let typed_trigger_key =
         ReportTriggerKey::parse(trigger_key.clone()).expect("report trigger key");
     let created =
-        persist_and_publish_report(db, build_report_transaction(ids), &trigger_key, 10).await;
+        persist_and_publish_report(db, (ids).build_report_transaction(), &trigger_key, 10).await;
     assert_eq!(created.recommendation_report_id, ids.report);
     assert_eq!(created.capital_base_usd, Usd::new(dec!(10000)));
     assert_eq!(created.account_snapshot_ref, ids.account_snapshot);
@@ -529,7 +529,7 @@ async fn assert_recommendation_roundtrip(
     assert_eq!(sizing.sizing_model, SizingModelKind::Kelly);
 }
 
-async fn assert_reserved_capital_tracks_pending_intent(
+async fn assert_reserved_tracks_intent(
     db: &DatabaseConnection,
     recommendation_id: &RecommendationId,
     condition_instance_id: &EntryConditionInstanceId,
@@ -640,16 +640,16 @@ async fn assert_reserved_capital_tracks_pending_intent(
     );
 }
 
-pub async fn execution_order_and_reconciliation_repositories_round_trip() {
+pub async fn execution_order_reconciliation_trip() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
-    explicitly_enable_entry_for_test(&db).await;
+    explicitly_enable_entry_test(&db).await;
     let order_intent_id = create_pending_intent(&db, &ids).await;
     let execution_order_id = ExecutionOrderId::from_v7();
 
     let execution_repo = PgExecutionOrderRepository::new(db.clone());
-    create_and_submit_execution_order(&execution_repo, &ids, &order_intent_id, &execution_order_id)
+    create_submit_execution_order(&execution_repo, &ids, &order_intent_id, &execution_order_id)
         .await;
 
     let reconciliation_repo = PgReconciliationRepository::new(db.clone());
@@ -657,7 +657,7 @@ pub async fn execution_order_and_reconciliation_repositories_round_trip() {
         .await;
 }
 
-async fn create_and_submit_execution_order(
+async fn create_submit_execution_order(
     execution_repo: &PgExecutionOrderRepository,
     ids: &TxnIds,
     order_intent_id: &OrderIntentId,
@@ -794,11 +794,11 @@ async fn append_and_resolve_reconciliation(
     );
 }
 
-pub async fn capital_and_kill_switch_repositories_round_trip() {
+pub async fn capital_kill_switch_trip() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
-    explicitly_enable_entry_for_test(&db).await;
+    explicitly_enable_entry_test(&db).await;
     // Creating an intent reserves its capital atomically (planned = allocated).
     let _order_intent_id = create_pending_intent(&db, &ids).await;
 
@@ -850,7 +850,7 @@ async fn seed_report_fixture(db: &DatabaseConnection) -> TxnIds {
     seed_market_catalog(db, event_id, market_id).await;
     let market_selection_id = seed_market_selection(db, &rc_id, market_id, event_id).await;
     let ids = TxnIds {
-        feature_parity_state_id: seed_clear_feature_parity_state(db).await,
+        feature_parity_state_id: clear_feature_parity(db).await,
         account_snapshot: AccountSnapshotId::from_v7(),
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
         portfolio_plan: PortfolioPlanId::from_v7(),
@@ -866,15 +866,15 @@ async fn seed_report_fixture(db: &DatabaseConnection) -> TxnIds {
     };
     persist_and_publish_report(
         db,
-        build_report_transaction(&ids),
-        &report_trigger_key(&ids),
+        ids.build_report_transaction(),
+        &ids.report_trigger_key(),
         10,
     )
     .await;
     ids
 }
 
-async fn seed_clear_feature_parity_state(db: &DatabaseConnection) -> FeatureParityStateId {
+async fn clear_feature_parity(db: &DatabaseConnection) -> FeatureParityStateId {
     let state_id = FeatureParityStateId::from_v7();
     QuantFeatureParityStateEntity::insert(
         NewFeatureParityState {
@@ -972,8 +972,8 @@ async fn create_pending_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderIn
         .order_intent_id
 }
 
-async fn explicitly_enable_entry_for_test(db: &DatabaseConnection) {
-    execution_pg_seed::enable_entry_admission_for_test(db, "pg-account-it-operator").await;
+async fn explicitly_enable_entry_test(db: &DatabaseConnection) {
+    execution_pg_seed::enable_test_admission(db, "pg-account-it-operator").await;
 }
 
 // ── Seed helpers ────────────────────────────────────────────────────────────
@@ -1090,56 +1090,58 @@ struct TxnIds {
     event: String,
 }
 
-fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
-    let equity_snapshot_id = EquitySnapshotId::from_v7();
-    let decision_at = Utc::now();
-    let report = report_row(ids, equity_snapshot_id, decision_at);
-    let sampled_feature_parity = report_fixtures::sampled_parity(&report);
-    let recommendation = report_recommendation(ids, decision_at);
-    let entry_condition_instance = NewEntryConditionInstance {
-        condition_instance_id: ids.condition_instance,
-        recommendation_id: ids.recommendation,
-        artifact_id: None,
-        artifact_hash: None,
-        state: EntryConditionState::NotRequired,
-        truth_json: Some(ConditionTruth::Satisfied),
-        revision: 0,
-        evaluation_hash: None,
-        input_fingerprint: None,
-        continuity_hash: None,
-        fold_state_json: EntryConditionFoldState::default(),
-        confirmation_started_at: None,
-        last_evaluated_at: None,
-        next_evaluation_at: None,
-        expires_at: recommendation.valid_until,
-        lease_owner: None,
-        lease_expires_at: None,
-        lease_epoch: 0,
-        claimed_by_intent_id: None,
-        claim_admission_state_version: None,
-        consumed_at: None,
-    };
-    NewReportTransaction {
-        feature_parity_state_id: Some(ids.feature_parity_state_id),
-        account_snapshot: NewAccountSnapshot {
-            account_snapshot_id: ids.account_snapshot,
-            ..new_account_snapshot()
-        },
-        equity_snapshot: report_equity_snapshot(ids, &equity_snapshot_id, decision_at),
-        data_quality_snapshot: NewReportDataQualitySnapshot {
-            report_data_quality_snapshot_id: ids.data_quality_snapshot,
-            decision_at,
-            decision_policy_snapshot_id: ids.decision_policy_snapshot,
-            tokens_json: ReportDataQualityTokens(Vec::new()),
-        },
-        portfolio_plan: report_portfolio_plan(ids, decision_at),
-        report,
-        recommendations: vec![recommendation],
-        entry_condition_artifacts: Vec::new(),
-        entry_condition_instances: vec![entry_condition_instance],
-        sampled_feature_parity: Some(sampled_feature_parity),
-        fact_delivery: Some(report_fixtures::pending_fact_delivery(&ids.report)),
-        operation_log: report_operation_log(ids),
+impl TxnIds {
+    fn build_report_transaction(&self) -> NewReportTransaction {
+        let equity_snapshot_id = EquitySnapshotId::from_v7();
+        let decision_at = Utc::now();
+        let report = report_row(self, equity_snapshot_id, decision_at);
+        let sampled_feature_parity = report_fixtures::sampled_parity(&report);
+        let recommendation = report_recommendation(self, decision_at);
+        let entry_condition_instance = NewEntryConditionInstance {
+            condition_instance_id: self.condition_instance,
+            recommendation_id: self.recommendation,
+            artifact_id: None,
+            artifact_hash: None,
+            state: EntryConditionState::NotRequired,
+            truth_json: Some(ConditionTruth::Satisfied),
+            revision: 0,
+            evaluation_hash: None,
+            input_fingerprint: None,
+            continuity_hash: None,
+            fold_state_json: EntryConditionFoldState::default(),
+            confirmation_started_at: None,
+            last_evaluated_at: None,
+            next_evaluation_at: None,
+            expires_at: recommendation.valid_until,
+            lease_owner: None,
+            lease_expires_at: None,
+            lease_epoch: 0,
+            claimed_by_intent_id: None,
+            claim_admission_state_version: None,
+            consumed_at: None,
+        };
+        NewReportTransaction {
+            feature_parity_state_id: Some(self.feature_parity_state_id),
+            account_snapshot: NewAccountSnapshot {
+                account_snapshot_id: self.account_snapshot,
+                ..new_account_snapshot()
+            },
+            equity_snapshot: report_equity_snapshot(self, &equity_snapshot_id, decision_at),
+            data_quality_snapshot: NewReportDataQualitySnapshot {
+                report_data_quality_snapshot_id: self.data_quality_snapshot,
+                decision_at,
+                decision_policy_snapshot_id: self.decision_policy_snapshot,
+                tokens_json: ReportDataQualityTokens(Vec::new()),
+            },
+            portfolio_plan: report_portfolio_plan(self, decision_at),
+            report,
+            recommendations: vec![recommendation],
+            entry_condition_artifacts: Vec::new(),
+            entry_condition_instances: vec![entry_condition_instance],
+            sampled_feature_parity: Some(sampled_feature_parity),
+            fact_delivery: Some(report_fixtures::pending_fact_delivery(&self.report)),
+            operation_log: (self).report_operation_log(),
+        }
     }
 }
 
@@ -1246,30 +1248,32 @@ fn report_recommendation(ids: &TxnIds, decision_at: DateTime<Utc>) -> NewRecomme
     }
 }
 
-fn report_operation_log(ids: &TxnIds) -> NewOperationLog {
-    NewOperationLog {
-        id: OperationLogId::from_v7(),
-        request_id: report_trigger_key(ids).into(),
-        actor_user_id: None,
-        actor_username: Some("system".to_owned()),
-        acting_role: Some("test".into()),
-        category: OperationCategory::QuantReport,
-        action: "publish".into(),
-        resource_type: Some(ResourceType::QuantReport),
-        resource_id: Some(ids.report.to_string()),
-        http_method: OperationHttpMethod::System,
-        http_path: "/test/quant/report".to_owned(),
-        http_status: 201,
-        outcome: OperationOutcome::Success,
-        client_ip: None,
-        user_agent: None,
-        latency_ms: 0,
-        detail: OperationDetailDocument::try_from(serde_json::json!({ "test": true }))
-            .expect("static operation detail"),
-        before_hash: None,
-        after_hash: None,
-        governance_audit_event_id: None,
-        governance_audit_sequence: None,
+impl TxnIds {
+    fn report_operation_log(&self) -> NewOperationLog {
+        NewOperationLog {
+            id: OperationLogId::from_v7(),
+            request_id: (self).report_trigger_key().into(),
+            actor_user_id: None,
+            actor_username: Some("system".to_owned()),
+            acting_role: Some("test".into()),
+            category: OperationCategory::QuantReport,
+            action: "publish".into(),
+            resource_type: Some(ResourceType::QuantReport),
+            resource_id: Some(self.report.to_string()),
+            http_method: OperationHttpMethod::System,
+            http_path: "/test/quant/report".to_owned(),
+            http_status: 201,
+            outcome: OperationOutcome::Success,
+            client_ip: None,
+            user_agent: None,
+            latency_ms: 0,
+            detail: OperationDetailDocument::try_from(serde_json::json!({ "test": true }))
+                .expect("static operation detail"),
+            before_hash: None,
+            after_hash: None,
+            governance_audit_event_id: None,
+            governance_audit_sequence: None,
+        }
     }
 }
 
@@ -1300,8 +1304,10 @@ fn intent_operation_log(intent_id: &OrderIntentId, action: &str) -> NewOperation
     }
 }
 
-fn report_trigger_key(ids: &TxnIds) -> String {
-    format!("scheduled:test:{}", ids.report)
+impl TxnIds {
+    fn report_trigger_key(&self) -> String {
+        format!("scheduled:test:{}", self.report)
+    }
 }
 
 // ── Payload builders ──────────────────────────────────────────────────────────

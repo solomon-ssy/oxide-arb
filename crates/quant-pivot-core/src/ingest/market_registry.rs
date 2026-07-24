@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn inactive_market_not_in_active_list() {
+    fn inactive_market_not_list() {
         let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         reg.register_market(sample_market("m1", MarketStatus::Settled));
         assert!(reg.active_markets().is_empty());
@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn active_markets_snapshot_is_wait_free() {
+    fn active_markets_snapshot_free() {
         let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         reg.register_market(sample_market("m1", MarketStatus::Active));
         let snapshot = reg.active_markets();
@@ -335,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn neg_risk_leg_set_counts_only_neg_risk_event_members() {
+    fn neg_risk_leg_members() {
         let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         let event_id = "evt-negrisk-mixed";
         reg.register_event(sample_neg_risk_event(
@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn neg_risk_leg_set_expects_unregistered_catalog_member() {
+    fn neg_risk_leg_member() {
         let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         let event_id = "evt-negrisk-partial";
         reg.register_event(sample_neg_risk_event(

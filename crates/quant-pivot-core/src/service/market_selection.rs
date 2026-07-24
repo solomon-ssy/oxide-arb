@@ -127,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn map_snapshot_to_model_projects_members_and_summary() {
+    fn map_snapshot_projects_summary() {
         let snapshot = MarketSelectionSnapshot {
             market_selection_id: MarketSelectionId::from_v7(),
             decision_at: as_of(),

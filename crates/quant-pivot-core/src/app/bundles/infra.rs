@@ -265,21 +265,11 @@ fn build_analytics_writers(
     let feature_event_writer = build_feature_event_writer(ch, ch_write_manager);
     let factor_event_writer =
         build_factor_event_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
-    let model_input_event_writer = build_model_input_event_writer(ch, ch_write_manager);
-    let signal_candidate_event_writer = build_signal_candidate_event_writer(
-        ch,
-        ch_write_manager,
-        metrics,
-        deploy,
-        &fact_writer_queue,
-    );
-    let exit_signal_evaluation_event_writer = build_exit_signal_evaluation_event_writer(
-        ch,
-        ch_write_manager,
-        metrics,
-        deploy,
-        &fact_writer_queue,
-    );
+    let model_input_event_writer = build_model_input_writer(ch, ch_write_manager);
+    let signal_candidate_event_writer =
+        build_signal_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
+    let exit_signal_evaluation_event_writer =
+        build_exit_signal_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
     let LedgerEventWriters {
         execution: execution_event_writer,
         capital: capital_allocation_event_writer,
@@ -337,7 +327,7 @@ fn build_book_fact_writer(
         let metrics = Arc::clone(metrics);
         obs.flush_lag_ms = Some(Arc::new(move |lag_ms| {
             tracker.record_ms(lag_ms);
-            metrics.observe_ingest_pipeline_lag_ms(name, lag_ms);
+            metrics.observe_ingest_lag_ms(name, lag_ms);
         }));
         obs
     };
@@ -426,7 +416,7 @@ fn build_factor_event_writer(
 }
 
 /// Wire model-input evidence and its run-scoped completion barrier.
-fn build_model_input_event_writer(
+fn build_model_input_writer(
     ch_pool: &Arc<ClickHousePool>,
     write_manager: &Arc<ChWriteManager>,
 ) -> Arc<ModelInputEventWriter> {
@@ -446,7 +436,7 @@ fn build_model_input_event_writer(
 
 /// Wire the pre-portfolio signal-candidate async writer
 /// (`quant_signal_candidate_event`).
-fn build_signal_candidate_event_writer(
+fn build_signal_writer(
     ch_pool: &Arc<ClickHousePool>,
     write_manager: &Arc<ChWriteManager>,
     metrics: &Arc<MetricsHub>,
@@ -478,7 +468,7 @@ fn build_signal_candidate_event_writer(
     Arc::new(SignalCandidateEventWriter::new(stream))
 }
 
-fn build_exit_signal_evaluation_event_writer(
+fn build_exit_signal_writer(
     ch_pool: &Arc<ClickHousePool>,
     write_manager: &Arc<ChWriteManager>,
     metrics: &Arc<MetricsHub>,
@@ -525,13 +515,7 @@ fn build_ledger_event_writers(
 ) -> LedgerEventWriters {
     LedgerEventWriters {
         execution: build_execution_event_writer(ch_pool, write_manager, metrics, deploy, queue),
-        capital: build_capital_allocation_event_writer(
-            ch_pool,
-            write_manager,
-            metrics,
-            deploy,
-            queue,
-        ),
+        capital: build_allocation_writer(ch_pool, write_manager, metrics, deploy, queue),
         position: build_position_event_writer(ch_pool, write_manager, metrics, deploy, queue),
     }
 }
@@ -568,7 +552,7 @@ fn build_execution_event_writer(
     Arc::new(ExecutionEventWriter::new(stream))
 }
 
-fn build_capital_allocation_event_writer(
+fn build_allocation_writer(
     ch_pool: &Arc<ClickHousePool>,
     write_manager: &Arc<ChWriteManager>,
     metrics: &Arc<MetricsHub>,

@@ -39,9 +39,8 @@ pub use lot_hold_value::{
 };
 pub use matrix::{
     DenseInputMatrix, FeatureColumnSpec, FeatureMatrixSpec, ModelInputCell, RawInputMatrix,
-    TrainingMatrix, build_training_matrix, build_training_matrix_from_refs,
-    matrix_spec_from_contract, matrix_spec_from_schema, model_input_cell, probe_matrix_coverage,
-    training_input_hash,
+    TrainingMatrix, build_borrowed_matrix, build_training_matrix, matrix_spec_from_contract,
+    matrix_spec_from_schema, model_input_cell, probe_matrix_coverage, training_input_hash,
 };
 #[cfg(feature = "research-jobs")]
 pub use parquet::{DatasetParquetCodec, DecodedDatasetParquet};
@@ -670,7 +669,7 @@ pub fn verify_dataset_manifest(
     }
     for example in examples {
         validate_example_boundary(example, manifest)?;
-        validate_example_capture(example)?;
+        (example).validate_example_capture()?;
     }
     let semantic_hash = TrainingDatasetArtifact::compute_dataset_hash(
         DatasetHashContract {
@@ -787,39 +786,41 @@ fn validate_example_boundary(
     Ok(())
 }
 
-fn validate_example_capture(example: &TrainingExample) -> QuantResult<()> {
-    let capture = example
-        .decision_capture
-        .as_ref()
-        .ok_or_else(|| ResearchError::DatasetBuild {
-            detail: format!("example {} has no v2 decision capture", example.example_id),
-        })?;
-    let snapshot = &capture.snapshot;
-    let boundary = &example.decision_boundary;
-    let catalog_cutoff = boundary.cutoff_for(DecisionSource::Catalog);
-    let book_cutoff = boundary.cutoff_for(DecisionSource::Book);
-    if snapshot.boundary != *boundary
-        || snapshot.market_id != example.market_id
-        || snapshot.token_id != example.token_id
-        || snapshot.event_id != example.selected_market.event_id
-        || snapshot.book_snapshot_ref.token_id != example.token_id
-        || capture.data_quality != example.feature_vector.data_quality
-        || snapshot.catalog.market_effective_at > catalog_cutoff
-        || snapshot.catalog.event_effective_at > catalog_cutoff
-        || snapshot.catalog.market_available_at > boundary.decision_at()
-        || snapshot.catalog.event_available_at > boundary.decision_at()
-        || snapshot.book_effective_at > book_cutoff
-        || snapshot.book_available_at > boundary.decision_at()
-    {
-        return Err(ResearchError::DatasetBuild {
+impl TrainingExample {
+    fn validate_example_capture(&self) -> QuantResult<()> {
+        let capture =
+            self.decision_capture
+                .as_ref()
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!("example {} has no v2 decision capture", self.example_id),
+                })?;
+        let snapshot = &capture.snapshot;
+        let boundary = &self.decision_boundary;
+        let catalog_cutoff = boundary.cutoff_for(DecisionSource::Catalog);
+        let book_cutoff = boundary.cutoff_for(DecisionSource::Book);
+        if snapshot.boundary != *boundary
+            || snapshot.market_id != self.market_id
+            || snapshot.token_id != self.token_id
+            || snapshot.event_id != self.selected_market.event_id
+            || snapshot.book_snapshot_ref.token_id != self.token_id
+            || capture.data_quality != self.feature_vector.data_quality
+            || snapshot.catalog.market_effective_at > catalog_cutoff
+            || snapshot.catalog.event_effective_at > catalog_cutoff
+            || snapshot.catalog.market_available_at > boundary.decision_at()
+            || snapshot.catalog.event_available_at > boundary.decision_at()
+            || snapshot.book_effective_at > book_cutoff
+            || snapshot.book_available_at > boundary.decision_at()
+        {
+            return Err(ResearchError::DatasetBuild {
             detail: format!(
                 "example {} decision capture violates its boundary/identity/data-quality binding",
-                example.example_id
+                self.example_id
             ),
         }
         .into());
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 const fn decision_source_for_evidence(source: EvidenceSourceKind) -> Option<DecisionSource> {
@@ -1104,81 +1105,83 @@ pub(crate) mod fixtures {
             position_state: None,
             book_fidelity: None,
         };
-        bind_capture_to_boundary(&mut example);
+        example.bind_capture_to_boundary();
         example
     }
 
-    /// Rebuild the fixture's complete V1 capture after a test changes its
-    /// decision boundary. Every evidence clock is derived from the already
-    /// frozen boundary; no lag is subtracted a second time.
-    pub fn bind_capture_to_boundary(example: &mut TrainingExample) {
-        let boundary = example.decision_boundary.clone();
-        let decision_at = boundary.decision_at();
-        let catalog_effective_at = boundary.cutoff_for(DecisionSource::Catalog);
-        let book_effective_at = boundary.cutoff_for(DecisionSource::Book);
-        let hash = |seed: char| {
-            ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64)))
-                .expect("fixture content hash")
-        };
-        let book_age_ms = u64::try_from((decision_at - book_effective_at).num_milliseconds())
-            .expect("fixture book cutoff is not after decision time");
-        let token_id = example.token_id.clone();
-        example.decision_capture = Some(DecisionCaptureEvidence {
-            snapshot: DecisionSnapshotEvidence {
-                boundary,
-                market_id: example.market_id.clone(),
-                event_id: example.selected_market.event_id.clone(),
-                token_id: token_id.clone(),
-                catalog: CatalogDecisionRef {
-                    catalog_sync_batch_id: CatalogSyncBatchId::new(Uuid::from_u128(1)),
-                    market_change_id: CatalogMarketChangeId::new(Uuid::from_u128(2)),
-                    event_change_id: CatalogEventChangeId::new(Uuid::from_u128(3)),
-                    market_content_hash: hash('1'),
-                    event_content_hash: hash('2'),
-                    membership_hash: hash('3'),
-                    market_effective_at: catalog_effective_at,
-                    market_available_at: decision_at,
-                    event_effective_at: catalog_effective_at,
-                    event_available_at: decision_at,
-                    market_timestamp_quality: CatalogTimestampQuality::Source,
-                    event_timestamp_quality: CatalogTimestampQuality::Source,
-                },
-                book_snapshot_ref: BookSnapshotRef {
-                    token_id,
-                    source: BookSnapshotSource::CanonicalL2 {
-                        stream_session_id: Uuid::from_u128(4),
-                        token_sequence: 1,
-                        source_event_hash: hash('5'),
-                        event_time_ms: book_effective_at.timestamp_millis(),
-                        ingestion_time_ms: decision_at.timestamp_millis(),
+    impl TrainingExample {
+        /// Rebuild the fixture's complete V1 capture after a test changes its
+        /// decision boundary. Every evidence clock is derived from the already
+        /// frozen boundary; no lag is subtracted a second time.
+        pub fn bind_capture_to_boundary(&mut self) {
+            let boundary = self.decision_boundary.clone();
+            let decision_at = boundary.decision_at();
+            let catalog_effective_at = boundary.cutoff_for(DecisionSource::Catalog);
+            let book_effective_at = boundary.cutoff_for(DecisionSource::Book);
+            let hash = |seed: char| {
+                ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64)))
+                    .expect("fixture content hash")
+            };
+            let book_age_ms = u64::try_from((decision_at - book_effective_at).num_milliseconds())
+                .expect("fixture book cutoff is not after decision time");
+            let token_id = self.token_id.clone();
+            self.decision_capture = Some(DecisionCaptureEvidence {
+                snapshot: DecisionSnapshotEvidence {
+                    boundary,
+                    market_id: self.market_id.clone(),
+                    event_id: self.selected_market.event_id.clone(),
+                    token_id: token_id.clone(),
+                    catalog: CatalogDecisionRef {
+                        catalog_sync_batch_id: CatalogSyncBatchId::new(Uuid::from_u128(1)),
+                        market_change_id: CatalogMarketChangeId::new(Uuid::from_u128(2)),
+                        event_change_id: CatalogEventChangeId::new(Uuid::from_u128(3)),
+                        market_content_hash: hash('1'),
+                        event_content_hash: hash('2'),
+                        membership_hash: hash('3'),
+                        market_effective_at: catalog_effective_at,
+                        market_available_at: decision_at,
+                        event_effective_at: catalog_effective_at,
+                        event_available_at: decision_at,
+                        market_timestamp_quality: CatalogTimestampQuality::Source,
+                        event_timestamp_quality: CatalogTimestampQuality::Source,
                     },
-                    content_hash: hash('4'),
+                    book_snapshot_ref: BookSnapshotRef {
+                        token_id,
+                        source: BookSnapshotSource::CanonicalL2 {
+                            stream_session_id: Uuid::from_u128(4),
+                            token_sequence: 1,
+                            source_event_hash: hash('5'),
+                            event_time_ms: book_effective_at.timestamp_millis(),
+                            ingestion_time_ms: decision_at.timestamp_millis(),
+                        },
+                        content_hash: hash('4'),
+                    },
+                    book_effective_at,
+                    book_available_at: decision_at,
                 },
-                book_effective_at,
-                book_available_at: decision_at,
-            },
-            identity: RecommendationIdentity {
-                category: MarketCategory::Sports,
-                question: "Fixture market?".to_owned(),
-                outcome_name: "Yes".to_owned(),
-            },
-            market_context: MarketContext {
-                best_bid: Some(Price::new(dec!(0.49))),
-                best_ask: Some(Price::new(dec!(0.51))),
-                mid_price: Some(Price::new(dec!(0.50))),
-                spread_bps: Some(Bps::new(dec!(400))),
-                depth_usd: Usd::new(dec!(100)),
-                volume_24h_usd: Some(Usd::new(dec!(1_000))),
-                book_age_ms,
-                time_to_resolution_secs: None,
-                market_status: MarketStatus::Active,
-                neg_risk: false,
-                tick_size: Hundredth,
-                fee_rate: None,
-            },
-            data_quality: example.feature_vector.data_quality,
-            liquidity_score: Probability::ONE,
-        });
+                identity: RecommendationIdentity {
+                    category: MarketCategory::Sports,
+                    question: "Fixture market?".to_owned(),
+                    outcome_name: "Yes".to_owned(),
+                },
+                market_context: MarketContext {
+                    best_bid: Some(Price::new(dec!(0.49))),
+                    best_ask: Some(Price::new(dec!(0.51))),
+                    mid_price: Some(Price::new(dec!(0.50))),
+                    spread_bps: Some(Bps::new(dec!(400))),
+                    depth_usd: Usd::new(dec!(100)),
+                    volume_24h_usd: Some(Usd::new(dec!(1_000))),
+                    book_age_ms,
+                    time_to_resolution_secs: None,
+                    market_status: MarketStatus::Active,
+                    neg_risk: false,
+                    tick_size: Hundredth,
+                    fee_rate: None,
+                },
+                data_quality: self.feature_vector.data_quality,
+                liquidity_score: Probability::ONE,
+            });
+        }
     }
 }
 
@@ -1195,8 +1198,7 @@ mod tests {
 
     use super::{
         DatasetHashContract, PolicySimulationLabels, PolicySimulationOutcome,
-        TrainingDatasetArtifact, TrainingExample, dataset_source_fingerprint,
-        fixtures::{bind_capture_to_boundary, example},
+        TrainingDatasetArtifact, TrainingExample, dataset_source_fingerprint, fixtures::example,
         policy_simulation_labels,
     };
 
@@ -1209,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_simulation_projects_four_labels_atomically() {
+    fn policy_simulation_projects_atomically() {
         let terminal_at = Utc.timestamp_opt(1_000_060, 0).single().expect("ts");
         let outcome = PolicySimulationOutcome {
             net_return_bps: Decimal::from(250),
@@ -1257,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn dataset_hash_ignores_surrogate_ids_and_order() {
+    fn dataset_hash_ignores_order() {
         let spec = ModelSpecId::from_v7();
         // Same content, different surrogate example ids + reversed order.
         let a = vec![example("aaa", 100), example("bbb", 200)];
@@ -1266,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn dataset_hash_changes_on_any_input_change() {
+    fn dataset_hash_changes_change() {
         let spec = ModelSpecId::from_v7();
         let base = vec![example("aaa", 100)];
         let changed = vec![example("aaa", 101)];
@@ -1274,7 +1276,7 @@ mod tests {
     }
 
     #[test]
-    fn dataset_hash_and_source_fingerprint_bind_per_source_cutoffs() {
+    fn dataset_hash_source_cutoffs() {
         let spec = ModelSpecId::from_v7();
         let base = vec![example("aaa", 100)];
         let mut changed = base.clone();
@@ -1284,7 +1286,7 @@ mod tests {
             .expect("boundary")
             .with_source_cutoff(DecisionSource::Book, 30)
             .expect("book cutoff");
-        bind_capture_to_boundary(&mut changed[0]);
+        changed[0].bind_capture_to_boundary();
 
         assert_ne!(dataset_hash(&spec, &base), dataset_hash(&spec, &changed));
         assert_ne!(
@@ -1294,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn dataset_hash_differs_by_purpose_for_identical_content() {
+    fn dataset_hash_differs_content() {
         // A `Training` and a `Calibration` dataset with byte-identical
         // examples/schemas must never collide on `uq_quant_training_dataset_hash`
         // The two ledgers must never be silently conflated.

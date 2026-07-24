@@ -180,10 +180,10 @@ impl TradeTapePrint {
             available_at: Some(available_at),
             participant_address: row.participant_address.clone(),
             participant_role: row.participant_role.into(),
-            side: ch_trade_side_to_domain(row.side),
-            price: row.price.to_price(),
-            size_shares: row.size_shares.to_shares(),
-            notional_usd: row.notional_usd.to_usd(),
+            side: (row.side).domain_side(),
+            price: Price::from(row.price),
+            size_shares: Shares::from(row.size_shares),
+            notional_usd: Usd::from(row.notional_usd),
             tx_hash: row.tx_hash.clone(),
             trade_id: row.source_event_id.clone(),
             source: TradeTapeSourceKind::from(row.source),
@@ -238,11 +238,13 @@ pub const fn ch_trade_side(side: Option<Side>) -> ChTradeSide {
     }
 }
 
-#[must_use]
-pub const fn ch_trade_side_to_domain(side: ChTradeSide) -> Option<Side> {
-    match side {
-        ChTradeSide::Buy => Some(Side::Buy),
-        ChTradeSide::Sell => Some(Side::Sell),
-        ChTradeSide::Unknown => None,
+impl ChTradeSide {
+    #[must_use]
+    pub const fn domain_side(self) -> Option<Side> {
+        match self {
+            Self::Buy => Some(Side::Buy),
+            Self::Sell => Some(Side::Sell),
+            Self::Unknown => None,
+        }
     }
 }

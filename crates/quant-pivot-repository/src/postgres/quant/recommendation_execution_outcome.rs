@@ -48,11 +48,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::{
-        error::{invariant_violation, not_found, state_conflict},
-        primitives::statement_timestamp,
-    },
-    traits::RecommendationExecutionOutcomeRepository,
+    postgres::primitives::statement_timestamp, traits::RecommendationExecutionOutcomeRepository,
 };
 
 /// PostgreSQL-backed immutable recommendation-execution outcome repository.
@@ -73,7 +69,7 @@ impl RecommendationExecutionOutcomeRepository for PgRecommendationExecutionOutco
         order_intent_id: &OrderIntentId,
     ) -> Result<ExecutionOutcomeReconciliationResult, StorageError> {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let graph = load_source_graph(&transaction, order_intent_id).await?;
+        let graph = Self::load_source_graph(&transaction, order_intent_id).await?;
         let source_observed_at = graph.source_observed_at();
         let outcome = match graph.derive().map_err(|error| source_graph_error(&error))? {
             ExecutionOutcomeDerivation::Ready(outcome) => *outcome,
@@ -83,7 +79,7 @@ impl RecommendationExecutionOutcomeRepository for PgRecommendationExecutionOutco
             }
         };
         validate_new(&outcome)?;
-        let inserted = insert_derived(&transaction, outcome, source_observed_at).await?;
+        let inserted = Self::insert_derived(&transaction, outcome, source_observed_at).await?;
         transaction.commit().await.map_err(StorageError::from)?;
         Ok(inserted)
     }
@@ -96,7 +92,7 @@ impl RecommendationExecutionOutcomeRepository for PgRecommendationExecutionOutco
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
-            .map(validated_info)
+            .map(Self::validated_info)
             .transpose()
     }
 
@@ -173,163 +169,176 @@ impl RecommendationExecutionOutcomeRepository for PgRecommendationExecutionOutco
     }
 }
 
-async fn load_source_graph(
-    transaction: &DatabaseTransaction,
-    order_intent_id: &OrderIntentId,
-) -> Result<ExecutionOutcomeSourceGraph, StorageError> {
-    let intent = QuantOrderIntentEntity::find_by_id(*order_intent_id)
-        .lock_shared()
-        .one(transaction)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| not_found(QUANT_ORDER_INTENT, order_intent_id))?;
-    let recommendation = QuantRecommendationEntity::find_by_id(intent.recommendation_id)
-        .lock_shared()
-        .one(transaction)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| not_found(QUANT_RECOMMENDATION, intent.recommendation_id))?;
-    let orders = QuantExecutionOrderEntity::find()
-        .filter(QuantExecutionOrderColumn::OrderIntentId.eq(*order_intent_id))
-        .order_by_asc(QuantExecutionOrderColumn::CreatedAt)
-        .order_by_asc(QuantExecutionOrderColumn::ExecutionOrderId)
-        .lock_shared()
-        .all(transaction)
-        .await
-        .map_err(StorageError::from)?
-        .into_iter()
-        .map(Into::into)
-        .collect();
-    let reconciliations = QuantReconciliationEntity::find()
-        .filter(QuantReconciliationColumn::OrderIntentId.eq(*order_intent_id))
-        .order_by_asc(QuantReconciliationColumn::CreatedAt)
-        .order_by_asc(QuantReconciliationColumn::ReconciliationId)
-        .lock_shared()
-        .all(transaction)
-        .await
-        .map_err(StorageError::from)?
-        .into_iter()
-        .map(Into::into)
-        .collect();
-    let position: Option<PositionInfo> = QuantPositionEntity::find()
-        .filter(QuantPositionColumn::OrderIntentId.eq(*order_intent_id))
-        .lock_shared()
-        .one(transaction)
-        .await
-        .map_err(StorageError::from)?
-        .map(Into::into);
-    let settlement_lots = QuantSettlementRedeemLotEntity::find()
-        .filter(QuantSettlementRedeemLotColumn::OrderIntentId.eq(*order_intent_id))
-        .order_by_asc(QuantSettlementRedeemLotColumn::CreatedAt)
-        .order_by_asc(QuantSettlementRedeemLotColumn::SettlementRedeemLotId)
-        .lock_shared()
-        .all(transaction)
-        .await
-        .map_err(StorageError::from)?;
-    if settlement_lots.len() > 1 {
-        return Err(source_invariant(
-            "one execution intent cannot have multiple settlement outcome lots",
-        ));
-    }
-    Ok(ExecutionOutcomeSourceGraph {
-        recommendation_id: recommendation.recommendation_id,
-        market_id: recommendation.market_id,
-        token_id: recommendation.token_id,
-        intent: OrderIntentInfo::from(intent),
-        orders,
-        reconciliations,
-        position,
-        settlement_lot: settlement_lots
+impl PgRecommendationExecutionOutcomeRepository {
+    async fn load_source_graph(
+        transaction: &DatabaseTransaction,
+        order_intent_id: &OrderIntentId,
+    ) -> Result<ExecutionOutcomeSourceGraph, StorageError> {
+        let intent = QuantOrderIntentEntity::find_by_id(*order_intent_id)
+            .lock_shared()
+            .one(transaction)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, order_intent_id))?;
+        let recommendation = QuantRecommendationEntity::find_by_id(intent.recommendation_id)
+            .lock_shared()
+            .one(transaction)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::not_found(QUANT_RECOMMENDATION, intent.recommendation_id)
+            })?;
+        let orders = QuantExecutionOrderEntity::find()
+            .filter(QuantExecutionOrderColumn::OrderIntentId.eq(*order_intent_id))
+            .order_by_asc(QuantExecutionOrderColumn::CreatedAt)
+            .order_by_asc(QuantExecutionOrderColumn::ExecutionOrderId)
+            .lock_shared()
+            .all(transaction)
+            .await
+            .map_err(StorageError::from)?
             .into_iter()
-            .next()
-            .map(SettlementRedeemLotInfo::from),
-    })
+            .map(Into::into)
+            .collect();
+        let reconciliations = QuantReconciliationEntity::find()
+            .filter(QuantReconciliationColumn::OrderIntentId.eq(*order_intent_id))
+            .order_by_asc(QuantReconciliationColumn::CreatedAt)
+            .order_by_asc(QuantReconciliationColumn::ReconciliationId)
+            .lock_shared()
+            .all(transaction)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let position: Option<PositionInfo> = QuantPositionEntity::find()
+            .filter(QuantPositionColumn::OrderIntentId.eq(*order_intent_id))
+            .lock_shared()
+            .one(transaction)
+            .await
+            .map_err(StorageError::from)?
+            .map(Into::into);
+        let settlement_lots = QuantSettlementRedeemLotEntity::find()
+            .filter(QuantSettlementRedeemLotColumn::OrderIntentId.eq(*order_intent_id))
+            .order_by_asc(QuantSettlementRedeemLotColumn::CreatedAt)
+            .order_by_asc(QuantSettlementRedeemLotColumn::SettlementRedeemLotId)
+            .lock_shared()
+            .all(transaction)
+            .await
+            .map_err(StorageError::from)?;
+        if settlement_lots.len() > 1 {
+            return Err(source_invariant(
+                "one execution intent cannot have multiple settlement outcome lots",
+            ));
+        }
+        Ok(ExecutionOutcomeSourceGraph {
+            recommendation_id: recommendation.recommendation_id,
+            market_id: recommendation.market_id,
+            token_id: recommendation.token_id,
+            intent: OrderIntentInfo::from(intent),
+            orders,
+            reconciliations,
+            position,
+            settlement_lot: settlement_lots
+                .into_iter()
+                .next()
+                .map(SettlementRedeemLotInfo::from),
+        })
+    }
 }
 
-async fn insert_derived(
-    transaction: &DatabaseTransaction,
-    outcome: NewRecommendationExecutionOutcome,
-    source_observed_at: DateTime<Utc>,
-) -> Result<ExecutionOutcomeReconciliationResult, StorageError> {
-    let available_at = statement_timestamp(transaction).await?;
-    let outcome_hash = outcome
-        .expected_outcome_hash(source_observed_at, available_at)
-        .map_err(|error| {
-            invariant_violation(Some(QUANT_RECOMMENDATION_EXECUTION_OUTCOME), error)
-        })?;
-    let mut active_outcome = outcome.clone().into_active_model();
-    active_outcome.source_observed_at = ActiveValue::Set(source_observed_at);
-    active_outcome.available_at = ActiveValue::Set(available_at);
-    active_outcome.outcome_hash = ActiveValue::Set(outcome_hash);
-    let inserted = match QuantRecommendationExecutionOutcomeEntity::insert(active_outcome)
-        .on_conflict(
-            OnConflict::column(Column::RecommendationId)
-                .do_nothing()
-                .to_owned(),
-        )
-        .exec_with_returning(transaction)
-        .await
-    {
-        Ok(row) => Some(row),
-        Err(DbErr::RecordNotFound(_)) => None,
-        Err(error) => return Err(StorageError::from(error)),
-    };
-    let (row, was_inserted) = match inserted {
-        Some(row) => (row, true),
-        None => (
-            QuantRecommendationExecutionOutcomeEntity::find_by_id(outcome.recommendation_id)
-                .one(transaction)
-                .await
-                .map_err(StorageError::from)?
-                .ok_or_else(|| {
-                    source_invariant("outcome conflict completed without an observable stored row")
-                })?,
-            false,
-        ),
-    };
-    let stored = validated_info(row)?;
-    if !stored.has_same_derivation(&outcome) {
-        return Err(state_conflict(
-            QUANT_RECOMMENDATION_EXECUTION_OUTCOME,
-            Some(outcome.recommendation_id),
-            "recommendation id is already bound to different immutable execution content",
-        ));
-    }
-    if was_inserted {
-        Ok(ExecutionOutcomeReconciliationResult::Inserted(stored))
-    } else {
-        Ok(ExecutionOutcomeReconciliationResult::AlreadyPresent(stored))
+impl PgRecommendationExecutionOutcomeRepository {
+    async fn insert_derived(
+        transaction: &DatabaseTransaction,
+        outcome: NewRecommendationExecutionOutcome,
+        source_observed_at: DateTime<Utc>,
+    ) -> Result<ExecutionOutcomeReconciliationResult, StorageError> {
+        let available_at = statement_timestamp(transaction).await?;
+        let outcome_hash = outcome
+            .expected_outcome_hash(source_observed_at, available_at)
+            .map_err(|error| {
+                StorageError::invariant_violation(
+                    Some(QUANT_RECOMMENDATION_EXECUTION_OUTCOME),
+                    error,
+                )
+            })?;
+        let mut active_outcome = outcome.clone().into_active_model();
+        active_outcome.source_observed_at = ActiveValue::Set(source_observed_at);
+        active_outcome.available_at = ActiveValue::Set(available_at);
+        active_outcome.outcome_hash = ActiveValue::Set(outcome_hash);
+        let inserted = match QuantRecommendationExecutionOutcomeEntity::insert(active_outcome)
+            .on_conflict(
+                OnConflict::column(Column::RecommendationId)
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .exec_with_returning(transaction)
+            .await
+        {
+            Ok(row) => Some(row),
+            Err(DbErr::RecordNotFound(_)) => None,
+            Err(error) => return Err(StorageError::from(error)),
+        };
+        let (row, was_inserted) = match inserted {
+            Some(row) => (row, true),
+            None => (
+                QuantRecommendationExecutionOutcomeEntity::find_by_id(outcome.recommendation_id)
+                    .one(transaction)
+                    .await
+                    .map_err(StorageError::from)?
+                    .ok_or_else(|| {
+                        source_invariant(
+                            "outcome conflict completed without an observable stored row",
+                        )
+                    })?,
+                false,
+            ),
+        };
+        let stored = Self::validated_info(row)?;
+        if !stored.has_same_derivation(&outcome) {
+            return Err(StorageError::state_conflict(
+                QUANT_RECOMMENDATION_EXECUTION_OUTCOME,
+                Some(outcome.recommendation_id),
+                "recommendation id is already bound to different immutable execution content",
+            ));
+        }
+        if was_inserted {
+            Ok(ExecutionOutcomeReconciliationResult::Inserted(stored))
+        } else {
+            Ok(ExecutionOutcomeReconciliationResult::AlreadyPresent(stored))
+        }
     }
 }
 
 fn source_graph_error(error: &ExecutionOutcomeReconciliationError) -> StorageError {
-    invariant_violation(
+    StorageError::invariant_violation(
         Some(QUANT_RECOMMENDATION_EXECUTION_OUTCOME),
         error.to_string(),
     )
 }
 
 fn validate_new(outcome: &NewRecommendationExecutionOutcome) -> Result<(), StorageError> {
-    outcome
-        .validate()
-        .map_err(|error| invariant_violation(Some(QUANT_RECOMMENDATION_EXECUTION_OUTCOME), error))
+    outcome.validate().map_err(|error| {
+        StorageError::invariant_violation(Some(QUANT_RECOMMENDATION_EXECUTION_OUTCOME), error)
+    })
 }
 
-fn validated_info(
-    row: QuantRecommendationExecutionOutcomeModel,
-) -> Result<RecommendationExecutionOutcomeInfo, StorageError> {
-    let outcome: RecommendationExecutionOutcomeInfo = row.into();
-    outcome.validate().map_err(|error| {
-        invariant_violation(
-            Some(QUANT_RECOMMENDATION_EXECUTION_OUTCOME),
-            format!("stored outcome failed integrity validation: {error}"),
-        )
-    })?;
-    Ok(outcome)
+impl PgRecommendationExecutionOutcomeRepository {
+    fn validated_info(
+        row: QuantRecommendationExecutionOutcomeModel,
+    ) -> Result<RecommendationExecutionOutcomeInfo, StorageError> {
+        let outcome: RecommendationExecutionOutcomeInfo = row.into();
+        outcome.validate().map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_RECOMMENDATION_EXECUTION_OUTCOME),
+                format!("stored outcome failed integrity validation: {error}"),
+            )
+        })?;
+        Ok(outcome)
+    }
 }
 
 fn source_invariant(detail: &'static str) -> StorageError {
-    invariant_violation(
+    StorageError::invariant_violation(
         Some(QUANT_RECOMMENDATION_EXECUTION_OUTCOME),
         detail.to_owned(),
     )

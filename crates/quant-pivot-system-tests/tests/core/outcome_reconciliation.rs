@@ -40,14 +40,14 @@ use sea_orm::DatabaseConnection;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outcome_reconciliation_source_contracts() {
     Box::pin(postgres::with_postgres_suite(async {
-        immediate_confirmed_fill_is_terminal_source_truth().await;
-        closed_execution_source_graph_is_idempotently_reconciled().await;
+        immediate_confirmed_fill_truth().await;
+        closed_execution_source_reconciled().await;
     }))
     .await
     .expect("start outcome-reconciliation PostgreSQL suite");
 }
 
-async fn immediate_confirmed_fill_is_terminal_source_truth() {
+async fn immediate_confirmed_fill_truth() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let submission = PgExecutionSubmissionRepository::new(db.clone());
@@ -77,7 +77,7 @@ async fn immediate_confirmed_fill_is_terminal_source_truth() {
     );
 }
 
-async fn closed_execution_source_graph_is_idempotently_reconciled() {
+async fn closed_execution_source_reconciled() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let submission = PgExecutionSubmissionRepository::new(db.clone());
@@ -94,10 +94,10 @@ async fn closed_execution_source_graph_is_idempotently_reconciled() {
 
     let graph = load_source_graph(&db, &ids, &intent_id).await;
     assert_deferred_source_reasons(&graph);
-    assert_input_order_does_not_change_hashes(&graph);
-    assert_partial_entry_fill_is_not_coerced_to_full(&graph);
-    assert_multiple_exit_fills_are_aggregated(&graph);
-    assert_order_identity_mismatch_fails_closed(&graph);
+    assert_input_order_stable(&graph);
+    assert_partial_not_full(&graph);
+    assert_multiple_exit_aggregated(&graph);
+    assert_order_mismatch_rejects(&graph);
 
     let repository = PgRecommendationExecutionOutcomeRepository::new(db);
     let first = repository
@@ -258,7 +258,7 @@ fn assert_deferred_source_reasons(graph: &ExecutionOutcomeSourceGraph) {
     );
 }
 
-fn assert_input_order_does_not_change_hashes(graph: &ExecutionOutcomeSourceGraph) {
+fn assert_input_order_stable(graph: &ExecutionOutcomeSourceGraph) {
     let expected = expect_ready(graph.clone());
     let mut reordered = graph.clone();
     reordered.orders.reverse();
@@ -267,7 +267,7 @@ fn assert_input_order_does_not_change_hashes(graph: &ExecutionOutcomeSourceGraph
     assert_eq!(actual, expected);
 }
 
-fn assert_multiple_exit_fills_are_aggregated(graph: &ExecutionOutcomeSourceGraph) {
+fn assert_multiple_exit_aggregated(graph: &ExecutionOutcomeSourceGraph) {
     let mut split = graph.clone();
     let exit_order_index = split
         .orders
@@ -335,7 +335,7 @@ fn assert_multiple_exit_fills_are_aggregated(graph: &ExecutionOutcomeSourceGraph
     assert_eq!(outcome.exit_avg_price, Some(Price::new(dec!(0.55))));
 }
 
-fn assert_partial_entry_fill_is_not_coerced_to_full(graph: &ExecutionOutcomeSourceGraph) {
+fn assert_partial_not_full(graph: &ExecutionOutcomeSourceGraph) {
     let mut partial = graph.clone();
     let entry_order_id = partial
         .orders
@@ -405,7 +405,7 @@ fn assert_partial_entry_fill_is_not_coerced_to_full(graph: &ExecutionOutcomeSour
     assert_eq!(outcome.realized_pnl_usd, Some(Usd::new(dec!(-1.5))));
 }
 
-fn assert_order_identity_mismatch_fails_closed(graph: &ExecutionOutcomeSourceGraph) {
+fn assert_order_mismatch_rejects(graph: &ExecutionOutcomeSourceGraph) {
     let mut mismatched = graph.clone();
     mismatched
         .orders

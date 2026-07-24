@@ -67,14 +67,14 @@ pub struct ResearchBundleDeps<'a> {
     pub governance: &'a GovernanceBundle,
 }
 
-fn frozen_parity_evidence_writer(
-    infra: &InfraBundle,
-) -> Arc<dyn FactWriter<QuantFeatureParityEventRow>> {
-    Arc::new(ChFactWriter::new(
-        Arc::clone(&infra.ch),
-        Arc::clone(&infra.ch_write_manager),
-        "quant_feature_parity_event",
-    ))
+impl InfraBundle {
+    fn frozen_parity_evidence_writer(&self) -> Arc<dyn FactWriter<QuantFeatureParityEventRow>> {
+        Arc::new(ChFactWriter::new(
+            Arc::clone(&self.ch),
+            Arc::clone(&self.ch_write_manager),
+            "quant_feature_parity_event",
+        ))
+    }
 }
 
 /// Research plane: selection, feature/factor pipelines, and artifact store.
@@ -263,7 +263,7 @@ impl ResearchBundle {
             parity_repo: Arc::clone(&deps.infra.repos.feature_parity)
                 as Arc<dyn FeatureParityRepository>,
             artifact_store: Arc::clone(&artifact_store),
-            evidence_writer: frozen_parity_evidence_writer(deps.infra),
+            evidence_writer: (deps.infra).frozen_parity_evidence_writer(),
         }));
         let model_governance = Self::assemble_model_governance(
             deps,

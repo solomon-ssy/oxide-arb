@@ -149,35 +149,37 @@ mod tests {
         types::{Price, Shares},
     };
 
-    fn row(event_type: ChCanonicalBookEventType) -> BookL2LedgerRow {
-        BookL2LedgerRow {
-            stream_session_id: Uuid::from_u128(0x018f_1234_5678_7000_8000_0000_0000_0001),
-            shard_id: 7,
-            token_id: TokenId::new("123456789"),
-            market_id: Some(MarketId::new("market")),
-            token_sequence: 42,
-            event_type,
-            bid_prices: vec![ChPrice::from(Price::new(Decimal::new(49, 2)))],
-            bid_sizes: vec![ChShares::from(Shares::new(Decimal::new(100, 0)))],
-            ask_prices: vec![ChPrice::from(Price::new(Decimal::new(51, 2)))],
-            ask_sizes: vec![ChShares::from(Shares::new(Decimal::new(80, 0)))],
-            old_tick_size: None,
-            new_tick_size: None,
-            trade_price: None,
-            trade_side: None,
-            trade_size: None,
-            fee_rate_bps: None,
-            venue_event_time: 1_718_000_000_123,
-            ingress_time: 1_718_000_000_124,
-            persisted_time: 1_718_000_000_125,
-            event_hash: ChDigest::new([0; 32]),
-            schema_version: BookL2LedgerRow::SCHEMA_VERSION,
+    impl ChCanonicalBookEventType {
+        fn row(self) -> BookL2LedgerRow {
+            BookL2LedgerRow {
+                stream_session_id: Uuid::from_u128(0x018f_1234_5678_7000_8000_0000_0000_0001),
+                shard_id: 7,
+                token_id: TokenId::new("123456789"),
+                market_id: Some(MarketId::new("market")),
+                token_sequence: 42,
+                event_type: self,
+                bid_prices: vec![ChPrice::from(Price::new(Decimal::new(49, 2)))],
+                bid_sizes: vec![ChShares::from(Shares::new(Decimal::new(100, 0)))],
+                ask_prices: vec![ChPrice::from(Price::new(Decimal::new(51, 2)))],
+                ask_sizes: vec![ChShares::from(Shares::new(Decimal::new(80, 0)))],
+                old_tick_size: None,
+                new_tick_size: None,
+                trade_price: None,
+                trade_side: None,
+                trade_size: None,
+                fee_rate_bps: None,
+                venue_event_time: 1_718_000_000_123,
+                ingress_time: 1_718_000_000_124,
+                persisted_time: 1_718_000_000_125,
+                event_hash: ChDigest::new([0; 32]),
+                schema_version: BookL2LedgerRow::SCHEMA_VERSION,
+            }
         }
     }
 
     #[test]
-    fn snapshot_hash_is_stable_and_ignores_non_contract_fields() {
-        let mut first = row(ChCanonicalBookEventType::Snapshot);
+    fn snapshot_ignores_non_fields() {
+        let mut first = (ChCanonicalBookEventType::Snapshot).row();
         let expected = first.canonical_event_hash().expect("hash");
         first.market_id = Some(MarketId::new("changed"));
         first.ingress_time += 100;
@@ -191,21 +193,24 @@ mod tests {
     }
 
     #[test]
-    fn all_variants_have_distinct_fixed_width_hashes() {
-        let snapshot = row(ChCanonicalBookEventType::Snapshot)
+    fn variants_distinct_fixed_hashes() {
+        let snapshot = (ChCanonicalBookEventType::Snapshot)
+            .row()
             .canonical_event_hash()
             .expect("snapshot");
-        let delta = row(ChCanonicalBookEventType::Delta)
+        let delta = (ChCanonicalBookEventType::Delta)
+            .row()
             .canonical_event_hash()
             .expect("delta");
-        let mut tick = row(ChCanonicalBookEventType::TickSizeChange);
+        let mut tick = (ChCanonicalBookEventType::TickSizeChange).row();
         tick.old_tick_size = Some(ChPrice::from(Price::new(Decimal::new(1, 2))));
         tick.new_tick_size = Some(ChPrice::from(Price::new(Decimal::new(1, 3))));
         let tick = tick.canonical_event_hash().expect("tick");
-        let gap = row(ChCanonicalBookEventType::Gap)
+        let gap = (ChCanonicalBookEventType::Gap)
+            .row()
             .canonical_event_hash()
             .expect("gap");
-        let mut trade = row(ChCanonicalBookEventType::LastTrade);
+        let mut trade = (ChCanonicalBookEventType::LastTrade).row();
         trade.trade_price = Some(ChPrice::from(Price::new(Decimal::new(5, 1))));
         trade.trade_side = Some(ChLedgerTradeSide::Buy);
         trade.trade_size = Some(ChShares::from(Shares::new(Decimal::new(10, 0))));

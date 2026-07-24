@@ -86,7 +86,7 @@ mod tests {
     use super::{TimeWindow, WindowBoundsError};
 
     #[test]
-    fn try_half_open_rejects_empty_and_inverted() {
+    fn try_rejects_empty_inverted() {
         let start = Utc.timestamp_opt(100, 0).unwrap();
         assert_eq!(
             TimeWindow::try_half_open(start, start),
@@ -99,7 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn try_half_open_accepts_positive_span() {
+    fn try_half_accepts_span() {
         let start = Utc.timestamp_opt(100, 0).unwrap();
         let end = Utc.timestamp_opt(200, 0).unwrap();
         assert_eq!(

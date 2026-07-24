@@ -16,7 +16,7 @@ use quant_pivot_repository::{
 use quant_pivot_system_tests::postgres::setup_pg;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
-pub async fn singleton_cas_is_atomic_audited_and_fail_closed() {
+pub async fn singleton_cas_atomic_rejects() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let repository = PgRuntimeControlRepository::new(db.clone());

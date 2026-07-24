@@ -21,6 +21,9 @@ use reqwest::{Client, Url};
 use super::{
     confirmation::{ObservedWrappedPayout, decode_wrapped_payout},
     contracts::VerifiedSettlementDeployment,
+    typed::{
+        IntoEvmAddress, IntoEvmBlockHash, IntoEvmTransactionHash, IntoEvmUint, SettlementValueError,
+    },
 };
 
 const POLYGON_CHAIN_ID: u64 = 137;
@@ -179,7 +182,7 @@ impl ExternalSettlementScanner {
             .await
             .map_err(|source| rpc_error("eth_getBlockByNumber(cursor recheck)", &source))?
             .ok_or(ExternalSettlementScanError::MissingCanonicalBlock { block: to_block })?;
-        let to_block_hash = typed_block_hash(canonical.header.hash)?;
+        let to_block_hash = (canonical.header.hash).into_evm_block_hash()?;
         if to_block == finalized_number && canonical.header.hash != finalized.header.hash {
             return Err(ExternalSettlementScanError::CanonicalHashChanged { block: to_block });
         }
@@ -238,9 +241,9 @@ fn locate_payout_redemptions(
             continue;
         }
         payouts.push(LocatedPayoutRedemption {
-            transaction_hash: typed_transaction_hash(transaction_hash)?,
+            transaction_hash: (transaction_hash).into_evm_transaction_hash()?,
             block_number,
-            block_hash: typed_block_hash(block_hash)?,
+            block_hash: (block_hash).into_evm_block_hash()?,
             log_index,
             payout,
         });
@@ -298,9 +301,9 @@ fn locate_wrapped_payouts(
             continue;
         }
         wrapped.push(LocatedWrappedPayout {
-            transaction_hash: typed_transaction_hash(transaction_hash)?,
+            transaction_hash: (transaction_hash).into_evm_transaction_hash()?,
             block_number,
-            block_hash: typed_block_hash(block_hash)?,
+            block_hash: (block_hash).into_evm_block_hash()?,
             log_index,
             payout,
         });
@@ -335,9 +338,9 @@ fn decode_payout_redemption(
         ));
     }
     Ok(Some(ObservedPayoutRedemption {
-        conditional_tokens: typed_address(conditional_tokens)?,
-        redeemer: typed_address(Address::from_slice(&topics[1].as_slice()[12..]))?,
-        collateral_token: typed_address(Address::from_slice(&topics[2].as_slice()[12..]))?,
+        conditional_tokens: (conditional_tokens).into_evm_address()?,
+        redeemer: (Address::from_slice(&topics[1].as_slice()[12..])).into_evm_address()?,
+        collateral_token: (Address::from_slice(&topics[2].as_slice()[12..])).into_evm_address()?,
         parent_collection_id: topics[3],
         market_id: MarketId::new(format!("{:#x}", B256::from_slice(&data[..32]))),
         index_sets,
@@ -395,7 +398,7 @@ fn pair_external_redemptions(
             payout_log_index: payout.log_index,
             wrapped_log_index: wrapped.log_index,
             market_id: payout.payout.market_id.clone(),
-            raw_payout: typed_uint(payout.payout.raw_payout)?,
+            raw_payout: (payout.payout.raw_payout).into_evm_uint()?,
         });
     }
     Ok(observations)
@@ -450,6 +453,14 @@ pub enum ExternalSettlementScanError {
     },
 }
 
+impl From<SettlementValueError> for ExternalSettlementScanError {
+    fn from(error: SettlementValueError) -> Self {
+        Self::InvalidLog {
+            detail: error.detail().to_owned(),
+        }
+    }
+}
+
 fn invalid_log(detail: impl Into<String>) -> ExternalSettlementScanError {
     ExternalSettlementScanError::InvalidLog {
         detail: detail.into(),
@@ -463,32 +474,6 @@ fn rpc_error(method: &'static str, source: &impl Display) -> ExternalSettlementS
     }
 }
 
-fn typed_transaction_hash(value: B256) -> Result<EvmTransactionHash, ExternalSettlementScanError> {
-    EvmTransactionHash::parse(format!("{value:#x}")).map_err(|source| {
-        ExternalSettlementScanError::InvalidLog {
-            detail: source.to_string(),
-        }
-    })
-}
-
-fn typed_block_hash(value: B256) -> Result<EvmBlockHash, ExternalSettlementScanError> {
-    EvmBlockHash::parse(format!("{value:#x}")).map_err(|source| {
-        ExternalSettlementScanError::InvalidLog {
-            detail: source.to_string(),
-        }
-    })
-}
-
-fn typed_uint(value: U256) -> Result<EvmUint256, ExternalSettlementScanError> {
-    EvmUint256::parse(value.to_string()).map_err(|source| ExternalSettlementScanError::InvalidLog {
-        detail: source.to_string(),
-    })
-}
-
-fn typed_address(value: Address) -> Result<EvmAddress, ExternalSettlementScanError> {
-    EvmAddress::parse(format!("{value:#x}")).map_err(|source| invalid_log(source.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use alloy::primitives::{Address, B256, Bytes, U256, keccak256};
@@ -498,7 +483,7 @@ mod tests {
     use crate::settlement::contracts::verified_deployment_fixture;
 
     #[test]
-    fn scanner_requires_exact_ctf_redemption_and_wrapped_payout_pair() {
+    fn scanner_requires_exact_pair() {
         let capability = verified_deployment_fixture(SettlementRoute::StandardV2);
         let wrapped_topics = vec![
             keccak256("Wrapped(address,address,address,uint256)"),

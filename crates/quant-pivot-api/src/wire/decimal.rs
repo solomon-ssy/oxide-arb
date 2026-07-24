@@ -53,7 +53,7 @@ mod tests {
     }
 
     #[test]
-    fn null_is_rejected_not_coerced_to_zero() {
+    fn null_rejected_not_zero() {
         let error = parse_decimal_value(&Value::Null).expect_err("must reject null");
         assert!(error.contains("null"));
     }

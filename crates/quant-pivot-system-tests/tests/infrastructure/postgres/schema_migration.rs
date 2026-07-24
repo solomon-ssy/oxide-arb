@@ -63,7 +63,7 @@ async fn assert_manifest_drift(db: &DatabaseConnection, section: &str) {
     assert!(error.to_string().contains(section));
 }
 
-pub async fn migration_plan_is_read_only_on_empty_database() {
+pub async fn migration_plan_empty_database() {
     let (db, _container, _config) = setup_empty_pg().await;
 
     let plan = plan_postgres_migrations(&db)
@@ -77,7 +77,7 @@ pub async fn migration_plan_is_read_only_on_empty_database() {
     assert!(!relation_exists(&db, "schema_migration_audit").await);
 }
 
-pub async fn immutable_baseline_is_idempotent_and_drift_is_rejected() {
+pub async fn immutable_baseline_idempotent_rejected() {
     let (db, _container, config) = setup_empty_pg().await;
 
     apply_postgres_migrations(&config, &db)
@@ -132,7 +132,7 @@ pub async fn immutable_baseline_is_idempotent_and_drift_is_rejected() {
     assert_manifest_drift(&db, "tables").await;
 }
 
-pub async fn boot_baseline_rejects_a_nonempty_unknown_schema() {
+pub async fn boot_rejects_unknown_schema() {
     let (db, _container, config) = setup_empty_pg().await;
     db.execute_unprepared("CREATE TABLE legacy_schema_marker (id bigint PRIMARY KEY)")
         .await
@@ -148,7 +148,7 @@ pub async fn boot_baseline_rejects_a_nonempty_unknown_schema() {
     );
 }
 
-pub async fn immutable_migrations_round_trip_on_empty_database() {
+pub async fn immutable_migrations_empty_database() {
     let (db, _container, config) = setup_empty_pg().await;
     apply_postgres_migrations(&config, &db)
         .await
@@ -168,7 +168,7 @@ pub async fn immutable_migrations_round_trip_on_empty_database() {
     assert!(relation_exists(&db, "quant_report_schedule_state").await);
 }
 
-pub async fn legacy_sqlx_ledger_is_forbidden() {
+pub async fn legacy_sqlx_ledger_forbidden() {
     let (db, _container, config) = setup_empty_pg().await;
     apply_postgres_migrations(&config, &db)
         .await
@@ -188,7 +188,7 @@ pub async fn legacy_sqlx_ledger_is_forbidden() {
     assert!(error.to_string().contains("_sqlx_migrations"));
 }
 
-pub async fn migration_artifact_checksum_tamper_is_rejected() {
+pub async fn migration_artifact_checksum_rejected() {
     let (db, _container, config) = setup_empty_pg().await;
     apply_postgres_migrations(&config, &db)
         .await
@@ -209,7 +209,7 @@ pub async fn migration_artifact_checksum_tamper_is_rejected() {
     assert!(error.to_string().contains("immutable deploy manifest"));
 }
 
-pub async fn unknown_future_native_migration_is_rejected() {
+pub async fn unknown_future_native_rejected() {
     let (db, _container, config) = setup_empty_pg().await;
     apply_postgres_migrations(&config, &db)
         .await
@@ -234,7 +234,7 @@ pub async fn unknown_future_native_migration_is_rejected() {
     );
 }
 
-pub async fn native_enum_drift_is_rejected() {
+pub async fn native_enum_drift_rejected() {
     let (db, _container, config) = setup_empty_pg().await;
     apply_postgres_migrations(&config, &db)
         .await
@@ -249,7 +249,7 @@ pub async fn native_enum_drift_is_rejected() {
     assert_manifest_drift(&db, "enums").await;
 }
 
-pub async fn column_definition_drift_is_rejected() {
+pub async fn column_definition_drift_rejected() {
     let (db, _container, config) = setup_empty_pg().await;
     apply_postgres_migrations(&config, &db)
         .await
@@ -266,7 +266,7 @@ pub async fn column_definition_drift_is_rejected() {
     assert_manifest_drift(&db, "columns").await;
 }
 
-pub async fn index_definition_drift_is_rejected() {
+pub async fn index_definition_drift_rejected() {
     let (db, _container, config) = setup_empty_pg().await;
     apply_postgres_migrations(&config, &db)
         .await
@@ -281,7 +281,7 @@ pub async fn index_definition_drift_is_rejected() {
     assert_manifest_drift(&db, "indexes").await;
 }
 
-pub async fn constraint_definition_drift_is_rejected() {
+pub async fn constraint_definition_drift_rejected() {
     let (db, _container, config) = setup_empty_pg().await;
     apply_postgres_migrations(&config, &db)
         .await
@@ -299,7 +299,7 @@ pub async fn constraint_definition_drift_is_rejected() {
     assert_manifest_drift(&db, "constraints").await;
 }
 
-pub async fn trigger_definition_drift_is_rejected() {
+pub async fn trigger_definition_drift_rejected() {
     let (db, _container, config) = setup_empty_pg().await;
     apply_postgres_migrations(&config, &db)
         .await

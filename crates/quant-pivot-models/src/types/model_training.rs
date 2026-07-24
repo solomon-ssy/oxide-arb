@@ -109,7 +109,7 @@ mod tests {
     use super::{ModelTrainingObjective, TrainingObjectiveSpec};
 
     #[test]
-    fn objective_is_tagged_and_rejects_schema_drift() {
+    fn objective_tagged_rejects_drift() {
         let objective = ModelTrainingObjective::learning_to_rank(TrainingObjectiveSpec::default());
         let value = serde_json::to_value(objective).expect("serialize objective");
         assert_eq!(value["format_version"], json!(1));

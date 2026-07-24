@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn digest_is_prefixed_and_stable() {
+    fn digest_prefixed_stable() {
         let value = Sample { a: 1, b: "x" };
         let digest = CanonicalDigest::blake3_json(&value).expect("digest");
         assert!(digest.starts_with(BLAKE3_PREFIX));
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_state_hash_matches_blake3_json() {
+    fn canonical_state_matches_json() {
         let value = Sample { a: 1, b: "x" };
         assert_eq!(
             canonical_state_hash(&value).expect("hash"),
@@ -150,14 +150,14 @@ mod tests {
     }
 
     #[test]
-    fn raw_hex_has_no_prefix() {
+    fn raw_hex_no_prefix() {
         let hex = CanonicalDigest::raw_hex(b"abc");
         assert!(!hex.starts_with(BLAKE3_PREFIX));
         assert_eq!(hex.len(), 64);
     }
 
     #[test]
-    fn typed_digest_is_key_order_independent_and_domain_separated() {
+    fn typed_digest_key_separated() {
         let left = serde_json::json!({"z": 1, "a": 2});
         let right = serde_json::json!({"a": 2, "z": 1});
         let left_hash =
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn untyped_digest_is_key_order_independent() {
+    fn untyped_digest_key_independent() {
         let left = serde_json::json!({"z": 1, "a": 2});
         let right = serde_json::json!({"a": 2, "z": 1});
         assert_eq!(

@@ -217,7 +217,7 @@ mod tests {
     };
 
     #[test]
-    fn return_calibration_lineage_round_trips_with_hash_verification() {
+    fn return_calibration_lineage_verification() {
         let parent = ModelVersionId::from_v7();
         let artifact = CalibrationArtifactId::from_v7();
         let derivation = ModelVersionDerivation::ReturnCalibration {
@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn return_calibration_lineage_rejects_tampered_hash() {
+    fn return_calibration_rejects_hash() {
         let derivation = ModelVersionDerivation::ReturnCalibration {
             parent_model_version_id: ModelVersionId::from_v7(),
             calibration_artifact_id: CalibrationArtifactId::from_v7(),
@@ -258,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn training_lineage_rejects_hidden_foreign_keys() {
+    fn training_lineage_rejects_keys() {
         assert!(
             ModelVersionDerivation::from_persistence(
                 ModelVersionDerivationKind::Training,

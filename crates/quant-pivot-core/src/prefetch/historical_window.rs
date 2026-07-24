@@ -24,10 +24,7 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    clickhouse::{
-        BookL2LedgerRow, BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd,
-        MarketResolutionRow, TradeTapeRow,
-    },
+    clickhouse::{BookL2LedgerRow, BookMicrostructureRow, MarketResolutionRow, TradeTapeRow},
     domain::{
         data_plane::{
             CryptoPriceReport, DecisionBoundary, DecisionClock, DecisionSource, DomainObservation,
@@ -39,7 +36,7 @@ use quant_pivot_models::{
     enums::domain::DomainFamily,
     runtime_config::DomainConfig,
     types::{
-        DomainInstrumentKey, IcaoStation, MarketId, TokenId,
+        Bps, DomainInstrumentKey, IcaoStation, MarketId, PayoutRatio, Price, TokenId, Usd,
         calibration::PublishedWeatherStationLeadBias,
     },
 };
@@ -54,6 +51,7 @@ use quant_pivot_research::{
     selection::SelectedMarket,
     training::{ForwardSample, ForwardWindow, MarketResolution as ResearchMarketResolution},
 };
+use rust_decimal::Decimal;
 
 use crate::pit::platform::ch_historical::snapshot_from_row;
 
@@ -192,7 +190,7 @@ impl HistoricalWindowLoader {
             seen_tokens,
         } = window_subjects(&spec.samples);
 
-        let end_boundary = window_end_boundary(spec)?;
+        let end_boundary = (spec).window_end_boundary()?;
         let catalog = self
             .catalog_repo
             .window_through(&markets, &end_boundary)
@@ -253,7 +251,7 @@ impl HistoricalWindowLoader {
             .map_err(QuantError::from)?;
         let trade_rows = self
             .fact_read
-            .trade_tape_window_by_market(markets.clone(), micro_from, micro_to, available_by_ms)
+            .market_tape_window(markets.clone(), micro_from, micro_to, available_by_ms)
             .await
             .map_err(QuantError::from)?;
         let resolution_rows = self
@@ -262,7 +260,7 @@ impl HistoricalWindowLoader {
             .await
             .map_err(QuantError::from)?;
 
-        let (books, resolutions) = group_book_and_resolution_rows(book_rows, resolution_rows);
+        let (books, resolutions) = group_book_resolution_rows(book_rows, resolution_rows);
         let micro = group_micro_rows(micro_rows);
         let trade_tape = group_trade_tape_rows(trade_rows);
 
@@ -402,7 +400,7 @@ impl HistoricalWindowLoader {
     }
 }
 
-fn group_book_and_resolution_rows(
+fn group_book_resolution_rows(
     book_rows: Vec<BookL2LedgerRow>,
     resolution_rows: Vec<MarketResolutionRow>,
 ) -> (
@@ -449,7 +447,7 @@ async fn load_domain_linkages(
     };
     for info in rows {
         let market_id = info.market_id.clone();
-        let linkage = info.into_domain();
+        let linkage = MarketLinkage::from(info);
         if let Some(binding) = linkage.binding() {
             window.instruments.extend(
                 binding
@@ -724,32 +722,34 @@ fn group_trade_tape_rows(rows: Vec<TradeTapeRow>) -> HashMap<MarketId, Vec<Trade
     grouped
 }
 
-fn window_end_boundary(spec: &WindowSpec) -> QuantResult<DecisionBoundary> {
-    if spec.knowledge_lag.subsec_nanos() != 0 {
-        return Err(QuantError::config(
-            "historical knowledge lag must be expressed in whole seconds",
-        ));
+impl WindowSpec {
+    fn window_end_boundary(&self) -> QuantResult<DecisionBoundary> {
+        if self.knowledge_lag.subsec_nanos() != 0 {
+            return Err(QuantError::config(
+                "historical knowledge lag must be expressed in whole seconds",
+            ));
+        }
+        let availability_delay = self
+            .available_by
+            .signed_duration_since(self.window_end)
+            .to_std()
+            .map_err(|error| {
+                QuantError::config(format!(
+                    "historical availability cutoff precedes the replay window: {error}"
+                ))
+            })?;
+        let global_lag = availability_delay
+            .as_secs()
+            .checked_add(self.knowledge_lag.as_secs())
+            .ok_or_else(|| QuantError::config("historical availability lag overflow"))?;
+        let crypto_lag = global_lag
+            .checked_add(self.domain.crypto.availability_lag_secs)
+            .ok_or_else(|| QuantError::config("historical Crypto availability lag overflow"))?;
+        let weather_lag = global_lag
+            .checked_add(self.domain.weather.availability_lag_secs)
+            .ok_or_else(|| QuantError::config("historical Weather availability lag overflow"))?;
+        replay_boundary(self.available_by, global_lag, crypto_lag, weather_lag)
     }
-    let availability_delay = spec
-        .available_by
-        .signed_duration_since(spec.window_end)
-        .to_std()
-        .map_err(|error| {
-            QuantError::config(format!(
-                "historical availability cutoff precedes the replay window: {error}"
-            ))
-        })?;
-    let global_lag = availability_delay
-        .as_secs()
-        .checked_add(spec.knowledge_lag.as_secs())
-        .ok_or_else(|| QuantError::config("historical availability lag overflow"))?;
-    let crypto_lag = global_lag
-        .checked_add(spec.domain.crypto.availability_lag_secs)
-        .ok_or_else(|| QuantError::config("historical Crypto availability lag overflow"))?;
-    let weather_lag = global_lag
-        .checked_add(spec.domain.weather.availability_lag_secs)
-        .ok_or_else(|| QuantError::config("historical Weather availability lag overflow"))?;
-    replay_boundary(spec.available_by, global_lag, crypto_lag, weather_lag)
 }
 
 /// Construct the sole frozen boundary for one offline replay decision.
@@ -981,7 +981,7 @@ pub fn forward_window(
                 .iter()
                 .copied()
                 .map(|payout| {
-                    payout.try_to_payout_ratio().map_err(|error| {
+                    PayoutRatio::try_from(payout).map_err(|error| {
                         QuantError::from(ResearchError::DatasetBuild {
                             detail: format!(
                                 "market resolution `{}` contains an invalid payout: {error}",
@@ -1019,11 +1019,11 @@ fn bucket_from_row(
     MicrostructureBucket {
         bucket_time: at,
         available_at,
-        mid_close: row.mid_price_close.map(ChPrice::to_price),
-        spread_bps_avg: row.spread_bps_avg.map(ChBps::to_bps),
-        top1_depth_usd_avg: row.top1_depth_usd_avg.map(ChUsd::to_usd),
-        top5_depth_usd_avg: row.top5_depth_usd_avg.map(ChUsd::to_usd),
-        imbalance_avg: row.imbalance_avg.map(ChDecimal64::to_decimal),
+        mid_close: row.mid_price_close.map(Price::from),
+        spread_bps_avg: row.spread_bps_avg.map(Bps::from),
+        top1_depth_usd_avg: row.top1_depth_usd_avg.map(Usd::from),
+        top5_depth_usd_avg: row.top5_depth_usd_avg.map(Usd::from),
+        imbalance_avg: row.imbalance_avg.map(Decimal::from),
         update_count: row.update_count,
         snapshot_count: row.snapshot_count,
         delta_count: row.delta_count,
@@ -1037,11 +1037,11 @@ fn bucket_from_row(
 fn forward_sample(row: &BookMicrostructureRow, at: DateTime<Utc>) -> ForwardSample {
     ForwardSample {
         at,
-        mid_close: row.mid_price_close.map(ChPrice::to_price),
-        best_bid_high: row.best_bid_high.map(ChPrice::to_price),
-        best_bid_low: row.best_bid_low.map(ChPrice::to_price),
-        best_bid_close: row.best_bid_close.map(ChPrice::to_price),
-        top1_depth_usd: row.top1_depth_usd_avg.map(ChUsd::to_usd),
+        mid_close: row.mid_price_close.map(Price::from),
+        best_bid_high: row.best_bid_high.map(Price::from),
+        best_bid_low: row.best_bid_low.map(Price::from),
+        best_bid_close: row.best_bid_close.map(Price::from),
+        top1_depth_usd: row.top1_depth_usd_avg.map(Usd::from),
     }
 }
 
@@ -1095,7 +1095,7 @@ mod tests {
     use super::book_prefetch_start;
 
     #[test]
-    fn book_prefetch_covers_non_zero_lag_before_the_earliest_cutoff() {
+    fn book_non_zero_before() {
         let window_start = Utc
             .with_ymd_and_hms(2026, 7, 12, 12, 0, 0)
             .single()
@@ -1112,7 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn book_prefetch_zero_lag_preserves_the_staleness_window() {
+    fn book_zero_preserves_window() {
         let window_start = Utc
             .with_ymd_and_hms(2026, 7, 12, 12, 0, 0)
             .single()

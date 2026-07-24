@@ -52,8 +52,10 @@ impl FromIterator<MarketId> for CatalogMarketIds {
     }
 }
 
-fn wire_strings(ids: &CatalogMarketIds) -> Vec<String> {
-    ids.0.iter().map(ToString::to_string).collect()
+impl CatalogMarketIds {
+    fn wire_strings(&self) -> Vec<String> {
+        self.0.iter().map(ToString::to_string).collect()
+    }
 }
 
 fn from_wire_strings(strings: Vec<String>) -> CatalogMarketIds {
@@ -63,14 +65,14 @@ fn from_wire_strings(strings: Vec<String>) -> CatalogMarketIds {
 impl From<CatalogMarketIds> for Value {
     #[inline]
     fn from(ids: CatalogMarketIds) -> Self {
-        wire_strings(&ids).into()
+        ids.wire_strings().into()
     }
 }
 
 impl From<&CatalogMarketIds> for Value {
     #[inline]
     fn from(ids: &CatalogMarketIds) -> Self {
-        wire_strings(ids).into()
+        (ids).wire_strings().into()
     }
 }
 
@@ -121,7 +123,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_market_ids_value_type_roundtrip() {
+    fn catalog_market_ids_roundtrip() {
         let ids = CatalogMarketIds(vec![MarketId::new("0xaaa"), MarketId::new("0xbbb")]);
         let value: Value = ids.clone().into();
         let back = <CatalogMarketIds as ValueType>::try_from(value).expect("roundtrip");

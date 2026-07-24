@@ -70,7 +70,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn starts_warming_and_flips_ready() {
+    fn starts_warming_flips_ready() {
         let gate = CatalogReadiness::new();
         assert!(!gate.is_ready());
         assert_eq!(gate.catalog_state(), CatalogState::Warming);
@@ -88,7 +88,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribers_observe_the_ready_transition() {
+    async fn subscribers_observe_ready_transition() {
         let gate = CatalogReadiness::new();
         let mut rx = gate.subscribe();
         gate.mark_ready(7, Utc::now());

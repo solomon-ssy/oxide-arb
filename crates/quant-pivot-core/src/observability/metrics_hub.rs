@@ -959,18 +959,18 @@ impl MetricsHub {
             .inc();
     }
 
-    pub fn observe_settlement_discovery_lag_ms(&self, lag_ms: u64) {
+    pub fn observe_discovery_lag_ms(&self, lag_ms: u64) {
         self.settlement_discovery_lag_seconds
             .observe(lag_secs_from_ms(lag_ms));
     }
 
-    pub fn observe_settlement_submission_age_ms(&self, workflow: &str, age_ms: u64) {
+    pub fn observe_submission_age_ms(&self, workflow: &str, age_ms: u64) {
         self.settlement_submission_age_seconds
             .with_label_values(&[workflow])
             .observe(lag_secs_from_ms(age_ms));
     }
 
-    pub fn observe_settlement_finality_lag_ms(&self, workflow: &str, lag_ms: u64) {
+    pub fn observe_finality_lag_ms(&self, workflow: &str, lag_ms: u64) {
         self.settlement_finality_lag_seconds
             .with_label_values(&[workflow])
             .observe(lag_secs_from_ms(lag_ms));
@@ -982,14 +982,14 @@ impl MetricsHub {
     }
 
     /// Observe one ingest-pipeline-lag sample (enqueue→flush-ack) for a writer.
-    pub fn observe_ingest_pipeline_lag_ms(&self, writer: &str, lag_ms: u64) {
+    pub fn observe_ingest_lag_ms(&self, writer: &str, lag_ms: u64) {
         self.ingest_pipeline_lag_seconds
             .with_label_values(&[writer])
             .observe(lag_secs_from_ms(lag_ms));
     }
 
     /// Publish the peak ingest pipeline lag for the elapsed observation window.
-    pub fn set_ingest_pipeline_lag_worst_ms(&self, lag_ms: u64) {
+    pub fn set_worst_ingest_lag(&self, lag_ms: u64) {
         self.ingest_pipeline_lag_worst_ms
             .set(i64::try_from(lag_ms).unwrap_or(i64::MAX));
     }
@@ -1033,13 +1033,13 @@ impl MetricsHub {
         self.report_expire_swept_total.inc_by(swept);
     }
 
-    pub fn inc_report_fact_settlement_claim_lost(&self, operation: &str, status: &str) {
+    pub fn inc_fact_claim_lost(&self, operation: &str, status: &str) {
         self.report_fact_settlement_claim_lost_total
             .with_label_values(&[operation, status])
             .inc();
     }
 
-    pub fn inc_report_fact_worker_error(&self, stage: &str) {
+    pub fn inc_fact_worker_error(&self, stage: &str) {
         self.report_fact_worker_errors_total
             .with_label_values(&[stage])
             .inc();
@@ -1057,7 +1057,7 @@ impl MetricsHub {
             .inc();
     }
 
-    pub fn set_feature_parity_latch_open(&self, open: bool) {
+    pub fn set_parity_latch_open(&self, open: bool) {
         self.feature_parity_latch_open.set(i64::from(open));
     }
 
@@ -1097,7 +1097,7 @@ mod tests {
     use super::MetricsHub;
 
     #[test]
-    fn order_intent_created_and_approved_counters_increase() {
+    fn order_intent_created_increase() {
         let hub = MetricsHub::new();
         hub.inc_order_intent_created("auto_execution", "buy");
         hub.inc_order_intent_approved("auto_execution", "buy");
@@ -1109,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_report_metrics_expose_frozen_observability_contract() {
+    fn durable_report_metrics_contract() {
         let hub = MetricsHub::new();
         hub.report_run_total
             .with_label_values(&["ad_hoc", "failed", "build_failed"])
@@ -1127,8 +1127,8 @@ mod tests {
         hub.report_current_age_seconds
             .with_label_values(&["weather_forecast_24h", "top_n"])
             .set(60);
-        hub.inc_report_fact_settlement_claim_lost("verify", "cancelled");
-        hub.inc_report_fact_worker_error("process_one");
+        hub.inc_fact_claim_lost("verify", "cancelled");
+        hub.inc_fact_worker_error("process_one");
 
         let (_, text) = hub.gather_prometheus_text().expect("gather");
         let body = String::from_utf8(text).expect("utf8");
@@ -1149,15 +1149,15 @@ mod tests {
     }
 
     #[test]
-    fn settlement_metrics_expose_bounded_operational_contract() {
+    fn settlement_metrics_expose_contract() {
         let hub = MetricsHub::new();
         hub.record_settlement_worker_pass("recovery", "confirmed");
         hub.record_settlement_worker_error("discovery");
         hub.record_settlement_lease_lost("redeem");
         hub.record_settlement_reconciliation_required("governed_action", "receipt_mismatch");
-        hub.observe_settlement_discovery_lag_ms(2_000);
-        hub.observe_settlement_submission_age_ms("redeem", 3_000);
-        hub.observe_settlement_finality_lag_ms("governed_action", 4_000);
+        hub.observe_discovery_lag_ms(2_000);
+        hub.observe_submission_age_ms("redeem", 3_000);
+        hub.observe_finality_lag_ms("governed_action", 4_000);
 
         let (_, text) = hub.gather_prometheus_text().expect("gather");
         let body = String::from_utf8(text).expect("utf8");

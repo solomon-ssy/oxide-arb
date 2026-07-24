@@ -88,7 +88,7 @@ impl VenueEvidenceCollector {
         token_id: &TokenId,
         now: DateTime<Utc>,
     ) -> ReconciliationEvidence {
-        let last_known = self.book_store.load_last_known_by_id(token_id);
+        let last_known = self.book_store.load_known_book(token_id);
         let detail = last_known.snapshot.map_or_else(
             || format!("no book snapshot ({:?})", last_known.availability),
             |snapshot| {
@@ -479,7 +479,7 @@ mod tests {
     use super::{account_discovery_allowed, trade_is_final_fill};
 
     #[test]
-    fn account_history_discovery_requires_complete_identity_absence() {
+    fn account_history_requires_absence() {
         assert!(account_discovery_allowed(false, false, false));
         assert!(!account_discovery_allowed(true, false, false));
         assert!(!account_discovery_allowed(false, true, false));
@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn only_confirmed_trade_status_is_realized_fill_truth() {
+    fn only_confirmed_trade_truth() {
         assert!(trade_is_final_fill(VenueTradeStatus::Confirmed));
         for status in [
             VenueTradeStatus::Matched,

@@ -31,7 +31,7 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     types::{
-        ExecutionOrderId, PendingScaleOut, PreparedFeeSchedule, PreparedVenueOrder, Price,
+        ExecutionOrderId, PendingScaleOut, PreparedFeeSchedule, PreparedVenueOrder,
         ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId, ResearchProfileRef,
         Usd, VenueOrderAmount,
     },
@@ -47,7 +47,7 @@ use crate::{
     execution::{
         admission::pit_fee_schedule,
         breaker::ExecutionBreaker,
-        dispatcher::{gtd_expiration_at, order_type_kind, submit_response_resolution},
+        dispatcher::{gtd_expiration_at, submit_response_resolution},
         exit_monitor::ExitOrderSpec,
         order_client::{PolymarketOrderClient, VenueOrder, VenueOutcome, VenueSubmitResult},
     },
@@ -119,7 +119,7 @@ impl CoreExitDispatcher {
         let execution_order = self
             .deps
             .submission
-            .create_exit_order_and_mark_closing(new_order, reason, pending_scale_out)
+            .create_exit_order(new_order, reason, pending_scale_out)
             .await?;
         let recommendation_id = intent.recommendation_id;
         self.deps.execution_events.write(project_execution_event(
@@ -297,7 +297,7 @@ fn build_exit_order(
         market_id: lot.market_id.clone(),
         token_id: lot.token_id.clone(),
         side: Side::Sell,
-        order_type: order_type_kind(&order.order_type),
+        order_type: order.order_type.into(),
         price: order.limit_price,
         shares: order.shares,
         cost_usd: order.shares * order.limit_price,
@@ -313,11 +313,6 @@ fn build_exit_order(
     })
 }
 
-/// The realized average exit price (venue avg, or the submitted limit fallback).
-fn exit_avg_price(result: &VenueSubmitResult, order_limit: Price) -> Price {
-    result.avg_fill_price.unwrap_or(order_limit)
-}
-
 /// Translate an exit venue outcome into the atomic ledger write, returning the
 /// confirmed realized `PnL` (for the breaker's daily-loss dimension) when filled.
 fn build_exit_ledger_write(
@@ -329,7 +324,7 @@ fn build_exit_ledger_write(
     let outcome = result.outcome;
     let venue_status = outcome.venue_order_status();
     let filled = result.filled_shares;
-    let exit_avg = exit_avg_price(result, execution_order.price);
+    let exit_avg = result.avg_fill_price.unwrap_or(execution_order.price);
 
     // Exact per-lot average-cost realized PnL, net the venue exit fee.
     let proceeds_usd = filled * exit_avg - result.expected_fee;
@@ -339,7 +334,7 @@ fn build_exit_ledger_write(
 
     let position_exit = |state: ExitState| ExitLedgerWrite {
         identity_refs: result.identity_refs(),
-        order_state: outcome_order_state(outcome),
+        order_state: (outcome).outcome_order_state(),
         venue_order_id: result.venue_order_id.clone(),
         venue_status,
         filled_at: Some(result.responded_at),
@@ -476,11 +471,13 @@ fn failed_exit_write(
     }
 }
 
-/// The terminal exit-order state for a (partial) fill venue outcome.
-const fn outcome_order_state(outcome: VenueOutcome) -> ExecutionOrderState {
-    match outcome {
-        VenueOutcome::PartiallyFilled => ExecutionOrderState::PartiallyFilled,
-        _ => ExecutionOrderState::Filled,
+impl VenueOutcome {
+    /// The terminal exit-order state for a (partial) fill venue outcome.
+    const fn outcome_order_state(self) -> ExecutionOrderState {
+        match self {
+            Self::PartiallyFilled => ExecutionOrderState::PartiallyFilled,
+            _ => ExecutionOrderState::Filled,
+        }
     }
 }
 

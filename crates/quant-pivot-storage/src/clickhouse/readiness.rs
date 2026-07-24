@@ -154,7 +154,7 @@ mod tests {
     use super::validate_raw_history_binding;
 
     #[test]
-    fn raw_history_identifiers_are_closed_by_the_canonical_registry() {
+    fn raw_history_identifiers_registry() {
         let registry = research_source_registry().expect("canonical registry");
         let mut binding = registry
             .bindings

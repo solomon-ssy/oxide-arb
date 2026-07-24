@@ -348,26 +348,8 @@ fn instant_plus_secs(instant: DateTime<Utc>, secs: u64) -> QuantResult<DateTime<
         .ok_or_else(|| QuantError::config("horizon deadline is outside chrono range"))
 }
 
-/// Per-recommendation effective horizon (seconds): the model's frozen prediction
-/// horizon (`suggested_horizon_secs`), falling back to the governed default when
-/// the model supplies none (classical / non-ML runs), capped by the market's
-/// time-to-resolution hard wall. A zero result means there is no actionable
-/// prediction window and must be rejected by the caller.
+/// Compute the effective model horizon, capped by time-to-resolution.
 const fn effective_horizon_secs(
-    candidate: &SignalCandidate,
-    capture: &MarketDecisionCapture,
-    fallback_horizon_secs: u64,
-) -> u64 {
-    effective_horizon_from(
-        candidate.suggested_horizon_secs,
-        capture.market_context.time_to_resolution_secs,
-        fallback_horizon_secs,
-    )
-}
-
-/// Pure core of [`effective_horizon_secs`]: the model horizon (or the governed
-/// fallback when absent) capped by the market's time-to-resolution.
-const fn effective_horizon_from(
     suggested_horizon_secs: u64,
     time_to_resolution_secs: Option<u64>,
     fallback_horizon_secs: u64,
@@ -463,7 +445,11 @@ fn compose_recommendation(
         }
     })?;
 
-    let horizon_secs = effective_horizon_secs(candidate, capture, fallback_horizon_secs);
+    let horizon_secs = effective_horizon_secs(
+        candidate.suggested_horizon_secs,
+        capture.market_context.time_to_resolution_secs,
+        fallback_horizon_secs,
+    );
     let valid_until = actionable_valid_until(
         input.decision_at,
         input.published_at,
@@ -864,7 +850,7 @@ fn policy_entry_plan(context: EntryPlanMaterialization<'_>) -> QuantResult<Mater
             policy.provenance.artifact_id, policy.provenance.cohort_index
         ),
     };
-    align_entry_plan_to_tick(&mut plan, tick_size);
+    align_entry_to_tick(&mut plan, tick_size);
     Ok(MaterializedEntryPlan { plan, artifact })
 }
 
@@ -1398,7 +1384,7 @@ fn policy_exit_plan(
             policy.provenance.artifact_id, policy.provenance.cohort_index
         ),
     };
-    align_exit_plan_to_tick(&mut plan, tick_size);
+    align_exit_to_tick(&mut plan, tick_size);
     Ok(plan)
 }
 
@@ -1408,7 +1394,7 @@ enum TickDirection {
     Up,
 }
 
-fn align_entry_plan_to_tick(plan: &mut EntryPlan, tick_size: TickSize) {
+fn align_entry_to_tick(plan: &mut EntryPlan, tick_size: TickSize) {
     match &mut plan.order_policy {
         EntryOrderPolicy::Passive { limit_price, .. } => {
             *limit_price = tick_aligned_price(limit_price.inner(), tick_size, TickDirection::Down);
@@ -1419,7 +1405,7 @@ fn align_entry_plan_to_tick(plan: &mut EntryPlan, tick_size: TickSize) {
     }
 }
 
-fn align_exit_plan_to_tick(plan: &mut ExitPlan, tick_size: TickSize) {
+fn align_exit_to_tick(plan: &mut ExitPlan, tick_size: TickSize) {
     for price in [
         plan.take_profit_price.as_mut(),
         plan.stop_loss_price.as_mut(),
@@ -1881,13 +1867,13 @@ fn aggregate_exposure_cap_usd(input: &ComposeReportInput<'_>) -> Option<Usd> {
         .kelly_safety
         .max_aggregate_exposure_pct
         .value;
-    compute_aggregate_exposure_cap_usd(input.account.capital_base_usd.inner(), pct)
+    aggregate_exposure_cap(input.account.capital_base_usd.inner(), pct)
 }
 
 /// Pure `capital_base_usd × max_aggregate_exposure_pct`, matching the LP's own
 /// `lp.rs::build_buckets` gate exactly (`pct <= 0` or `capital_base <= 0`
 /// disables the cap — `None`, never a fabricated `0`).
-fn compute_aggregate_exposure_cap_usd(
+fn aggregate_exposure_cap(
     capital_base_usd: Decimal,
     max_aggregate_exposure_pct: Decimal,
 ) -> Option<Usd> {
@@ -2315,26 +2301,26 @@ mod tests {
 
     use super::{
         ComposeReportInput, DefaultRecommendationComposer, RecommendationComposer, TickDirection,
-        actionable_valid_until, auto_execution_gate, effective_horizon_from, empty_plan_for_report,
+        actionable_valid_until, auto_execution_gate, effective_horizon_secs, empty_plan_for_report,
         entry_window_secs, execution_eligibility, tick_aligned_price,
     };
     use crate::{
-        report::{composer::compute_aggregate_exposure_cap_usd, types::ReportTrigger},
+        report::{composer::aggregate_exposure_cap, types::ReportTrigger},
         test_fixtures::execution_pg_seed::fixture_profile_ref,
     };
 
     #[test]
-    fn effective_horizon_uses_model_horizon_capped_by_resolution() {
+    fn effective_horizon_uses_resolution() {
         // Model horizon below resolution: use the model horizon.
-        assert_eq!(effective_horizon_from(3_600, Some(86_400), 7_200), 3_600);
+        assert_eq!(effective_horizon_secs(3_600, Some(86_400), 7_200), 3_600);
         // Resolution closer than the model horizon: cap at resolution.
-        assert_eq!(effective_horizon_from(86_400, Some(1_800), 7_200), 1_800);
+        assert_eq!(effective_horizon_secs(86_400, Some(1_800), 7_200), 1_800);
         // No resolution wall: use the (uncapped) model horizon.
-        assert_eq!(effective_horizon_from(3_600, None, 7_200), 3_600);
+        assert_eq!(effective_horizon_secs(3_600, None, 7_200), 3_600);
     }
 
     #[test]
-    fn tick_rounding_is_directional_and_bounded() {
+    fn tick_rounding_directional_bounded() {
         assert_eq!(
             tick_aligned_price(dec!(0.603), TickSize::Hundredth, TickDirection::Down),
             Price::new(dec!(0.60))
@@ -2354,16 +2340,16 @@ mod tests {
     }
 
     #[test]
-    fn effective_horizon_falls_back_when_model_horizon_absent() {
+    fn effective_horizon_falls_absent() {
         // suggested == 0 (classical run) -> governed fallback, still capped.
-        assert_eq!(effective_horizon_from(0, Some(86_400), 7_200), 7_200);
-        assert_eq!(effective_horizon_from(0, Some(900), 7_200), 900);
+        assert_eq!(effective_horizon_secs(0, Some(86_400), 7_200), 7_200);
+        assert_eq!(effective_horizon_secs(0, Some(900), 7_200), 900);
         // A market at/after resolution has no actionable model horizon.
-        assert_eq!(effective_horizon_from(0, Some(0), 7_200), 0);
+        assert_eq!(effective_horizon_secs(0, Some(0), 7_200), 0);
     }
 
     #[test]
-    fn entry_window_is_the_ratio_slice_of_the_horizon() {
+    fn entry_window_ratio_horizon() {
         // Default 0.5 ratio -> enter within the first half (the half-life point).
         assert_eq!(entry_window_secs(3_600, dec!(0.5)).expect("window"), 1_800);
         // Full ratio -> entry valid across the whole horizon.
@@ -2374,7 +2360,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_policy_rejects_invalid_decimal_at_the_wire_boundary() {
+    fn runtime_rejects_invalid_boundary() {
         let mut value = serde_json::to_value(DecisionPolicySnapshot::default()).expect("policy");
         value["execution_risk"]["portfolio"]["budget"]["total_budget_usd"] =
             serde_json::json!({"value": "not-a-decimal"});
@@ -2382,7 +2368,7 @@ mod tests {
     }
 
     #[test]
-    fn validity_is_anchored_to_decision_and_opens_at_publication() {
+    fn validity_anchored_decision_publication() {
         let decision_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let published_at = decision_at + Duration::seconds(30);
         let market_id = MarketId::new("0xmarket");
@@ -2395,7 +2381,7 @@ mod tests {
     }
 
     #[test]
-    fn publication_after_prediction_window_fails_closed() {
+    fn publication_after_prediction_rejects() {
         let decision_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let market_id = MarketId::new("0xmarket");
 
@@ -2411,38 +2397,32 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_exposure_cap_usd_matches_lp_gate() {
+    fn aggregate_exposure_matches_gate() {
         assert_eq!(
-            compute_aggregate_exposure_cap_usd(dec!(10_000), dec!(0.25)),
+            aggregate_exposure_cap(dec!(10_000), dec!(0.25)),
             Some(Usd::new(dec!(2500))),
             "capital_base_usd × pct, rounded to cent precision"
         );
     }
 
     #[test]
-    fn aggregate_exposure_cap_usd_none_when_pct_disabled() {
+    fn aggregate_exposure_cap_disabled() {
         assert_eq!(
-            compute_aggregate_exposure_cap_usd(dec!(10_000), dec!(0)),
+            aggregate_exposure_cap(dec!(10_000), dec!(0)),
             None,
             "pct <= 0 must report no cap, never a fabricated 0 cap"
         );
-        assert_eq!(
-            compute_aggregate_exposure_cap_usd(dec!(10_000), dec!(-1)),
-            None
-        );
+        assert_eq!(aggregate_exposure_cap(dec!(10_000), dec!(-1)), None);
     }
 
     #[test]
-    fn aggregate_exposure_cap_usd_none_when_capital_base_non_positive() {
+    fn aggregate_exposure_non_positive() {
         assert_eq!(
-            compute_aggregate_exposure_cap_usd(dec!(0), dec!(0.25)),
+            aggregate_exposure_cap(dec!(0), dec!(0.25)),
             None,
             "a non-positive capital base must never report a fabricated cap"
         );
-        assert_eq!(
-            compute_aggregate_exposure_cap_usd(dec!(-500), dec!(0.25)),
-            None
-        );
+        assert_eq!(aggregate_exposure_cap(dec!(-500), dec!(0.25)), None);
     }
 
     fn candidate() -> SignalCandidate {
@@ -2504,7 +2484,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_eligibility_keeps_semi_auto_when_auto_denied_for_low_confidence() {
+    fn execution_keeps_denied_confidence() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .execution_authorization
@@ -2549,7 +2529,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_eligibility_allows_auto_when_policy_passes() {
+    fn execution_eligibility_allows_passes() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .execution_authorization
@@ -2588,7 +2568,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_execution_budget_is_cumulative_across_ranked_recommendations() {
+    fn auto_execution_budget_recommendations() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .execution_authorization
@@ -2667,7 +2647,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_rejects_missing_decision_capture() {
+    fn compose_rejects_missing_capture() {
         let as_of = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
         let trigger_time = as_of + Duration::seconds(120);
         let config = DecisionPolicySnapshot::default();

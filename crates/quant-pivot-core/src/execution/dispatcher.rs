@@ -31,16 +31,15 @@ use quant_pivot_models::{
         clickhouse::ChQuantLedgerEventKind,
         common::OrderType,
         execution::{
-            AdmissionOutcome, ExecutionOrderPhase, OrderTypeKind, ReconciliationEvidenceKind,
-            ReconciliationResult,
+            AdmissionOutcome, ExecutionOrderPhase, ReconciliationEvidenceKind, ReconciliationResult,
         },
         quant::{AccountSource, ExecutionOrderState, OrderIntentStatus},
     },
     hashing::CanonicalDigest,
     types::{
         EntryOrderSpec, ExecutionAccountId, ExecutionOrderId, FeatureParityStateId, OrderIntentId,
-        PreparedVenueOrder, Price, ReconciliationEvidence, ReconciliationEvidenceChain,
-        ReconciliationId, Usd,
+        PreparedVenueOrder, ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
+        Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -49,9 +48,7 @@ use quant_pivot_repository::traits::{
 
 use crate::{
     execution::{
-        admission::{
-            AdmissionDecision, AdmissionInputBuilder, ExecutionAdmissionEngine, prepare_entry_order,
-        },
+        admission::{AdmissionDecision, AdmissionInputBuilder, ExecutionAdmissionEngine},
         breaker::ExecutionBreaker,
         intent_lifecycle::IntentLifecyclePublisher,
         order_client::{PolymarketOrderClient, VenueOrder, VenueOutcome, VenueSubmitResult},
@@ -187,7 +184,7 @@ impl CoreExecutionDispatcher {
         };
         let recommendation = input.recommendation.clone();
         let condition = input.condition.clone();
-        let prepared_order = prepare_entry_order(&input)?;
+        let prepared_order = input.prepare_entry_order()?;
         let decision = match self.deps.admission.evaluate(input).await {
             Ok(decision) => decision,
             Err(error) => return Err(error),
@@ -222,7 +219,7 @@ impl CoreExecutionDispatcher {
                 let rejected = self
                     .deps
                     .submission
-                    .reject_admission(intent_id, reason.clone(), denial_trace_ref(&decision))
+                    .reject_admission(intent_id, reason.clone(), decision.denial_trace_ref())
                     .await?;
                 self.deps.intent_lifecycle.publish(
                     &rejected,
@@ -232,7 +229,7 @@ impl CoreExecutionDispatcher {
                 Err(ExecutionError::AdmissionDenied { reason }.into())
             }
             AdmissionOutcome::Defer => Err(ExecutionError::AdmissionDeferred {
-                reason: defer_reason(&decision),
+                reason: decision.defer_reason(),
             }
             .into()),
         }
@@ -258,7 +255,7 @@ impl CoreExecutionDispatcher {
         let execution_order = match self
             .deps
             .submission
-            .create_entry_order_and_lock_capital(new_order, feature_parity_state_id)
+            .create_entry_order(new_order, feature_parity_state_id)
             .await
         {
             Ok(order) => order,
@@ -375,35 +372,29 @@ fn ensure_submittable(intent: &OrderIntentInfo, now: DateTime<Utc>) -> Result<()
     Ok(())
 }
 
-/// Compact, audit-friendly reference of the non-passing admission checks.
-fn denial_trace_ref(decision: &AdmissionDecision) -> Option<String> {
-    let parts: Vec<String> = decision
-        .trace
-        .iter()
-        .filter(|trace| trace.outcome != AdmissionOutcome::Allow)
-        .map(|trace| format!("{:?}:{}", trace.check, trace.detail))
-        .collect();
-    (!parts.is_empty()).then(|| parts.join("; "))
+impl AdmissionDecision {
+    /// Compact, audit-friendly reference of the non-passing admission checks.
+    fn denial_trace_ref(&self) -> Option<String> {
+        let parts: Vec<String> = self
+            .trace
+            .iter()
+            .filter(|trace| trace.outcome != AdmissionOutcome::Allow)
+            .map(|trace| format!("{:?}:{}", trace.check, trace.detail))
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("; "))
+    }
 }
 
-fn defer_reason(decision: &AdmissionDecision) -> String {
-    decision
-        .trace
-        .iter()
-        .rev()
-        .find(|trace| trace.outcome == AdmissionOutcome::Defer)
-        .map_or_else(
-            || "admission deferred".to_owned(),
-            |trace| trace.detail.clone(),
-        )
-}
-
-pub(crate) const fn order_type_kind(order_type: &OrderType) -> OrderTypeKind {
-    match order_type {
-        OrderType::Fok => OrderTypeKind::Fok,
-        OrderType::Fak => OrderTypeKind::Fak,
-        OrderType::Gtc => OrderTypeKind::Gtc,
-        OrderType::Gtd { .. } => OrderTypeKind::Gtd,
+impl AdmissionDecision {
+    fn defer_reason(&self) -> String {
+        self.trace
+            .iter()
+            .rev()
+            .find(|trace| trace.outcome == AdmissionOutcome::Defer)
+            .map_or_else(
+                || "admission deferred".to_owned(),
+                |trace| trace.detail.clone(),
+            )
     }
 }
 
@@ -444,7 +435,7 @@ fn build_new_execution_order(
         market_id: recommendation.market_id.clone(),
         token_id: spec.token_id.clone(),
         side: spec.side,
-        order_type: order_type_kind(&spec.order_type),
+        order_type: spec.order_type.into(),
         price: spec.limit_price,
         shares: prepared_order.expected_filled_shares,
         cost_usd: prepared_order
@@ -479,10 +470,6 @@ fn build_venue_order(
     }
 }
 
-fn fill_avg_price(result: &VenueSubmitResult, spec: &EntryOrderSpec) -> Price {
-    result.avg_fill_price.unwrap_or(spec.limit_price)
-}
-
 fn position_fill(
     result: &VenueSubmitResult,
     recommendation: &RecommendationInfo,
@@ -490,7 +477,7 @@ fn position_fill(
     order_intent_id: &OrderIntentId,
     execution_account_id: ExecutionAccountId,
 ) -> PositionFill {
-    let price = fill_avg_price(result, spec);
+    let price = result.avg_fill_price.unwrap_or(spec.limit_price);
     let fill_cost = result.filled_shares * price;
     PositionFill {
         order_intent_id: *order_intent_id,
@@ -576,7 +563,7 @@ fn build_ledger_write(
     execution_account_id: ExecutionAccountId,
 ) -> SubmissionLedgerWrite {
     let outcome = result.outcome;
-    let fill_cost = result.filled_shares * fill_avg_price(result, spec);
+    let fill_cost = result.filled_shares * result.avg_fill_price.unwrap_or(spec.limit_price);
     let total_spent = fill_cost + result.expected_fee;
     let common_venue_status = outcome.venue_order_status();
     let identity_refs = result.identity_refs();
@@ -722,7 +709,7 @@ mod tests {
     use super::gtd_expiration_at;
 
     #[test]
-    fn gtd_expiration_rejects_unrepresentable_timestamp() {
+    fn gtd_expiration_rejects_timestamp() {
         assert!(
             gtd_expiration_at(&OrderType::Gtd {
                 expiration: u64::MAX,

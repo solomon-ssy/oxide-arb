@@ -18,10 +18,7 @@ use crate::service::research_readiness::{
 const CAPTURE_INTERVAL: Duration = Duration::from_mins(5);
 
 impl AppContext {
-    pub fn register_research_readiness_evidence_worker(
-        &self,
-        runner: &mut AppRunner,
-    ) -> QuantResult<()> {
+    pub fn register_readiness_worker(&self, runner: &mut AppRunner) -> QuantResult<()> {
         let attestor = EvidenceAttestor::from_config(&self.config.research.evidence_attestation)?;
         if attestor.is_none() {
             tracing::warn!(

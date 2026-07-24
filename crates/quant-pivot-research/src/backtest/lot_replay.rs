@@ -154,7 +154,7 @@ fn replay_lot(
     label: &LabelSelector,
     sequence: &LotDecisionSequence,
 ) -> QuantResult<LotOutcome> {
-    let (first_as_of, denominator) = replay_denominator(sequence)?;
+    let (first_as_of, denominator) = (sequence).replay_denominator()?;
     let mut rank_pairs = Vec::with_capacity(sequence.decisions.len());
     let mut simulated_sold = Decimal::ZERO;
     let mut return_value = Decimal::ZERO;
@@ -208,36 +208,38 @@ fn replay_lot(
     })
 }
 
-fn replay_denominator(sequence: &LotDecisionSequence) -> QuantResult<(DateTime<Utc>, Decimal)> {
-    let Some(first) = sequence.decisions.first() else {
-        return Err(ResearchError::ValidationMethodology {
-            detail: format!(
-                "lot {} has an empty decision sequence — refuse to invent a zero return",
-                sequence.position_id
-            ),
-        }
-        .into());
-    };
-    let Some(first_ctx) = &first.lot_context else {
-        return Err(ResearchError::ValidationMethodology {
+impl LotDecisionSequence {
+    fn replay_denominator(&self) -> QuantResult<(DateTime<Utc>, Decimal)> {
+        let Some(first) = self.decisions.first() else {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "lot {} has an empty decision sequence — refuse to invent a zero return",
+                    self.position_id
+                ),
+            }
+            .into());
+        };
+        let Some(first_ctx) = &first.lot_context else {
+            return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "lot {} first decision is missing lot_context; rebuild the ExitDecision dataset",
-                sequence.position_id
+                self.position_id
             ),
         }
         .into());
-    };
-    let denominator = first_ctx.remaining_shares.inner();
-    if denominator <= Decimal::ZERO {
-        return Err(ResearchError::ValidationMethodology {
+        };
+        let denominator = first_ctx.remaining_shares.inner();
+        if denominator <= Decimal::ZERO {
+            return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "lot {} first decision has non-positive remaining_shares — refuse to invent a denominator",
-                sequence.position_id
+                self.position_id
             ),
         }
         .into());
+        }
+        Ok((first.decision_at(), denominator))
     }
-    Ok((first.decision_at(), denominator))
 }
 
 enum OnPathStep {
@@ -449,7 +451,7 @@ mod tests {
         features::{FeatureName, FeatureVector},
         model::{
             LabelSelector, PositionStateFeatures, SellScore, SellScoreInput, SellScorerRuntime,
-            SellSignalPolicy, position_state_signed,
+            SellSignalPolicy,
         },
         training::{
             HOLD_VS_EXIT_ALPHA_BPS, LotTrainingContext, TrainingExample, TrainingLabel, fixtures,
@@ -460,11 +462,13 @@ mod tests {
         Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap()
     }
 
-    fn position_state() -> PositionStateFeatures {
-        PositionStateFeatures {
-            unrealized_pnl_pct: Some(dec!(0)),
-            time_in_trade_ratio: dec!(0.1),
-            peak_mark_drawdown: Some(dec!(0)),
+    impl PositionStateFeatures {
+        fn test_fixture() -> Self {
+            Self {
+                unrealized_pnl_pct: Some(dec!(0)),
+                time_in_trade_ratio: dec!(0.1),
+                peak_mark_drawdown: Some(dec!(0)),
+            }
         }
     }
 
@@ -510,15 +514,17 @@ mod tests {
                 opened_at: as_of,
                 max_hold_secs: 86_400,
             }),
-            position_state: Some(position_state()),
+            position_state: Some(PositionStateFeatures::test_fixture()),
             book_fidelity: None,
         }
     }
 
-    fn label() -> LabelSelector {
-        LabelSelector {
-            name: HOLD_VS_EXIT_ALPHA_BPS,
-            horizon_secs: 0,
+    impl LabelSelector {
+        fn test_fixture() -> Self {
+            Self {
+                name: HOLD_VS_EXIT_ALPHA_BPS,
+                horizon_secs: 0,
+            }
         }
     }
 
@@ -562,17 +568,19 @@ mod tests {
         }
     }
 
-    fn policy() -> SellSignalPolicy {
-        SellSignalPolicy {
-            min_confidence: dec!(0.5),
-            min_p_exit_better: dec!(0.5),
-            min_expected_alpha_bps: dec!(50),
-            max_sell_pct: dec!(1),
+    impl SellSignalPolicy {
+        fn test_fixture() -> Self {
+            Self {
+                min_confidence: dec!(0.5),
+                min_p_exit_better: dec!(0.5),
+                min_expected_alpha_bps: dec!(50),
+                max_sell_pct: dec!(1),
+            }
         }
     }
 
     #[test]
-    fn lot_replay_full_exit_stops_subsequent_decisions() {
+    fn lot_replay_full_decisions() {
         let position_id = PositionId::from_v7();
         let mut d0 = decision(ts(0), dec!(-20), dec!(100));
         let mut d1 = decision(ts(60), dec!(100), dec!(100));
@@ -589,8 +597,8 @@ mod tests {
         let result = LotReplayBacktester::new()
             .run(LotBacktestInputs {
                 model: &model,
-                policy: policy(),
-                label: label(),
+                policy: SellSignalPolicy::test_fixture(),
+                label: LabelSelector::test_fixture(),
                 lots: &[sequence],
             })
             .expect("replay");
@@ -602,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn lot_replay_partial_exit_accrues_slice_then_stops_on_divergence() {
+    fn lot_replay_partial_divergence() {
         let position_id = PositionId::from_v7();
         // History never sold — remaining stays 100. After a 50% simulated
         // exit, the next historical row still shows remaining=100 → diverge.
@@ -620,8 +628,8 @@ mod tests {
         let result = LotReplayBacktester::new()
             .run(LotBacktestInputs {
                 model: &model,
-                policy: policy(),
-                label: label(),
+                policy: SellSignalPolicy::test_fixture(),
+                label: LabelSelector::test_fixture(),
                 lots: &[sequence],
             })
             .expect("replay");
@@ -639,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn lot_replay_backtester_holds_to_terminal_when_never_exits() {
+    fn lot_replay_never_exits() {
         let position_id = PositionId::from_v7();
         let mut d0 = decision(ts(0), dec!(-20), dec!(100));
         let mut d1 = decision(ts(60), dec!(-10), dec!(100));
@@ -653,8 +661,8 @@ mod tests {
         let result = LotReplayBacktester::new()
             .run(LotBacktestInputs {
                 model: &model,
-                policy: policy(),
-                label: label(),
+                policy: SellSignalPolicy::test_fixture(),
+                label: LabelSelector::test_fixture(),
                 lots: &[sequence],
             })
             .expect("replay");
@@ -666,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn null_baseline_exit_at_first_takes_first_label() {
+    fn null_baseline_exit_label() {
         let position_id = PositionId::from_v7();
         let mut d0 = decision(ts(0), dec!(80), dec!(100));
         let mut d1 = decision(ts(60), dec!(200), dec!(100));
@@ -676,15 +684,18 @@ mod tests {
             position_id,
             decisions: vec![d0, d1],
         };
-        let outcome =
-            replay_lot_null_baseline(SellNullBaseline::ExitAtFirstDecision, &label(), &sequence)
-                .expect("baseline");
+        let outcome = replay_lot_null_baseline(
+            SellNullBaseline::ExitAtFirstDecision,
+            &LabelSelector::test_fixture(),
+            &sequence,
+        )
+        .expect("baseline");
         assert_eq!(outcome.return_value, dec!(80) / Decimal::from(10_000));
         assert_eq!(outcome.cumulative_exit_pct, Decimal::ONE);
     }
 
     #[test]
-    fn null_baseline_always_hold_is_zero_alpha() {
+    fn null_baseline_zero_alpha() {
         let position_id = PositionId::from_v7();
         let mut d0 = decision(ts(0), dec!(80), dec!(100));
         d0.lot_context.as_mut().unwrap().position_id = position_id;
@@ -692,16 +703,22 @@ mod tests {
             position_id,
             decisions: vec![d0],
         };
-        let outcome = replay_lot_null_baseline(SellNullBaseline::AlwaysHold, &label(), &sequence)
-            .expect("baseline");
+        let outcome = replay_lot_null_baseline(
+            SellNullBaseline::AlwaysHold,
+            &LabelSelector::test_fixture(),
+            &sequence,
+        )
+        .expect("baseline");
         assert_eq!(outcome.return_value, Decimal::ZERO);
         assert_eq!(outcome.cumulative_exit_pct, Decimal::ZERO);
         assert!(outcome.rank_pairs.is_empty());
     }
 
     #[test]
-    fn position_state_inputs_are_covered_by_the_shared_pseudo_factor_formula() {
-        let count = position_state_signed(&position_state()).len();
+    fn position_state_inputs_formula() {
+        let count = PositionStateFeatures::test_fixture()
+            .position_state_signed()
+            .len();
         assert_eq!(count, 3);
     }
 }

@@ -142,7 +142,7 @@ impl ModelGovernanceService {
     async fn find_version(&self, id: &ModelVersionId) -> QuantResult<ModelVersionInfo> {
         self.deps
             .model_registry_repo
-            .find_model_version_by_id(id)
+            .find_model_version(id)
             .await?
             .ok_or_else(|| {
                 GovernanceError::NotFound {
@@ -453,7 +453,7 @@ impl ModelGovernancePort for ModelGovernanceService {
         let updated = self
             .deps
             .model_registry_repo
-            .set_publish_path_set_id(&version.model_version_id, Some(request.path_set_id))
+            .set_publish_path(&version.model_version_id, Some(request.path_set_id))
             .await
             .map_err(QuantError::from)?;
         self.write_audit(NewModelGovernanceAudit {
@@ -908,7 +908,7 @@ impl ModelGovernanceService {
             }
             .into());
         }
-        Ok(Some(path_set_gate_input_from_info(&info)))
+        Ok(Some(path_set_gate_input(&info)))
     }
 
     /// Resolve the dataset coverage backing a model version (the gate's
@@ -1089,7 +1089,7 @@ const fn validation_thresholds_from_config(
     }
 }
 
-const fn path_set_gate_input_from_info(info: &BacktestPathSetInfo) -> CpcvPathSetGateInput {
+const fn path_set_gate_input(info: &BacktestPathSetInfo) -> CpcvPathSetGateInput {
     let distribution = info.sharpe_distribution;
     CpcvPathSetGateInput {
         median_rank_ic: info.median_rank_ic,
@@ -1174,7 +1174,7 @@ mod path_set_gate_input_tests {
     };
     use rust_decimal_macros::dec;
 
-    use super::{checked_shadow_stability_lookback, path_set_gate_input_from_info};
+    use super::{checked_shadow_stability_lookback, path_set_gate_input};
 
     fn hash() -> ContentHash {
         ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("hash")
@@ -1207,7 +1207,7 @@ mod path_set_gate_input_tests {
     }
 
     #[test]
-    fn path_set_gate_input_decodes_sell_diagnostics() {
+    fn set_gate_decodes_diagnostics() {
         let info = info_with_distribution(SharpeDistribution {
             min: dec!(0),
             p25: dec!(0),
@@ -1218,14 +1218,14 @@ mod path_set_gate_input_tests {
             median_tail_loss: Some(dec!(-0.005)),
             baseline_uplift: Some(dec!(0.001)),
         });
-        let gate = path_set_gate_input_from_info(&info);
+        let gate = path_set_gate_input(&info);
         assert_eq!(gate.median_max_drawdown, Some(dec!(0.1)));
         assert_eq!(gate.median_tail_loss, Some(dec!(-0.005)));
         assert_eq!(gate.baseline_uplift, Some(dec!(0.001)));
     }
 
     #[test]
-    fn shadow_stability_lookback_rejects_overflow() {
+    fn shadow_stability_rejects_overflow() {
         assert_eq!(
             checked_shadow_stability_lookback(86_400).expect("ordinary window"),
             691_200

@@ -43,7 +43,7 @@ use quant_pivot_models::{
         query::{TimeWindow, WindowBoundsError},
     },
     enums::{common::MarketCategory, quant::RecommendationResolutionKind},
-    runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FavoriteLongshotConfig},
+    runtime_config::{DomainConfig, FactorsConfig, FavoriteLongshotConfig},
     types::{CalibrationArtifactId, MarketId, PayoutRatio, ResearchJobProgress, TokenId},
 };
 use quant_pivot_repository::traits::{
@@ -60,9 +60,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     prefetch::historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec},
-    service::calibration_shared::{
-        assert_disjoint_from_all_training_datasets, calibration_split_hash,
-    },
+    service::calibration_shared::{assert_dataset_disjoint, calibration_split_hash},
 };
 
 /// Validate the relational discriminator against the already-decoded payload.
@@ -194,7 +192,8 @@ impl BiasTableFitService {
                 })
             })?;
         let config = version.snapshot;
-        let max_book_staleness = book_staleness(&config.recommendation.data_quality);
+        let max_book_staleness =
+            StdDuration::from_millis(config.recommendation.data_quality.max_book_age_ms);
         let knowledge_lag_secs =
             config
                 .pit_knowledge_lag_secs()
@@ -450,7 +449,7 @@ impl CalibrationArtifactFitPort for BiasTableFitService {
                 })?;
         let frozen = self.frozen_fit(&params).await?;
         let config = &frozen.favorite_longshot;
-        assert_disjoint_from_all_training_datasets(
+        assert_dataset_disjoint(
             self.training_dataset_repo.as_ref(),
             &window,
             "bias-table fit",
@@ -583,11 +582,6 @@ impl BiasTableFitService {
     }
 }
 
-/// Max book staleness for the PIT engine, from the frozen data-quality config.
-const fn book_staleness(data_quality: &DataQualityConfig) -> StdDuration {
-    StdDuration::from_millis(data_quality.max_book_age_ms)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -621,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_model_score_kind_with_market_price_bias_shaped_payload() {
+    fn rejects_model_score_payload() {
         // The exact "kind says X, payload is shaped like Y" drift this guard
         // exists to catch before serving a broken payload to the detail view.
         let info = base_info(
@@ -637,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_well_formed_market_price_bias_payload() {
+    fn accepts_well_formed_payload() {
         let info = base_info(
             CalibrationKind::MarketPriceBias,
             CalibrationArtifactPayload::MarketPriceBias(MarketPriceBiasPayload {

@@ -90,7 +90,7 @@ pub trait RecommendationReportRepository: Send + Sync {
 
     /// Report produced by an exact serving run. The schema enforces at most one
     /// report per non-null run id.
-    async fn find_by_model_run_id(
+    async fn find_by_model_run(
         &self,
         model_run_id: &ModelRunId,
     ) -> Result<Option<RecommendationReportInfo>, StorageError>;

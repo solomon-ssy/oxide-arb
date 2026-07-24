@@ -62,7 +62,7 @@ mod tests {
     use super::ShadowRankDelta;
 
     #[test]
-    fn rank_delta_rejects_incomplete_or_unknown_schema() {
+    fn rank_rejects_unknown_schema() {
         let valid = json!({
             "mean_abs_rank_delta": "1",
             "max_rank_delta": 2,

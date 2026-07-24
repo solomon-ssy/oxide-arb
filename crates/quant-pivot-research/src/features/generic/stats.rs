@@ -276,13 +276,13 @@ mod tests {
     }
 
     #[test]
-    fn simple_return_needs_two_points_and_nonzero_base() {
+    fn simple_return_needs_base() {
         assert_eq!(simple_return(&[Decimal::from(100)]), None);
         assert_eq!(simple_return(&[Decimal::ZERO, Decimal::from(5)]), None);
     }
 
     #[test]
-    fn realized_volatility_is_quantized_and_deterministic() {
+    fn realized_volatility_quantized_deterministic() {
         let series = [
             Decimal::from(100),
             Decimal::from(101),
@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn realized_volatility_needs_three_points() {
+    fn realized_volatility_needs_points() {
         assert_eq!(
             realized_volatility(&[Decimal::from(1), Decimal::from(2)]),
             None
@@ -305,14 +305,14 @@ mod tests {
     }
 
     #[test]
-    fn mean_reversion_centers_on_window_mean() {
+    fn mean_reversion_centers_mean() {
         let series = [Decimal::from(10), Decimal::from(20), Decimal::from(30)];
         // mean = 20, last = 30 ⇒ (20 - 30) / 20 = -0.5
         assert_eq!(mean_reversion(&series), Some(Decimal::new(-5, 1)));
     }
 
     #[test]
-    fn momentum_roc_not_equal_simple_return() {
+    fn momentum_roc_not_return() {
         // A price that runs up then reverses: the lag-skipped ROC (base → the
         // pre-reversal level) is positive, while the full-window simple return is
         // negative. Momentum is provably NOT a return clone (audit #2).
@@ -340,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn ema_last_smooths_toward_recent() {
+    fn ema_last_smooths_recent() {
         let series = timed(&[100, 100, 130], 60);
         let ema = ema_time_decayed(&series, 120)
             .expect("valid EMA input")
@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn ema_slope_is_signed_by_recent_move() {
+    fn ema_slope_signed_move() {
         let up = timed(&[100, 101, 105], 60);
         let down = timed(&[105, 101, 100], 60);
         assert!(
@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn ema_horizon_is_time_native_not_point_count() {
+    fn ema_horizon_not_count() {
         // The same price path sampled at two different cadences (dense vs.
         // sparse) must produce the same time-decayed EMA at matched elapsed
         // times — a fixed point-count span could not. Here both series span the
@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn ema_time_decayed_is_deterministic() {
+    fn ema_time_decayed_deterministic() {
         let series = timed(&[100, 102, 101, 105, 103], 45);
         let first = ema_time_decayed(&series, 90)
             .expect("valid EMA input")
@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn ema_rejects_non_monotonic_timestamps_instead_of_clamping_the_gap() {
+    fn ema_rejects_non_gap() {
         let series = [
             (60_000_i64, Decimal::from(100)),
             (30_000_i64, Decimal::from(101)),
@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn vol_adjusted_is_return_over_vol() {
+    fn vol_adjusted_return_vol() {
         assert_eq!(
             vol_adjusted(Decimal::new(6, 2), Decimal::new(2, 2)),
             Some(Decimal::from(3))
@@ -434,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn macd_time_defined_for_trending_series() {
+    fn macd_time_defined_series() {
         let series: Vec<(i64, Decimal)> = (0..30)
             .map(|i| (i * 30_000, Decimal::from(100 + i)))
             .collect();

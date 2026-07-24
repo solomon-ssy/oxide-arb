@@ -4,14 +4,12 @@
 //! wiring code can name it without threading the context path.
 
 // Crate-internal helpers.
-pub mod arc_repo;
+pub(crate) mod connection;
 pub(crate) mod error;
 pub(crate) mod primitives;
 pub(crate) mod query;
 pub(crate) mod state_hash;
 pub(crate) mod write;
-
-pub use arc_repo::arc_repo;
 
 pub mod catalog;
 pub mod governance;
@@ -20,8 +18,8 @@ pub mod rbac;
 
 // Flattened facade.
 pub use catalog::{
-    PgCatalogLedgerRepository, PgClobMarketInfoRepository, PgEventRepository, PgEventRepositoryTxn,
-    PgMarketRepository, PgMarketRepositoryTxn, clob_market_info, event, ingest, ledger, market,
+    PgCatalogLedgerRepository, PgClobMarketInfoRepository, PgEventRepository, PgMarketRepository,
+    clob_market_info, event, ingest, ledger, market,
 };
 pub use governance::{
     PgOperationLogRepository, PgPolicyRepository, PgRuntimeControlRepository,

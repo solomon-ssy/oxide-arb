@@ -422,7 +422,7 @@ mod tests {
     // Full fixtures live in the PostgreSQL system contract; this unit test
     // isolates the micro-unit representability invariant.
     #[test]
-    fn lot_shares_must_be_exact_outcome_token_micro_units() {
+    fn lot_shares_exact_units() {
         let result = super::shares_to_raw(Shares::new(dec!(0.0000001)));
         assert!(result.is_err());
     }

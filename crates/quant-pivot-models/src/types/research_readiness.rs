@@ -444,29 +444,31 @@ mod tests {
             .expect("valid timestamp")
     }
 
-    fn retention() -> RetentionRunwayEvidenceV1 {
-        let observed_at = observed_at();
-        RetentionRunwayEvidenceV1 {
-            format_version: RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
-            registry_hash: hash(1),
-            required_sources: vec![ResearchReadinessSource::ClobL2],
-            observed_at,
-            required_days: 200,
-            measured_history_days: Some(220),
-            active_raw_bytes: 5_000,
-            observations: vec![RetentionSourceObservationV1 {
-                source: ResearchReadinessSource::ClobL2,
-                storage: ResearchSourceStorageKind::ClickHouseTable,
-                object: "quant_book_l2_ledger".to_owned(),
-                time_column: "persisted_time".to_owned(),
-                earliest_event_time: Some(observed_at - Duration::days(220)),
-                latest_event_time: Some(observed_at),
-                row_count: 100,
-                active_bytes: Some(5_000),
-                active_partition_count: Some(8),
-                partition_key: Some("toYYYYMM(persisted_time)".to_owned()),
-                table_ttl_expression: None,
-            }],
+    impl RetentionRunwayEvidenceV1 {
+        fn test_fixture() -> Self {
+            let observed_at = observed_at();
+            Self {
+                format_version: RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION,
+                registry_hash: hash(1),
+                required_sources: vec![ResearchReadinessSource::ClobL2],
+                observed_at,
+                required_days: 200,
+                measured_history_days: Some(220),
+                active_raw_bytes: 5_000,
+                observations: vec![RetentionSourceObservationV1 {
+                    source: ResearchReadinessSource::ClobL2,
+                    storage: ResearchSourceStorageKind::ClickHouseTable,
+                    object: "quant_book_l2_ledger".to_owned(),
+                    time_column: "persisted_time".to_owned(),
+                    earliest_event_time: Some(observed_at - Duration::days(220)),
+                    latest_event_time: Some(observed_at),
+                    row_count: 100,
+                    active_bytes: Some(5_000),
+                    active_partition_count: Some(8),
+                    partition_key: Some("toYYYYMM(persisted_time)".to_owned()),
+                    table_ttl_expression: None,
+                }],
+            }
         }
     }
 
@@ -475,26 +477,26 @@ mod tests {
     }
 
     #[test]
-    fn retention_requires_measured_history_monthly_parts_and_no_table_ttl() {
-        let mut evidence = retention();
+    fn retention_requires_no_ttl() {
+        let mut evidence = RetentionRunwayEvidenceV1::test_fixture();
         assert!(evidence.proven());
 
         evidence.observations[0].partition_key = Some("toDate(persisted_time)".to_owned());
         assert!(!evidence.proven());
 
-        evidence = retention();
+        evidence = RetentionRunwayEvidenceV1::test_fixture();
         evidence.measured_history_days = Some(199);
         assert!(!evidence.proven());
 
-        evidence = retention();
+        evidence = RetentionRunwayEvidenceV1::test_fixture();
         evidence.observations[0].table_ttl_expression =
             Some("persisted_time + toIntervalDay(200) DELETE".to_owned());
         assert!(!evidence.proven());
     }
 
     #[test]
-    fn retention_requires_the_exact_registry_binding_set() {
-        let evidence = retention();
+    fn retention_requires_exact_set() {
+        let evidence = RetentionRunwayEvidenceV1::test_fixture();
         let registry = ResearchSourceRegistry {
             required_sources: evidence.required_sources.clone(),
             bindings: vec![ResearchSourceBinding {
@@ -515,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_registry_has_filtered_vertical_sources_and_domain_observations() {
+    fn canonical_registry_filtered_observations() {
         let registry = super::research_source_registry().expect("source registry");
         assert!(
             registry
@@ -540,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn shadow_profile_requires_all_dimensions_over_the_full_window() {
+    fn shadow_profile_requires_window() {
         let observed_at = observed_at();
         let mut evidence = ShadowLatencyProfileV1 {
             format_version: SHADOW_LATENCY_PROFILE_FORMAT_VERSION,

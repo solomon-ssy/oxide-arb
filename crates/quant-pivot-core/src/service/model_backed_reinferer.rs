@@ -92,7 +92,7 @@ impl ModelBackedExitSignalReinferer {
         let Some(version) = self
             .deps
             .model_registry
-            .find_model_version_by_id(model_version_id)
+            .find_model_version(model_version_id)
             .await
             .map_err(QuantError::from)?
         else {
@@ -838,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn find_lot_candidate_matches_token_and_side() {
+    fn find_lot_matches_side() {
         let lot = PositionInfo {
             position_id: PositionId::from_v7(),
             order_intent_id: OrderIntentId::from_v7(),
@@ -867,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_market_uses_lot_outcome_token_as_primary() {
+    fn selected_market_uses_primary() {
         let now = Utc::now();
         let market = MarketRegistryInfo {
             market_id: MarketId::new("m1"),
@@ -971,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn liquidity_score_cap_none_when_budget_non_positive() {
+    fn liquidity_score_non_positive() {
         let mut config = DecisionPolicySnapshot::default();
         // Positive budget + usage cap resolve a usable normalization cap.
         config
@@ -999,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_boundary_derives_each_cutoff_once_from_decision_time() {
+    fn runtime_boundary_derives_time() {
         let mut config = DecisionPolicySnapshot::default();
         config.report_schedule.schedules[0].knowledge_lag_secs = 10;
         config

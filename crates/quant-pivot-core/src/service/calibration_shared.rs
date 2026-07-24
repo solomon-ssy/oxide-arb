@@ -47,7 +47,7 @@ pub fn half_open_windows_overlap(
 /// # Errors
 ///
 /// Returns [`ResearchError::DatasetBuild`] on the first overlapping dataset.
-pub async fn assert_disjoint_from_all_training_datasets(
+pub async fn assert_dataset_disjoint(
     training_dataset_repo: &dyn TrainingDatasetRepository,
     window: &TimeWindow,
     fit_label: &str,
@@ -171,7 +171,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn half_open_overlap_detects_touching_intervals() {
+    fn half_open_detects_intervals() {
         let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let mid = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap();
         let end = Utc.with_ymd_and_hms(2026, 1, 3, 0, 0, 0).unwrap();
@@ -180,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn calibration_split_must_be_disjoint_and_embargoed_from_training() {
+    fn calibration_split_disjoint_training() {
         let train = TimeWindow {
             from: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             to: Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap(),

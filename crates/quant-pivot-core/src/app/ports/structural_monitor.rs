@@ -44,8 +44,7 @@ use crate::{
         book_store::BookStore,
         market_registry::MarketRegistry,
         trade_tape_health::{
-            cursors_by_contract_address, trade_tape_market_ingest_available,
-            trade_tape_route_lag_blocks,
+            cursors_by_contract_address, market_tape_available, tape_route_lag_blocks,
         },
     },
     prefetch::feature_window::FeatureWindowProvider,
@@ -231,12 +230,12 @@ impl CoreStructuralMonitor {
                     .map(|window| window.prints.clone())
                     .unwrap_or_default();
                 prints_by_market.insert(market.market_id.clone(), prints.clone());
-                let source_available = trade_tape_market_ingest_available(
+                let source_available = market_tape_available(
                     &self.trade_tape_on_chain,
                     &cursors_by_address,
                     market.neg_risk,
                 );
-                let lag_blocks = trade_tape_route_lag_blocks(market.neg_risk, &cursors_by_address);
+                let lag_blocks = tape_route_lag_blocks(market.neg_risk, &cursors_by_address);
                 concentration_market_view(
                     market,
                     &prints,
@@ -333,7 +332,7 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
             let covered = active_markets
                 .iter()
                 .filter(|market| {
-                    trade_tape_market_ingest_available(
+                    market_tape_available(
                         &self.trade_tape_on_chain,
                         &cursors_by_address,
                         market.neg_risk,
@@ -346,7 +345,7 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
         let missing_markets = active_markets
             .iter()
             .filter(|market| {
-                !trade_tape_market_ingest_available(
+                !market_tape_available(
                     &self.trade_tape_on_chain,
                     &cursors_by_address,
                     market.neg_risk,

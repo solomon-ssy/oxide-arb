@@ -87,7 +87,7 @@ impl Drop for DisposableDirectory {
 }
 
 #[tokio::test]
-async fn clean_boot_recovers_each_system_stage_and_restores_backups() {
+async fn clean_recovers_restores_backups() {
     let workspace = DisposableDirectory::new();
     let postgres = Postgres::default()
         .with_db_name("postgres")
@@ -140,13 +140,12 @@ async fn clean_boot_recovers_each_system_stage_and_restores_backups() {
     let journal_file = workspace.path().join(JOURNAL_FILE_NAME);
     let deploy = load_deploy(workspace.path());
 
-    assert_standard_fresh_postgres_deployment(workspace.path(), &bootstrap_password_file, &deploy)
-        .await;
+    assert_standard_fresh_deployment(workspace.path(), &bootstrap_password_file, &deploy).await;
     let first_operation =
         full_reset_cycle(workspace.path(), &journal_file, &bootstrap_password_file).await;
     assert_eq!(read_journal(&journal_file).operation_id, first_operation);
 
-    assert_reset_plan_rejects_live_owners(&deploy, workspace.path(), &journal_file).await;
+    assert_reset_rejects_owners(&deploy, workspace.path(), &journal_file).await;
 
     seed_partial_reset_markers(&deploy).await;
     let confirmation_operation = plan_reset(workspace.path(), &journal_file).await;
@@ -180,10 +179,10 @@ async fn clean_boot_recovers_each_system_stage_and_restores_backups() {
 
     seed_partial_reset_markers(&deploy).await;
     let postgres_failed_operation = plan_reset(workspace.path(), &journal_file).await;
-    set_postgres_create_database_allowed(&postgres, false).await;
+    set_postgres_create_allowed(&postgres, false).await;
     let postgres_failed_output =
         apply_planned_reset(workspace.path(), &journal_file, &bootstrap_password_file).await;
-    set_postgres_create_database_allowed(&postgres, true).await;
+    set_postgres_create_allowed(&postgres, true).await;
     assert_failed_apply(&postgres_failed_output, "PostgreSQL");
     assert_failed_journal(&journal_file, postgres_failed_operation, "applying");
     assert_postgres_failure_state(&deploy).await;
@@ -196,10 +195,10 @@ async fn clean_boot_recovers_each_system_stage_and_restores_backups() {
 
     seed_partial_reset_markers(&deploy).await;
     let clickhouse_failed_operation = plan_reset(workspace.path(), &journal_file).await;
-    set_clickhouse_drop_size_limit(&deploy, 1).await;
+    set_clickhouse_drop_limit(&deploy, 1).await;
     let clickhouse_failed_output =
         apply_planned_reset(workspace.path(), &journal_file, &bootstrap_password_file).await;
-    set_clickhouse_drop_size_limit(&deploy, 0).await;
+    set_clickhouse_drop_limit(&deploy, 0).await;
     assert_failed_apply(&clickhouse_failed_output, "ClickHouse");
     assert_failed_journal(&journal_file, clickhouse_failed_operation, "postgres_reset");
     assert_clickhouse_failure_state(&deploy).await;
@@ -228,7 +227,7 @@ async fn clean_boot_recovers_each_system_stage_and_restores_backups() {
     verify_clickhouse_backup_restore(&deploy).await;
 }
 
-async fn assert_standard_fresh_postgres_deployment(
+async fn assert_standard_fresh_deployment(
     config_dir: &Path,
     bootstrap_password_file: &Path,
     deploy: &DeployConfig,
@@ -510,7 +509,7 @@ async fn seed_partial_reset_markers(deploy: &DeployConfig) {
         .expect("seed foreign Redis marker");
 }
 
-async fn set_clickhouse_drop_size_limit(deploy: &DeployConfig, bytes: u64) {
+async fn set_clickhouse_drop_limit(deploy: &DeployConfig, bytes: u64) {
     ClickHousePool::from_config(&deploy.db.clickhouse)
         .client()
         .query(&format!(
@@ -565,7 +564,7 @@ async fn configure_disposable_postgres_user(container: &ContainerAsync<Postgres>
         .expect("configure disposable PostgreSQL application user");
 }
 
-async fn set_postgres_create_database_allowed(container: &ContainerAsync<Postgres>, allowed: bool) {
+async fn set_postgres_create_allowed(container: &ContainerAsync<Postgres>, allowed: bool) {
     let attributes = if allowed { "CREATEDB" } else { "NOCREATEDB" };
     let statement = format!("ALTER ROLE quant_pivot {attributes}");
     let mut execution = container
@@ -729,7 +728,7 @@ async fn assert_clean_recovery_state(deploy: &DeployConfig) {
     postgres.close().await;
 }
 
-async fn assert_reset_plan_rejects_live_owners(
+async fn assert_reset_rejects_owners(
     deploy: &DeployConfig,
     config_dir: &Path,
     journal_file: &Path,
@@ -758,7 +757,7 @@ async fn assert_reset_plan_rejects_live_owners(
     let active_query = tokio::spawn(async move {
         query_client
             .query(
-                "SELECT sleepEachRow(0.02) FROM numbers(10000) \
+                "SELECT sleepEachRow(0.02) FROM numbers(1000000) \
                  SETTINGS max_block_size = 1",
             )
             .with_setting("query_id", task_query_id)
@@ -784,9 +783,10 @@ async fn assert_reset_plan_rejects_live_owners(
     let clickhouse_denial = run_xtask(reset_plan_args(config_dir, journal_file), None).await;
     assert!(!clickhouse_denial.status.success());
     assert_output_redacted(&clickhouse_denial);
+    let clickhouse_stderr = String::from_utf8_lossy(&clickhouse_denial.stderr);
     assert!(
-        String::from_utf8_lossy(&clickhouse_denial.stderr)
-            .contains("active ClickHouse project queries")
+        clickhouse_stderr.contains("active ClickHouse project queries"),
+        "unexpected ClickHouse reset denial:\n{clickhouse_stderr}"
     );
     clickhouse
         .client()

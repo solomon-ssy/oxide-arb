@@ -33,7 +33,7 @@ fn market_by_condition_body() -> Value {
 }
 
 #[tokio::test]
-async fn gamma_get_market_deserializes_from_mock() {
+async fn gamma_get_deserializes_mock() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/markets"))
@@ -64,7 +64,7 @@ async fn gamma_get_market_deserializes_from_mock() {
 }
 
 #[tokio::test]
-async fn gamma_get_market_unknown_condition_id_is_an_error() {
+async fn gamma_get_unknown_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/markets"))
@@ -85,7 +85,7 @@ async fn gamma_get_market_unknown_condition_id_is_an_error() {
 }
 
 #[tokio::test]
-async fn gamma_resolution_derives_winner_from_outcome_prices() {
+async fn gamma_resolution_derives_prices() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/markets"))
@@ -130,7 +130,7 @@ async fn gamma_resolution_derives_winner_from_outcome_prices() {
 }
 
 #[tokio::test]
-async fn gamma_resolution_open_market_yields_none() {
+async fn gamma_resolution_open_none() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/markets"))
@@ -199,7 +199,7 @@ async fn gamma_retries_on_429() {
 }
 
 #[tokio::test]
-async fn gamma_full_sync_follows_keyset_cursor() {
+async fn gamma_full_sync_cursor() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
@@ -265,7 +265,7 @@ async fn gamma_full_sync_follows_keyset_cursor() {
 }
 
 #[tokio::test]
-async fn gamma_full_sync_retries_transient_invalid_json_without_logging_body() {
+async fn gamma_invalid_without_body() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/events/keyset"))
@@ -300,7 +300,7 @@ async fn gamma_full_sync_retries_transient_invalid_json_without_logging_body() {
 }
 
 #[tokio::test]
-async fn gamma_full_sync_does_not_retry_structural_contract_drift() {
+async fn gamma_never_retries_drift() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/events/keyset"))
@@ -328,7 +328,7 @@ async fn gamma_full_sync_does_not_retry_structural_contract_drift() {
 }
 
 #[tokio::test]
-async fn gamma_keyset_page_budget_rejects_unbounded_continuation() {
+async fn gamma_rejects_unbounded_continuation() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/events/keyset"))
@@ -357,7 +357,7 @@ async fn gamma_keyset_page_budget_rejects_unbounded_continuation() {
 }
 
 #[tokio::test]
-async fn gamma_token_discovery_uses_the_shared_keyset_paginator() {
+async fn gamma_token_uses_paginator() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/events/keyset"))

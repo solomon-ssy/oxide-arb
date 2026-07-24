@@ -113,7 +113,7 @@ mod tests {
     use super::{RpcError, redact_urls};
 
     #[test]
-    fn display_redacts_rpc_path_query_and_userinfo() {
+    fn display_redacts_rpc_userinfo() {
         let error = RpcError::CallFailed {
             method: "eth_getLogs".to_owned(),
             reason:
@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn redaction_preserves_punctuation_and_multiple_urls() {
+    fn redaction_preserves_punctuation_urls() {
         assert_eq!(
             redact_urls(
                 "primary (https://one.example/key), fallback http://two.example/path failed"
@@ -142,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn host_only_url_is_not_modified() {
+    fn host_only_not_modified() {
         assert_eq!(
             redact_urls("provider https://polygon.example failed"),
             "provider https://polygon.example failed"

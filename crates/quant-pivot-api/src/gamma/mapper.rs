@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_and_registry_share_the_same_pair_and_categories() {
+    fn upsert_registry_share_categories() {
         let batch = batch_from(
             r#"{
                 "id": "evt-1",
@@ -260,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn settled_market_carries_winning_outcome_and_close_time() {
+    fn settled_market_carries_time() {
         let batch = batch_from(
             r#"{
                 "id": "evt-1",
@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn settled_market_without_closed_time_keeps_resolution_time_unknown() {
+    fn missing_close_keeps_unknown() {
         let batch = batch_from(
             r#"{
                 "id": "evt-1",
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_markets_flow_into_the_batch() {
+    fn rejected_markets_into_batch() {
         let batch = batch_from(
             r#"{
                 "id": "evt-1",

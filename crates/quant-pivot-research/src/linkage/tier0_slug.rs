@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_updown_slug_parses_and_grounds() {
+    fn deterministic_updown_parses_grounds() {
         // 1780319100 = 2026-06-01T13:05:00Z, aligned to 300s.
         let source = grounded("btc-updown-5m-1780319100");
         let candidate = Tier0SlugExtractor
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_description_yields_no_candidate() {
+    fn missing_description_no_candidate() {
         // Fail-open regression guard: without a literal oracle anchor in the
         // description, Tier 0 must produce NO candidate — never a guessed
         // Chainlink default from the ruleset.
@@ -237,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn unrecognized_oracle_text_yields_no_candidate() {
+    fn unrecognized_oracle_no_candidate() {
         assert!(
             Tier0SlugExtractor
                 .extract(&metadata(
@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn misaligned_or_unknown_slugs_fall_through() {
+    fn misaligned_unknown_slugs_fall() {
         // Epoch not aligned to the 5m boundary.
         assert!(
             Tier0SlugExtractor
@@ -275,14 +275,14 @@ mod tests {
     }
 
     #[test]
-    fn window_bounds_derive_from_the_epoch() {
+    fn window_bounds_derive_epoch() {
         let (open, close) = window_bounds("eth-updown-15m-1780318800").expect("bounds");
         assert_eq!((close - open).num_seconds(), 900);
         assert_eq!(open.timestamp(), 1_780_318_800);
     }
 
     #[test]
-    fn every_supported_asset_parses_every_epoch_interval() {
+    fn supported_asset_parses_interval() {
         const ALIGNED_EPOCH: i64 = 1_800_000_000;
         for rule in rules() {
             let feed = rule.chainlink_feed.to_ascii_lowercase();

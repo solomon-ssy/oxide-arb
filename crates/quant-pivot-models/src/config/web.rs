@@ -40,7 +40,7 @@ impl Default for WebConfig {
 impl WebConfig {
     /// Whether the HS256 signing key is exactly 256 bits after `Base64URL` decoding.
     #[must_use]
-    pub fn jwt_signing_key_is_configured(&self) -> bool {
+    pub fn has_jwt_signing_key(&self) -> bool {
         self.jwt.signing_key_bytes().is_ok()
     }
 }
@@ -127,7 +127,7 @@ mod tests {
     use super::WebConfig;
 
     #[test]
-    fn defaults_are_sensible_and_fail_closed_without_a_key() {
+    fn defaults_rejects_without_key() {
         let cfg = WebConfig::default();
         assert_eq!(cfg.listen_host, "0.0.0.0");
         assert_eq!(cfg.listen_port, 8080);
@@ -137,31 +137,31 @@ mod tests {
         assert_eq!(cfg.jwt.access_ttl_secs, 900);
         assert_eq!(cfg.jwt.refresh_ttl_secs, 604_800);
         assert_eq!(cfg.jwt.absolute_session_ttl_secs, 2_592_000);
-        assert!(!cfg.jwt_signing_key_is_configured());
+        assert!(!cfg.has_jwt_signing_key());
     }
 
     #[test]
-    fn nested_jwt_plaintext_deserializes_and_is_redacted() {
+    fn nested_jwt_deserializes_redacted() {
         let cfg: WebConfig = serde_json::from_str(
             r#"{ "listen_port": 9090, "jwt": { "signing_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "access_ttl_secs": 60 } }"#,
         )
         .expect("valid web config");
         assert_eq!(cfg.listen_port, 9090);
-        assert!(cfg.jwt_signing_key_is_configured());
+        assert!(cfg.has_jwt_signing_key());
         assert!(!format!("{cfg:?}").contains("AAAAAAAAAAAAAAAA"));
         assert_eq!(cfg.jwt.access_ttl_secs, 60);
         assert_eq!(cfg.jwt.refresh_ttl_secs, 604_800);
     }
 
     #[test]
-    fn resolved_signing_key_is_accepted() {
+    fn resolved_signing_key_accepted() {
         let mut cfg = WebConfig::default();
         cfg.jwt.signing_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into();
-        assert!(cfg.jwt_signing_key_is_configured());
+        assert!(cfg.has_jwt_signing_key());
     }
 
     #[test]
-    fn signing_key_rejects_passwords_short_keys_and_padding() {
+    fn signing_key_rejects_padding() {
         for invalid in [
             "human-password",
             "c2hvcnQ",
@@ -169,7 +169,7 @@ mod tests {
         ] {
             let mut cfg = WebConfig::default();
             cfg.jwt.signing_key = invalid.into();
-            assert!(!cfg.jwt_signing_key_is_configured());
+            assert!(!cfg.has_jwt_signing_key());
         }
     }
 }

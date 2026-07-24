@@ -537,7 +537,7 @@ mod tests {
     use super::BreakerThresholds;
 
     #[test]
-    fn breaker_thresholds_reject_negative_daily_cap() {
+    fn breaker_thresholds_reject_cap() {
         let config = ExecutionBreakerConfig {
             daily_realized_loss_cap_usd: DecimalValue::new(dec!(-1)),
             ..ExecutionBreakerConfig::default()

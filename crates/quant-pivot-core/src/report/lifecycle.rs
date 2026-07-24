@@ -110,8 +110,8 @@ impl ReportLifecycleService {
     }
 
     /// Install the order-intent terminal event sink (idempotent; first set wins).
-    pub fn set_intent_terminal_event_sink(&self, sink: Arc<dyn IntentTerminalEventSink>) {
-        self.publisher.set_intent_terminal_event_sink(sink);
+    pub fn set_intent_event_sink(&self, sink: Arc<dyn IntentTerminalEventSink>) {
+        self.publisher.set_intent_event_sink(sink);
     }
 
     /// Idempotently enqueue an ad-hoc report and return its durable run row.
@@ -268,7 +268,7 @@ impl ReportLifecycleService {
             .await?
             .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
 
-        if !is_parity_contained_report_status(current.status) {
+        if !parity_is_contained(current.status) {
             match self
                 .report_repo
                 .revoke(
@@ -284,7 +284,7 @@ impl ReportLifecycleService {
                     self.publisher
                         .publish_invalidated_intents(&invalidated_intents, occurred_at);
                 }
-                Err(error) if is_report_revoke_transition_conflict(&error, report_id) => {
+                Err(error) if revoke_transition_conflicts(&error, report_id) => {
                     let latest =
                         self.report_repo
                             .find_by_id(report_id)
@@ -292,7 +292,7 @@ impl ReportLifecycleService {
                             .ok_or_else(|| {
                                 StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id)
                             })?;
-                    if !is_parity_contained_report_status(latest.status) {
+                    if !parity_is_contained(latest.status) {
                         return Err(error.into());
                     }
                 }
@@ -424,7 +424,7 @@ impl ReportLifecycleService {
     /// Build and freeze a claimed run without touching the report/run commit.
     /// The coordinator keeps the lease alive while this future is in flight.
     pub(crate) async fn prepare_claimed(&self, run: &ReportRunInfo) -> QuantResult<ComposedReport> {
-        let (request, _) = build_request_from_claimed_run(run)?;
+        let (request, _) = build_claimed_request(run)?;
         self.feature_parity_gate
             .ensure_clear("new report generation")
             .await?;
@@ -449,7 +449,7 @@ impl ReportLifecycleService {
         run: &ReportRunInfo,
         composed: ComposedReport,
     ) -> QuantResult<RecommendationReportInfo> {
-        let (_, claim) = build_request_from_claimed_run(run)?;
+        let (_, claim) = build_claimed_request(run)?;
         let prepared = self
             .report_repo
             .create_prepared_report(claim, composed.transaction)
@@ -479,9 +479,7 @@ impl ReportLifecycleService {
     }
 }
 
-fn build_request_from_claimed_run(
-    run: &ReportRunInfo,
-) -> QuantResult<(BuildReportRequest, ReportRunClaim)> {
+fn build_claimed_request(run: &ReportRunInfo) -> QuantResult<(BuildReportRequest, ReportRunClaim)> {
     if run.status != ReportRunStatus::Running {
         return Err(ReportError::ContractViolation {
             detail: format!("report run {} is not Running", run.report_run_id),
@@ -631,7 +629,7 @@ fn operation_detail(reason: &str) -> QuantResult<OperationDetailDocument> {
     )
 }
 
-const fn is_parity_contained_report_status(status: RecommendationReportStatus) -> bool {
+const fn parity_is_contained(status: RecommendationReportStatus) -> bool {
     matches!(
         status,
         RecommendationReportStatus::Superseded
@@ -641,10 +639,7 @@ const fn is_parity_contained_report_status(status: RecommendationReportStatus) -
     )
 }
 
-fn is_report_revoke_transition_conflict(
-    error: &StorageError,
-    report_id: &RecommendationReportId,
-) -> bool {
+fn revoke_transition_conflicts(error: &StorageError, report_id: &RecommendationReportId) -> bool {
     let expected_id = report_id.to_string();
     matches!(
         error,
@@ -666,25 +661,25 @@ mod parity_containment_tests {
     use super::*;
 
     #[test]
-    fn only_terminal_report_states_skip_parity_revoke() {
+    fn only_terminal_report_revoke() {
         for status in [
             RecommendationReportStatus::Superseded,
             RecommendationReportStatus::Obsolete,
             RecommendationReportStatus::Revoked,
             RecommendationReportStatus::Expired,
         ] {
-            assert!(is_parity_contained_report_status(status));
+            assert!(parity_is_contained(status));
         }
         for status in [
             RecommendationReportStatus::Prepared,
             RecommendationReportStatus::Published,
         ] {
-            assert!(!is_parity_contained_report_status(status));
+            assert!(!parity_is_contained(status));
         }
     }
 
     #[test]
-    fn only_exact_report_revoke_transition_conflict_is_retry_classified() {
+    fn only_exact_report_classified() {
         let report_id = RecommendationReportId::from_v7();
         let exact = StorageError::illegal_transition(
             QUANT_RECOMMENDATION_REPORT,
@@ -692,7 +687,7 @@ mod parity_containment_tests {
             RecommendationReportStatus::Expired.as_str(),
             RecommendationReportStatus::Revoked.as_str(),
         );
-        assert!(is_report_revoke_transition_conflict(&exact, &report_id));
+        assert!(revoke_transition_conflicts(&exact, &report_id));
 
         let unrelated_report = StorageError::illegal_transition(
             QUANT_RECOMMENDATION_REPORT,
@@ -700,21 +695,15 @@ mod parity_containment_tests {
             RecommendationReportStatus::Expired.as_str(),
             RecommendationReportStatus::Revoked.as_str(),
         );
-        assert!(!is_report_revoke_transition_conflict(
-            &unrelated_report,
-            &report_id
-        ));
+        assert!(!revoke_transition_conflicts(&unrelated_report, &report_id));
         let unrelated_entity = StorageError::illegal_transition(
             QUANT_RECOMMENDATION,
             Some(&report_id),
             "attributed",
             "revoked",
         );
-        assert!(!is_report_revoke_transition_conflict(
-            &unrelated_entity,
-            &report_id
-        ));
-        assert!(!is_report_revoke_transition_conflict(
+        assert!(!revoke_transition_conflicts(&unrelated_entity, &report_id));
+        assert!(!revoke_transition_conflicts(
             &StorageError::Connection("database unavailable".to_owned()),
             &report_id
         ));

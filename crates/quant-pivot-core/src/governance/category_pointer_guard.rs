@@ -51,7 +51,7 @@ impl CategoryPointerGuard {
             let version_id = reference.id;
             let version = self
                 .model_registry
-                .find_model_version_by_id(&version_id)
+                .find_model_version(&version_id)
                 .await
                 .map_err(|error| {
                     ControlError::Precondition(format!(
@@ -167,7 +167,7 @@ mod tests {
         ) -> Result<ModelSpecInfo, StorageError> {
             unimplemented!()
         }
-        async fn find_model_spec_by_id(
+        async fn find_model_spec(
             &self,
             model_spec_id: &ModelSpecId,
         ) -> Result<Option<ModelSpecInfo>, StorageError> {
@@ -185,7 +185,7 @@ mod tests {
         ) -> Result<i32, StorageError> {
             unimplemented!()
         }
-        async fn find_model_version_by_id(
+        async fn find_model_version(
             &self,
             model_version_id: &ModelVersionId,
         ) -> Result<Option<ModelVersionInfo>, StorageError> {
@@ -241,7 +241,7 @@ mod tests {
         ) -> Result<ModelVersionInfo, StorageError> {
             unimplemented!()
         }
-        async fn set_publish_path_set_id(
+        async fn set_publish_path(
             &self,
             _model_version_id: &ModelVersionId,
             _publish_path_set_id: Option<BacktestPathSetId>,
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn correctly_scoped_pointer_is_accepted() {
+    async fn correctly_scoped_pointer_accepted() {
         let (guard, version_id) =
             seeded_guard(Some(MarketCategory::Crypto), PublicationStatus::Published).await;
         let config = config_with(MarketCategory::Crypto, &version_id);
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_unscoped_artifact_is_rejected_as_a_category_pointer() {
+    async fn generic_unscoped_rejected_pointer() {
         let (guard, version_id) = seeded_guard(None, PublicationStatus::Published).await;
         let config = config_with(MarketCategory::Crypto, &version_id);
         let error = guard.validate(&config).await.expect_err("must reject");
@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_published_version_is_rejected() {
+    async fn non_published_version_rejected() {
         let (guard, version_id) =
             seeded_guard(Some(MarketCategory::Crypto), PublicationStatus::Candidate).await;
         let config = config_with(MarketCategory::Crypto, &version_id);
@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_pointers_are_always_accepted() {
+    async fn empty_pointers_always_accepted() {
         let (guard, _version_id) =
             seeded_guard(Some(MarketCategory::Crypto), PublicationStatus::Published).await;
         assert!(guard.validate(&ModelConfig::default()).await.is_ok());

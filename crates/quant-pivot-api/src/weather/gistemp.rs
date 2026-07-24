@@ -195,7 +195,7 @@ mod tests {
     use super::NasaGistempSource;
 
     #[tokio::test]
-    async fn parses_months_and_skips_unpublished_markers() {
+    async fn parses_months_skips_markers() {
         let server = MockServer::start().await;
         let body = concat!(
             "Land-Ocean: Global Means\n",

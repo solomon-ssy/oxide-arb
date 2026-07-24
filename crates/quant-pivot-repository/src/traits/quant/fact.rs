@@ -101,7 +101,7 @@ pub trait QuantFactRepository: Send + Sync {
         rows: Vec<QuantPositionEventRow>,
     ) -> Result<(), StorageError>;
 
-    async fn insert_exit_signal_evaluation_events(
+    async fn insert_exit_signal_events(
         &self,
         rows: Vec<QuantExitSignalEvaluationEventRow>,
     ) -> Result<(), StorageError>;

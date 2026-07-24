@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_matrix_preserves_raw_cell_states_and_real_run_id() {
+    fn feature_matrix_preserves_id() {
         let present = vector(Some(FeatureCell::observed(
             FeatureValue::Decimal(dec!(0.02)),
             None,
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_weighted_input_preserves_factor_bytes_and_real_run_id() {
+    fn frozen_weighted_preserves_id() {
         let feature_vector = vector(None);
         let selected_market = market();
         let decision_at = feature_vector.decision_at;

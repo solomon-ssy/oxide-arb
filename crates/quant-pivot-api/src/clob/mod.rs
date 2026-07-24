@@ -649,7 +649,7 @@ impl ClobClient {
 
     /// Attach a hook invoked when REST book ingest rejects an invalid level.
     #[must_use]
-    pub fn with_book_level_reject_hook(mut self, hook: Option<BookLevelRejectHook>) -> Self {
+    pub fn with_level_reject_hook(mut self, hook: Option<BookLevelRejectHook>) -> Self {
         self.on_book_level_rejected = hook;
         self
     }

@@ -612,14 +612,13 @@ impl FeatureParityExecutor {
         self.metrics
             .record_feature_parity_run(completed.kind.as_str(), completed.status.as_str());
         let completed = if completed.status == FeatureParityRunStatus::Mismatched {
-            self.metrics.set_feature_parity_latch_open(true);
+            self.metrics.set_parity_latch_open(true);
             self.ensure_containment(&completed, &outcome.mismatched_report_ids)
                 .await?
         } else {
             completed
         };
-        let completed_rows =
-            non_negative_count_to_u64(completed.total_count, "completed parity rows")?;
+        let completed_rows = nonnegative_count(completed.total_count, "completed parity rows")?;
         progress.report(ResearchJobProgress::with_total(
             "finalize",
             completed_rows,
@@ -674,7 +673,7 @@ impl FeatureParityExecutor {
                 detail.to_owned(),
             )
             .await?;
-        self.metrics.set_feature_parity_latch_open(true);
+        self.metrics.set_parity_latch_open(true);
         if let Err(containment_error) = self.ensure_containment(&failed, &[]).await {
             return Err(ResearchError::Determinism {
                 detail: format!(
@@ -728,7 +727,7 @@ fn count_to_u64(count: usize, field: &'static str) -> QuantResult<u64> {
     })
 }
 
-fn non_negative_count_to_u64(count: i64, field: &'static str) -> QuantResult<u64> {
+fn nonnegative_count(count: i64, field: &'static str) -> QuantResult<u64> {
     u64::try_from(count).map_err(|error| {
         ResearchError::Determinism {
             detail: format!("{field} must be non-negative and fit u64: {error}"),
@@ -922,8 +921,8 @@ impl OutcomeEvidence {
             .into());
         }
         self.seen.insert(comparison.sampling_key.clone());
-        validate_evidence(&comparison.online)?;
-        validate_evidence(&comparison.replay)?;
+        comparison.online.validate_evidence()?;
+        comparison.replay.validate_evidence()?;
         let matched = comparison.online == comparison.replay;
         if matched {
             self.matched += 1;
@@ -964,7 +963,7 @@ impl OutcomeEvidence {
         validate_replayed_key(expected, &pending.sampling_key, pending.decision_at)?;
         self.seen.insert(pending.sampling_key.clone());
         if let Some(online) = pending.online.as_ref() {
-            validate_evidence(online)?;
+            (online).validate_evidence()?;
         }
         self.rows.push(pending_row(
             run,
@@ -1098,14 +1097,16 @@ fn validate_replayed_key(
     Ok(())
 }
 
-fn validate_evidence(evidence: &FeatureParityEvidence) -> QuantResult<()> {
-    if evidence.fingerprint.trim().is_empty() {
-        return Err(ResearchError::Determinism {
-            detail: "parity evidence fingerprint must not be empty".to_owned(),
+impl FeatureParityEvidence {
+    fn validate_evidence(&self) -> QuantResult<()> {
+        if self.fingerprint.trim().is_empty() {
+            return Err(ResearchError::Determinism {
+                detail: "parity evidence fingerprint must not be empty".to_owned(),
+            }
+            .into());
         }
-        .into());
+        Ok(())
     }
-    Ok(())
 }
 
 fn stable_parity_event_id(
@@ -1750,28 +1751,30 @@ mod tests {
         }
     }
 
-    fn comparison(
-        now: DateTime<Utc>,
-        online: FeatureParityEvidence,
-        replay: FeatureParityEvidence,
-    ) -> FeatureParityComparison {
-        FeatureParityComparison {
-            sampling_key: "report-a/market-001".to_owned(),
-            decision_at: now,
-            stage: FeatureParityStage::FeatureCell,
-            report_id: None,
-            model_run_id: None,
-            model_version_id: None,
-            training_dataset_id: None,
-            market_id: None,
-            feature_name: Some("book.spread_bps".to_owned()),
-            reason: None,
-            online,
-            replay,
-            transform_hash: None,
-            detail: FeatureParityDetailSource::FeatureCell {
-                feature_vector_id: FeatureVectorId::from_v7(),
-            },
+    impl FeatureParityComparison {
+        fn fixture(
+            now: DateTime<Utc>,
+            online: FeatureParityEvidence,
+            replay: FeatureParityEvidence,
+        ) -> Self {
+            Self {
+                sampling_key: "report-a/market-001".to_owned(),
+                decision_at: now,
+                stage: FeatureParityStage::FeatureCell,
+                report_id: None,
+                model_run_id: None,
+                model_version_id: None,
+                training_dataset_id: None,
+                market_id: None,
+                feature_name: Some("book.spread_bps".to_owned()),
+                reason: None,
+                online,
+                replay,
+                transform_hash: None,
+                detail: FeatureParityDetailSource::FeatureCell {
+                    feature_vector_id: FeatureVectorId::from_v7(),
+                },
+            }
         }
     }
 
@@ -1805,7 +1808,7 @@ mod tests {
     }
 
     #[test]
-    fn sampled_run_uses_maximum_of_ten_percent_and_twenty() {
+    fn sampled_run_uses_twenty() {
         let small = deterministic_sample(
             FeatureParityRunKind::Sampled,
             (0..12).map(candidate).collect(),
@@ -1829,7 +1832,7 @@ mod tests {
     }
 
     #[test]
-    fn sampling_is_stable_across_source_order() {
+    fn sampling_stable_across_order() {
         let forward: Vec<_> = (0..100).map(candidate).collect();
         let mut reverse = forward.clone();
         reverse.reverse();
@@ -1847,14 +1850,15 @@ mod tests {
     }
 
     #[test]
-    fn parity_event_identity_is_retry_idempotent_and_status_sensitive() {
+    fn parity_event_identity_sensitive() {
         let now = Utc::now();
         let run = run(now);
         let contract_hash = run
             .feature_contract_hash
             .as_ref()
             .expect("feature contract hash");
-        let compared = comparison(now, evidence("same", now), evidence("same", now));
+        let compared =
+            FeatureParityComparison::fixture(now, evidence("same", now), evidence("same", now));
         let first = comparison_row(
             &run,
             contract_hash,
@@ -1885,7 +1889,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_sampling_keys_fail_closed() {
+    fn duplicate_sampling_keys_rejects() {
         let duplicate = candidate(1);
         let error = deterministic_sample(
             FeatureParityRunKind::Sampled,
@@ -1896,7 +1900,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_selection_uses_report_subject_without_fake_market() {
+    fn empty_uses_without_market() {
         let now = Utc::now();
         let run = run(now);
         let report_candidate = FeatureParityCandidate {
@@ -1918,7 +1922,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_evidence_passes_but_cutoff_skew_mismatches() {
+    fn exact_evidence_passes_mismatches() {
         let now = Utc::now();
         let run = run(now);
         let candidates = vec![FeatureParityCandidate {
@@ -1932,7 +1936,11 @@ mod tests {
             &run,
             &candidates,
             FeatureParityReplayAttempt {
-                comparisons: vec![comparison(now, online.clone(), online.clone())],
+                comparisons: vec![FeatureParityComparison::fixture(
+                    now,
+                    online.clone(),
+                    online.clone(),
+                )],
                 pending: Vec::new(),
             },
         )
@@ -1946,7 +1954,7 @@ mod tests {
             &run,
             &candidates,
             FeatureParityReplayAttempt {
-                comparisons: vec![comparison(now, online, replay)],
+                comparisons: vec![FeatureParityComparison::fixture(now, online, replay)],
                 pending: Vec::new(),
             },
         )
@@ -1959,7 +1967,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_lag_is_pending_not_mismatch() {
+    fn writer_lag_not_mismatch() {
         let now = Utc::now();
         let run = run(now);
         let candidates = vec![FeatureParityCandidate {
@@ -2000,7 +2008,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deterministic_mismatch_opens_latch_contains_reports_and_returns_containment_stamp() {
+    async fn deterministic_mismatch_contains_stamp() {
         let now = Utc::now();
         let run = run(now);
         let report_id = RecommendationReportId::from_v7();
@@ -2011,7 +2019,7 @@ mod tests {
             decision_at: now,
         };
         let online = evidence("online", now);
-        let mut mismatch = comparison(now, online, evidence("replay", now));
+        let mut mismatch = FeatureParityComparison::fixture(now, online, evidence("replay", now));
         mismatch.report_id = Some(report_id);
         mismatch.model_run_id = match &candidate.subject {
             FeatureParitySubject::ModelRun(run_id) => Some(*run_id),
@@ -2059,7 +2067,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_pending_materialization_fails_closed_and_contains() {
+    async fn expired_pending_rejects_contains() {
         let now = Utc::now();
         let mut run = run(now);
         run.pending_since = Some(now - Duration::minutes(11));
@@ -2136,7 +2144,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn report_incident_deduplicates_explicit_and_bound_reports_without_broad_lookup() {
+    async fn report_incident_without_lookup() {
         let now = Utc::now();
         let mut run = run(now);
         run.status = FeatureParityRunStatus::Mismatched;
@@ -2175,7 +2183,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn report_incident_falls_back_to_window_and_attempts_every_report_on_failure() {
+    async fn report_incident_falls_failure() {
         let now = Utc::now();
         let mut run = run(now);
         run.status = FeatureParityRunStatus::Failed;

@@ -193,7 +193,7 @@ fn assert_merged_concurrent_bundle(
     );
 }
 
-pub async fn active_resources_are_loaded_in_one_typed_set_and_approvals_are_single_use() {
+pub async fn active_resources_loaded_use() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     bootstrap_default_policy_bundle(
@@ -345,7 +345,7 @@ pub async fn active_resources_are_loaded_in_one_typed_set_and_approvals_are_sing
     ));
 }
 
-pub async fn outbox_failure_rolls_back_activation_snapshot_guard_and_approval_consumption() {
+pub async fn outbox_failure_rolls_consumption() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     bootstrap_default_policy_bundle(
@@ -436,7 +436,7 @@ pub async fn outbox_failure_rolls_back_activation_snapshot_guard_and_approval_co
     );
 }
 
-pub async fn rollback_records_a_new_generation_when_content_hash_matches_history() {
+pub async fn rollback_generation_matches_history() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     bootstrap_default_policy_bundle(
@@ -533,7 +533,7 @@ pub async fn rollback_records_a_new_generation_when_content_hash_matches_history
     );
 }
 
-pub async fn concurrent_resource_activations_fail_stale_then_rebase_without_lost_updates() {
+pub async fn concurrent_rebase_preserves_updates() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     bootstrap_default_policy_bundle(
@@ -588,7 +588,7 @@ pub async fn concurrent_resource_activations_fail_stale_then_rebase_without_lost
         2
     );
 
-    let (winner, stale) = activate_concurrent_candidates(&db, &recommendation, &execution).await;
+    let (winner, stale) = recommendation.race_activation(&db, &execution).await;
     assert_eq!(winner.1.outcome, PolicyActivationOutcome::Committed);
     assert!(matches!(
         stale.1,
@@ -671,33 +671,33 @@ pub async fn concurrent_resource_activations_fail_stale_then_rebase_without_lost
     );
 }
 
-async fn activate_concurrent_candidates(
-    db: &DatabaseConnection,
-    recommendation: &PreparedCandidate,
-    execution: &PreparedCandidate,
-) -> (
-    (ConfigResourceKind, PolicyActivationCommit),
-    (ConfigResourceKind, StorageError),
-) {
-    let recommendation_repo = PgPolicyRepository::new(db.clone());
-    let execution_repo = PgPolicyRepository::new(db.clone());
-    let (recommendation_result, execution_result) = tokio::join!(
-        recommendation_repo.activate_resource(
-            recommendation.activation.clone(),
-            recommendation.snapshot.clone(),
-        ),
-        execution_repo.activate_resource(execution.activation.clone(), execution.snapshot.clone()),
-    );
-    match (recommendation_result, execution_result) {
-        (Ok(winner), Err(stale)) => (
-            (ConfigResourceKind::RecommendationPolicy, winner),
-            (ConfigResourceKind::ExecutionRiskPolicy, stale),
-        ),
-        (Err(stale), Ok(winner)) => (
-            (ConfigResourceKind::ExecutionRiskPolicy, winner),
-            (ConfigResourceKind::RecommendationPolicy, stale),
-        ),
-        results => panic!("exactly one same-generation activation must commit: {results:?}"),
+impl PreparedCandidate {
+    async fn race_activation(
+        &self,
+        db: &DatabaseConnection,
+        execution: &Self,
+    ) -> (
+        (ConfigResourceKind, PolicyActivationCommit),
+        (ConfigResourceKind, StorageError),
+    ) {
+        let recommendation_repo = PgPolicyRepository::new(db.clone());
+        let execution_repo = PgPolicyRepository::new(db.clone());
+        let (recommendation_result, execution_result) = tokio::join!(
+            recommendation_repo.activate_resource(self.activation.clone(), self.snapshot.clone()),
+            execution_repo
+                .activate_resource(execution.activation.clone(), execution.snapshot.clone()),
+        );
+        match (recommendation_result, execution_result) {
+            (Ok(winner), Err(stale)) => (
+                (ConfigResourceKind::RecommendationPolicy, winner),
+                (ConfigResourceKind::ExecutionRiskPolicy, stale),
+            ),
+            (Err(stale), Ok(winner)) => (
+                (ConfigResourceKind::ExecutionRiskPolicy, winner),
+                (ConfigResourceKind::RecommendationPolicy, stale),
+            ),
+            results => panic!("exactly one same-generation activation must commit: {results:?}"),
+        }
     }
 }
 

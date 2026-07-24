@@ -97,7 +97,7 @@ mod tests {
 
     /// Every generic factor spec must declare a generic-plane family.
     #[test]
-    fn generic_factor_specs_use_generic_families() {
+    fn generic_factor_specs_families() {
         let features = FeaturesConfig::default();
         for (spec, _) in generic_factors(&features) {
             assert!(

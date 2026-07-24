@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_is_independent_of_input_order() {
+    fn ordered_independent_input_order() {
         let forward = ResearchHasher::ordered(&["alpha", "beta", "gamma"]).expect("hash");
         let shuffled = ResearchHasher::ordered(&["gamma", "alpha", "beta"]).expect("hash");
         assert_eq!(forward, shuffled, "set hash must be order-independent");
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn model_feature_requirements_is_order_independent() {
+    fn model_feature_requirements_independent() {
         let forward = ModelFeatureRequirements::generic_only(vec![
             FeatureName::from_static("alpha"),
             FeatureName::from_static("beta"),
@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn model_feature_requirements_distinguishes_category_specific_sets() {
+    fn model_feature_distinguishes_sets() {
         let generic_only =
             ModelFeatureRequirements::generic_only(vec![FeatureName::from_static("book.mid")]);
         let mut with_category = generic_only.clone();
@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_schema_is_order_independent() {
+    fn feature_schema_order_independent() {
         let forward = FeatureSchema::new(
             SchemaVersion::new(1),
             vec![sample_spec("alpha"), sample_spec("beta")],
@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_schema_version_changes_hash() {
+    fn feature_version_changes_hash() {
         let v1 =
             FeatureSchema::new(SchemaVersion::new(1), vec![sample_spec("alpha")]).expect("schema");
         let v2 =
@@ -384,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn factor_schema_is_order_independent() {
+    fn factor_schema_order_independent() {
         let forward = FactorSet {
             definitions: vec![sample_factor("alpha"), sample_factor("beta")],
         };
@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn factor_schema_distinguishes_different_sets() {
+    fn factor_schema_distinguishes_sets() {
         let two = FactorSet {
             definitions: vec![sample_factor("alpha"), sample_factor("beta")],
         };
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_vector_hash_stable_for_same_input() {
+    fn feature_vector_hash_input() {
         let a = base_vector(
             generic_with(
                 "book.mid",
@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_vector_hash_commits_the_secondary_executable_ask() {
+    fn feature_vector_commits_ask() {
         let generic = generic_with(
             "book.mid",
             FeatureValue::Probability(Probability::new(dec!(0.5))),
@@ -508,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_vector_hash_ignores_context_and_audit_metadata() {
+    fn feature_vector_ignores_metadata() {
         // Same generic/domain content; every context/audit field differs.
         let generic = generic_with(
             "book.mid",
@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_vector_hash_distinguishes_domain_none_from_present() {
+    fn feature_vector_distinguishes_present() {
         let generic = generic_with(
             "book.mid",
             FeatureValue::Probability(Probability::new(dec!(0.5))),
@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_vector_hash_distinguishes_domain_schema_version() {
+    fn feature_vector_distinguishes_version() {
         // `DomainFamily` has a single live variant today (`Crypto` — see
         // `enums::domain::DomainFamily::ALL`); fabricating a second variant
         // solely to exercise this test would itself be dead semantics.
@@ -600,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_vector_hash_quantizes_beyond_stat_scale() {
+    fn feature_vector_hash_scale() {
         // Differ only past the 12th decimal place (HASH_STAT_SCALE): the
         // quantization pass must collapse both to the same digest.
         let a = base_vector(
@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_vector_hash_distinguishes_within_stat_scale() {
+    fn feature_vector_distinguishes_scale() {
         let a = base_vector(
             generic_with("book.mid", FeatureValue::Decimal(dec!(0.120000000000))),
             None,
@@ -635,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_vector_hash_quantization_never_mutates_stored_value() {
+    fn feature_vector_never_value() {
         // The hash-only quantization pass must be side-effect-free: the
         // vector's own stored `Decimal` retains full precision.
         let high_precision = dec!(0.123456789012345678);

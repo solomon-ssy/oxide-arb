@@ -176,38 +176,30 @@ pub struct EquitySnapshotQuery {
     pub page: PageRequest,
 }
 
-/// Monotonic high-water mark over strategy `capital_base_usd`.
-///
-/// When no prior peak exists, the current capital base seeds the mark.
-#[must_use]
-pub fn capital_hwm(prior_high_water_mark_usd: Option<Usd>, capital_base_usd: Usd) -> Usd {
-    prior_high_water_mark_usd
-        .unwrap_or(capital_base_usd)
-        .max(capital_base_usd)
-}
-
-/// Monotonic HWM merge at insert when the caller already computed a candidate peak.
-#[must_use]
-pub fn hwm_merge(
-    prior_high_water_mark_usd: Option<Usd>,
-    computed_high_water_mark_usd: Usd,
-    capital_base_usd: Usd,
-) -> Usd {
-    prior_high_water_mark_usd
-        .map_or(computed_high_water_mark_usd, |prior| {
-            prior.max(computed_high_water_mark_usd)
-        })
-        .max(capital_base_usd)
-}
-
-/// Peak-to-trough drawdown of strategy capital base relative to HWM, ∈ `[0, 1]`.
-#[must_use]
-pub fn capital_drawdown(capital_base_usd: Usd, high_water_mark_usd: Usd) -> Decimal {
-    if high_water_mark_usd.is_zero() || capital_base_usd >= high_water_mark_usd {
-        return Decimal::ZERO;
+impl EquitySnapshotInfo {
+    /// Resolve the monotonic strategy-capital high-water mark.
+    #[must_use]
+    pub fn high_water_mark(prior: Option<Usd>, capital_base: Usd) -> Usd {
+        prior.unwrap_or(capital_base).max(capital_base)
     }
-    ((high_water_mark_usd - capital_base_usd).inner() / high_water_mark_usd.inner())
-        .clamp(Decimal::ZERO, Decimal::ONE)
+
+    /// Merge a caller-computed peak with the durable peak and current capital.
+    #[must_use]
+    pub fn merge_high_water_mark(prior: Option<Usd>, computed: Usd, capital_base: Usd) -> Usd {
+        prior
+            .map_or(computed, |durable| durable.max(computed))
+            .max(capital_base)
+    }
+
+    /// Compute peak-to-trough strategy-capital drawdown in `[0, 1]`.
+    #[must_use]
+    pub fn drawdown(capital_base: Usd, high_water_mark: Usd) -> Decimal {
+        if high_water_mark.is_zero() || capital_base >= high_water_mark {
+            return Decimal::ZERO;
+        }
+        ((high_water_mark - capital_base).inner() / high_water_mark.inner())
+            .clamp(Decimal::ZERO, Decimal::ONE)
+    }
 }
 
 #[cfg(test)]
@@ -215,28 +207,34 @@ mod equity_metrics_tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use super::{capital_drawdown, capital_hwm};
+    use super::EquitySnapshotInfo;
     use crate::types::Usd;
 
     #[test]
-    fn first_or_new_high_water_mark_has_zero_drawdown() {
-        let hwm = capital_hwm(None, Usd::new(dec!(12500)));
+    fn first_high_zero_drawdown() {
+        let hwm = EquitySnapshotInfo::high_water_mark(None, Usd::new(dec!(12500)));
         assert_eq!(hwm, Usd::new(dec!(12500)));
-        assert_eq!(capital_drawdown(Usd::new(dec!(12500)), hwm), Decimal::ZERO);
+        assert_eq!(
+            EquitySnapshotInfo::drawdown(Usd::new(dec!(12500)), hwm),
+            Decimal::ZERO
+        );
     }
 
     #[test]
-    fn drawdown_is_peak_to_current_capital_base_ratio() {
-        let hwm = capital_hwm(None, Usd::new(dec!(12500)));
-        assert_eq!(capital_drawdown(Usd::new(dec!(10000)), hwm), dec!(0.2));
+    fn drawdown_peak_capital_ratio() {
+        let hwm = EquitySnapshotInfo::high_water_mark(None, Usd::new(dec!(12500)));
+        assert_eq!(
+            EquitySnapshotInfo::drawdown(Usd::new(dec!(10000)), hwm),
+            dec!(0.2)
+        );
     }
 
     #[test]
-    fn high_water_mark_is_monotonic_max() {
-        let first = capital_hwm(None, Usd::new(dec!(10000)));
-        let second = capital_hwm(Some(first), Usd::new(dec!(9000)));
+    fn high_water_mark_max() {
+        let first = EquitySnapshotInfo::high_water_mark(None, Usd::new(dec!(10000)));
+        let second = EquitySnapshotInfo::high_water_mark(Some(first), Usd::new(dec!(9000)));
         assert_eq!(second, Usd::new(dec!(10000)));
-        let third = capital_hwm(Some(second), Usd::new(dec!(11000)));
+        let third = EquitySnapshotInfo::high_water_mark(Some(second), Usd::new(dec!(11000)));
         assert_eq!(third, Usd::new(dec!(11000)));
     }
 }

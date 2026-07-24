@@ -307,7 +307,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn controller_exhausts_after_max_attempts() {
+    fn controller_exhausts_after_attempts() {
         let policy = RetryPolicy {
             max_attempts: Some(2),
             initial_interval_ms: 10,
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn server_retry_hint_is_a_lower_bound_within_total_budget() {
+    fn server_retry_hint_budget() {
         let within_budget = RetryPolicy {
             max_attempts: Some(1),
             initial_interval_ms: 10,
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_succeeds_after_transient_failures() {
+    async fn retry_succeeds_after_failures() {
         tokio::time::pause();
 
         let counter = Arc::new(AtomicU32::new(0));
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn api_error_maps_to_error_kind_via_from() {
+    fn api_error_error_via() {
         let transient = ApiError::Timeout {
             operation: "gamma".into(),
             elapsed_ms: 5_000,
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_gives_up_on_permanent() {
+    async fn retry_gives_up_permanent() {
         tokio::time::pause();
         let policy = RetryPolicy::clob_default();
 

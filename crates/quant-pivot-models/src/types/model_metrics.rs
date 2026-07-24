@@ -195,7 +195,7 @@ mod tests {
     use super::ModelVersionMetrics;
 
     #[test]
-    fn metrics_reject_unknown_family_and_fields() {
+    fn metrics_reject_unknown_fields() {
         let value = serde_json::to_value(ModelVersionMetrics::not_measured("fixture"))
             .expect("serialize metrics");
         assert_eq!(value["definition"]["kind"], json!("not_measured"));

@@ -92,7 +92,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_is_atomic_and_revision_monotonic() {
+    fn snapshot_atomic_revision_monotonic() {
         let handle = RuntimeControlsHandle::default();
         let mut next = handle.snapshot();
         next.revision = 1;

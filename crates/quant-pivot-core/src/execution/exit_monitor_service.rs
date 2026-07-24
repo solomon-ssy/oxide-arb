@@ -42,7 +42,7 @@ use crate::{
         exit_dispatcher::{CoreExitDispatcher, ExitSubmitRequest},
         exit_monitor::{
             ExitDecision, ExitMonitorHealthHandle, ExitMonitorInput, ExitSignalContext,
-            ExitSignalEvaluator, ExitSignalVerdict, decide_exit,
+            ExitSignalEvaluator, ExitSignalVerdict,
         },
     },
     governance::RuntimeControlsHandle,
@@ -283,7 +283,7 @@ impl ExitMonitorService {
         )
         .await?;
 
-        match decide_exit(&input) {
+        match input.decide_exit() {
             ExitDecision::SubmitExitOrder {
                 reason,
                 order,
@@ -441,7 +441,7 @@ mod tests {
     use super::classify_book;
 
     #[test]
-    fn classify_book_uses_configured_max_age() {
+    fn classify_book_uses_age() {
         let now_ms = 1_000_000u64;
         let snapshot = BookSnapshot::new(
             Arc::from([
@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_book_rejects_future_snapshot() {
+    fn classify_book_rejects_snapshot() {
         let now_ms = 1_000_000_u64;
         let snapshot = BookSnapshot::new(Arc::from([]), Arc::from([]), now_ms + 1, 1);
         assert!(classify_book(Some(&snapshot), now_ms, 5_000).is_err());

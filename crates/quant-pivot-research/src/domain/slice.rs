@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn pit_valid_linkage_never_reads_a_future_revision() {
+    fn pit_never_reads_revision() {
         let early = linkage(LinkageOutcome::Resolved(Box::new(binding())), 0);
         let late = linkage(
             LinkageOutcome::Unresolved {
@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn backdated_linkage_is_invisible_until_its_availability_time() {
+    fn backdated_linkage_invisible_time() {
         let early = linkage(LinkageOutcome::Resolved(Box::new(binding())), 0);
         let mut backdated = linkage(
             LinkageOutcome::Unresolved {
@@ -637,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn linkage_ties_use_the_stable_id_order() {
+    fn linkage_ties_use_order() {
         let domain = DomainConfig::default();
         let mut lower_id = linkage(LinkageOutcome::Resolved(Box::new(binding())), 0);
         lower_id.linkage_id = MarketLinkageId::new(Uuid::from_u128(1));
@@ -660,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn slice_inputs_fail_closed_per_rung() {
+    fn slice_inputs_rejects_rung() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let domain = DomainConfig::default();
         let boundary = boundary(as_of, &domain);
@@ -755,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn observation_windows_respect_the_visibility_cutoff() {
+    fn observation_windows_respect_cutoff() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let domain = DomainConfig::default();
         let boundary = boundary(as_of, &domain);
@@ -815,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn availability_is_not_mapped_for_an_unrouted_category_or_disabled_family() {
+    fn availability_not_mapped_family() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let domain = DomainConfig::default();
         let boundary = boundary(as_of, &domain);
@@ -851,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn availability_is_unresolved_without_a_pit_valid_resolved_linkage() {
+    fn availability_unresolved_without_linkage() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let domain = DomainConfig::default();
         let boundary = boundary(as_of, &domain);
@@ -888,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn availability_distinguishes_source_empty_from_available_at_the_cutoff() {
+    fn availability_distinguishes_empty_cutoff() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let domain = DomainConfig::default();
         let boundary = boundary(as_of, &domain);

@@ -77,7 +77,7 @@ use quant_pivot_system_tests::{
         pit::InMemoryDecisionSnapshotSource,
         publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
-        trade_tape_fixtures::live_trade_tape_block_cursor_repo,
+        trade_tape_fixtures::live_tape_cursor_repo,
     },
 };
 use rust_decimal::Decimal;
@@ -97,44 +97,46 @@ const CATALOG: E2eCatalog = E2eCatalog {
     no_token: "44444",
 };
 
-fn registry_market(catalog: &E2eCatalog) -> MarketRegistryInfo {
-    MarketRegistryInfo {
-        market_id: MarketId::new(catalog.market_id),
-        event_id: EventId::new(catalog.event_id),
-        token_yes: TokenId::new(catalog.yes_token),
-        token_no: TokenId::new(catalog.no_token),
-        question: "Feature E2E?".into(),
-        slug: "feature-e2e".into(),
-        description: None,
-        categories: CategorySet::from(MarketCategory::Sports),
-        status: MarketStatus::Active,
-        filter_reasons: CatalogFilterReasonSet::default(),
-        outcome: None,
-        neg_risk: false,
-        tick_size: TickSize::Hundredth,
-        tokens: vec![
-            TokenInfo {
-                token_id: TokenId::new(catalog.yes_token),
-                outcome: "Yes".into(),
-                neg_risk: false,
-            },
-            TokenInfo {
-                token_id: TokenId::new(catalog.no_token),
-                outcome: "No".into(),
-                neg_risk: false,
-            },
-        ],
-        best_bid: None,
-        best_ask: None,
-        depth_usd: None,
-        min_order_size: Decimal::ONE,
-        liquidity_usd: Some(Usd::new(Decimal::from(25_000))),
-        volume_24h: Some(Usd::new(Decimal::from(9_000))),
-        start_date: Some(Utc::now() - ChronoDuration::days(2)),
-        end_date: Some(Utc::now() + ChronoDuration::days(5)),
-        resolved_at: None,
-        created_at: Some(Utc::now() - ChronoDuration::days(2)),
-        updated_at: Utc::now(),
+impl E2eCatalog {
+    fn registry_market(&self) -> MarketRegistryInfo {
+        MarketRegistryInfo {
+            market_id: MarketId::new(self.market_id),
+            event_id: EventId::new(self.event_id),
+            token_yes: TokenId::new(self.yes_token),
+            token_no: TokenId::new(self.no_token),
+            question: "Feature E2E?".into(),
+            slug: "feature-e2e".into(),
+            description: None,
+            categories: CategorySet::from(MarketCategory::Sports),
+            status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
+            outcome: None,
+            neg_risk: false,
+            tick_size: TickSize::Hundredth,
+            tokens: vec![
+                TokenInfo {
+                    token_id: TokenId::new(self.yes_token),
+                    outcome: "Yes".into(),
+                    neg_risk: false,
+                },
+                TokenInfo {
+                    token_id: TokenId::new(self.no_token),
+                    outcome: "No".into(),
+                    neg_risk: false,
+                },
+            ],
+            best_bid: None,
+            best_ask: None,
+            depth_usd: None,
+            min_order_size: Decimal::ONE,
+            liquidity_usd: Some(Usd::new(Decimal::from(25_000))),
+            volume_24h: Some(Usd::new(Decimal::from(9_000))),
+            start_date: Some(Utc::now() - ChronoDuration::days(2)),
+            end_date: Some(Utc::now() + ChronoDuration::days(5)),
+            resolved_at: None,
+            created_at: Some(Utc::now() - ChronoDuration::days(2)),
+            updated_at: Utc::now(),
+        }
     }
 }
 
@@ -164,7 +166,7 @@ async fn seed_catalog(db: &DatabaseConnection, catalog: &E2eCatalog) {
 }
 
 fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E2eCatalog) {
-    let market = registry_market(catalog);
+    let market = (catalog).registry_market();
     registry.register_event(EventRegistryInfo {
         event_id: market.event_id.clone(),
         title: "Feature E2E".to_owned(),
@@ -274,7 +276,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn trade_tape_window_by_market(
+    async fn market_tape_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
@@ -478,7 +480,7 @@ fn assert_emitted_feature_cells(
     drop(emitted);
 }
 
-pub async fn insufficient_vectors_are_audited_but_partitioned_from_model_input() {
+pub async fn insufficient_vectors_audited_input() {
     // Catalog and book inputs are valid, but the required microstructure window
     // is absent. The model contract must reject the vector without inventing a
     // replacement value, while retaining its complete audit evidence.
@@ -515,7 +517,7 @@ pub async fn insufficient_vectors_are_audited_but_partitioned_from_model_input()
         feature_repo: Arc::clone(&repo) as Arc<dyn FeatureRepository>,
         event_writer,
         market_registry: Arc::clone(&registry),
-        block_cursor_repo: live_trade_tape_block_cursor_repo(),
+        block_cursor_repo: live_tape_cursor_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
         calibration_repo: Arc::new(EmptyCalibrationArtifactRepo),
@@ -573,7 +575,7 @@ pub async fn insufficient_vectors_are_audited_but_partitioned_from_model_input()
     );
 }
 
-pub async fn create_feature_vector_then_find() {
+pub async fn create_feature_vector_find() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db, &CATALOG).await;
@@ -636,7 +638,7 @@ pub async fn create_feature_vector_then_find() {
         feature_repo: Arc::clone(&feature_repo),
         event_writer: Arc::clone(&event_writer),
         market_registry: Arc::clone(&registry),
-        block_cursor_repo: live_trade_tape_block_cursor_repo(),
+        block_cursor_repo: live_tape_cursor_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
         calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),

@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn every_catalog_market_gets_exactly_one_terminal_decision() {
+    fn catalog_market_gets_decision() {
         let selection = selection();
         let report_id = RecommendationReportId::from_v7();
         let model_version_id = ModelVersionId::from_v7();

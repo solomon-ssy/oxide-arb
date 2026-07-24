@@ -101,9 +101,9 @@ use quant_pivot_system_tests::{
         catalog_fixtures::{make_event, make_market},
         execution_pg_seed,
         execution_pg_seed::{
-            ReportBuildOptions, ReportSeedConfig, claim_entry_for_test,
-            enable_entry_admission_for_test, entry_claim_for_test, fixture_profile_ref,
-            prepared_order, seed_conditional_price_report_on_infra, seed_shared_demo_infra,
+            ReportBuildOptions, ReportSeedConfig, claim_entry_for_test, enable_test_admission,
+            entry_claim_for_test, fixture_profile_ref, prepared_order, seed_price_report,
+            seed_shared_demo_infra,
         },
         model_spec_fixtures,
         policy_fixtures::bootstrap_default_policy_bundle,
@@ -125,7 +125,7 @@ const PARTIAL_SPENT: Decimal = dec!(24);
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-pub async fn claim_guards_against_double_submit() {
+pub async fn claim_guards_against_submit() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -147,11 +147,11 @@ pub async fn claim_guards_against_double_submit() {
     );
 }
 
-pub async fn entry_condition_artifact_and_audit_are_database_worm() {
+pub async fn entry_condition_artifact_worm() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let infra = seed_shared_demo_infra(&db).await;
-    let ids = seed_conditional_price_report_on_infra(
+    let ids = seed_price_report(
         &db,
         &infra,
         ReportSeedConfig {
@@ -195,7 +195,7 @@ pub async fn entry_condition_artifact_and_audit_are_database_worm() {
     );
 }
 
-pub async fn concurrent_approval_has_one_winner_and_one_amount_truth() {
+pub async fn concurrent_approval_one_truth() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -204,7 +204,7 @@ pub async fn concurrent_approval_has_one_winner_and_one_amount_truth() {
     let intent_id = OrderIntentId::from_v7();
     PgOrderIntentRepository::new(db.clone())
         .create_with_allocation(
-            new_pending_intent_with_id(&ids, intent_id),
+            new_pending_intent_id(&ids, intent_id),
             new_allocation_for(&ids, intent_id),
         )
         .await
@@ -279,7 +279,7 @@ pub async fn concurrent_approval_has_one_winner_and_one_amount_truth() {
     assert_eq!(capital.released_usd, Usd::ZERO);
 }
 
-pub async fn expiry_is_atomic_and_idempotent_across_capital_and_audit() {
+pub async fn expiry_atomic_idempotent_audit() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -328,7 +328,7 @@ pub async fn expiry_is_atomic_and_idempotent_across_capital_and_audit() {
     );
 }
 
-pub async fn expiry_and_cancel_race_has_one_terminal_owner() {
+pub async fn expiry_cancel_race_owner() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
 
@@ -372,7 +372,7 @@ pub async fn expiry_and_cancel_race_has_one_terminal_owner() {
     assert_eq!(cancel_race_capital.released_usd, Usd::new(NOTIONAL));
 }
 
-pub async fn expiry_and_submission_claim_race_has_one_owner() {
+pub async fn expiry_submission_claim_owner() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let claim_ids = seed_report_fixture(&db).await;
@@ -420,7 +420,7 @@ pub async fn expiry_and_submission_claim_race_has_one_owner() {
     }
 }
 
-pub async fn report_revoke_atomically_terminates_intent_condition_and_capital() {
+pub async fn report_revoke_atomically_capital() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -432,7 +432,7 @@ pub async fn report_revoke_atomically_terminates_intent_condition_and_capital() 
             &ids.report,
             "operator containment",
             Utc::now(),
-            report_operation_log(&ids),
+            ids.report_operation_log(),
         )
         .await
         .expect("atomic report revoke");
@@ -466,7 +466,7 @@ pub async fn report_revoke_atomically_terminates_intent_condition_and_capital() 
             &ids.report,
             "idempotent retry",
             Utc::now(),
-            report_operation_log(&ids),
+            ids.report_operation_log(),
         )
         .await
         .expect("idempotent revoke retry");
@@ -485,7 +485,7 @@ pub async fn report_revoke_atomically_terminates_intent_condition_and_capital() 
     assert_eq!(intent_logs, 1, "terminal intent log must be written once");
 }
 
-pub async fn report_revoke_and_cancel_race_has_one_intent_terminal_audit() {
+pub async fn report_revoke_cancel_audit() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -497,7 +497,7 @@ pub async fn report_revoke_and_cancel_race_has_one_intent_terminal_audit() {
             &ids.report,
             "concurrent revoke",
             Utc::now(),
-            report_operation_log(&ids),
+            ids.report_operation_log(),
         ),
         intent_repo.cancel(
             &intent_id,
@@ -543,7 +543,7 @@ pub async fn report_revoke_and_cancel_race_has_one_intent_terminal_audit() {
     );
 }
 
-pub async fn create_entry_locks_capital_and_advances_intent() {
+pub async fn create_entry_advances_intent() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -552,7 +552,7 @@ pub async fn create_entry_locks_capital_and_advances_intent() {
 
     claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&intent_id, &ids),
             &ids.feature_parity_state_id,
         )
@@ -577,7 +577,7 @@ pub async fn create_entry_locks_capital_and_advances_intent() {
     assert_eq!(intent.status, OrderIntentStatus::Submitted);
 }
 
-pub async fn supersession_wins_before_submission_and_releases_capital() {
+pub async fn supersession_wins_before_capital() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -594,7 +594,7 @@ pub async fn supersession_wins_before_submission_and_releases_capital() {
         .expect("successor delivery claim must remain held");
 
     let result = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&intent_id, &ids),
             &ids.feature_parity_state_id,
         )
@@ -621,7 +621,7 @@ pub async fn supersession_wins_before_submission_and_releases_capital() {
     assert!(orders.is_empty());
 }
 
-pub async fn submitted_order_survives_later_supersession() {
+pub async fn submitted_order_survives_supersession() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -629,7 +629,7 @@ pub async fn submitted_order_survives_later_supersession() {
     let submission = PgExecutionSubmissionRepository::new(db.clone());
     claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&intent_id, &ids),
             &ids.feature_parity_state_id,
         )
@@ -665,7 +665,7 @@ pub async fn submitted_order_survives_later_supersession() {
     assert_eq!(capital.locked_usd, Usd::new(NOTIONAL));
 }
 
-pub async fn prepared_report_is_not_actionable_before_fact_verification() {
+pub async fn report_not_before_verification() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let predecessor = seed_report_fixture(&db).await;
@@ -696,7 +696,7 @@ pub async fn prepared_report_is_not_actionable_before_fact_verification() {
     );
 }
 
-pub async fn verified_publication_atomically_supersedes_prior_current() {
+pub async fn verified_publication_atomically_current() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let predecessor = seed_report_fixture(&db).await;
@@ -723,7 +723,7 @@ pub async fn verified_publication_atomically_supersedes_prior_current() {
     assert_eq!(current.recommendation_report_id, candidate.report);
 }
 
-pub async fn fact_failure_leaves_existing_current_untouched() {
+pub async fn fact_failure_leaves_untouched() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let predecessor = seed_report_fixture(&db).await;
@@ -755,7 +755,7 @@ pub async fn fact_failure_leaves_existing_current_untouched() {
     assert_eq!(candidate.status, RecommendationReportStatus::Prepared);
 }
 
-pub async fn concurrent_publications_leave_one_current_per_scope() {
+pub async fn concurrent_publications_leave_scope() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let predecessor = seed_report_fixture(&db).await;
@@ -798,7 +798,7 @@ pub async fn concurrent_publications_leave_one_current_per_scope() {
     );
 }
 
-pub async fn out_of_order_verification_obsoletes_older_candidate() {
+pub async fn out_order_verification_candidate() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let predecessor = seed_report_fixture(&db).await;
@@ -841,7 +841,7 @@ pub async fn out_of_order_verification_obsoletes_older_candidate() {
     assert_eq!(current.recommendation_report_id, newer.report);
 }
 
-pub async fn cancelled_delivery_settlement_returns_claim_lost() {
+pub async fn cancelled_delivery_returns_lost() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let predecessor = seed_report_fixture(&db).await;
@@ -871,7 +871,7 @@ pub async fn cancelled_delivery_settlement_returns_claim_lost() {
     assert!(lost.lease_expires_at.is_none());
 }
 
-pub async fn empty_report_is_published_and_becomes_current() {
+pub async fn empty_report_published_current() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let predecessor = seed_report_fixture(&db).await;
@@ -906,12 +906,12 @@ pub async fn empty_report_is_published_and_becomes_current() {
     assert_eq!(current.recommendation_report_id, empty.report);
 }
 
-pub async fn lost_lease_prevents_report_commit_and_marks_abandoned() {
+pub async fn lost_lease_prevents_abandoned() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let predecessor = seed_report_fixture(&db).await;
-    let ids = successor_ids(&predecessor);
-    let transaction = build_report_transaction(&ids);
+    let ids = predecessor.successor_ids();
+    let transaction = ids.build_report_transaction();
     let decision_at = transaction.report.decision_at;
     let worker_id = WorkerId::from_v7();
     let run_id = ReportRunId::from_v7();
@@ -981,7 +981,7 @@ pub async fn lost_lease_prevents_report_commit_and_marks_abandoned() {
     );
 }
 
-pub async fn stale_parity_generation_blocks_entry_write_ahead() {
+pub async fn stale_parity_blocks_ahead() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -991,10 +991,7 @@ pub async fn stale_parity_generation_blocks_entry_write_ahead() {
 
     let stale_generation = FeatureParityStateId::from_v7();
     let error = submission
-        .create_entry_order_and_lock_capital(
-            new_execution_order(&intent_id, &ids),
-            &stale_generation,
-        )
+        .create_entry_order(new_execution_order(&intent_id, &ids), &stale_generation)
         .await
         .expect_err("stale clear generation must fail before write-ahead");
     assert!(matches!(error, StorageError::StateConflict { .. }));
@@ -1012,7 +1009,7 @@ pub async fn stale_parity_generation_blocks_entry_write_ahead() {
     assert_eq!(intent.status, OrderIntentStatus::AdmissionPending);
 }
 
-pub async fn create_entry_advances_recommendation_to_executed() {
+pub async fn create_entry_advances_executed() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1021,7 +1018,7 @@ pub async fn create_entry_advances_recommendation_to_executed() {
 
     claim_entry_for_test(&db, &submission, &intent_id).await;
     submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&intent_id, &ids),
             &ids.feature_parity_state_id,
         )
@@ -1036,7 +1033,7 @@ pub async fn create_entry_advances_recommendation_to_executed() {
     assert_eq!(rec.status, RecommendationStatus::Executed);
 }
 
-pub async fn reject_admission_releases_capital_and_marks_rejected() {
+pub async fn reject_admission_releases_rejected() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1066,7 +1063,7 @@ pub async fn reject_admission_releases_capital_and_marks_rejected() {
     assert_eq!(capital.released_usd, Usd::new(NOTIONAL));
 }
 
-pub async fn revert_claim_restores_approved_by_policy_for_auto_intent() {
+pub async fn revert_claim_restores_intent() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1081,7 +1078,7 @@ pub async fn revert_claim_restores_approved_by_policy_for_auto_intent() {
     assert_eq!(reverted.status, OrderIntentStatus::ApprovedByPolicy);
 }
 
-pub async fn partial_fill_splits_capital_while_locked() {
+pub async fn partial_fill_splits_locked() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1090,7 +1087,7 @@ pub async fn partial_fill_splits_capital_while_locked() {
 
     claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&intent_id, &ids),
             &ids.feature_parity_state_id,
         )
@@ -1146,7 +1143,7 @@ pub async fn partial_fill_splits_capital_while_locked() {
     assert_eq!(capital.released_usd, Usd::ZERO);
 }
 
-pub async fn position_upsert_weighted_average_cost() {
+pub async fn position_upsert_weighted_cost() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1188,7 +1185,7 @@ pub async fn position_upsert_weighted_average_cost() {
     );
 }
 
-pub async fn full_fill_spends_capital_and_writes_position() {
+pub async fn full_fill_writes_position() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1197,7 +1194,7 @@ pub async fn full_fill_spends_capital_and_writes_position() {
 
     claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&intent_id, &ids),
             &ids.feature_parity_state_id,
         )
@@ -1281,7 +1278,7 @@ fn ambiguous_identity_write(
     }
 }
 
-pub async fn submission_persists_multi_trade_and_multi_hash_identity_atomically() {
+pub async fn submission_persists_multi_atomically() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1289,7 +1286,7 @@ pub async fn submission_persists_multi_trade_and_multi_hash_identity_atomically(
     let submission = PgExecutionSubmissionRepository::new(db.clone());
     claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&intent_id, &ids),
             &ids.feature_parity_state_id,
         )
@@ -1321,7 +1318,7 @@ pub async fn submission_persists_multi_trade_and_multi_hash_identity_atomically(
     );
 }
 
-pub async fn duplicate_trade_identity_rolls_back_entire_submission_outcome() {
+pub async fn duplicate_trade_identity_outcome() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let first_ids = seed_report_fixture(&db).await;
@@ -1329,7 +1326,7 @@ pub async fn duplicate_trade_identity_rolls_back_entire_submission_outcome() {
     let submission = PgExecutionSubmissionRepository::new(db.clone());
     claim_entry_for_test(&db, &submission, &first_intent).await;
     let first_order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&first_intent, &first_ids),
             &first_ids.feature_parity_state_id,
         )
@@ -1357,7 +1354,7 @@ pub async fn duplicate_trade_identity_rolls_back_entire_submission_outcome() {
     let second_intent = seed_approved_intent(&db, &second_ids).await;
     claim_entry_for_test(&db, &submission, &second_intent).await;
     let second_order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&second_intent, &second_ids),
             &second_ids.feature_parity_state_id,
         )
@@ -1401,7 +1398,7 @@ pub async fn duplicate_trade_identity_rolls_back_entire_submission_outcome() {
     assert_eq!(capital.state, CapitalAllocationState::Locked);
 }
 
-pub async fn concurrent_orders_can_share_one_transaction_hash_without_losing_trade_identity() {
+pub async fn concurrent_orders_preserves_identity() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let first_ids = seed_report_fixture(&db).await;
@@ -1409,7 +1406,7 @@ pub async fn concurrent_orders_can_share_one_transaction_hash_without_losing_tra
     let first_repo = PgExecutionSubmissionRepository::new(db.clone());
     claim_entry_for_test(&db, &first_repo, &first_intent).await;
     let first_order = first_repo
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&first_intent, &first_ids),
             &first_ids.feature_parity_state_id,
         )
@@ -1427,7 +1424,7 @@ pub async fn concurrent_orders_can_share_one_transaction_hash_without_losing_tra
     let second_repo = PgExecutionSubmissionRepository::new(db.clone());
     claim_entry_for_test(&db, &second_repo, &second_intent).await;
     let second_order = second_repo
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&second_intent, &second_ids),
             &second_ids.feature_parity_state_id,
         )
@@ -1477,7 +1474,7 @@ pub async fn concurrent_orders_can_share_one_transaction_hash_without_losing_tra
     );
 }
 
-pub async fn restart_enrichment_backfills_trade_status_hash_and_order_identity() {
+pub async fn restart_enrichment_backfills_identity() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1485,7 +1482,7 @@ pub async fn restart_enrichment_backfills_trade_status_hash_and_order_identity()
     let submission = PgExecutionSubmissionRepository::new(db.clone());
     claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&intent_id, &ids),
             &ids.feature_parity_state_id,
         )
@@ -1576,14 +1573,14 @@ pub async fn restart_enrichment_backfills_trade_status_hash_and_order_identity()
     assert!(matches!(error, StorageError::StateConflict { .. }));
 }
 
-pub async fn execution_identity_refs_are_atomic_unique_and_concurrent() {
-    submission_persists_multi_trade_and_multi_hash_identity_atomically().await;
-    duplicate_trade_identity_rolls_back_entire_submission_outcome().await;
-    concurrent_orders_can_share_one_transaction_hash_without_losing_trade_identity().await;
-    restart_enrichment_backfills_trade_status_hash_and_order_identity().await;
+pub async fn execution_atomic_unique_concurrent() {
+    submission_persists_multi_atomically().await;
+    duplicate_trade_identity_outcome().await;
+    concurrent_orders_preserves_identity().await;
+    restart_enrichment_backfills_identity().await;
 }
 
-pub async fn ambiguous_holds_capital_and_enqueues_reconciliation() {
+pub async fn ambiguous_holds_capital_reconciliation() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1592,7 +1589,7 @@ pub async fn ambiguous_holds_capital_and_enqueues_reconciliation() {
 
     claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&intent_id, &ids),
             &ids.feature_parity_state_id,
         )
@@ -1652,7 +1649,7 @@ pub async fn ambiguous_holds_capital_and_enqueues_reconciliation() {
     );
 }
 
-pub async fn rejected_releases_capital_without_position() {
+pub async fn rejected_releases_without_position() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1661,7 +1658,7 @@ pub async fn rejected_releases_capital_without_position() {
 
     claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&intent_id, &ids),
             &ids.feature_parity_state_id,
         )
@@ -1699,7 +1696,7 @@ pub async fn rejected_releases_capital_without_position() {
     assert_eq!(capital.released_usd, Usd::new(NOTIONAL));
 }
 
-pub async fn recover_dangling_returns_in_flight_orders() {
+pub async fn recover_dangling_returns_orders() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1708,7 +1705,7 @@ pub async fn recover_dangling_returns_in_flight_orders() {
 
     claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&intent_id, &ids),
             &ids.feature_parity_state_id,
         )
@@ -1726,7 +1723,7 @@ pub async fn recover_dangling_returns_in_flight_orders() {
     );
 }
 
-pub async fn create_advances_recommendation_to_intent_created() {
+pub async fn create_advances_recommendation_created() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1740,7 +1737,7 @@ pub async fn create_advances_recommendation_to_intent_created() {
     assert_eq!(rec.status, RecommendationStatus::IntentCreated);
 }
 
-pub async fn create_rejects_when_recommendation_executed() {
+pub async fn create_rejects_recommendation_executed() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1757,7 +1754,7 @@ pub async fn create_rejects_when_recommendation_executed() {
     let intent_id = OrderIntentId::from_v7();
     let err = PgOrderIntentRepository::new(db.clone())
         .create_with_allocation(
-            new_pending_intent_with_id(&ids, intent_id),
+            new_pending_intent_id(&ids, intent_id),
             new_allocation_for(&ids, intent_id),
         )
         .await
@@ -1771,7 +1768,7 @@ pub async fn create_rejects_when_recommendation_executed() {
     ));
 }
 
-pub async fn create_rejects_when_submitted_intent_blocks() {
+pub async fn create_rejects_submitted_blocks() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1789,7 +1786,7 @@ pub async fn create_rejects_when_submitted_intent_blocks() {
     let second_id = OrderIntentId::from_v7();
     let err = PgOrderIntentRepository::new(db.clone())
         .create_with_allocation(
-            new_pending_intent_with_id(&ids, second_id),
+            new_pending_intent_id(&ids, second_id),
             new_allocation_for(&ids, second_id),
         )
         .await
@@ -1803,7 +1800,7 @@ pub async fn create_rejects_when_submitted_intent_blocks() {
     ));
 }
 
-fn new_pending_intent_with_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> NewOrderIntent {
+fn new_pending_intent_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> NewOrderIntent {
     NewOrderIntent {
         order_intent_id,
         recommendation_id: ids.recommendation,
@@ -1888,7 +1885,7 @@ async fn ambiguous_order(
     let intent_id = seed_approved_intent(db, ids).await;
     claim_entry_for_test(db, submission, &intent_id).await;
     let order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(&intent_id, ids),
             &ids.feature_parity_state_id,
         )
@@ -1981,7 +1978,7 @@ fn filled_write() -> ReconciliationLedgerWrite {
     }
 }
 
-pub async fn reconcile_ambiguous_to_filled_spends_capital_and_writes_position() {
+pub async fn reconcile_ambiguous_writes_position() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -2023,7 +2020,7 @@ pub async fn reconcile_ambiguous_to_filled_spends_capital_and_writes_position() 
     assert_eq!(recon.evidence_json.0[0].detail, "submit: ambiguous");
 }
 
-pub async fn reconcile_ambiguous_to_not_filled_releases_capital() {
+pub async fn reconcile_ambiguous_not_capital() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -2079,7 +2076,7 @@ pub async fn reconcile_ambiguous_to_not_filled_releases_capital() {
     );
 }
 
-pub async fn reconcile_unresolvable_impairs_capital_and_leaves_order_ambiguous() {
+pub async fn reconcile_unresolvable_impairs_ambiguous() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -2143,7 +2140,7 @@ pub async fn reconcile_unresolvable_impairs_capital_and_leaves_order_ambiguous()
     );
 }
 
-pub async fn reconcile_partial_fill_splits_capital_and_writes_position() {
+pub async fn reconcile_partial_writes_position() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -2274,7 +2271,7 @@ pub async fn reconcile_correction_is_idempotent() {
     );
 }
 
-pub async fn operator_resolve_impaired_to_filled_spends_capital() {
+pub async fn operator_resolve_impaired_capital() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -2433,7 +2430,7 @@ fn reconciliation_row(
 // ── Fixture chain (self-contained; mirrors pg_account_capital) ────────────────
 
 async fn seed_approved_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderIntentId {
-    enable_entry_admission_for_test(db, "pg-execution-submission-it-operator").await;
+    enable_test_admission(db, "pg-execution-submission-it-operator").await;
     let order_intent_id = OrderIntentId::from_v7();
     PgOrderIntentRepository::new(db.clone())
         .create_with_allocation(
@@ -2509,7 +2506,7 @@ async fn seed_approved_intent(db: &DatabaseConnection, ids: &TxnIds) -> OrderInt
         .order_intent_id
 }
 
-async fn seed_clear_feature_parity_state(db: &DatabaseConnection) -> FeatureParityStateId {
+async fn clear_feature_parity(db: &DatabaseConnection) -> FeatureParityStateId {
     let state_id = FeatureParityStateId::from_v7();
     QuantFeatureParityStateEntity::insert(
         NewFeatureParityState {
@@ -2532,7 +2529,7 @@ async fn seed_clear_feature_parity_state(db: &DatabaseConnection) -> FeaturePari
 }
 
 async fn seed_report_fixture(db: &DatabaseConnection) -> TxnIds {
-    let feature_parity_state_id = seed_clear_feature_parity_state(db).await;
+    let feature_parity_state_id = clear_feature_parity(db).await;
     let rc_id = seed_runtime_config(db).await;
     let (model_version_id, model_run_id) = seed_model_version(db, &rc_id).await;
     let event_id = "evt-1";
@@ -2556,7 +2553,7 @@ async fn seed_report_fixture(db: &DatabaseConnection) -> TxnIds {
     };
     persist_and_publish_report(
         db,
-        build_report_transaction(&ids),
+        ids.build_report_transaction(),
         &format!("scheduled:test:{}", ids.report),
         10,
     )
@@ -2568,10 +2565,10 @@ async fn seed_successor_prepared(
     db: &DatabaseConnection,
     predecessor: &TxnIds,
 ) -> (TxnIds, WorkerId) {
-    let ids = successor_ids(predecessor);
+    let ids = (predecessor).successor_ids();
     persist_prepared_report(
         db,
-        build_report_transaction(&ids),
+        ids.build_report_transaction(),
         &format!("scheduled:successor:{}", ids.report),
         10,
     )
@@ -2586,21 +2583,23 @@ async fn seed_successor_prepared(
     (ids, worker)
 }
 
-fn successor_ids(predecessor: &TxnIds) -> TxnIds {
-    TxnIds {
-        feature_parity_state_id: predecessor.feature_parity_state_id,
-        account_snapshot: AccountSnapshotId::from_v7(),
-        data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
-        portfolio_plan: PortfolioPlanId::from_v7(),
-        report: RecommendationReportId::from_v7(),
-        recommendation: RecommendationId::from_v7(),
-        condition_instance: EntryConditionInstanceId::from_v7(),
-        model_version: predecessor.model_version,
-        model_run: predecessor.model_run,
-        market_selection: predecessor.market_selection,
-        decision_policy_snapshot: predecessor.decision_policy_snapshot,
-        market: predecessor.market.clone(),
-        event: predecessor.event.clone(),
+impl TxnIds {
+    fn successor_ids(&self) -> Self {
+        Self {
+            feature_parity_state_id: self.feature_parity_state_id,
+            account_snapshot: AccountSnapshotId::from_v7(),
+            data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
+            portfolio_plan: PortfolioPlanId::from_v7(),
+            report: RecommendationReportId::from_v7(),
+            recommendation: RecommendationId::from_v7(),
+            condition_instance: EntryConditionInstanceId::from_v7(),
+            model_version: self.model_version,
+            model_run: self.model_run,
+            market_selection: self.market_selection,
+            decision_policy_snapshot: self.decision_policy_snapshot,
+            market: self.market.clone(),
+            event: self.event.clone(),
+        }
     }
 }
 
@@ -2624,7 +2623,7 @@ async fn seed_empty_successor_prepared(
         event: predecessor.event.clone(),
     };
     let empty_options = ReportBuildOptions::empty_report();
-    let mut transaction = build_report_transaction(&ids);
+    let mut transaction = ids.build_report_transaction();
     transaction.report.summary_json = empty_options.summary;
     transaction.portfolio_plan.allocated_usd = Usd::ZERO;
     transaction.recommendations.clear();
@@ -2684,7 +2683,7 @@ async fn seed_approval_governance(
         &active.decision_policy_snapshot_id, decision_policy_snapshot_id,
         "execution fixture must use the active typed policy bundle"
     );
-    execution_pg_seed::enable_entry_admission_for_test(db, "concurrent-approval-test").await;
+    execution_pg_seed::enable_test_admission(db, "concurrent-approval-test").await;
 }
 
 async fn seed_runtime_config(db: &DatabaseConnection) -> DecisionPolicySnapshotId {
@@ -2793,56 +2792,58 @@ struct TxnIds {
     event: String,
 }
 
-fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
-    let equity_snapshot_id = EquitySnapshotId::from_v7();
-    let report = report_row(ids, equity_snapshot_id);
-    let decision_at = report.decision_at;
-    let sampled_feature_parity = report_fixtures::sampled_parity(&report);
-    let recommendation = report_recommendation(ids);
-    let entry_condition_instance = NewEntryConditionInstance {
-        condition_instance_id: ids.condition_instance,
-        recommendation_id: ids.recommendation,
-        artifact_id: None,
-        artifact_hash: None,
-        state: EntryConditionState::NotRequired,
-        truth_json: Some(ConditionTruth::Satisfied),
-        revision: 0,
-        evaluation_hash: None,
-        input_fingerprint: None,
-        continuity_hash: None,
-        fold_state_json: EntryConditionFoldState::default(),
-        confirmation_started_at: None,
-        last_evaluated_at: None,
-        next_evaluation_at: None,
-        expires_at: recommendation.valid_until,
-        lease_owner: None,
-        lease_expires_at: None,
-        lease_epoch: 0,
-        claimed_by_intent_id: None,
-        claim_admission_state_version: None,
-        consumed_at: None,
-    };
-    NewReportTransaction {
-        feature_parity_state_id: Some(ids.feature_parity_state_id),
-        account_snapshot: NewAccountSnapshot {
-            account_snapshot_id: ids.account_snapshot,
-            ..new_account_snapshot()
-        },
-        equity_snapshot: report_equity_snapshot(ids, &equity_snapshot_id),
-        data_quality_snapshot: NewReportDataQualitySnapshot {
-            report_data_quality_snapshot_id: ids.data_quality_snapshot,
-            decision_at,
-            decision_policy_snapshot_id: ids.decision_policy_snapshot,
-            tokens_json: ReportDataQualityTokens(Vec::new()),
-        },
-        portfolio_plan: report_portfolio_plan(ids),
-        report,
-        recommendations: vec![recommendation],
-        entry_condition_artifacts: Vec::new(),
-        entry_condition_instances: vec![entry_condition_instance],
-        sampled_feature_parity: Some(sampled_feature_parity),
-        fact_delivery: Some(report_fixtures::pending_fact_delivery(&ids.report)),
-        operation_log: report_operation_log(ids),
+impl TxnIds {
+    fn build_report_transaction(&self) -> NewReportTransaction {
+        let equity_snapshot_id = EquitySnapshotId::from_v7();
+        let report = report_row(self, equity_snapshot_id);
+        let decision_at = report.decision_at;
+        let sampled_feature_parity = report_fixtures::sampled_parity(&report);
+        let recommendation = (self).report_recommendation();
+        let entry_condition_instance = NewEntryConditionInstance {
+            condition_instance_id: self.condition_instance,
+            recommendation_id: self.recommendation,
+            artifact_id: None,
+            artifact_hash: None,
+            state: EntryConditionState::NotRequired,
+            truth_json: Some(ConditionTruth::Satisfied),
+            revision: 0,
+            evaluation_hash: None,
+            input_fingerprint: None,
+            continuity_hash: None,
+            fold_state_json: EntryConditionFoldState::default(),
+            confirmation_started_at: None,
+            last_evaluated_at: None,
+            next_evaluation_at: None,
+            expires_at: recommendation.valid_until,
+            lease_owner: None,
+            lease_expires_at: None,
+            lease_epoch: 0,
+            claimed_by_intent_id: None,
+            claim_admission_state_version: None,
+            consumed_at: None,
+        };
+        NewReportTransaction {
+            feature_parity_state_id: Some(self.feature_parity_state_id),
+            account_snapshot: NewAccountSnapshot {
+                account_snapshot_id: self.account_snapshot,
+                ..new_account_snapshot()
+            },
+            equity_snapshot: report_equity_snapshot(self, &equity_snapshot_id),
+            data_quality_snapshot: NewReportDataQualitySnapshot {
+                report_data_quality_snapshot_id: self.data_quality_snapshot,
+                decision_at,
+                decision_policy_snapshot_id: self.decision_policy_snapshot,
+                tokens_json: ReportDataQualityTokens(Vec::new()),
+            },
+            portfolio_plan: (self).report_portfolio_plan(),
+            report,
+            recommendations: vec![recommendation],
+            entry_condition_artifacts: Vec::new(),
+            entry_condition_instances: vec![entry_condition_instance],
+            sampled_feature_parity: Some(sampled_feature_parity),
+            fact_delivery: Some(report_fixtures::pending_fact_delivery(&self.report)),
+            operation_log: (self).report_operation_log(),
+        }
     }
 }
 
@@ -2866,18 +2867,20 @@ fn report_equity_snapshot(
     }
 }
 
-fn report_portfolio_plan(ids: &TxnIds) -> NewPortfolioPlan {
-    NewPortfolioPlan {
-        portfolio_plan_id: ids.portfolio_plan,
-        model_run_id: Some(ids.model_run),
-        market_selection_id: ids.market_selection,
-        decision_at: Utc::now(),
-        budget_usd: Usd::new(dec!(10000)),
-        allocated_usd: Usd::new(NOTIONAL),
-        risk_budget_json: PortfolioRiskBudget::default(),
-        constraints_json: PortfolioConstraintsSnapshot::default(),
-        rejected_summary: PortfolioRejectedSummary::default(),
-        optimizer_meta_json: PortfolioOptimizerMeta::default(),
+impl TxnIds {
+    fn report_portfolio_plan(&self) -> NewPortfolioPlan {
+        NewPortfolioPlan {
+            portfolio_plan_id: self.portfolio_plan,
+            model_run_id: Some(self.model_run),
+            market_selection_id: self.market_selection,
+            decision_at: Utc::now(),
+            budget_usd: Usd::new(dec!(10000)),
+            allocated_usd: Usd::new(NOTIONAL),
+            risk_budget_json: PortfolioRiskBudget::default(),
+            constraints_json: PortfolioConstraintsSnapshot::default(),
+            rejected_summary: PortfolioRejectedSummary::default(),
+            optimizer_meta_json: PortfolioOptimizerMeta::default(),
+        }
     }
 }
 
@@ -2913,61 +2916,65 @@ fn report_row(ids: &TxnIds, equity_snapshot_id: EquitySnapshotId) -> NewRecommen
     }
 }
 
-fn report_recommendation(ids: &TxnIds) -> NewRecommendation {
-    NewRecommendation {
-        research_profile_artifact_id: execution_pg_seed::fixture_profile_ref().artifact_id(),
-        recommendation_id: ids.recommendation,
-        recommendation_report_id: ids.report,
-        rank: 1,
-        market_id: MarketId::new(&ids.market),
-        event_id: EventId::new(&ids.event),
-        token_id: TokenId::new("token-1"),
-        outcome_side: OutcomeSide::Yes,
-        composite_score: Probability::new(dec!(0.7)),
-        risk_adjusted_score: Probability::new(dec!(0.65)),
-        confidence: Probability::new(dec!(0.72)),
-        expected_return_bps: Bps::new(dec!(150)),
-        downside_bps: Bps::new(dec!(80)),
-        identity: recommendation_identity(),
-        market_context: market_context(),
-        rank_before_portfolio: 1,
-        liquidity_score: Probability::new(dec!(0.8)),
-        data_quality_score: Probability::new(dec!(0.9)),
-        model_score_percentile: Probability::new(dec!(0.75)),
-        trade_plan: trade_plan(),
-        factor_breakdown: factor_breakdown(),
-        evidence_refs: evidence_refs(),
-        execution_eligibility: execution_eligibility(),
-        valid_from: Utc::now(),
-        valid_until: Utc::now() + Duration::hours(1),
-        status: RecommendationStatus::Prepared,
+impl TxnIds {
+    fn report_recommendation(&self) -> NewRecommendation {
+        NewRecommendation {
+            research_profile_artifact_id: execution_pg_seed::fixture_profile_ref().artifact_id(),
+            recommendation_id: self.recommendation,
+            recommendation_report_id: self.report,
+            rank: 1,
+            market_id: MarketId::new(&self.market),
+            event_id: EventId::new(&self.event),
+            token_id: TokenId::new("token-1"),
+            outcome_side: OutcomeSide::Yes,
+            composite_score: Probability::new(dec!(0.7)),
+            risk_adjusted_score: Probability::new(dec!(0.65)),
+            confidence: Probability::new(dec!(0.72)),
+            expected_return_bps: Bps::new(dec!(150)),
+            downside_bps: Bps::new(dec!(80)),
+            identity: recommendation_identity(),
+            market_context: market_context(),
+            rank_before_portfolio: 1,
+            liquidity_score: Probability::new(dec!(0.8)),
+            data_quality_score: Probability::new(dec!(0.9)),
+            model_score_percentile: Probability::new(dec!(0.75)),
+            trade_plan: trade_plan(),
+            factor_breakdown: factor_breakdown(),
+            evidence_refs: evidence_refs(),
+            execution_eligibility: execution_eligibility(),
+            valid_from: Utc::now(),
+            valid_until: Utc::now() + Duration::hours(1),
+            status: RecommendationStatus::Prepared,
+        }
     }
 }
 
-fn report_operation_log(ids: &TxnIds) -> NewOperationLog {
-    NewOperationLog {
-        id: OperationLogId::from_v7(),
-        request_id: format!("scheduled:test:{}", ids.report).into(),
-        actor_user_id: None,
-        actor_username: Some("system".to_owned()),
-        acting_role: Some("test".into()),
-        category: OperationCategory::QuantReport,
-        action: "publish".into(),
-        resource_type: Some(ResourceType::QuantReport),
-        resource_id: Some(ids.report.to_string()),
-        http_method: OperationHttpMethod::System,
-        http_path: "/test/quant/report".to_owned(),
-        http_status: 201,
-        outcome: OperationOutcome::Success,
-        client_ip: None,
-        user_agent: None,
-        latency_ms: 0,
-        detail: OperationDetailDocument::try_from(serde_json::json!({ "test": true }))
-            .expect("static operation detail"),
-        before_hash: None,
-        after_hash: None,
-        governance_audit_event_id: None,
-        governance_audit_sequence: None,
+impl TxnIds {
+    fn report_operation_log(&self) -> NewOperationLog {
+        NewOperationLog {
+            id: OperationLogId::from_v7(),
+            request_id: format!("scheduled:test:{}", self.report).into(),
+            actor_user_id: None,
+            actor_username: Some("system".to_owned()),
+            acting_role: Some("test".into()),
+            category: OperationCategory::QuantReport,
+            action: "publish".into(),
+            resource_type: Some(ResourceType::QuantReport),
+            resource_id: Some(self.report.to_string()),
+            http_method: OperationHttpMethod::System,
+            http_path: "/test/quant/report".to_owned(),
+            http_status: 201,
+            outcome: OperationOutcome::Success,
+            client_ip: None,
+            user_agent: None,
+            latency_ms: 0,
+            detail: OperationDetailDocument::try_from(serde_json::json!({ "test": true }))
+                .expect("static operation detail"),
+            before_hash: None,
+            after_hash: None,
+            governance_audit_event_id: None,
+            governance_audit_sequence: None,
+        }
     }
 }
 
@@ -3273,7 +3280,7 @@ async fn fill_entry_lot(
 ) {
     claim_entry_for_test(db, submission, intent_id).await;
     let order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(intent_id, ids),
             &ids.feature_parity_state_id,
         )
@@ -3303,7 +3310,7 @@ async fn fill_entry_lot(
         .expect("record entry fill");
 }
 
-pub async fn entry_fill_freezes_scale_out_denominator() {
+pub async fn entry_fill_freezes_denominator() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -3361,7 +3368,7 @@ fn exit_order(
     }
 }
 
-pub async fn exit_full_releases_capital_with_realized_pnl() {
+pub async fn exit_full_releases_pnl() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -3371,7 +3378,7 @@ pub async fn exit_full_releases_capital_with_realized_pnl() {
 
     // Write-ahead the exit: lot Open -> Closing.
     let exit = submission
-        .create_exit_order_and_mark_closing(
+        .create_exit_order(
             exit_order(&intent_id, &ids, dec!(100), dec!(0.55)),
             ExitReason::StopLoss,
             None,
@@ -3432,7 +3439,7 @@ pub async fn exit_full_releases_capital_with_realized_pnl() {
     assert_eq!(position.realized_pnl_usd, Usd::new(dec!(-5)));
 }
 
-pub async fn exit_partial_keeps_capital_spent_and_reduces_lot() {
+pub async fn exit_partial_keeps_lot() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -3441,7 +3448,7 @@ pub async fn exit_partial_keeps_capital_spent_and_reduces_lot() {
     fill_entry_lot(&db, &submission, &ids, &intent_id).await;
 
     let exit = submission
-        .create_exit_order_and_mark_closing(
+        .create_exit_order(
             exit_order(&intent_id, &ids, dec!(40), dec!(0.70)),
             ExitReason::PartialExit,
             Some(PendingScaleOut {
@@ -3507,7 +3514,7 @@ pub async fn exit_partial_keeps_capital_spent_and_reduces_lot() {
     assert!(intent.scale_out_state.pending_target.is_none());
 }
 
-pub async fn exit_rejects_second_in_flight_order() {
+pub async fn exit_rejects_second_order() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -3516,7 +3523,7 @@ pub async fn exit_rejects_second_in_flight_order() {
     fill_entry_lot(&db, &submission, &ids, &intent_id).await;
 
     submission
-        .create_exit_order_and_mark_closing(
+        .create_exit_order(
             exit_order(&intent_id, &ids, dec!(100), dec!(0.55)),
             ExitReason::StopLoss,
             None,
@@ -3525,7 +3532,7 @@ pub async fn exit_rejects_second_in_flight_order() {
         .expect("first exit order");
 
     let err = submission
-        .create_exit_order_and_mark_closing(
+        .create_exit_order(
             exit_order(&intent_id, &ids, dec!(100), dec!(0.54)),
             ExitReason::StopLoss,
             None,

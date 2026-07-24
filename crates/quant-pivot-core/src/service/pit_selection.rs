@@ -366,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_book_depth_separately_from_catalog_liquidity() {
+    fn projects_book_depth_liquidity() {
         let as_of = Utc.timestamp_millis_opt(2_000_000).single().expect("ts");
         let book = ResolvedBook::try_from(BookSnapshotAt {
             token_id: TokenId::new("yes"),
@@ -412,13 +412,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_domain_batch_entry_is_not_reclassified_as_not_mapped() {
+    fn missing_not_not_mapped() {
         let availability = HashMap::new();
         assert!(availability_for(&availability, &MarketId::new("missing")).is_err());
     }
 
     #[test]
-    fn missing_book_projects_empty_fail_closed() {
+    fn missing_projects_empty_rejects() {
         let as_of = Utc.timestamp_millis_opt(2_000_000).single().expect("ts");
         let market = market();
         let candidate = project_candidate(
@@ -601,22 +601,24 @@ mod tests {
         }
     }
 
-    fn empty_prefetched() -> Prefetched {
-        Prefetched {
-            books: HashMap::new(),
-            micro: HashMap::new(),
-            trade_tape: HashMap::new(),
-            resolutions: HashMap::new(),
-            catalog: CatalogWindowInfo {
-                market_changes: Vec::new(),
-                event_changes: Vec::new(),
-            },
-            domain_observations: HashMap::new(),
-            crypto_reports: HashMap::new(),
-            weather_observations: HashMap::new(),
-            weather_forecasts: HashMap::new(),
-            weather_calibrations: Vec::new(),
-            linkages: HashMap::new(),
+    impl Prefetched {
+        fn selection_empty() -> Self {
+            Self {
+                books: HashMap::new(),
+                micro: HashMap::new(),
+                trade_tape: HashMap::new(),
+                resolutions: HashMap::new(),
+                catalog: CatalogWindowInfo {
+                    market_changes: Vec::new(),
+                    event_changes: Vec::new(),
+                },
+                domain_observations: HashMap::new(),
+                crypto_reports: HashMap::new(),
+                weather_observations: HashMap::new(),
+                weather_forecasts: HashMap::new(),
+                weather_calibrations: Vec::new(),
+                linkages: HashMap::new(),
+            }
         }
     }
 
@@ -630,11 +632,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn select_at_includes_crypto_market_when_linkage_resolved_and_observed() {
+    async fn select_includes_crypto_observed() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let market = crypto_market("0xcrypto", as_of + ChronoDuration::days(7));
 
-        let mut prefetched = empty_prefetched();
+        let mut prefetched = Prefetched::selection_empty();
         prefetched.linkages.insert(
             market.market_id.clone(),
             vec![resolved_linkage(
@@ -702,13 +704,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn select_at_excludes_crypto_market_when_linkage_unresolved() {
+    async fn select_excludes_crypto_unresolved() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let market = crypto_market("0xunresolved", as_of + ChronoDuration::days(7));
 
         // No linkage at all for this market ⇒ Unresolved ⇒ the required domain
         // feature is unavailable ⇒ ModelFeatureUnavailable.
-        let prefetched = empty_prefetched();
+        let prefetched = Prefetched::selection_empty();
         let domain_config = DomainConfig::default();
         let domain_source = PrefetchedDomainAvailabilitySource::new(&prefetched, &domain_config);
 

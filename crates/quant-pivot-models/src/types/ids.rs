@@ -134,7 +134,7 @@ impl DomainSourceId {
 
     /// Binance USD-M Futures aggregate-trade stream.
     #[must_use]
-    pub fn binance_usdm_futures_agg_trade() -> Self {
+    pub fn binance_futures_trade() -> Self {
         Self::new("binance_usdm_futures_agg_trade")
     }
 
@@ -755,7 +755,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recommendation_report_id_v7_sortable_by_time() {
+    fn recommendation_report_id_time() {
         const N: usize = 50;
         let mut ids: Vec<RecommendationReportId> = Vec::with_capacity(N);
         for _ in 0..N {
@@ -778,13 +778,13 @@ mod tests {
     }
 
     #[test]
-    fn order_intent_id_from_v7_is_version_7() {
+    fn order_intent_id_7() {
         let id = OrderIntentId::from_v7();
         assert_eq!(id.as_uuid().get_version(), Some(uuid::Version::SortRand));
     }
 
     #[test]
-    fn generated_ids_are_version_7() {
+    fn generated_ids_version_7() {
         assert_eq!(
             ModelRunId::from_v7().as_uuid().get_version(),
             Some(uuid::Version::SortRand)
@@ -814,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn uuid_id_is_inline_copy_value() {
+    fn uuid_id_inline_value() {
         const UUID: Uuid = Uuid::from_u128(0x0190_6f35_2b3a_7f11_9c22_aabb_ccdd_eeff);
         const ID: RecommendationId = RecommendationId::new(UUID);
 
@@ -830,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn uuid_id_serde_wire_form_matches_canonical_string() {
+    fn uuid_id_matches_string() {
         const UUID: Uuid = Uuid::from_u128(0x0190_6f35_2b3a_7f11_9c22_aabb_ccdd_eeff);
         let id = RecommendationId::new(UUID);
         let canonical = UUID.hyphenated().to_string();
@@ -857,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn uuid_id_seaorm_binding_stays_native_uuid() {
+    fn uuid_id_seaorm_uuid() {
         const UUID: Uuid = Uuid::from_u128(0x0190_6f35_2b3a_7f11_9c22_aabb_ccdd_eeff);
         let id = RecommendationId::new(UUID);
 
@@ -866,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn content_addressed_uuid_v5_contract_does_not_drift() {
+    fn content_address_never_drifts() {
         let hash = ContentHash::from_bytes([0; 32]);
 
         assert_eq!(
@@ -924,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn str_id_clone_is_cheap() {
+    fn str_id_clone_cheap() {
         let id = TokenId::new("token-123");
         let cloned = id.clone();
         assert_eq!(id, cloned);

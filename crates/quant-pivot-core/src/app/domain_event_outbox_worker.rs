@@ -7,11 +7,7 @@ use quant_pivot_error::{
     QuantError, QuantResult,
     storage::{StorageError, entity::QUANT_DOMAIN_EVENT_OUTBOX},
 };
-use quant_pivot_models::{
-    clickhouse::{ChSchemaVersion, DomainEventRow},
-    domain::data_plane::{DomainEventEnvelope, DomainEventType},
-    types::{DomainEventId, WorkerId},
-};
+use quant_pivot_models::{clickhouse::DomainEventRow, types::WorkerId};
 use quant_pivot_repository::traits::{DomainProjectionRepository, FactWriter};
 use tokio_util::sync::CancellationToken;
 
@@ -73,7 +69,14 @@ impl DomainEventOutboxWorker {
         }
         let rows = events
             .iter()
-            .map(to_clickhouse_row)
+            .map(|event| {
+                DomainEventRow::try_from(event).map_err(|error| {
+                    StorageError::invariant_violation(
+                        Some(QUANT_DOMAIN_EVENT_OUTBOX),
+                        format!("domain event payload serialization failed: {error}"),
+                    )
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         if let Err(error) = self.writer.write_batch(rows).await {
             for event in &events {
@@ -98,43 +101,5 @@ impl DomainEventOutboxWorker {
                 .await?;
         }
         Ok(())
-    }
-}
-
-fn to_clickhouse_row(event: &DomainEventEnvelope) -> Result<DomainEventRow, QuantError> {
-    let payload_json = serde_json::to_string(&event.payload).map_err(|error| {
-        StorageError::invariant_violation(
-            Some(QUANT_DOMAIN_EVENT_OUTBOX),
-            format!("domain event payload serialization failed: {error}"),
-        )
-    })?;
-    Ok(DomainEventRow {
-        event_id: event.id.as_uuid(),
-        source: event.source.to_string(),
-        event_type: event_type_name(event.event_type).to_owned(),
-        subject: event.subject.clone(),
-        event_time: event.time.timestamp_millis(),
-        published_at: event.published_at.timestamp_millis(),
-        available_at: event.available_at.timestamp_millis(),
-        schema_version: ChSchemaVersion(event.schema_version),
-        revision: event.revision,
-        supersedes_event_id: event.supersedes_event_id.map(DomainEventId::as_uuid),
-        payload_hash: event.payload_hash,
-        source_checkpoint_hash: event.source_checkpoint_hash,
-        payload_json,
-    })
-}
-
-const fn event_type_name(event_type: DomainEventType) -> &'static str {
-    match event_type {
-        DomainEventType::CryptoPriceTransition => "crypto.price_transition",
-        DomainEventType::SettlementRedeemConfirmed => "settlement.redeem_confirmed",
-        DomainEventType::WeatherDailyTemperatureExtremeAdvanced => {
-            "weather.daily_temperature_extreme_advanced"
-        }
-        DomainEventType::WeatherDailyTemperatureExtremeCorrected => {
-            "weather.daily_temperature_extreme_corrected"
-        }
-        DomainEventType::WeatherObservationDayClosed => "weather.observation_day_closed",
     }
 }

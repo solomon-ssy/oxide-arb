@@ -3,7 +3,7 @@
 //!
 //! Two momentum factors that are really the same signal (audit #2) show up here
 //! as a high `|ρ|`. This is an **analyzer plus an offline/CI gate**: the
-//! acceptance suite (`default_momentum_estimators_not_mutually_collinear`)
+//! acceptance suite (`default_momentum_not_collinear`)
 //! asserts the four momentum estimators and the simple return stay below the
 //! configured tolerance on a heterogeneous synthetic panel. Collinearity is an
 //! offline diagnostic; the model-publish gate consumes its governed evidence.
@@ -280,12 +280,8 @@ mod tests {
     use super::{FactorCollinearityAnalyzer, FactorObservationMatrix, neutralize_by_group};
     use crate::factors::value::FactorName;
 
-    fn cell(value: i64, scale: u32) -> Decimal {
-        Decimal::new(value, scale)
-    }
-
     #[test]
-    fn neutralize_by_category_removes_shared_category_level() {
+    fn neutralize_category_removes_level() {
         // Two factors both step up with the category level (so their raw Spearman
         // is inflated), but within each category their fine structure is not the
         // same. Category-neutralizing strips the shared level, so the residual
@@ -297,9 +293,18 @@ mod tests {
         for category in 0..3_i64 {
             let base = category * 100;
             // Within-group: alpha rises 0,1,2; beta is a rotation (1,2,0).
-            rows.push(vec![Some(cell(base, 0)), Some(cell(base + 1, 0))]);
-            rows.push(vec![Some(cell(base + 1, 0)), Some(cell(base + 2, 0))]);
-            rows.push(vec![Some(cell(base + 2, 0)), Some(cell(base, 0))]);
+            rows.push(vec![
+                Some(Decimal::new(base, 0)),
+                Some(Decimal::new(base + 1, 0)),
+            ]);
+            rows.push(vec![
+                Some(Decimal::new(base + 1, 0)),
+                Some(Decimal::new(base + 2, 0)),
+            ]);
+            rows.push(vec![
+                Some(Decimal::new(base + 2, 0)),
+                Some(Decimal::new(base, 0)),
+            ]);
         }
         let panel = FactorObservationMatrix {
             factors: vec![alpha, beta],
@@ -330,15 +335,15 @@ mod tests {
     }
 
     #[test]
-    fn neutralize_treats_missing_group_as_its_own_bucket() {
+    fn neutralize_treats_missing_bucket() {
         // A `None` group must not borrow another group's mean; it neutralizes
         // among the other `None` rows only.
         let alpha = FactorName::from_static("alpha");
         let rows = vec![
-            vec![Some(cell(10, 0))],
-            vec![Some(cell(20, 0))],
-            vec![Some(cell(100, 0))],
-            vec![Some(cell(140, 0))],
+            vec![Some(Decimal::new(10, 0))],
+            vec![Some(Decimal::new(20, 0))],
+            vec![Some(Decimal::new(100, 0))],
+            vec![Some(Decimal::new(140, 0))],
         ];
         let panel = FactorObservationMatrix {
             factors: vec![alpha],

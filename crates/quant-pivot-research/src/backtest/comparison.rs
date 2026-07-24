@@ -53,59 +53,54 @@ pub struct ModelComparisonReport {
     pub comparison_hash: ContentHash,
 }
 
-/// Compute the head-to-head comparison of `candidate` against `baseline`.
-///
-/// Both runs must come from the same replay window; samples are joined on
-/// `(as_of, market, token)` for the correlation / disagreement metrics.
-///
-/// # Errors
-///
-/// Propagates canonical-hash serialization failures.
-pub fn compare_reports(
-    baseline: &BacktestRunResult,
-    candidate: &BacktestRunResult,
-) -> QuantResult<ModelComparisonReport> {
-    let rank_ic_delta =
-        (candidate.report.rank_ic - baseline.report.rank_ic).round_dp(RESEARCH_DECIMAL_SCALE);
-    let hit_rate_delta = (candidate.report.hit_rate.inner() - baseline.report.hit_rate.inner())
-        .round_dp(RESEARCH_DECIMAL_SCALE);
-    let realized_pnl_delta = (candidate.report.report_pnl_simulation.realized_pnl_usd
-        - baseline.report.report_pnl_simulation.realized_pnl_usd)
-        .round_dp(RESEARCH_DECIMAL_SCALE);
+impl BacktestRunResult {
+    /// Compute the head-to-head comparison of `candidate` against this baseline.
+    ///
+    /// Both runs must come from the same replay window; samples are joined on
+    /// `(as_of, market, token)` for the correlation / disagreement metrics.
+    pub fn compare(&self, candidate: &Self) -> QuantResult<ModelComparisonReport> {
+        let rank_ic_delta =
+            (candidate.report.rank_ic - self.report.rank_ic).round_dp(RESEARCH_DECIMAL_SCALE);
+        let hit_rate_delta = (candidate.report.hit_rate.inner() - self.report.hit_rate.inner())
+            .round_dp(RESEARCH_DECIMAL_SCALE);
+        let realized_pnl_delta = (candidate.report.report_pnl_simulation.realized_pnl_usd
+            - self.report.report_pnl_simulation.realized_pnl_usd)
+            .round_dp(RESEARCH_DECIMAL_SCALE);
 
-    let (score_correlation, side_disagreement_rate, common_samples) =
-        joined_divergence(&baseline.sample_outcomes, &candidate.sample_outcomes);
+        let (score_correlation, side_disagreement_rate, common_samples) =
+            joined_divergence(&self.sample_outcomes, &candidate.sample_outcomes);
 
-    let category_breakdown_diff = category_diff(baseline, candidate);
+        let category_breakdown_diff = self.category_diff(candidate);
 
-    let comparison_hash = ResearchHasher::canonical(&ComparisonHashInput {
-        baseline_model_version_id: &baseline.report.model_version_id,
-        candidate_model_version_id: &candidate.report.model_version_id,
-        baseline_report_hash: &baseline.report.report_hash,
-        candidate_report_hash: &candidate.report.report_hash,
-        rank_ic_delta,
-        hit_rate_delta,
-        realized_pnl_delta,
-        score_correlation,
-        side_disagreement_rate,
-        common_samples,
-        category_breakdown_diff: &category_breakdown_diff,
-    })?;
+        let comparison_hash = ResearchHasher::canonical(&ComparisonHashInput {
+            baseline_model_version_id: &self.report.model_version_id,
+            candidate_model_version_id: &candidate.report.model_version_id,
+            baseline_report_hash: &self.report.report_hash,
+            candidate_report_hash: &candidate.report.report_hash,
+            rank_ic_delta,
+            hit_rate_delta,
+            realized_pnl_delta,
+            score_correlation,
+            side_disagreement_rate,
+            common_samples,
+            category_breakdown_diff: &category_breakdown_diff,
+        })?;
 
-    Ok(ModelComparisonReport {
-        baseline_model_version_id: baseline.report.model_version_id,
-        candidate_model_version_id: candidate.report.model_version_id,
-        baseline_report_hash: baseline.report.report_hash,
-        candidate_report_hash: candidate.report.report_hash,
-        rank_ic_delta,
-        hit_rate_delta,
-        realized_pnl_delta,
-        score_correlation,
-        side_disagreement_rate,
-        common_samples,
-        category_breakdown_diff,
-        comparison_hash,
-    })
+        Ok(ModelComparisonReport {
+            baseline_model_version_id: self.report.model_version_id,
+            candidate_model_version_id: candidate.report.model_version_id,
+            baseline_report_hash: self.report.report_hash,
+            candidate_report_hash: candidate.report.report_hash,
+            rank_ic_delta,
+            hit_rate_delta,
+            realized_pnl_delta,
+            score_correlation,
+            side_disagreement_rate,
+            common_samples,
+            category_breakdown_diff,
+            comparison_hash,
+        })
+    }
 }
 
 /// Composite-score correlation + side-disagreement over the common sample keys.
@@ -146,51 +141,50 @@ fn joined_divergence(
 }
 
 /// Per-category rank-IC diff over the union of both reports' categories.
-fn category_diff(
-    baseline: &BacktestRunResult,
-    candidate: &BacktestRunResult,
-) -> Vec<CategoryRankIcDelta> {
-    let baseline_by_cat: BTreeMap<MarketCategory, Decimal> = baseline
-        .report
-        .category_breakdown
-        .iter()
-        .map(|c| (c.category, c.rank_ic))
-        .collect();
-    let candidate_by_cat: BTreeMap<MarketCategory, Decimal> = candidate
-        .report
-        .category_breakdown
-        .iter()
-        .map(|c| (c.category, c.rank_ic))
-        .collect();
+impl BacktestRunResult {
+    fn category_diff(&self, candidate: &Self) -> Vec<CategoryRankIcDelta> {
+        let baseline_by_cat: BTreeMap<MarketCategory, Decimal> = self
+            .report
+            .category_breakdown
+            .iter()
+            .map(|c| (c.category, c.rank_ic))
+            .collect();
+        let candidate_by_cat: BTreeMap<MarketCategory, Decimal> = candidate
+            .report
+            .category_breakdown
+            .iter()
+            .map(|c| (c.category, c.rank_ic))
+            .collect();
 
-    let mut categories: Vec<MarketCategory> = baseline_by_cat
-        .keys()
-        .chain(candidate_by_cat.keys())
-        .copied()
-        .collect();
-    categories.sort_by_key(|category| category.as_str());
-    categories.dedup();
+        let mut categories: Vec<MarketCategory> = baseline_by_cat
+            .keys()
+            .chain(candidate_by_cat.keys())
+            .copied()
+            .collect();
+        categories.sort_by_key(|category| category.as_str());
+        categories.dedup();
 
-    categories
-        .into_iter()
-        .map(|category| {
-            let baseline_rank_ic = baseline_by_cat
-                .get(&category)
-                .copied()
-                .unwrap_or(Decimal::ZERO);
-            let candidate_rank_ic = candidate_by_cat
-                .get(&category)
-                .copied()
-                .unwrap_or(Decimal::ZERO);
-            CategoryRankIcDelta {
-                category,
-                baseline_rank_ic,
-                candidate_rank_ic,
-                rank_ic_delta: (candidate_rank_ic - baseline_rank_ic)
-                    .round_dp(RESEARCH_DECIMAL_SCALE),
-            }
-        })
-        .collect()
+        categories
+            .into_iter()
+            .map(|category| {
+                let baseline_rank_ic = baseline_by_cat
+                    .get(&category)
+                    .copied()
+                    .unwrap_or(Decimal::ZERO);
+                let candidate_rank_ic = candidate_by_cat
+                    .get(&category)
+                    .copied()
+                    .unwrap_or(Decimal::ZERO);
+                CategoryRankIcDelta {
+                    category,
+                    baseline_rank_ic,
+                    candidate_rank_ic,
+                    rank_ic_delta: (candidate_rank_ic - baseline_rank_ic)
+                        .round_dp(RESEARCH_DECIMAL_SCALE),
+                }
+            })
+            .collect()
+    }
 }
 
 /// Join key for matching the same decision across the two models.
@@ -228,7 +222,6 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use super::compare_reports;
     use crate::{
         backtest::{BacktestReport, BacktestRunResult, SampleOutcome},
         test_support::content_hash as hash,
@@ -323,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn comparison_reports_capture_deltas_and_disagreement() {
+    fn comparison_reports_capture_disagreement() {
         let baseline = result(
             "aa",
             dec!(0.10),
@@ -344,7 +337,7 @@ mod tests {
             ],
         );
 
-        let comparison = compare_reports(&baseline, &candidate).expect("compare");
+        let comparison = baseline.compare(&candidate).expect("compare");
         assert_eq!(
             comparison.rank_ic_delta,
             dec!(0.15),

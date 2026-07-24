@@ -58,7 +58,7 @@ fn claim_config(version_id: &DecisionPolicySnapshotId) -> ReportRunClaimConfig {
     }
 }
 
-pub async fn two_coordinators_claim_one_global_run() {
+pub async fn two_coordinators_claim_run() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let version_id = activate_runtime(&db).await;
@@ -85,7 +85,7 @@ pub async fn two_coordinators_claim_one_global_run() {
     assert_eq!(claimed[0].status, ReportRunStatus::Running);
 }
 
-pub async fn restart_coalesces_latest_and_records_aggregate_gap() {
+pub async fn restart_coalesces_latest_gap() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let version_id = activate_runtime(&db).await;
@@ -168,7 +168,7 @@ pub async fn restart_coalesces_latest_and_records_aggregate_gap() {
     assert_eq!(health.missed_occurrence_count_24h, expected_missed_count);
 }
 
-pub async fn config_change_skips_old_queued_occurrence() {
+pub async fn config_change_skips_occurrence() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let version_id = activate_runtime(&db).await;

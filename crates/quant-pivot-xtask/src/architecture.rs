@@ -17,6 +17,8 @@ use syn::{
 };
 use toml::Value;
 
+use crate::function_design;
+
 const TEST_ONLY_EXTERNAL_DEPENDENCIES: &[&str] = &[
     "actix-http",
     "actix-test",
@@ -84,17 +86,18 @@ pub fn run() -> Result<()> {
 
     let metadata: CargoMetadata =
         serde_json::from_slice(&output.stdout).context("decode cargo metadata")?;
-    let mut violations = validate(&metadata);
-    violations.extend(validate_workspace_dependency_inventory(&metadata)?);
-    violations.extend(validate_performance_contracts(&metadata)?);
+    let mut violations = metadata.validate();
+    violations.extend(metadata.validate_workspace_dependency_inventory()?);
+    violations.extend(metadata.validate_performance_contracts()?);
     violations.extend(validate_public_api(&metadata.workspace_root)?);
+    violations.extend(function_design::validate_workspace(
+        &metadata.workspace_root,
+    )?);
     violations.extend(validate_settlement_runtime_reachability(
         &metadata.workspace_root,
     )?);
-    violations.extend(validate_phase_11_9_ledger(&metadata.workspace_root)?);
-    violations.extend(validate_removed_phase_11_9_attribution_contract(
-        &metadata.workspace_root,
-    )?);
+    violations.extend(validate_phase_ledger(&metadata.workspace_root)?);
+    violations.extend(validate_attribution_removal(&metadata.workspace_root)?);
     if violations.is_empty() {
         println!("architecture check passed");
         return Ok(());
@@ -308,7 +311,7 @@ fn read_architecture_source(
     Ok((path, source))
 }
 
-fn validate_removed_phase_11_9_attribution_contract(workspace_root: &Path) -> Result<Vec<String>> {
+fn validate_attribution_removal(workspace_root: &Path) -> Result<Vec<String>> {
     const REMOVED_PATHS: &[&str] = &[
         "crates/quant-pivot-core/src/app/attribution_worker.rs",
         "crates/quant-pivot-core/src/execution/attribution.rs",
@@ -995,7 +998,7 @@ fn parallel_kernel_allowed(path: &Path, function_name: Option<&str>) -> bool {
             Some("build_batch")
         ) | (
             Some("crates/quant-pivot-research/src/parallel.rs"),
-            Some("par_try_map" | "par_map_with_index" | "par_try_map_with_index")
+            Some("par_try_map" | "par_map_with_index" | "par_try_map_index")
         ) | (
             Some("crates/quant-pivot-research/src/validation/cpcv.rs"),
             Some("run")
@@ -1015,7 +1018,7 @@ struct BodyStyleVisitor<'a> {
     violations: Vec<String>,
 }
 
-fn type_path_has_direct_argument(ty: &Type, owner: &str, argument: &str) -> bool {
+fn has_direct_type_argument(ty: &Type, owner: &str, argument: &str) -> bool {
     let Type::Path(type_path) = ty else {
         return false;
     };
@@ -1094,14 +1097,14 @@ impl<'ast> Visit<'ast> for BodyStyleVisitor<'_> {
     }
 
     fn visit_type(&mut self, ty: &'ast Type) {
-        if type_path_has_direct_argument(ty, "Arc", "Uuid") {
+        if has_direct_type_argument(ty, "Arc", "Uuid") {
             self.violations.push(format!(
                 "{} heap-shares a 16-byte UUID as `Arc<Uuid>`; use the Copy UUID newtype value",
                 self.path.display()
             ));
         }
         if self.path.starts_with("crates/quant-pivot-web/src/ws")
-            && type_path_has_direct_argument(ty, "Sender", "String")
+            && has_direct_type_argument(ty, "Sender", "String")
         {
             self.violations.push(format!(
                 "{} uses `Sender<String>` in WebSocket delivery; encode once and fan out shared `ByteString` frames",
@@ -1272,68 +1275,72 @@ fn use_tree_roots(tree: &UseTree, output: &mut Vec<String>) {
     }
 }
 
-fn validate(metadata: &CargoMetadata) -> Vec<String> {
-    let workspace_packages = metadata
-        .packages
-        .iter()
-        .filter(|package| metadata.workspace_members.contains(&package.id))
-        .map(|package| (package.name.as_str(), package))
-        .collect::<BTreeMap<_, _>>();
-    let mut violations = Vec::new();
-
-    for package in workspace_packages.values() {
-        if package.name.starts_with("quant-pivot-")
-            && !KNOWN_WORKSPACE_PACKAGES.contains(&package.name.as_str())
-        {
-            violations.push(format!(
-                "{} has no declared architecture role",
-                package.name
-            ));
-        }
-        if !matches!(
-            package.name.as_str(),
-            "quant-pivot-allocator" | "quant-pivot-macros"
-        ) && !package.dependencies.iter().any(|dependency| {
-            dependency.kind.is_none() && dependency.name == "quant-pivot-allocator"
-        }) {
-            violations.push(format!(
-                "{} does not link the target-process jemalloc policy crate",
-                package.name
-            ));
-        }
-        for dependency in package
-            .dependencies
+impl CargoMetadata {
+    fn validate(&self) -> Vec<String> {
+        let workspace_packages = self
+            .packages
             .iter()
-            .filter(|dependency| dependency.kind.is_none())
-        {
-            validate_test_boundary(package, dependency, &mut violations);
-            validate_entity_visibility(package, dependency, &mut violations);
-            if dependency.path.is_some()
-                && dependency.name.starts_with("quant-pivot-")
-                && dependency.name != "quant-pivot-allocator"
-                && !allowed_workspace_dependencies(&package.name)
-                    .contains(&dependency.name.as_str())
+            .filter(|package| self.workspace_members.contains(&package.id))
+            .map(|package| (package.name.as_str(), package))
+            .collect::<BTreeMap<_, _>>();
+        let mut violations = Vec::new();
+
+        for package in workspace_packages.values() {
+            if package.name.starts_with("quant-pivot-")
+                && !KNOWN_WORKSPACE_PACKAGES.contains(&package.name.as_str())
             {
                 violations.push(format!(
-                    "{} has forbidden normal dependency on {}",
-                    package.name, dependency.name
+                    "{} has no declared architecture role",
+                    package.name
                 ));
             }
+            if !matches!(
+                package.name.as_str(),
+                "quant-pivot-allocator" | "quant-pivot-macros"
+            ) && !package.dependencies.iter().any(|dependency| {
+                dependency.kind.is_none() && dependency.name == "quant-pivot-allocator"
+            }) {
+                violations.push(format!(
+                    "{} does not link the target-process jemalloc policy crate",
+                    package.name
+                ));
+            }
+            for dependency in package
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.kind.is_none())
+            {
+                validate_test_boundary(package, dependency, &mut violations);
+                validate_entity_visibility(package, dependency, &mut violations);
+                if dependency.path.is_some()
+                    && dependency.name.starts_with("quant-pivot-")
+                    && dependency.name != "quant-pivot-allocator"
+                    && !allowed_workspace_dependencies(&package.name)
+                        .contains(&dependency.name.as_str())
+                {
+                    violations.push(format!(
+                        "{} has forbidden normal dependency on {}",
+                        package.name, dependency.name
+                    ));
+                }
+            }
         }
-    }
 
-    violations
+        violations
+    }
 }
 
-fn validate_performance_contracts(metadata: &CargoMetadata) -> Result<Vec<String>> {
-    let root = &metadata.workspace_root;
-    let mut violations = Vec::new();
-    validate_allocator_contract(root, &mut violations)?;
-    validate_deployment_contract(root, &mut violations)?;
-    validate_runtime_contract(root, &mut violations)?;
-    validate_performance_evidence_contract(root, &mut violations)?;
-    validate_removed_l2_contract(root, &mut violations)?;
-    Ok(violations)
+impl CargoMetadata {
+    fn validate_performance_contracts(&self) -> Result<Vec<String>> {
+        let root = &self.workspace_root;
+        let mut violations = Vec::new();
+        validate_allocator_contract(root, &mut violations)?;
+        validate_deployment_contract(root, &mut violations)?;
+        validate_runtime_contract(root, &mut violations)?;
+        validate_performance_evidence_contract(root, &mut violations)?;
+        validate_removed_l2_contract(root, &mut violations)?;
+        Ok(violations)
+    }
 }
 
 fn validate_performance_evidence_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
@@ -1546,7 +1553,7 @@ fn validate_deployment_contract(root: &Path, violations: &mut Vec<String>) -> Re
 
 fn validate_runtime_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
     validate_compute_runtime_contract(root, violations)?;
-    validate_data_plane_runtime_contract(root, violations)
+    validate_data_plane(root, violations)
 }
 
 fn validate_compute_runtime_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
@@ -1642,7 +1649,7 @@ fn validate_compute_runtime_contract(root: &Path, violations: &mut Vec<String>) 
     Ok(())
 }
 
-fn validate_data_plane_runtime_contract(root: &Path, violations: &mut Vec<String>) -> Result<()> {
+fn validate_data_plane(root: &Path, violations: &mut Vec<String>) -> Result<()> {
     let session_hub_path = root.join("crates/quant-pivot-web/src/ws/mod.rs");
     let session_hub = fs::read_to_string(&session_hub_path)
         .with_context(|| format!("read {}", session_hub_path.display()))?;
@@ -1802,32 +1809,34 @@ fn validate_removed_l2_contract(root: &Path, violations: &mut Vec<String>) -> Re
     Ok(())
 }
 
-fn validate_workspace_dependency_inventory(metadata: &CargoMetadata) -> Result<Vec<String>> {
-    let manifest_path = metadata.workspace_root.join("Cargo.toml");
-    let manifest = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("read {}", manifest_path.display()))?;
-    let manifest: Value =
-        toml::from_str(&manifest).with_context(|| format!("parse {}", manifest_path.display()))?;
-    let declared = manifest
-        .get("workspace")
-        .and_then(|workspace| workspace.get("dependencies"))
-        .and_then(Value::as_table)
-        .context("workspace.dependencies must be a TOML table")?;
-    let used = metadata
-        .packages
-        .iter()
-        .filter(|package| metadata.workspace_members.contains(&package.id))
-        .flat_map(|package| package.dependencies.iter())
-        .map(|dependency| dependency.rename.as_deref().unwrap_or(&dependency.name))
-        .collect::<BTreeSet<_>>();
+impl CargoMetadata {
+    fn validate_workspace_dependency_inventory(&self) -> Result<Vec<String>> {
+        let manifest_path = self.workspace_root.join("Cargo.toml");
+        let manifest = fs::read_to_string(&manifest_path)
+            .with_context(|| format!("read {}", manifest_path.display()))?;
+        let manifest: Value = toml::from_str(&manifest)
+            .with_context(|| format!("parse {}", manifest_path.display()))?;
+        let declared = manifest
+            .get("workspace")
+            .and_then(|workspace| workspace.get("dependencies"))
+            .and_then(Value::as_table)
+            .context("workspace.dependencies must be a TOML table")?;
+        let used = self
+            .packages
+            .iter()
+            .filter(|package| self.workspace_members.contains(&package.id))
+            .flat_map(|package| package.dependencies.iter())
+            .map(|dependency| dependency.rename.as_deref().unwrap_or(&dependency.name))
+            .collect::<BTreeSet<_>>();
 
-    Ok(declared
-        .keys()
-        .filter(|dependency| !used.contains(dependency.as_str()))
-        .map(|dependency| {
-            format!("workspace dependency {dependency} is not inherited by any member manifest")
-        })
-        .collect())
+        Ok(declared
+            .keys()
+            .filter(|dependency| !used.contains(dependency.as_str()))
+            .map(|dependency| {
+                format!("workspace dependency {dependency} is not inherited by any member manifest")
+            })
+            .collect())
+    }
 }
 
 fn validate_test_boundary(
@@ -1984,16 +1993,16 @@ struct PhaseLedgerTask {
     detail: String,
 }
 
-fn validate_phase_11_9_ledger(workspace_root: &Path) -> Result<Vec<String>> {
+fn validate_phase_ledger(workspace_root: &Path) -> Result<Vec<String>> {
     let path = workspace_root.join(PHASE_11_9_LEDGER_PATH);
     let source = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    Ok(validate_phase_11_9_ledger_source(&source)
+    Ok(validate_ledger_source(&source)
         .into_iter()
         .map(|violation| format!("{}: {violation}", path.display()))
         .collect())
 }
 
-fn validate_phase_11_9_ledger_source(source: &str) -> Vec<String> {
+fn validate_ledger_source(source: &str) -> Vec<String> {
     let mut violations = Vec::new();
     let Some((before_implementation, implementation_and_after)) =
         source.split_once("## 11. Implementation Ledger")
@@ -2034,7 +2043,7 @@ fn validate_phase_11_9_ledger_source(source: &str) -> Vec<String> {
         let Some(id) = cells.first() else {
             continue;
         };
-        if !is_phase_ledger_task_id(id) || cells.len() < 4 {
+        if !is_ledger_task_id(id) || cells.len() < 4 {
             continue;
         }
         if tasks.contains_key(*id) {
@@ -2094,7 +2103,7 @@ fn validate_phase_11_9_ledger_source(source: &str) -> Vec<String> {
         .lines()
         .filter_map(markdown_cells)
         .filter(|cells| cells.len() >= 4 && cells[2].starts_with("PASS"))
-        .flat_map(|cells| extract_phase_ledger_task_ids(cells[1]))
+        .flat_map(|cells| extract_ledger_task_ids(cells[1]))
         .collect::<BTreeSet<_>>();
 
     for (id, task) in &tasks {
@@ -2118,7 +2127,7 @@ fn validate_phase_11_9_ledger_source(source: &str) -> Vec<String> {
                 "BLOCKED task `{id}` must record blocker=, unblock=, and resume="
             ));
         }
-        validate_phase_ledger_task_dependencies(id, task, &tasks, &mut violations);
+        validate_ledger_dependencies(id, task, &tasks, &mut violations);
     }
 
     let status_line = source
@@ -2146,7 +2155,7 @@ fn markdown_cells(line: &str) -> Option<Vec<&str>> {
     Some(line.trim_matches('|').split('|').map(str::trim).collect())
 }
 
-fn is_phase_ledger_task_id(value: &str) -> bool {
+fn is_ledger_task_id(value: &str) -> bool {
     let Some(value) = value.strip_prefix('W') else {
         return false;
     };
@@ -2161,10 +2170,10 @@ fn is_phase_ledger_task_id(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || character == '-')
 }
 
-fn extract_phase_ledger_task_ids(value: &str) -> Vec<String> {
+fn extract_ledger_task_ids(value: &str) -> Vec<String> {
     value
         .split(|character: char| !(character.is_ascii_alphanumeric() || character == '-'))
-        .filter(|token| is_phase_ledger_task_id(token))
+        .filter(|token| is_ledger_task_id(token))
         .map(str::to_owned)
         .collect()
 }
@@ -2183,8 +2192,8 @@ fn parse_phase_ledger_dependencies(
         .filter(|dependency| !dependency.is_empty())
         .filter_map(|dependency| {
             let reference = dependency.strip_suffix('*').unwrap_or(dependency);
-            if is_phase_ledger_task_id(reference)
-                || (dependency.ends_with('*') && is_phase_ledger_task_prefix(reference))
+            if is_ledger_task_id(reference)
+                || (dependency.ends_with('*') && is_ledger_task_prefix(reference))
             {
                 Some(dependency.to_owned())
             } else {
@@ -2197,7 +2206,7 @@ fn parse_phase_ledger_dependencies(
         .collect()
 }
 
-fn is_phase_ledger_task_prefix(value: &str) -> bool {
+fn is_ledger_task_prefix(value: &str) -> bool {
     let Some(value) = value.strip_prefix('W') else {
         return false;
     };
@@ -2212,7 +2221,7 @@ fn is_phase_ledger_task_prefix(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || character == '-')
 }
 
-fn validate_phase_ledger_task_dependencies(
+fn validate_ledger_dependencies(
     task_id: &str,
     task: &PhaseLedgerTask,
     tasks: &BTreeMap<String, PhaseLedgerTask>,
@@ -2266,8 +2275,8 @@ mod tests {
     };
 
     use super::{
-        CargoDependency, CargoMetadata, CargoPackage, validate, validate_config_secret_types,
-        validate_persistence_documents, validate_phase_11_9_ledger_source, validate_public_exports,
+        CargoDependency, CargoMetadata, CargoPackage, validate_config_secret_types,
+        validate_ledger_source, validate_persistence_documents, validate_public_exports,
         validate_source_style,
     };
 
@@ -2284,18 +2293,19 @@ mod tests {
         }
     }
 
-    fn metadata(mut package: CargoPackage) -> CargoMetadata {
-        package
-            .dependencies
-            .push(dependency("quant-pivot-allocator", None, &[]));
-        CargoMetadata {
-            workspace_members: BTreeSet::from([package.id.clone()]),
-            packages: vec![package],
-            workspace_root: PathBuf::from("/workspace"),
+    impl CargoPackage {
+        fn metadata(mut self) -> CargoMetadata {
+            self.dependencies
+                .push(dependency("quant-pivot-allocator", None, &[]));
+            CargoMetadata {
+                workspace_members: BTreeSet::from([self.id.clone()]),
+                packages: vec![self],
+                workspace_root: PathBuf::from("/workspace"),
+            }
         }
     }
 
-    fn phase_11_9_ledger_fixture(implementation: &str, evidence: &str) -> String {
+    fn phase_11_9_fixture(implementation: &str, evidence: &str) -> String {
         format!(
             r"
 > 状态：**Phase 11.9 执行中**
@@ -2333,8 +2343,8 @@ mod tests {
     }
 
     #[test]
-    fn phase_11_9_ledger_accepts_one_active_task_and_verified_dependencies() {
-        let source = phase_11_9_ledger_fixture(
+    fn phase_11_accepts_dependencies() {
+        let source = phase_11_9_fixture(
             r"
 | ID | 状态 | 依赖 | 任务 | 完成证据 |
 |---|---|---|---|---|
@@ -2347,12 +2357,12 @@ mod tests {
             "| 2026-07-24 | W1-01 | PASS | verified |",
         );
 
-        assert!(validate_phase_11_9_ledger_source(&source).is_empty());
+        assert!(validate_ledger_source(&source).is_empty());
     }
 
     #[test]
-    fn phase_11_9_ledger_rejects_drifted_state_and_missing_evidence() {
-        let source = phase_11_9_ledger_fixture(
+    fn phase_rejects_missing_evidence() {
+        let source = phase_11_9_fixture(
             r"
 | ID | 状态 | 依赖 | 任务 | 完成证据 |
 |---|---|---|---|---|
@@ -2365,7 +2375,7 @@ mod tests {
             "",
         );
 
-        let violations = validate_phase_11_9_ledger_source(&source);
+        let violations = validate_ledger_source(&source);
 
         assert!(
             violations
@@ -2391,32 +2401,34 @@ mod tests {
 
     #[test]
     fn rejects_upward_production_dependency() {
-        let metadata = metadata(CargoPackage {
+        let metadata = (CargoPackage {
             id: "models-id".to_owned(),
             name: "quant-pivot-models".to_owned(),
             dependencies: vec![dependency("quant-pivot-core", None, &[])],
-        });
+        })
+        .metadata();
 
         assert_eq!(
-            validate(&metadata),
+            metadata.validate(),
             ["quant-pivot-models has forbidden normal dependency on quant-pivot-core"]
         );
     }
 
     #[test]
-    fn ignores_dev_only_dependency_direction() {
-        let metadata = metadata(CargoPackage {
+    fn ignores_dev_only_direction() {
+        let metadata = (CargoPackage {
             id: "models-id".to_owned(),
             name: "quant-pivot-models".to_owned(),
             dependencies: vec![dependency("quant-pivot-core", Some("dev"), &[])],
-        });
+        })
+        .metadata();
 
-        assert!(validate(&metadata).is_empty());
+        assert!(metadata.validate().is_empty());
     }
 
     #[test]
     fn restricts_persistence_entity_visibility() {
-        let metadata = metadata(CargoPackage {
+        let metadata = (CargoPackage {
             id: "web-id".to_owned(),
             name: "quant-pivot-web".to_owned(),
             dependencies: vec![dependency(
@@ -2424,10 +2436,11 @@ mod tests {
                 None,
                 &["persistence-entities"],
             )],
-        });
+        })
+        .metadata();
 
         assert_eq!(
-            validate(&metadata),
+            metadata.validate(),
             [
                 "quant-pivot-web enables quant-pivot-models/persistence-entities outside the persistence boundary"
             ]
@@ -2435,7 +2448,7 @@ mod tests {
     }
 
     #[test]
-    fn permits_explicit_bounded_context_exports() {
+    fn permits_explicit_bounded_exports() {
         let source =
             syn::parse_file("pub use child::{OwnedType, owned_function};").expect("parse fixture");
 
@@ -2445,7 +2458,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_forwarding_glob_and_crate_root_exports() {
+    fn rejects_forwarding_glob_exports() {
         let source = syn::parse_file(
             "pub use quant_pivot_models::Thing; pub use crate::owned::Other; pub use child::*;",
         )
@@ -2467,7 +2480,7 @@ mod tests {
     }
 
     #[test]
-    fn source_style_accepts_tree_imports_and_one_qualifier_body_paths() {
+    fn source_style_accepts_paths() {
         let source = syn::parse_file(
             r"
             use std::{cmp::Ordering, panic::{self, AssertUnwindSafe}};
@@ -2491,7 +2504,7 @@ mod tests {
     }
 
     #[test]
-    fn blocking_tasks_are_restricted_to_executor_or_tests() {
+    fn blocking_tasks_restricted_tests() {
         let source = syn::parse_file("fn run() { let _ = tokio::task::spawn_blocking(work); }")
             .expect("parse fixture");
 
@@ -2507,7 +2520,7 @@ mod tests {
     }
 
     #[test]
-    fn rayon_primitives_are_restricted_to_exact_governed_kernels() {
+    fn rayon_primitives_restricted_kernels() {
         let pool = syn::parse_file(
             "fn run() { let _ = ThreadPoolBuilder::new().num_threads(9).build(); }",
         )
@@ -2530,7 +2543,7 @@ mod tests {
     }
 
     #[test]
-    fn source_style_rejects_heap_uuid_and_ws_string_sender() {
+    fn source_style_rejects_sender() {
         let uuid = syn::parse_file("struct Id(Arc<Uuid>);").expect("parse fixture");
         let violations = validate_source_style(&uuid, Path::new("src/id.rs"));
         assert_eq!(violations.len(), 1);
@@ -2546,7 +2559,7 @@ mod tests {
     }
 
     #[test]
-    fn source_style_accepts_framework_attribute_and_sea_orm_relation_paths() {
+    fn source_accepts_framework_paths() {
         let source = syn::parse_file(
             r"
             use super::market;
@@ -2565,7 +2578,7 @@ mod tests {
     }
 
     #[test]
-    fn source_style_preserves_codegen_paths_but_still_rejects_local_imports() {
+    fn source_preserves_rejects_imports() {
         let generated = syn::parse_file(
             r"
             //! `SeaORM` Entity, @generated by sea-orm-codegen 2.0.0
@@ -2595,7 +2608,7 @@ mod tests {
     }
 
     #[test]
-    fn source_style_rejects_split_same_root_imports() {
+    fn source_style_rejects_imports() {
         let source =
             syn::parse_file("use std::cmp::Ordering; use std::panic::{self, AssertUnwindSafe};")
                 .expect("parse fixture");
@@ -2607,7 +2620,7 @@ mod tests {
     }
 
     #[test]
-    fn source_style_rejects_block_imports_and_deep_paths() {
+    fn source_style_rejects_paths() {
         let source = syn::parse_file(
             r"
             fn run() {
@@ -2638,7 +2651,7 @@ mod tests {
     }
 
     #[test]
-    fn source_style_rejects_imports_after_module_items() {
+    fn source_rejects_after_items() {
         let source = syn::parse_file("const LIMIT: usize = 1; use std::cmp::Ordering;")
             .expect("parse fixture");
 
@@ -2649,7 +2662,7 @@ mod tests {
     }
 
     #[test]
-    fn source_style_accepts_macro_rules_reexport_in_preamble() {
+    fn source_style_accepts_preamble() {
         let source =
             syn::parse_file("macro_rules! stable_name { () => {}; } pub(crate) use stable_name;")
                 .expect("parse fixture");
@@ -2658,7 +2671,7 @@ mod tests {
     }
 
     #[test]
-    fn source_style_rejects_mechanical_internal_aliases() {
+    fn source_style_rejects_aliases() {
         let source = syn::parse_file(
             "use quant_pivot_models::entities::market::Entity as QuantPivotModelsEntitiesMarketEntity;",
         )
@@ -2670,7 +2683,7 @@ mod tests {
     }
 
     #[test]
-    fn source_style_accepts_semantic_conflict_aliases() {
+    fn source_style_accepts_aliases() {
         let source = syn::parse_file(
             r"
             use anyhow::Error as AnyhowError;
@@ -2684,7 +2697,7 @@ mod tests {
     }
 
     #[test]
-    fn persistence_documents_require_typed_fail_closed_shapes() {
+    fn persistence_documents_rejects_shapes() {
         let entity = syn::parse_file(
             r#"
             #[sea_orm::model]
@@ -2723,7 +2736,7 @@ mod tests {
     }
 
     #[test]
-    fn persistence_documents_reject_open_or_non_decodable_types() {
+    fn persistence_documents_non_types() {
         let entity = syn::parse_file(
             r#"
             #[sea_orm::model]
@@ -2763,7 +2776,7 @@ mod tests {
     }
 
     #[test]
-    fn repository_direct_batch_writes_are_restricted_to_semantic_owners() {
+    fn repository_direct_writes_owners() {
         let source = syn::parse_file("async fn write() { Entity::insert_many(rows).await; }")
             .expect("parse repository fixture");
 
@@ -2791,7 +2804,7 @@ mod tests {
     }
 
     #[test]
-    fn config_secrets_require_the_non_serializable_zeroizing_boundary() {
+    fn config_secrets_non_boundary() {
         let valid = syn::parse_file(
             r"
             struct SecretText(Zeroizing<String>);

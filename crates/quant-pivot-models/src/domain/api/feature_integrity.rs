@@ -248,7 +248,7 @@ mod tests {
     const HASH: &str = "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[test]
-    fn run_view_preserves_subject_and_failure_audit_fields() {
+    fn run_preserves_failure_fields() {
         let now = Utc::now();
         let report_id = RecommendationReportId::from_v7();
         let model_version_id = ModelVersionId::from_v7();

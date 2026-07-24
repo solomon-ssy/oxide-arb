@@ -107,7 +107,7 @@ fn service(db: &DatabaseConnection) -> LinkageResolverService {
     .expect("linkage resolver")
 }
 
-pub async fn single_sibling_request_validates_and_atomically_appends_the_complete_group() {
+pub async fn single_sibling_validates_group() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let valid_members = [

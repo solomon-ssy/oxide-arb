@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn context_uses_exact_primary_and_secondary_executable_asks() {
+    fn context_uses_exact_asks() {
         let context = build_market_inference_context(
             &vector(dec!(0.61), Some(dec!(0.44))),
             &market(Some(TokenId::new("no"))),
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_unbound_secondary_ask_never_becomes_a_no_price() {
+    fn missing_never_no_price() {
         let missing = build_market_inference_context(
             &vector(dec!(0.61), None),
             &market(Some(TokenId::new("no"))),
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_or_zero_primary_ask_rejects_the_runtime_row() {
+    fn absent_zero_rejects_row() {
         assert!(
             build_market_inference_context(&vector(dec!(0), Some(dec!(0.44))), &market(None))
                 .is_none()

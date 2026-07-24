@@ -73,38 +73,40 @@ pub fn builtin_role_policies() -> Vec<(&'static str, Vec<(ResourceType, Operatio
     ]
 }
 
-fn expected_policy_keys(ctx: &SeedContext) -> Result<HashSet<[String; 7]>, DbErr> {
-    let admin_id = ctx
-        .require::<UserId>(ADMIN_USER_ARTIFACT)
-        .map_err(|error| DbErr::Custom(error.to_string()))?;
-    let mut keys = HashSet::new();
-    keys.insert([
-        PTYPE_GROUPING.to_owned(),
-        admin_id.to_string(),
-        ROLE_SUPER_ADMIN.to_owned(),
-        String::new(),
-        String::new(),
-        String::new(),
-        String::new(),
-    ]);
-    for (role_code, permissions) in builtin_role_policies() {
-        for (resource, operation) in permissions {
-            keys.insert([
-                PTYPE_POLICY.to_owned(),
-                role_code.to_owned(),
-                resource.to_string(),
-                operation.to_string(),
-                OBJECT_TYPE_RESOURCE.to_owned(),
-                String::new(),
-                String::new(),
-            ]);
+impl SeedContext {
+    fn expected_policy_keys(&self) -> Result<HashSet<[String; 7]>, DbErr> {
+        let admin_id = self
+            .require::<UserId>(ADMIN_USER_ARTIFACT)
+            .map_err(|error| DbErr::Custom(error.to_string()))?;
+        let mut keys = HashSet::new();
+        keys.insert([
+            PTYPE_GROUPING.to_owned(),
+            admin_id.to_string(),
+            ROLE_SUPER_ADMIN.to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ]);
+        for (role_code, permissions) in builtin_role_policies() {
+            for (resource, operation) in permissions {
+                keys.insert([
+                    PTYPE_POLICY.to_owned(),
+                    role_code.to_owned(),
+                    resource.to_string(),
+                    operation.to_string(),
+                    OBJECT_TYPE_RESOURCE.to_owned(),
+                    String::new(),
+                    String::new(),
+                ]);
+            }
         }
+        Ok(keys)
     }
-    Ok(keys)
 }
 
 async fn hydrate(db: &DatabaseTransaction, ctx: &SeedContext) -> Result<(), DbErr> {
-    let expected = expected_policy_keys(ctx)?;
+    let expected = (ctx).expected_policy_keys()?;
     let actual = Entity::find()
         .all(db)
         .await?
@@ -303,7 +305,7 @@ mod tests {
     };
 
     #[test]
-    fn every_seeded_policy_is_in_the_permission_catalog() {
+    fn seeded_policy_permission_catalog() {
         for (role_code, permissions) in builtin_role_policies() {
             for (resource, operation) in permissions {
                 assert!(
@@ -316,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn policies_have_no_duplicates_per_role() {
+    fn policies_no_duplicates_role() {
         for (role_code, permissions) in builtin_role_policies() {
             let mut seen = HashSet::new();
             for pair in &permissions {
@@ -339,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_integrity_is_readable_and_risk_owner_can_govern() {
+    fn feature_integrity_readable_govern() {
         let policies = builtin_role_policies();
         let viewer = policies
             .iter()

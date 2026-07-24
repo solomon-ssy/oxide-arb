@@ -41,7 +41,7 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::{ContentHash, OrderIntentId, RoleCode, UserId},
+    types::{ContentHash, OrderIntentId, RoleCode},
 };
 use serde::Serialize;
 
@@ -200,7 +200,9 @@ pub async fn create(
     op_ctx: OperationCtx,
     body: ValidatedJson<CreateIntentRequest>,
 ) -> Result<WebResponse<OrderIntentView>, WebError> {
-    let operator_id = actor_user_id(&actor)?;
+    let operator_id = actor
+        .user_id()
+        .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))?;
     let request = body.into_inner();
     let intent = state
         .order_intents
@@ -239,7 +241,9 @@ pub async fn approve(
     op_ctx: OperationCtx,
     body: ValidatedJson<ApproveIntentRequest>,
 ) -> Result<WebResponse<OrderIntentView>, WebError> {
-    let operator_id = actor_user_id(&actor)?;
+    let operator_id = actor
+        .user_id()
+        .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))?;
     let request = body.into_inner();
     let intent_id = id.into_inner();
     let before = state
@@ -287,7 +291,9 @@ pub async fn reject(
     op_ctx: OperationCtx,
     body: ValidatedJson<RejectIntentRequest>,
 ) -> Result<WebResponse<OrderIntentView>, WebError> {
-    let operator_id = actor_user_id(&actor)?;
+    let operator_id = actor
+        .user_id()
+        .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))?;
     let request = body.into_inner();
     let intent_id = id.into_inner();
     let before = state
@@ -331,7 +337,9 @@ pub async fn cancel(
     op_ctx: OperationCtx,
     body: ValidatedJson<CancelIntentRequest>,
 ) -> Result<WebResponse<OrderIntentView>, WebError> {
-    let operator_id = actor_user_id(&actor)?;
+    let operator_id = actor
+        .user_id()
+        .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))?;
     let request = body.into_inner();
     let intent_id = id.into_inner();
     let before = state
@@ -363,15 +371,6 @@ pub async fn cancel(
         "reason": request.reason,
     }))?;
     Ok(WebResponse::ok(OrderIntentView::from(intent)))
-}
-
-/// Parse the authenticated subject into the canonical user-id namespace.
-fn actor_user_id(actor: &AuthedActor) -> Result<UserId, WebError> {
-    actor
-        .claims
-        .sub
-        .parse()
-        .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))
 }
 
 fn canonical_state_hash<T: Serialize>(state: &T) -> Result<ContentHash, WebError> {

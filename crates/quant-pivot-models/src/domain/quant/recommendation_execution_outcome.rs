@@ -84,12 +84,15 @@ impl NewRecommendationExecutionOutcome {
     ) -> Result<ContentHash, RecommendationExecutionOutcomeContractError> {
         let input = ExecutionOutcomeHashInput::from_new(self, source_observed_at, available_at);
         validate_fields(&input, None)?;
-        Ok(execution_outcome_hash(&input)?)
+        Ok(ContentHash::try_from(&input)?)
     }
 
     /// Exact fill ratio derived from canonical share facts.
     pub fn fill_ratio(&self) -> Result<Decimal, RecommendationExecutionOutcomeContractError> {
-        fill_ratio(self.requested_shares, self.filled_shares)
+        Decimal::try_from(ExecutionFill {
+            requested: self.requested_shares,
+            filled: self.filled_shares,
+        })
     }
 }
 
@@ -141,7 +144,7 @@ impl RecommendationExecutionOutcomeInfo {
     ) -> Result<ContentHash, RecommendationExecutionOutcomeContractError> {
         let input = ExecutionOutcomeHashInput::from_info(self);
         validate_fields(&input, Some(self.created_at))?;
-        Ok(execution_outcome_hash(&input)?)
+        Ok(ContentHash::try_from(&input)?)
     }
 
     /// Validate the stored row and its tamper-evident digest.
@@ -196,7 +199,10 @@ impl RecommendationExecutionOutcomeInfo {
 
     /// Exact fill ratio derived from canonical share facts.
     pub fn fill_ratio(&self) -> Result<Decimal, RecommendationExecutionOutcomeContractError> {
-        fill_ratio(self.requested_shares, self.filled_shares)
+        Decimal::try_from(ExecutionFill {
+            requested: self.requested_shares,
+            filled: self.filled_shares,
+        })
     }
 }
 
@@ -347,21 +353,21 @@ impl<'a> ExecutionOutcomeHashInput<'a> {
             terminal_state: outcome.terminal_state,
             no_fill_reason: outcome.no_fill_reason,
             entry_order_state: outcome.entry_order_state,
-            requested_shares: canonical_shares(outcome.requested_shares),
-            filled_shares: canonical_shares(outcome.filled_shares),
-            entry_avg_price: outcome.entry_avg_price.map(canonical_price),
-            entry_fee_usd: outcome.entry_fee_usd.map(canonical_usd),
+            requested_shares: outcome.requested_shares.normalized(),
+            filled_shares: outcome.filled_shares.normalized(),
+            entry_avg_price: outcome.entry_avg_price.map(Price::normalized),
+            entry_fee_usd: outcome.entry_fee_usd.map(Usd::normalized),
             entry_filled_at: outcome.entry_filled_at,
             position_terminal_state: outcome.position_terminal_state,
             exit_reason: outcome.exit_reason,
-            exit_filled_shares: outcome.exit_filled_shares.map(canonical_shares),
-            exit_avg_price: outcome.exit_avg_price.map(canonical_price),
-            exit_fee_usd: outcome.exit_fee_usd.map(canonical_usd),
+            exit_filled_shares: outcome.exit_filled_shares.map(Shares::normalized),
+            exit_avg_price: outcome.exit_avg_price.map(Price::normalized),
+            exit_fee_usd: outcome.exit_fee_usd.map(Usd::normalized),
             exit_at: outcome.exit_at,
-            settlement_payout_usd: outcome.settlement_payout_usd.map(canonical_usd),
-            realized_pnl_usd: outcome.realized_pnl_usd.map(canonical_usd),
-            max_adverse_excursion_bps: outcome.max_adverse_excursion_bps.map(canonical_bps),
-            max_favorable_excursion_bps: outcome.max_favorable_excursion_bps.map(canonical_bps),
+            settlement_payout_usd: outcome.settlement_payout_usd.map(Usd::normalized),
+            realized_pnl_usd: outcome.realized_pnl_usd.map(Usd::normalized),
+            max_adverse_excursion_bps: outcome.max_adverse_excursion_bps.map(Bps::normalized),
+            max_favorable_excursion_bps: outcome.max_favorable_excursion_bps.map(Bps::normalized),
             terminal_at: outcome.terminal_at,
             source_observed_at,
             available_at,
@@ -386,21 +392,21 @@ impl<'a> ExecutionOutcomeHashInput<'a> {
             terminal_state: outcome.terminal_state,
             no_fill_reason: outcome.no_fill_reason,
             entry_order_state: outcome.entry_order_state,
-            requested_shares: canonical_shares(outcome.requested_shares),
-            filled_shares: canonical_shares(outcome.filled_shares),
-            entry_avg_price: outcome.entry_avg_price.map(canonical_price),
-            entry_fee_usd: outcome.entry_fee_usd.map(canonical_usd),
+            requested_shares: outcome.requested_shares.normalized(),
+            filled_shares: outcome.filled_shares.normalized(),
+            entry_avg_price: outcome.entry_avg_price.map(Price::normalized),
+            entry_fee_usd: outcome.entry_fee_usd.map(Usd::normalized),
             entry_filled_at: outcome.entry_filled_at,
             position_terminal_state: outcome.position_terminal_state,
             exit_reason: outcome.exit_reason,
-            exit_filled_shares: outcome.exit_filled_shares.map(canonical_shares),
-            exit_avg_price: outcome.exit_avg_price.map(canonical_price),
-            exit_fee_usd: outcome.exit_fee_usd.map(canonical_usd),
+            exit_filled_shares: outcome.exit_filled_shares.map(Shares::normalized),
+            exit_avg_price: outcome.exit_avg_price.map(Price::normalized),
+            exit_fee_usd: outcome.exit_fee_usd.map(Usd::normalized),
             exit_at: outcome.exit_at,
-            settlement_payout_usd: outcome.settlement_payout_usd.map(canonical_usd),
-            realized_pnl_usd: outcome.realized_pnl_usd.map(canonical_usd),
-            max_adverse_excursion_bps: outcome.max_adverse_excursion_bps.map(canonical_bps),
-            max_favorable_excursion_bps: outcome.max_favorable_excursion_bps.map(canonical_bps),
+            settlement_payout_usd: outcome.settlement_payout_usd.map(Usd::normalized),
+            realized_pnl_usd: outcome.realized_pnl_usd.map(Usd::normalized),
+            max_adverse_excursion_bps: outcome.max_adverse_excursion_bps.map(Bps::normalized),
+            max_favorable_excursion_bps: outcome.max_favorable_excursion_bps.map(Bps::normalized),
             terminal_at: outcome.terminal_at,
             source_observed_at: outcome.source_observed_at,
             available_at: outcome.available_at,
@@ -409,22 +415,6 @@ impl<'a> ExecutionOutcomeHashInput<'a> {
             execution_fact_schema_version: outcome.execution_fact_schema_version,
         }
     }
-}
-
-fn canonical_shares(value: Shares) -> Shares {
-    Shares::new(value.inner().normalize())
-}
-
-fn canonical_price(value: Price) -> Price {
-    Price::new(value.inner().normalize())
-}
-
-fn canonical_usd(value: Usd) -> Usd {
-    Usd::new(value.inner().normalize())
-}
-
-fn canonical_bps(value: Bps) -> Bps {
-    Bps::new(value.inner().normalize())
 }
 
 fn validate_fields(
@@ -639,30 +629,39 @@ const fn validate_non_negative(
     Ok(())
 }
 
-fn fill_ratio(
-    requested_shares: Shares,
-    filled_shares: Shares,
-) -> Result<Decimal, RecommendationExecutionOutcomeContractError> {
-    if !requested_shares.is_positive() {
-        return Err(
-            RecommendationExecutionOutcomeContractError::InvalidRequestedShares {
-                actual: requested_shares,
-            },
-        );
-    }
-    if filled_shares.is_negative() || filled_shares > requested_shares {
-        return Err(
-            RecommendationExecutionOutcomeContractError::InvalidFilledShares {
-                requested: requested_shares,
-                actual: filled_shares,
-            },
-        );
-    }
-    Ok(filled_shares.inner() / requested_shares.inner())
+#[derive(Debug, Clone, Copy)]
+struct ExecutionFill {
+    requested: Shares,
+    filled: Shares,
 }
 
-fn execution_outcome_hash(
-    input: &ExecutionOutcomeHashInput<'_>,
-) -> Result<ContentHash, CanonicalDigestError> {
-    CanonicalDigest::content_hash_json(input)
+impl TryFrom<ExecutionFill> for Decimal {
+    type Error = RecommendationExecutionOutcomeContractError;
+
+    fn try_from(fill: ExecutionFill) -> Result<Self, Self::Error> {
+        if !fill.requested.is_positive() {
+            return Err(
+                RecommendationExecutionOutcomeContractError::InvalidRequestedShares {
+                    actual: fill.requested,
+                },
+            );
+        }
+        if fill.filled.is_negative() || fill.filled > fill.requested {
+            return Err(
+                RecommendationExecutionOutcomeContractError::InvalidFilledShares {
+                    requested: fill.requested,
+                    actual: fill.filled,
+                },
+            );
+        }
+        Ok(fill.filled.inner() / fill.requested.inner())
+    }
+}
+
+impl TryFrom<&ExecutionOutcomeHashInput<'_>> for ContentHash {
+    type Error = CanonicalDigestError;
+
+    fn try_from(input: &ExecutionOutcomeHashInput<'_>) -> Result<Self, Self::Error> {
+        CanonicalDigest::content_hash_json(input)
+    }
 }

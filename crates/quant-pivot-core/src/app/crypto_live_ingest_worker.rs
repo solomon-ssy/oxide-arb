@@ -141,7 +141,7 @@ impl CryptoLiveIngestWorker {
             }
         }
         for row in rows {
-            let linkage = row.into_domain();
+            let linkage = MarketLinkage::from(row);
             Self::add_discovered_linkage(&mut bindings, linkage)?;
         }
         Ok(bindings)
@@ -163,22 +163,17 @@ impl CryptoLiveIngestWorker {
             .find(|binding| binding.role == LinkageSourceRole::LiveEvent);
         match live {
             Some(source) if source.source_id == DomainSourceId::binance_agg_trade() => {
-                let symbol = source
-                    .instrument_key
-                    .as_binance_agg_trade_symbol()
-                    .ok_or_else(|| {
-                        QuantError::config("invalid Binance live-event linkage instrument")
-                    })?;
+                let symbol = source.instrument_key.binance_agg_symbol().ok_or_else(|| {
+                    QuantError::config("invalid Binance live-event linkage instrument")
+                })?;
                 bindings
                     .binance
                     .insert(source.instrument_key.clone(), symbol);
             }
-            Some(source)
-                if source.source_id == DomainSourceId::binance_usdm_futures_agg_trade() =>
-            {
+            Some(source) if source.source_id == DomainSourceId::binance_futures_trade() => {
                 let symbol = source
                     .instrument_key
-                    .as_binance_usdm_futures_agg_trade_symbol()
+                    .binance_futures_symbol()
                     .ok_or_else(|| {
                         QuantError::config(
                             "invalid Binance USD-M Futures live-event linkage instrument",
@@ -256,7 +251,7 @@ impl CryptoLiveIngestWorker {
                 let worker = Arc::clone(&self);
                 let source = Arc::clone(source);
                 let task_instrument = instrument.clone();
-                let source_id = source_id_for_market(market);
+                let source_id = market.trade_source();
                 let handle = tokio::spawn(async move {
                     worker
                         .run_binance_symbol(
@@ -798,10 +793,10 @@ impl CryptoLiveIngestWorker {
         let source_id = report.source_id.clone();
         let instrument_key = report.instrument_key.clone();
         self.crypto_writer
-            .write_batch(vec![report.to_clickhouse_row()])
+            .write_batch(vec![CryptoPriceReportRow::from(&report)])
             .await?;
         let checkpoint = if report.source_id == DomainSourceId::binance_agg_trade()
-            || report.source_id == DomainSourceId::binance_usdm_futures_agg_trade()
+            || report.source_id == DomainSourceId::binance_futures_trade()
         {
             DomainSourceCheckpoint::BinanceAggTrade {
                 aggregate_trade_id: report.source_sequence,
@@ -843,7 +838,7 @@ impl CryptoLiveIngestWorker {
             .write_batch(
                 reports
                     .into_iter()
-                    .map(|report| report.to_clickhouse_row())
+                    .map(|report| CryptoPriceReportRow::from(&report))
                     .collect(),
             )
             .await?;
@@ -932,13 +927,6 @@ fn next_sequence(value: u64) -> QuantResult<u64> {
         .ok_or_else(|| QuantError::config("source sequence overflow"))
 }
 
-fn source_id_for_market(market: BinanceMarketSegment) -> DomainSourceId {
-    match market {
-        BinanceMarketSegment::Spot => DomainSourceId::binance_agg_trade(),
-        BinanceMarketSegment::UsdmFutures => DomainSourceId::binance_usdm_futures_agg_trade(),
-    }
-}
-
 async fn stop_removed(
     tasks: &mut BTreeMap<DomainInstrumentKey, SourceTask>,
     desired: BTreeSet<&DomainInstrumentKey>,
@@ -1008,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn same_timestamp_correction_is_not_deduplicated_by_time_only() {
+    fn timestamp_only_never_dedupes() {
         let first = report(1, 0, 'a');
         let correction = CryptoPriceReport {
             report_hash: hash('b'),
@@ -1020,7 +1008,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chainlink_gap_recovery_reads_every_full_page_before_stopping() {
+    async fn chainlink_reads_before_stopping() {
         let pages = Arc::new(Mutex::new(BTreeMap::from([
             (0_u128, vec![report(1, 0, 'a'), report(2, 1, 'b')]),
             (3_u128, vec![report(3, 2, 'c')]),

@@ -360,7 +360,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_process_log_respects_checkpoint() {
+    fn process_log_respects_checkpoint() {
         assert!(should_process_log(101, 0, 100, 5));
         assert!(!should_process_log(100, 5, 100, 5));
         assert!(should_process_log(100, 6, 100, 5));
@@ -369,12 +369,12 @@ mod tests {
     }
 
     #[test]
-    fn resume_point_bootstraps_from_contract_block() {
+    fn resume_point_bootstraps_block() {
         assert_eq!(resume_point(None, 57_000_000), (57_000_000, -1));
     }
 
     #[test]
-    fn block_ranges_respect_inclusive_provider_limit() {
+    fn block_ranges_respect_limit() {
         assert_eq!(
             block_ranges(100, 124, 10),
             vec![(100, 109), (110, 119), (120, 124)]
@@ -384,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn dedup_prints_keeps_first_occurrence() {
+    fn dedup_prints_keeps_occurrence() {
         let print = TradeTapePrint {
             market_id: MarketId::new("m1"),
             token_id: TokenId::new("t1"),

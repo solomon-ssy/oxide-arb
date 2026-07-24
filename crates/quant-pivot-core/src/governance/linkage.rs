@@ -736,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn linkage_currentness_binds_metadata_resolver_and_capability_registry() {
+    fn linkage_currentness_binds_registry() {
         let metadata = hash('a');
         let registry = hash('b');
         let resolver = ResolverVersion::new(3);

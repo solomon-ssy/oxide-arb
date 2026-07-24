@@ -161,19 +161,19 @@ mod tests {
     use crate::linkage::ruleset::rule_for_alias;
 
     #[test]
-    fn no_description_grounds_no_oracle() {
+    fn no_description_no_oracle() {
         let rule = rule_for_alias("btc").expect("rule");
         assert!(extract_oracle(rule, None).is_none());
     }
 
     #[test]
-    fn unrecognized_text_grounds_no_oracle() {
+    fn unrecognized_text_no_oracle() {
         let rule = rule_for_alias("btc").expect("rule");
         assert!(extract_oracle(rule, Some("This market resolves via magic.")).is_none());
     }
 
     #[test]
-    fn chainlink_stream_url_grounds_data_streams() {
+    fn chainlink_stream_url_streams() {
         let rule = rule_for_alias("btc").expect("rule");
         let (oracle, span) = extract_oracle(
             rule,
@@ -188,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn binance_candle_citation_grounds_binance_kline() {
+    fn binance_candle_citation_kline() {
         let rule = rule_for_alias("btc").expect("rule");
         let (oracle, _) = extract_oracle(
             rule,
@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn binance_hourly_candle_freezes_pair_and_interval() {
+    fn binance_hourly_freezes_interval() {
         let rule = rule_for_alias("btc").expect("rule");
         let (oracle, span) = extract_oracle(
             rule,
@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn binance_citation_rejects_wrong_pair_or_conflicting_interval() {
+    fn binance_citation_rejects_interval() {
         let rule = rule_for_alias("btc").expect("rule");
         assert!(
             extract_oracle(

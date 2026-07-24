@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    clickhouse::{BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd, TradeTapeRow},
+    clickhouse::{BookMicrostructureRow, TradeTapeRow},
     domain::{
         market::{BookLevel, MarketInfo, book::BookSnapshot},
         pagination::{NormalizePageQuery, PageRequest},
@@ -335,17 +335,17 @@ impl MicrostructureBucket {
     pub fn from_row(row: &BookMicrostructureRow) -> Self {
         Self {
             bucket_ms: row.bucket_time,
-            mid_open: row.mid_price_open.map(ChPrice::to_price),
-            mid_close: row.mid_price_close.map(ChPrice::to_price),
-            best_bid_close: row.best_bid_close.map(ChPrice::to_price),
-            best_ask_close: row.best_ask_close.map(ChPrice::to_price),
-            spread_bps_min: row.spread_bps_min.map(ChBps::to_bps),
-            spread_bps_avg: row.spread_bps_avg.map(ChBps::to_bps),
-            spread_bps_max: row.spread_bps_max.map(ChBps::to_bps),
-            depth_top1_usd: row.top1_depth_usd_avg.map(ChUsd::to_usd),
-            depth_top5_usd: row.top5_depth_usd_avg.map(ChUsd::to_usd),
-            depth_top20_usd: row.top20_depth_usd_avg.map(ChUsd::to_usd),
-            imbalance: row.imbalance_avg.map(ChDecimal64::to_decimal),
+            mid_open: row.mid_price_open.map(Price::from),
+            mid_close: row.mid_price_close.map(Price::from),
+            best_bid_close: row.best_bid_close.map(Price::from),
+            best_ask_close: row.best_ask_close.map(Price::from),
+            spread_bps_min: row.spread_bps_min.map(Bps::from),
+            spread_bps_avg: row.spread_bps_avg.map(Bps::from),
+            spread_bps_max: row.spread_bps_max.map(Bps::from),
+            depth_top1_usd: row.top1_depth_usd_avg.map(Usd::from),
+            depth_top5_usd: row.top5_depth_usd_avg.map(Usd::from),
+            depth_top20_usd: row.top20_depth_usd_avg.map(Usd::from),
+            imbalance: row.imbalance_avg.map(Decimal::from),
             last_trade_count: row.last_trade_count,
             update_count: row.update_count,
             gap_count: row.gap_count,
@@ -370,7 +370,7 @@ impl MarketTradeTick {
         Self {
             token_id: row.token_id,
             ts_ms: row.event_time,
-            price: row.price.to_price(),
+            price: Price::from(row.price),
         }
     }
 }
@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_digests_both_sides_and_sums_depth() {
+    fn summary_digests_both_depth() {
         let yes = snapshot(dec!(0.96), dec!(0.97));
         let no = snapshot(dec!(0.03), dec!(0.04));
         let summary =
@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_is_absent_without_any_published_book() {
+    fn summary_absent_without_book() {
         assert!(MarketBookSummaryView::from_snapshots(None, None).is_none());
     }
 }

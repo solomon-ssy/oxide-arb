@@ -21,7 +21,7 @@
 //!
 //! ## Batch id loads
 //!
-//! Use [`find_models_by_id_chunks`] / [`map_by_key`] / [`group_by_key`] with
+//! Use [`find_id_chunks`] / [`map_by_key`] / [`group_by_key`] with
 //! [`crate::batch::chunk_for_in_clause`] so hot-path enrichers stay under the
 //! Postgres bind-parameter limit and avoid N+1 lookups.
 
@@ -89,7 +89,7 @@ where
 }
 
 /// List rows for a foreign-key value, newest [`created_at_column`] first.
-pub async fn list_by_fk_ordered_desc<E, Fk, Created, Item>(
+pub async fn list_fk_desc<E, Fk, Created, Item>(
     db: &impl ConnectionTrait,
     fk_column: Fk,
     fk_value: impl Into<Value>,
@@ -111,7 +111,7 @@ where
 }
 
 /// Load entity models whose id column is in `ids`, chunking the `IN` list.
-pub async fn find_models_by_id_chunks<E, C, Id>(
+pub async fn find_id_chunks<E, C, Id>(
     db: &impl ConnectionTrait,
     ids: &[Id],
     id_column: C,
@@ -175,21 +175,21 @@ mod tests {
     use super::{group_by_key, map_by_key, non_empty};
 
     #[test]
-    fn non_empty_rejects_blank_strings() {
+    fn non_empty_rejects_strings() {
         assert_eq!(non_empty(None), None);
         assert_eq!(non_empty(Some("")), None);
         assert_eq!(non_empty(Some("x")), Some("x"));
     }
 
     #[test]
-    fn map_by_key_indexes_last_write() {
+    fn map_key_indexes_write() {
         let map = map_by_key(vec![("a", 1), ("b", 2), ("a", 3)], |(k, _)| *k);
         assert_eq!(map.get("a"), Some(&("a", 3)));
         assert_eq!(map.get("b"), Some(&("b", 2)));
     }
 
     #[test]
-    fn group_by_key_collects_buckets() {
+    fn group_key_collects_buckets() {
         let grouped = group_by_key(vec![("a", 1), ("b", 2), ("a", 3)], |(k, _)| *k);
         assert_eq!(grouped.get("a").map(Vec::len), Some(2));
         assert_eq!(grouped.get("b").map(Vec::len), Some(1));

@@ -38,6 +38,22 @@ enum SchemaMigrationAudit {
 
 pub struct Migration;
 
+impl Migration {
+    pub fn spec() -> MigrationSpec {
+        let mut artifacts = Vec::with_capacity(ARTIFACTS.len() + 6);
+        artifacts.push(SOURCE.as_bytes());
+        artifacts.extend_from_slice(ARTIFACTS);
+        artifacts.extend([
+            RELATIONAL_INVARIANTS_SQL,
+            QUERY_INDEXES_SQL,
+            WORM_TRIGGERS_SQL,
+            COLUMN_DEFAULTS_SQL,
+            V1_SCHEMA_SQL,
+        ]);
+        migration_spec(NAME, &artifacts)
+    }
+}
+
 impl MigrationName for Migration {
     fn name(&self) -> &str {
         NAME
@@ -88,7 +104,7 @@ impl MigrationTrait for Migration {
         worm_triggers::apply(manager)
             .await
             .map_err(|error| DbErr::Custom(format!("WORM triggers failed: {error}")))?;
-        audit::record(manager, spec())
+        audit::record(manager, Self::spec())
             .await
             .map_err(|error| DbErr::Custom(format!("migration artifact audit failed: {error}")))
     }
@@ -179,18 +195,4 @@ async fn create_migration_audit(manager: &SchemaManager<'_>) -> Result<(), DbErr
                 .to_owned(),
         )
         .await
-}
-
-pub fn spec() -> MigrationSpec {
-    let mut artifacts = Vec::with_capacity(ARTIFACTS.len() + 6);
-    artifacts.push(SOURCE.as_bytes());
-    artifacts.extend_from_slice(ARTIFACTS);
-    artifacts.extend([
-        RELATIONAL_INVARIANTS_SQL,
-        QUERY_INDEXES_SQL,
-        WORM_TRIGGERS_SQL,
-        COLUMN_DEFAULTS_SQL,
-        V1_SCHEMA_SQL,
-    ]);
-    migration_spec(NAME, &artifacts)
 }

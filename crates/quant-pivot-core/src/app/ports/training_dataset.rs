@@ -24,7 +24,6 @@ use quant_pivot_models::{
         ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId,
         ResearchEvaluationTrack, ResearchProfileArtifact, SourceSliceManifest,
         SourceSliceManifestRef, TrainingDatasetId, TrainingSampleSource,
-        resolve_builtin_research_profile,
     },
 };
 use quant_pivot_repository::traits::{
@@ -152,7 +151,9 @@ impl CoreTrainingDatasetPort {
         request: &DatasetPlanRequest,
         verify_object_bytes: bool,
     ) -> QuantResult<()> {
-        let profile = resolve_builtin_research_profile(&request.profile_ref)
+        let profile = request
+            .profile_ref
+            .resolve_builtin_research_profile()
             .map_err(|detail| ResearchError::DatasetPlan { detail })?;
         let bytes = self
             .artifact_store
@@ -291,7 +292,9 @@ impl CoreTrainingDatasetPort {
             }
             .into());
         }
-        let profile = resolve_builtin_research_profile(&body.profile_ref)
+        let profile = body
+            .profile_ref
+            .resolve_builtin_research_profile()
             .map_err(|detail| ResearchError::DatasetPlan { detail })?;
         let runtime = self
             .runtime_config

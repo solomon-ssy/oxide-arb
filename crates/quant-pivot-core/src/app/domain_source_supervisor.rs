@@ -22,7 +22,7 @@ use quant_pivot_models::{
             DomainSourceExpectationDefinition, DomainSourceExpectationTransition,
             UpsertDomainSourceExpectation,
         },
-        quant::{LinkageOutcome, MarketLinkage, MarketLinkageInfo, MarketSubject},
+        quant::{LinkageOutcome, MarketLinkage, MarketSubject},
     },
     enums::domain::{DomainFamily, DomainSourceExpectationStatus},
     types::{
@@ -104,7 +104,7 @@ impl DomainSourceSupervisor {
             .latest_for_active_markets()
             .await?
             .into_iter()
-            .map(MarketLinkageInfo::into_domain)
+            .map(MarketLinkage::from)
             .collect::<Vec<_>>();
         let desired = compile_expectations(
             &self.registry,
@@ -690,7 +690,7 @@ mod tests {
     use super::{WeatherStationRegistry, compile_expectations, domain_capability_registry};
 
     #[test]
-    fn static_registry_creates_crypto_and_weather_expectations_without_linkage() {
+    fn static_creates_without_linkage() {
         let stations = BTreeMap::from([
             (
                 "KLGA".to_owned(),

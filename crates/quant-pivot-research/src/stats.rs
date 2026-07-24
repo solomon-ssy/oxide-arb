@@ -347,7 +347,7 @@ mod calibration_stat_tests {
     }
 
     #[test]
-    fn pava_non_increasing_reverses_order() {
+    fn pava_non_increasing_order() {
         let values = vec![dec!(5), dec!(2), dec!(3), dec!(1)];
         let out = pava_non_increasing(&values);
         for window in out.windows(2) {
@@ -356,7 +356,7 @@ mod calibration_stat_tests {
     }
 
     #[test]
-    fn wilson_interval_contains_point_estimate() {
+    fn wilson_interval_contains_estimate() {
         let z = wilson_z(Decimal::new(95, 2)).expect("Wilson z");
         let (lo, hi) = wilson_interval(0.5, 100, z, 6).expect("Wilson interval");
         assert!(lo < Decimal::new(5, 1));
@@ -364,7 +364,7 @@ mod calibration_stat_tests {
     }
 
     #[test]
-    fn wilson_z_matches_known_95_percent_quantile() {
+    fn wilson_z_matches_quantile() {
         // The standard two-sided 95% normal quantile, to float precision.
         let z = wilson_z(Decimal::new(95, 2)).expect("Wilson z");
         assert!(
@@ -374,7 +374,7 @@ mod calibration_stat_tests {
     }
 
     #[test]
-    fn wilson_interval_matches_known_closed_form() {
+    fn wilson_interval_matches_form() {
         // p_hat=0.2, n=50, z=1.9599639845400545 (95%) — golden (lo, hi)
         // independently computed in Python from the standard Wilson score
         // interval closed form (Wilson, 1927), rounded to the same 6-dp scale
@@ -386,14 +386,14 @@ mod calibration_stat_tests {
     }
 
     #[test]
-    fn wilson_interval_zero_samples_yields_zero_width() {
+    fn wilson_zero_zero_width() {
         let (lo, hi) = wilson_interval(0.5, 0, 1.96, 6).expect("Wilson interval");
         assert_eq!(lo, Decimal::ZERO);
         assert_eq!(hi, Decimal::ZERO);
     }
 
     #[test]
-    fn pava_non_decreasing_grouped_pools_ties_before_pava() {
+    fn pava_non_before_pava() {
         // scores [1, 2, 2, 3], outcomes [0, 1, 0, 1] grouped as
         // (x=1, mean=0, w=1), (x=2, mean=0.5, w=2), (x=3, mean=1, w=1).
         // Group means (0, 0.5, 1) are already non-decreasing, so the
@@ -408,7 +408,7 @@ mod calibration_stat_tests {
     }
 
     #[test]
-    fn pava_non_decreasing_grouped_merges_violating_groups_by_weight() {
+    fn pava_non_merges_weight() {
         // Group means [0, 1, 0.4] with weights [1, 1, 3]: the middle group
         // (mean=1, weight=1) violates monotonicity against the heavier last
         // group (mean=0.4, weight=3) and must merge into a weighted mean of
@@ -420,7 +420,7 @@ mod calibration_stat_tests {
     }
 
     #[test]
-    fn pava_non_decreasing_grouped_matches_unweighted_pava_at_unit_weight() {
+    fn pava_non_matches_weight() {
         let values = vec![dec!(1), dec!(3), dec!(2), dec!(5), dec!(4)];
         let weights = vec![1_u64; values.len()];
         assert_eq!(
@@ -430,7 +430,7 @@ mod calibration_stat_tests {
     }
 
     #[test]
-    fn variance_and_stddev_of_known_series() {
+    fn variance_stddev_known_series() {
         // [2, 4, 4, 4, 5, 5, 7, 9]: population variance = 4, stddev = 2 (textbook example).
         let values = vec![
             dec!(2),
@@ -447,19 +447,19 @@ mod calibration_stat_tests {
     }
 
     #[test]
-    fn skewness_is_zero_for_symmetric_series() {
+    fn skewness_zero_symmetric_series() {
         let symmetric = vec![dec!(-2), dec!(-1), dec!(0), dec!(1), dec!(2)];
         assert_eq!(skewness(&symmetric), Decimal::ZERO);
     }
 
     #[test]
-    fn skewness_is_positive_for_right_tailed_series() {
+    fn skewness_positive_right_series() {
         let right_tailed = vec![dec!(1), dec!(1), dec!(1), dec!(1), dec!(10)];
         assert!(skewness(&right_tailed) > Decimal::ZERO);
     }
 
     #[test]
-    fn kurtosis_of_degenerate_series_is_zero_not_normal() {
+    fn kurtosis_zero_not_normal() {
         // Fewer than two distinct values ⇒ zero variance ⇒ must report 0, never
         // silently claim the normal distribution's kurtosis of 3.
         let degenerate = vec![dec!(5), dec!(5), dec!(5)];
@@ -467,13 +467,13 @@ mod calibration_stat_tests {
     }
 
     #[test]
-    fn normal_cdf_matches_known_quantiles() {
+    fn normal_cdf_matches_quantiles() {
         assert!((normal_cdf(0.0) - 0.5).abs() < 1e-9);
         assert!((normal_cdf(1.959_963_984_540_054_5) - 0.975).abs() < 1e-6);
     }
 
     #[test]
-    fn normal_inverse_cdf_is_the_inverse_of_normal_cdf() {
+    fn normal_inverse_cdf_cdf() {
         let p = 0.841_344_746_068_542_9; // Phi(1.0)
         assert!((normal_inverse_cdf(p) - 1.0).abs() < 1e-6);
     }

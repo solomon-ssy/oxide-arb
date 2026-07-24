@@ -849,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_page_keeps_pre_window_anchor_deltas_and_gap() {
+    fn replay_page_keeps_gap() {
         let token_id = TokenId::new("token");
         let market_id = MarketId::new("market");
         let session = Uuid::now_v7();

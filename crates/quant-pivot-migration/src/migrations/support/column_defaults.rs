@@ -912,7 +912,7 @@ mod tests {
     use super::{COLUMN_DEFAULTS, DefaultValue};
 
     #[test]
-    fn defaults_are_unique_and_literals_are_single_expressions() {
+    fn defaults_unique_literals_expressions() {
         let mut keys = BTreeSet::new();
         for spec in COLUMN_DEFAULTS {
             assert!(!spec.table.is_empty());

@@ -37,9 +37,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::{
-        error, primitives, quant::condition_wake::notify_input_change, query::paginate_mapped,
-    },
+    postgres::{primitives, quant::condition_wake::notify_input_change, query::paginate_mapped},
     traits::FactorRepository,
 };
 
@@ -86,7 +84,7 @@ impl FactorRepository for PgFactorRepository {
                     .await
                     .map_err(StorageError::from)?;
                 if conflicts.len() != 1 {
-                    return Err(error::state_conflict(
+                    return Err(StorageError::state_conflict(
                         QUANT_FACTOR,
                         Some(&definition.factor_definition_id),
                         format!(
@@ -96,7 +94,7 @@ impl FactorRepository for PgFactorRepository {
                     ));
                 }
                 let existing = conflicts.pop().ok_or_else(|| {
-                    error::state_conflict(
+                    StorageError::state_conflict(
                         QUANT_FACTOR,
                         Some(&definition.factor_definition_id),
                         "content-addressed conflict row disappeared",
@@ -191,9 +189,10 @@ impl FactorRepository for PgFactorRepository {
         factor_definition_id: &FactorDefinitionId,
     ) -> Result<FactorDefinitionInfo, StorageError> {
         let mut rows =
-            publish_definition_revisions(&self.db, slice::from_ref(factor_definition_id)).await?;
+            Self::publish_definition_revisions(&self.db, slice::from_ref(factor_definition_id))
+                .await?;
         rows.pop().ok_or_else(|| {
-            error::invariant_violation(
+            StorageError::invariant_violation(
                 Some(QUANT_FACTOR),
                 "single factor publication returned no revision",
             )
@@ -204,14 +203,15 @@ impl FactorRepository for PgFactorRepository {
         &self,
         factor_definition_ids: &[FactorDefinitionId],
     ) -> Result<Vec<FactorDefinitionInfo>, StorageError> {
-        publish_definition_revisions(&self.db, factor_definition_ids).await
+        Self::publish_definition_revisions(&self.db, factor_definition_ids).await
     }
 
     async fn retire_definition(
         &self,
         factor_definition_id: &FactorDefinitionId,
     ) -> Result<FactorDefinitionInfo, StorageError> {
-        update_definition_status(&self.db, factor_definition_id, PublicationStatus::Retired).await
+        Self::update_definition_status(&self.db, factor_definition_id, PublicationStatus::Retired)
+            .await
     }
 
     async fn list_values_for_run(
@@ -295,7 +295,7 @@ impl FactorRepository for PgFactorRepository {
             value.created_at,
         ))
         .map_err(|error| {
-            error::invariant_violation(
+            StorageError::invariant_violation(
                 Some(QUANT_FACTOR),
                 format!("latest factor snapshot hash failed: {error}"),
             )
@@ -322,7 +322,7 @@ impl FactorRepository for PgFactorRepository {
         model_version_id: &ModelVersionId,
     ) -> Result<Option<LatestFactorSnapshotBundleInfo>, StorageError> {
         if factor_definition_ids.is_empty() {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_FACTOR),
                 "latest factor snapshot bundle requires at least one definition",
             ));
@@ -332,7 +332,7 @@ impl FactorRepository for PgFactorRepository {
             .copied()
             .collect::<HashSet<_>>();
         if requested.len() != factor_definition_ids.len() {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_FACTOR),
                 "latest factor snapshot bundle contains duplicate definition ids",
             ));
@@ -377,7 +377,7 @@ impl FactorRepository for PgFactorRepository {
             .iter()
             .any(|row| row.decision_at != latest_value.decision_at)
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_FACTOR),
                 format!(
                     "model run {} contains mixed decision timestamps for market {}",
@@ -387,12 +387,12 @@ impl FactorRepository for PgFactorRepository {
         }
 
         let available_at = rows.iter().map(|row| row.created_at).max().ok_or_else(|| {
-            error::invariant_violation(
+            StorageError::invariant_violation(
                 Some(QUANT_FACTOR),
                 "factor snapshot bundle unexpectedly has no values",
             )
         })?;
-        let values = project_snapshot_values(
+        let values = Self::project_snapshot_values(
             &self.db,
             factor_definition_ids,
             market_id,
@@ -409,7 +409,7 @@ impl FactorRepository for PgFactorRepository {
             &values,
         ))
         .map_err(|error| {
-            error::invariant_violation(
+            StorageError::invariant_violation(
                 Some(QUANT_FACTOR),
                 format!("latest factor snapshot bundle hash failed: {error}"),
             )
@@ -428,25 +428,25 @@ impl FactorRepository for PgFactorRepository {
 
 fn validate_new_definition(definition: &NewFactorDefinition) -> Result<(), StorageError> {
     if definition.name != definition.definition.name.as_str() {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_FACTOR),
             "factor definition name projection does not match the typed document",
         ));
     }
     if definition.factor_family != definition.definition.family {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_FACTOR),
             "factor family projection does not match the typed document",
         ));
     }
     if definition.scope != definition.factor_family.definition_scope() {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_FACTOR),
             "factor scope does not match the factor family",
         ));
     }
     if definition.definition.owner.trim().is_empty() {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_FACTOR),
             "factor definition owner must be non-empty",
         ));
@@ -454,13 +454,13 @@ fn validate_new_definition(definition: &NewFactorDefinition) -> Result<(), Stora
     let expected_hash =
         factor_definition_content_hash(&definition.definition, &definition.feature_contract_hash)
             .map_err(|hash_error| {
-            error::invariant_violation(
+            StorageError::invariant_violation(
                 Some(QUANT_FACTOR),
                 format!("factor definition cannot be canonically hashed: {hash_error}"),
             )
         })?;
     if definition.definition_hash != expected_hash {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_FACTOR),
             format!(
                 "factor definition hash {} does not match canonical content hash {}",
@@ -470,7 +470,7 @@ fn validate_new_definition(definition: &NewFactorDefinition) -> Result<(), Stora
     }
     let expected_id = FactorDefinitionId::from_definition_hash(&expected_hash);
     if definition.factor_definition_id != expected_id {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_FACTOR),
             format!(
                 "factor definition id {} does not match definition hash {} (expected {})",
@@ -479,7 +479,7 @@ fn validate_new_definition(definition: &NewFactorDefinition) -> Result<(), Stora
         ));
     }
     if definition.status != PublicationStatus::Draft {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_FACTOR),
             "new factor-definition revisions must be registered as Draft",
         ));
@@ -487,54 +487,56 @@ fn validate_new_definition(definition: &NewFactorDefinition) -> Result<(), Stora
     Ok(())
 }
 
-async fn project_snapshot_values(
-    db: &DatabaseConnection,
-    factor_definition_ids: &[FactorDefinitionId],
-    market_id: &MarketId,
-    rows: Vec<Model>,
-    expected_definition_count: usize,
-) -> Result<Vec<LatestFactorSnapshotValueInfo>, StorageError> {
-    let definitions = Entity::find()
-        .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
-        .all(db)
-        .await
-        .map_err(StorageError::from)?
-        .into_iter()
-        .map(|definition| (definition.factor_definition_id, definition))
-        .collect::<HashMap<_, _>>();
-    if definitions.len() != expected_definition_count {
-        return Err(error::state_conflict(
-            QUANT_FACTOR,
-            Some(market_id),
-            "factor snapshot bundle references a missing definition revision",
-        ));
-    }
-    rows.into_iter()
-        .map(|row| {
-            let definition = definitions.get(&row.factor_definition_id).ok_or_else(|| {
-                error::state_conflict(
-                    QUANT_FACTOR,
-                    Some(&row.factor_definition_id),
-                    "factor snapshot definition disappeared",
-                )
-            })?;
-            Ok(LatestFactorSnapshotValueInfo {
-                factor_value_id: row.factor_value_id,
-                factor_definition_id: row.factor_definition_id,
-                definition_hash: definition.definition_hash,
-                name: definition.name.clone(),
-                family: definition.factor_family,
-                value_state: row.value_state,
-                raw_value: row.raw_value,
-                normalized_score: row.normalized_score,
-                normalization_source: row.normalization_source,
-                indeterminate_reason: row.indeterminate_reason,
-                direction: row.direction,
-                confidence: row.confidence,
-                explanation: row.explanation,
+impl PgFactorRepository {
+    async fn project_snapshot_values(
+        db: &DatabaseConnection,
+        factor_definition_ids: &[FactorDefinitionId],
+        market_id: &MarketId,
+        rows: Vec<Model>,
+        expected_definition_count: usize,
+    ) -> Result<Vec<LatestFactorSnapshotValueInfo>, StorageError> {
+        let definitions = Entity::find()
+            .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
+            .all(db)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(|definition| (definition.factor_definition_id, definition))
+            .collect::<HashMap<_, _>>();
+        if definitions.len() != expected_definition_count {
+            return Err(StorageError::state_conflict(
+                QUANT_FACTOR,
+                Some(market_id),
+                "factor snapshot bundle references a missing definition revision",
+            ));
+        }
+        rows.into_iter()
+            .map(|row| {
+                let definition = definitions.get(&row.factor_definition_id).ok_or_else(|| {
+                    StorageError::state_conflict(
+                        QUANT_FACTOR,
+                        Some(&row.factor_definition_id),
+                        "factor snapshot definition disappeared",
+                    )
+                })?;
+                Ok(LatestFactorSnapshotValueInfo {
+                    factor_value_id: row.factor_value_id,
+                    factor_definition_id: row.factor_definition_id,
+                    definition_hash: definition.definition_hash,
+                    name: definition.name.clone(),
+                    family: definition.factor_family,
+                    value_state: row.value_state,
+                    raw_value: row.raw_value,
+                    normalized_score: row.normalized_score,
+                    normalization_source: row.normalization_source,
+                    indeterminate_reason: row.indeterminate_reason,
+                    direction: row.direction,
+                    confidence: row.confidence,
+                    explanation: row.explanation,
+                })
             })
-        })
-        .collect()
+            .collect()
+    }
 }
 
 fn ensure_identical_definition(
@@ -553,7 +555,7 @@ fn ensure_identical_definition(
     if identical {
         return Ok(());
     }
-    Err(error::invariant_violation(
+    Err(StorageError::invariant_violation(
         Some(QUANT_FACTOR),
         format!(
             "factor definition content-address collision for id {} / hash {}",
@@ -562,49 +564,51 @@ fn ensure_identical_definition(
     ))
 }
 
-async fn publish_definition_revisions(
-    db: &DatabaseConnection,
-    factor_definition_ids: &[FactorDefinitionId],
-) -> Result<Vec<FactorDefinitionInfo>, StorageError> {
-    if factor_definition_ids.is_empty() {
-        return Ok(Vec::new());
+impl PgFactorRepository {
+    async fn publish_definition_revisions(
+        db: &DatabaseConnection,
+        factor_definition_ids: &[FactorDefinitionId],
+    ) -> Result<Vec<FactorDefinitionInfo>, StorageError> {
+        if factor_definition_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        validate_unique_publish_ids(factor_definition_ids)?;
+        let txn = db.begin().await.map_err(StorageError::from)?;
+        let initial = Entity::find()
+            .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
+            .all(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        let by_id = definitions_by_id(initial);
+        let names = logical_names_for_publish(factor_definition_ids, &by_id)?;
+        // Sorting gives every concurrent multi-factor publication the same lock
+        // order; the partial unique index remains the final invariant.
+        for name in &names {
+            Self::acquire_factor_publication_lock(&txn, name).await?;
+        }
+        let locked = Entity::find()
+            .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
+            .order_by_asc(Column::Name)
+            .lock_exclusive()
+            .all(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        let locked_by_id = definitions_by_id(locked);
+        validate_publish_transitions(factor_definition_ids, &locked_by_id)?;
+        let newly_published_ids = factor_definition_ids
+            .iter()
+            .filter(|id| {
+                locked_by_id
+                    .get(*id)
+                    .is_some_and(|row| row.status != PublicationStatus::Published)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        Self::replace_published_revisions(&txn, factor_definition_ids, &locked_by_id).await?;
+        let published = Self::load_published_batch(&txn, &newly_published_ids).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(published)
     }
-    validate_unique_publish_ids(factor_definition_ids)?;
-    let txn = db.begin().await.map_err(StorageError::from)?;
-    let initial = Entity::find()
-        .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
-        .all(&txn)
-        .await
-        .map_err(StorageError::from)?;
-    let by_id = definitions_by_id(initial);
-    let names = logical_names_for_publish(factor_definition_ids, &by_id)?;
-    // Sorting gives every concurrent multi-factor publication the same lock
-    // order; the partial unique index remains the final invariant.
-    for name in &names {
-        acquire_factor_publication_lock(&txn, name).await?;
-    }
-    let locked = Entity::find()
-        .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
-        .order_by_asc(Column::Name)
-        .lock_exclusive()
-        .all(&txn)
-        .await
-        .map_err(StorageError::from)?;
-    let locked_by_id = definitions_by_id(locked);
-    validate_publish_transitions(factor_definition_ids, &locked_by_id)?;
-    let newly_published_ids = factor_definition_ids
-        .iter()
-        .filter(|id| {
-            locked_by_id
-                .get(*id)
-                .is_some_and(|row| row.status != PublicationStatus::Published)
-        })
-        .copied()
-        .collect::<Vec<_>>();
-    replace_published_revisions(&txn, factor_definition_ids, &locked_by_id).await?;
-    let published = load_published_batch(&txn, &newly_published_ids).await?;
-    txn.commit().await.map_err(StorageError::from)?;
-    Ok(published)
 }
 
 fn validate_unique_publish_ids(
@@ -613,7 +617,7 @@ fn validate_unique_publish_ids(
     let mut seen_ids = HashSet::with_capacity(factor_definition_ids.len());
     for id in factor_definition_ids {
         if !seen_ids.insert(*id) {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_FACTOR),
                 format!("duplicate factor definition id in publish batch: {id}"),
             ));
@@ -637,7 +641,7 @@ fn logical_names_for_publish(
 ) -> Result<Vec<String>, StorageError> {
     for id in factor_definition_ids {
         if !by_id.contains_key(id) {
-            return Err(error::not_found(QUANT_FACTOR, id));
+            return Err(StorageError::not_found(QUANT_FACTOR, id));
         }
     }
 
@@ -647,7 +651,7 @@ fn logical_names_for_publish(
         .collect();
     names.sort_unstable();
     if names.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_FACTOR),
             "a publish batch cannot contain multiple revisions of the same logical factor",
         ));
@@ -662,13 +666,13 @@ fn validate_publish_transitions(
     for id in factor_definition_ids {
         let row = locked_by_id
             .get(id)
-            .ok_or_else(|| error::not_found(QUANT_FACTOR, id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_FACTOR, id))?;
         if row.status != PublicationStatus::Published
             && !row
                 .status
                 .allows_transition_to(PublicationStatus::Published)
         {
-            return Err(error::illegal_transition(
+            return Err(StorageError::illegal_transition(
                 QUANT_FACTOR,
                 Some(id),
                 row.status,
@@ -679,105 +683,113 @@ fn validate_publish_transitions(
     Ok(())
 }
 
-async fn replace_published_revisions(
-    txn: &DatabaseTransaction,
-    factor_definition_ids: &[FactorDefinitionId],
-    locked_by_id: &HashMap<FactorDefinitionId, QuantFactorDefinitionModel>,
-) -> Result<(), StorageError> {
-    for id in factor_definition_ids {
-        let target = locked_by_id
-            .get(id)
-            .ok_or_else(|| error::not_found(QUANT_FACTOR, id))?;
-        Entity::update_many()
-            .col_expr(
-                Column::Status,
-                primitives::enum_value(&PublicationStatus::Retired),
-            )
-            .filter(Column::Name.eq(target.name.clone()))
-            .filter(Column::FactorDefinitionId.ne(*id))
-            .filter(Column::Status.eq(PublicationStatus::Published))
-            .exec(txn)
+impl PgFactorRepository {
+    async fn replace_published_revisions(
+        txn: &DatabaseTransaction,
+        factor_definition_ids: &[FactorDefinitionId],
+        locked_by_id: &HashMap<FactorDefinitionId, QuantFactorDefinitionModel>,
+    ) -> Result<(), StorageError> {
+        for id in factor_definition_ids {
+            let target = locked_by_id
+                .get(id)
+                .ok_or_else(|| StorageError::not_found(QUANT_FACTOR, id))?;
+            Entity::update_many()
+                .col_expr(
+                    Column::Status,
+                    primitives::enum_value(&PublicationStatus::Retired),
+                )
+                .filter(Column::Name.eq(target.name.clone()))
+                .filter(Column::FactorDefinitionId.ne(*id))
+                .filter(Column::Status.eq(PublicationStatus::Published))
+                .exec(txn)
+                .await
+                .map_err(StorageError::from)?;
+
+            if target.status != PublicationStatus::Published {
+                let mut active = target.clone().into_active_model();
+                active.status = ActiveValue::Set(PublicationStatus::Published);
+                active.update(txn).await.map_err(StorageError::from)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PgFactorRepository {
+    async fn load_published_batch(
+        txn: &DatabaseTransaction,
+        factor_definition_ids: &[FactorDefinitionId],
+    ) -> Result<Vec<FactorDefinitionInfo>, StorageError> {
+        let refreshed = Entity::find()
+            .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
+            .all(txn)
             .await
             .map_err(StorageError::from)?;
+        let mut refreshed_by_id: HashMap<FactorDefinitionId, FactorDefinitionInfo> = refreshed
+            .into_iter()
+            .map(|row| (row.factor_definition_id, row.into()))
+            .collect();
+        let published = factor_definition_ids
+            .iter()
+            .map(|id| {
+                refreshed_by_id
+                    .remove(id)
+                    .ok_or_else(|| StorageError::not_found(QUANT_FACTOR, id))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(published)
+    }
+}
 
-        if target.status != PublicationStatus::Published {
-            let mut active = target.clone().into_active_model();
-            active.status = ActiveValue::Set(PublicationStatus::Published);
-            active.update(txn).await.map_err(StorageError::from)?;
+impl PgFactorRepository {
+    async fn acquire_factor_publication_lock(
+        txn: &DatabaseTransaction,
+        logical_name: &str,
+    ) -> Result<(), StorageError> {
+        primitives::advisory_text_xact_lock(txn, logical_name, 8_609_321_192_504_036_405).await
+    }
+}
+
+impl PgFactorRepository {
+    async fn update_definition_status(
+        db: &DatabaseConnection,
+        factor_definition_id: &FactorDefinitionId,
+        next: PublicationStatus,
+    ) -> Result<FactorDefinitionInfo, StorageError> {
+        let txn = db.begin().await.map_err(StorageError::from)?;
+        let Some(initial) = Entity::find_by_id(*factor_definition_id)
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Err(StorageError::not_found(QUANT_FACTOR, factor_definition_id));
+        };
+        Self::acquire_factor_publication_lock(&txn, &initial.name).await?;
+        let Some(row) = Entity::find_by_id(*factor_definition_id)
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Err(StorageError::not_found(QUANT_FACTOR, factor_definition_id));
+        };
+        let from = row.status;
+        if !from.allows_transition_to(next) {
+            return Err(StorageError::illegal_transition(
+                QUANT_FACTOR,
+                Some(factor_definition_id),
+                from,
+                next,
+            ));
         }
+        let mut active = row.into_active_model();
+        active.status = ActiveValue::Set(next);
+        let updated = active
+            .update(&txn)
+            .await
+            .map_err(StorageError::from)
+            .map(Into::into)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(updated)
     }
-    Ok(())
-}
-
-async fn load_published_batch(
-    txn: &DatabaseTransaction,
-    factor_definition_ids: &[FactorDefinitionId],
-) -> Result<Vec<FactorDefinitionInfo>, StorageError> {
-    let refreshed = Entity::find()
-        .filter(Column::FactorDefinitionId.is_in(factor_definition_ids.iter().copied()))
-        .all(txn)
-        .await
-        .map_err(StorageError::from)?;
-    let mut refreshed_by_id: HashMap<FactorDefinitionId, FactorDefinitionInfo> = refreshed
-        .into_iter()
-        .map(|row| (row.factor_definition_id, row.into()))
-        .collect();
-    let published = factor_definition_ids
-        .iter()
-        .map(|id| {
-            refreshed_by_id
-                .remove(id)
-                .ok_or_else(|| error::not_found(QUANT_FACTOR, id))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(published)
-}
-
-async fn acquire_factor_publication_lock(
-    txn: &DatabaseTransaction,
-    logical_name: &str,
-) -> Result<(), StorageError> {
-    primitives::advisory_text_xact_lock(txn, logical_name, 8_609_321_192_504_036_405).await
-}
-
-async fn update_definition_status(
-    db: &DatabaseConnection,
-    factor_definition_id: &FactorDefinitionId,
-    next: PublicationStatus,
-) -> Result<FactorDefinitionInfo, StorageError> {
-    let txn = db.begin().await.map_err(StorageError::from)?;
-    let Some(initial) = Entity::find_by_id(*factor_definition_id)
-        .one(&txn)
-        .await
-        .map_err(StorageError::from)?
-    else {
-        return Err(error::not_found(QUANT_FACTOR, factor_definition_id));
-    };
-    acquire_factor_publication_lock(&txn, &initial.name).await?;
-    let Some(row) = Entity::find_by_id(*factor_definition_id)
-        .lock_exclusive()
-        .one(&txn)
-        .await
-        .map_err(StorageError::from)?
-    else {
-        return Err(error::not_found(QUANT_FACTOR, factor_definition_id));
-    };
-    let from = row.status;
-    if !from.allows_transition_to(next) {
-        return Err(error::illegal_transition(
-            QUANT_FACTOR,
-            Some(factor_definition_id),
-            from,
-            next,
-        ));
-    }
-    let mut active = row.into_active_model();
-    active.status = ActiveValue::Set(next);
-    let updated = active
-        .update(&txn)
-        .await
-        .map_err(StorageError::from)
-        .map(Into::into)?;
-    txn.commit().await.map_err(StorageError::from)?;
-    Ok(updated)
 }

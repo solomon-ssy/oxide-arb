@@ -40,7 +40,7 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_system_tests::{
-    postgres::setup_pg,
+    postgres::{PostgresClock, setup_pg},
     support::execution_pg_seed::{
         ExecutionTxnIds, ReportSeedConfig, SharedDemoInfra, entry_execution_order,
         fixture_profile_ref, seed_approved_intent, seed_report_fixture, seed_report_on_infra,
@@ -56,11 +56,11 @@ const SCALE_REPORT_COUNT: usize = 11;
 const SCALE_RECOMMENDATIONS_PER_REPORT: usize = 1_000;
 const SCALE_EXPECTED_RECOMMENDATIONS: usize = SCALE_REPORT_COUNT * SCALE_RECOMMENDATIONS_PER_REPORT;
 
-pub async fn candidate_page_is_keyset_ordered_and_cutoff_frozen() {
+pub async fn candidate_page_keyset_frozen() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
-    let cutoff = Utc::now();
+    let cutoff = db.statement_time().await;
     let window = feedback_window(ids.decision_at - Duration::minutes(1), cutoff);
     let repository = PgFeedbackCohortRepository::new(db);
 
@@ -82,7 +82,7 @@ pub async fn candidate_page_is_keyset_ordered_and_cutoff_frozen() {
     assert_eq!(page.next_cursor(), None);
 }
 
-pub async fn cohort_truth_planes_are_orthogonal_and_submission_exact() {
+pub async fn cohort_truth_planes_exact() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_settlement_report_fixture(&db).await;
@@ -100,7 +100,7 @@ pub async fn cohort_truth_planes_are_orthogonal_and_submission_exact() {
         .await
         .expect("seal visible resolution outcome");
     let execution = seed_unfilled_execution_outcome(&db, &ids).await;
-    let cutoff = Utc::now();
+    let cutoff = db.statement_time().await;
     let window_start = ids.decision_at - Duration::minutes(1);
     let repository = PgFeedbackCohortRepository::new(db.clone());
 
@@ -189,14 +189,14 @@ pub async fn cohort_truth_planes_are_orthogonal_and_submission_exact() {
     ));
 }
 
-pub async fn cutoff_excludes_late_truth_and_late_candidates_across_pages() {
+pub async fn cutoff_excludes_late_pages() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let infra = seed_shared_demo_infra(&db).await;
     let first = seed_feedback_report(&db, &infra, 1).await;
     let second = seed_feedback_report(&db, &infra, 2).await;
     let window_start = first.decision_at.min(second.decision_at) - Duration::minutes(1);
-    let cutoff = Utc::now();
+    let cutoff = db.statement_time().await;
     let repository = PgFeedbackCohortRepository::new(db.clone());
     let first_page = repository
         .list_page(page_query(
@@ -251,7 +251,7 @@ pub async fn cutoff_excludes_late_truth_and_late_candidates_across_pages() {
     assert!(old_page.candidates()[0].resolution_outcome().is_none());
     assert_eq!(old_page.next_cursor(), None);
 
-    let new_cutoff = Utc::now();
+    let new_cutoff = db.statement_time().await;
     let new_page = repository
         .list_page(page_query(
             FeedbackCohort::ModelLearning,
@@ -281,7 +281,7 @@ pub async fn cutoff_excludes_late_truth_and_late_candidates_across_pages() {
     );
 }
 
-pub async fn keyset_reads_more_than_ten_thousand_without_duplicates() {
+pub async fn keyset_reads_without_duplicates() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let infra = seed_shared_demo_infra(&db).await;
@@ -295,8 +295,8 @@ pub async fn keyset_reads_more_than_ten_thousand_without_duplicates() {
         .min()
         .expect("scale reports")
         - Duration::minutes(1);
-    seed_scale_recommendations(&db, &reports, window_start, Utc::now()).await;
-    let cutoff = Utc::now();
+    let cutoff = db.statement_time().await;
+    seed_scale_recommendations(&db, &reports, window_start, cutoff).await;
     let repository = PgFeedbackCohortRepository::new(db);
     let mut after = None;
     let mut seen = HashSet::with_capacity(SCALE_EXPECTED_RECOMMENDATIONS);

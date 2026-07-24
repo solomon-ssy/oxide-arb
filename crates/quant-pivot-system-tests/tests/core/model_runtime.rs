@@ -102,7 +102,7 @@ use quant_pivot_system_tests::{
         pit::InMemoryDecisionSnapshotSource,
         publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
-        trade_tape_fixtures::live_trade_tape_block_cursor_repo,
+        trade_tape_fixtures::live_tape_cursor_repo,
     },
 };
 use rust_decimal::Decimal;
@@ -149,7 +149,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn trade_tape_window_by_market(
+    async fn market_tape_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
@@ -430,7 +430,7 @@ async fn build_features(
         feature_repo,
         event_writer: noop_feature_writer(),
         market_registry: Arc::clone(&registry),
-        block_cursor_repo: live_trade_tape_block_cursor_repo(),
+        block_cursor_repo: live_tape_cursor_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
         calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
@@ -667,7 +667,7 @@ async fn build_cross_section_features(
         feature_repo,
         event_writer: noop_feature_writer(),
         market_registry: Arc::clone(&registry),
-        block_cursor_repo: live_trade_tape_block_cursor_repo(),
+        block_cursor_repo: live_tape_cursor_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
         calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
@@ -835,7 +835,7 @@ async fn register_candidate_sibling(
 ) -> ModelVersionId {
     let registry = PgModelRegistryRepository::new(db.clone());
     let published = registry
-        .find_model_version_by_id(published_id)
+        .find_model_version(published_id)
         .await
         .expect("find published")
         .expect("published row");
@@ -991,7 +991,7 @@ fn artifact_store() -> Arc<dyn ArtifactStore> {
     Arc::new(LocalArtifactStore::new(root))
 }
 
-pub async fn online_loop_selection_to_signal_candidates() {
+pub async fn online_loop_selection_candidates() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db).await;
@@ -1064,7 +1064,7 @@ pub async fn online_loop_selection_to_signal_candidates() {
     assert!(!values.is_empty(), "factor values persisted under the run");
 }
 
-pub async fn inference_degradation_shadow_failure_keeps_active() {
+pub async fn inference_failure_keeps_active() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db).await;
@@ -1172,7 +1172,7 @@ async fn run_overlay_round(input: OverlayRoundInput<'_>) -> ModelRunOutcome {
         .expect("overlay round")
 }
 
-pub async fn hot_update_changes_candidate_weights_not_published_artifact() {
+pub async fn hot_changes_not_artifact() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db).await;
@@ -1266,7 +1266,7 @@ pub async fn hot_update_changes_candidate_weights_not_published_artifact() {
     assert_eq!(shadow_run.run_kind, ModelRunKind::Shadow);
 }
 
-pub async fn inference_rejects_retired_active_model() {
+pub async fn inference_rejects_retired_model() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db).await;
@@ -1318,7 +1318,7 @@ pub async fn inference_rejects_retired_active_model() {
     );
 }
 
-pub async fn model_run_create_find_succeed_fail() {
+pub async fn model_run_create_fail() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgModelRunRepository::new(db.clone());

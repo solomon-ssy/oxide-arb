@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn role_code_accepts_only_canonical_lower_snake_case() {
+    fn role_code_accepts_case() {
         assert!(create_request("risk_owner_2").validate().is_ok());
         for invalid in ["RiskOwner", "risk-owner", "risk owner", "_risk_owner", ""] {
             assert!(

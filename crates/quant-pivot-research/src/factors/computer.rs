@@ -43,7 +43,7 @@ use crate::{
     features::{FeatureSchema, FeatureVector},
     hashing::ResearchHasher,
     model::FavoriteLongshotBiasTable,
-    parallel::{par_map_with_index, par_try_map, par_try_map_with_index},
+    parallel::{par_map_with_index, par_try_map, par_try_map_index},
 };
 
 /// Batch size at or above which the engine spreads its stages across the `rayon`
@@ -227,17 +227,17 @@ impl FactorEngine {
     /// Compute every enabled factor for a batch of markets at one decision time,
     /// with no artifact reference — the [`SmallCrossSectionPolicy::Indeterminate`]
     /// path. Configuring `FrozenReferenceQuantile` without calling
-    /// [`Self::compute_all_batch_with_references`] fails closed per factor.
+    /// [`Self::compute_batch_with_refs`] fails closed per factor.
     ///
     /// # Errors
     ///
-    /// See [`Self::compute_all_batch_with_references`].
+    /// See [`Self::compute_batch_with_refs`].
     pub fn compute_all_batch(
         &self,
         features: &[FeatureVector],
         config: &FactorsConfig,
     ) -> QuantResult<Vec<MarketFactorOutcome>> {
-        self.compute_all_batch_with_references(features, config, &FrozenReferenceQuantiles::empty())
+        self.compute_batch_with_refs(features, config, &FrozenReferenceQuantiles::empty())
     }
 
     /// Compute every enabled factor for a batch of markets, using the loaded
@@ -254,7 +254,7 @@ impl FactorEngine {
     /// Propagates raw-computation failures, an invalid `min_factor_confidence`,
     /// an unresolvable normalization config, a non-uniform batch `as_of`, or an
     /// empty enabled factor registry.
-    pub fn compute_all_batch_with_references(
+    pub fn compute_batch_with_refs(
         &self,
         features: &[FeatureVector],
         config: &FactorsConfig,
@@ -420,7 +420,7 @@ fn build_norm_grid(
         )
     };
     if parallel {
-        par_try_map_with_index(factors, |index, _| normalize_factor(index))
+        par_try_map_index(factors, |index, _| normalize_factor(index))
     } else {
         (0..factors.len()).map(normalize_factor).collect()
     }

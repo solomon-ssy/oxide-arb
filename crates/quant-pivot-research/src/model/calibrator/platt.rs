@@ -40,7 +40,7 @@ fn sample_count_as_f64(len: usize) -> QuantResult<f64> {
 
 /// Convert every calibration-split score to `f64`, failing closed (never a
 /// fabricated `0.0`) the moment any single score cannot round-trip.
-fn decimals_to_f64_or_fail(scores: &[Decimal]) -> QuantResult<Vec<f64>> {
+fn decimals_to_f64(scores: &[Decimal]) -> QuantResult<Vec<f64>> {
     scores
         .iter()
         .map(|score| {
@@ -60,7 +60,7 @@ fn decimals_to_f64_or_fail(scores: &[Decimal]) -> QuantResult<Vec<f64>> {
 /// a fabricated `0.0`) on a non-finite or out-of-range result — a `NaN`/`inf`
 /// parameter here would mean the Newton loop diverged, and persisting `0.0`
 /// instead would silently store a degenerate, uninformative calibrator.
-fn decimal_from_f64_or_fail(value: f64, name: &'static str) -> QuantResult<Decimal> {
+fn decimal_from_f64(value: f64, name: &'static str) -> QuantResult<Decimal> {
     Decimal::from_f64(value).ok_or_else(|| {
         QuantError::from(ResearchError::DatasetBuild {
             detail: format!(
@@ -102,11 +102,11 @@ impl ProbabilityCalibrator for PlattCalibrator {
         // silent 0"): a score that cannot round-trip through `f64` must
         // reject the whole fit, not silently corrupt the Newton loop with a
         // fabricated `0.0`.
-        let scores_f64 = decimals_to_f64_or_fail(scores)?;
+        let scores_f64 = decimals_to_f64(scores)?;
         let (param_a, param_b) = fit_platt(&scores_f64, outcomes)?;
         Ok(MonotoneMapping::Platt {
-            a: decimal_from_f64_or_fail(param_a, "param_a")?,
-            b: decimal_from_f64_or_fail(param_b, "param_b")?,
+            a: decimal_from_f64(param_a, "param_a")?,
+            b: decimal_from_f64(param_b, "param_b")?,
         })
     }
 
@@ -255,14 +255,14 @@ mod tests {
     use crate::model::calibrator::{MonotoneMapping, ProbabilityCalibrator};
 
     #[test]
-    fn fit_fails_closed_without_both_classes() {
+    fn fit_rejects_without_classes() {
         let scores = vec![dec!(0.1); 20];
         let outcomes = vec![true; 20];
         assert!(PlattCalibrator.fit(&scores, &outcomes).is_err());
     }
 
     #[test]
-    fn fit_recovers_monotone_increasing_sigmoid() {
+    fn fit_recovers_monotone_sigmoid() {
         // Perfectly separable-ish data: high score -> win.
         let mut scores = Vec::new();
         let mut outcomes = Vec::new();
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn platt_calibration_matches_known_closed_form() {
+    fn platt_calibration_matches_form() {
         // Golden (A, B) independently computed in Python from the same
         // Lin-Lin-Weng (2007) Newton-with-backtracking algorithm (correct
         // `Σ f_i·d_i`-style accumulation, not the buggy `mul_add` order this
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn calibrate_is_monotone_in_score() {
+    fn calibrate_monotone_score() {
         let calibrator = PlattCalibrator;
         let mut scores = Vec::new();
         let mut outcomes = Vec::new();

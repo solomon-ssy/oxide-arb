@@ -46,7 +46,7 @@ fn new_job(job_id: ResearchJobId) -> NewResearchJob {
     }
 }
 
-pub async fn job_kind_must_match_tagged_params() {
+pub async fn job_kind_match_params() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db.clone());
@@ -68,7 +68,7 @@ pub async fn job_kind_must_match_tagged_params() {
     );
 }
 
-pub async fn finalize_requires_running_lease_owner() {
+pub async fn finalize_requires_running_owner() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db);
@@ -100,7 +100,7 @@ pub async fn finalize_requires_running_lease_owner() {
     assert!(finalized.lease_owner.is_none());
 }
 
-pub async fn stale_owner_finalize_is_rejected_after_reclaim() {
+pub async fn stale_rejected_after_reclaim() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db);
@@ -165,7 +165,7 @@ pub async fn stale_owner_finalize_is_rejected_after_reclaim() {
     assert_eq!(finalized.status, ResearchJobStatus::Succeeded);
 }
 
-pub async fn requeue_inflight_requeues_own_running_row_and_bumps_recovery() {
+pub async fn requeue_inflight_requeues_recovery() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db);
@@ -200,7 +200,7 @@ pub async fn requeue_inflight_requeues_own_running_row_and_bumps_recovery() {
     );
 }
 
-pub async fn requeue_inflight_ignores_other_owners_running_rows() {
+pub async fn requeue_inflight_ignores_rows() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db);
@@ -224,7 +224,7 @@ pub async fn requeue_inflight_ignores_other_owners_running_rows() {
     assert_eq!(row.lease_owner.as_ref(), Some(&worker_a));
 }
 
-pub async fn requeue_inflight_quarantines_at_recovery_cap() {
+pub async fn requeue_inflight_quarantines_cap() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db);
@@ -257,7 +257,7 @@ pub async fn requeue_inflight_quarantines_at_recovery_cap() {
     );
 }
 
-pub async fn double_finalize_returns_state_conflict() {
+pub async fn double_finalize_returns_conflict() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db);

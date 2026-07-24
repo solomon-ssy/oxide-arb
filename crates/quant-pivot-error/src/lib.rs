@@ -223,7 +223,7 @@ mod tests {
     };
 
     #[test]
-    fn api_error_propagates_via_from() {
+    fn api_error_propagates_via() {
         let api_err = ApiError::Timeout {
             operation: "get_book".into(),
             elapsed_ms: 5000,
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn storage_error_wraps_db_err() {
+    fn storage_error_wraps_err() {
         let db_err = DbErr::Custom("test db error".into());
         let oxide_err: QuantError = db_err.into();
         assert!(matches!(oxide_err, QuantError::Storage(_)));
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_error_propagates_with_stable_code() {
+    fn execution_error_propagates_code() {
         let err = ExecutionError::ReportOnlyMode;
         let oxide_err: QuantError = err.into();
         assert!(matches!(oxide_err, QuantError::Execution(_)));

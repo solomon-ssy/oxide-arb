@@ -679,30 +679,32 @@ mod tests {
 
     // ── PrefetchedDomainAvailabilitySource (zero I/O) ───────────────────────
 
-    fn empty_prefetched() -> Prefetched {
-        Prefetched {
-            books: HashMap::new(),
-            micro: HashMap::new(),
-            trade_tape: HashMap::new(),
-            resolutions: HashMap::new(),
-            catalog: CatalogWindowInfo {
-                market_changes: Vec::new(),
-                event_changes: Vec::new(),
-            },
-            domain_observations: HashMap::new(),
-            crypto_reports: HashMap::new(),
-            weather_observations: HashMap::new(),
-            weather_forecasts: HashMap::new(),
-            weather_calibrations: Vec::new(),
-            linkages: HashMap::new(),
+    impl Prefetched {
+        fn availability_empty() -> Self {
+            Self {
+                books: HashMap::new(),
+                micro: HashMap::new(),
+                trade_tape: HashMap::new(),
+                resolutions: HashMap::new(),
+                catalog: CatalogWindowInfo {
+                    market_changes: Vec::new(),
+                    event_changes: Vec::new(),
+                },
+                domain_observations: HashMap::new(),
+                crypto_reports: HashMap::new(),
+                weather_observations: HashMap::new(),
+                weather_forecasts: HashMap::new(),
+                weather_calibrations: Vec::new(),
+                linkages: HashMap::new(),
+            }
         }
     }
 
     #[tokio::test]
-    async fn prefetched_source_resolves_from_in_memory_linkage_and_observations() {
+    async fn prefetched_source_resolves_observations() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let domain = DomainConfig::default();
-        let mut prefetched = empty_prefetched();
+        let mut prefetched = Prefetched::availability_empty();
         prefetched.linkages.insert(
             MarketId::new("resolved-available"),
             vec![linkage(
@@ -891,7 +893,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn trade_tape_window_by_market(
+        async fn market_tape_window(
             &self,
             _market_ids: Vec<MarketId>,
             _from_ms: i64,
@@ -1021,7 +1023,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_source_batches_the_ledger_and_fact_reads() {
+    async fn live_source_batches_reads() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let domain = DomainConfig::default();
         let repo = FakeLinkageRepo {
@@ -1051,7 +1053,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_domain_availability_defaults_absent_markets_to_unresolved() {
+    async fn resolve_domain_availability_unresolved() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let domain = DomainConfig::default();
         let repo = FakeLinkageRepo { rows: Vec::new() };

@@ -26,13 +26,11 @@ pub async fn ensure_database(
     validate_pg_identifier(&config.user, "user")?;
     validate_pg_identifier(database_owner, "database owner")?;
 
-    let url = config
-        .try_connection_url_with_database(MAINTENANCE_DATABASE)
-        .map_err(|_| {
-            StorageError::Connection(
-                "invalid PostgreSQL maintenance connection configuration".to_owned(),
-            )
-        })?;
+    let url = config.try_database_url(MAINTENANCE_DATABASE).map_err(|_| {
+        StorageError::Connection(
+            "invalid PostgreSQL maintenance connection configuration".to_owned(),
+        )
+    })?;
     let mut opts = ConnectOptions::new(url);
     opts.max_connections(1)
         .min_connections(1)
@@ -146,7 +144,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_accepts_default_database_name() {
+    fn validate_accepts_default_name() {
         assert!(validate_pg_identifier("quant_pivot", "database").is_ok());
     }
 
@@ -156,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_invalid_first_char() {
+    fn validate_rejects_invalid_char() {
         assert!(validate_pg_identifier("1bad", "database").is_err());
     }
 

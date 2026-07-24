@@ -48,7 +48,7 @@ impl NewRecommendationResolutionOutcome {
     ) -> Result<ContentHash, RecommendationResolutionOutcomeContractError> {
         let input = ResolutionOutcomeHashInput::from_new(self, available_at);
         validate_fields(&input)?;
-        Ok(resolution_outcome_hash(&input)?)
+        Ok(ContentHash::try_from(&input)?)
     }
 
     /// Validate source timeline, identity, payout shape, and log identity.
@@ -87,7 +87,7 @@ impl RecommendationResolutionOutcomeInfo {
     ) -> Result<ContentHash, RecommendationResolutionOutcomeContractError> {
         let input = ResolutionOutcomeHashInput::from_info(self);
         validate_fields(&input)?;
-        Ok(resolution_outcome_hash(&input)?)
+        Ok(ContentHash::try_from(&input)?)
     }
 
     /// Recompute and verify the stored immutable content.
@@ -354,10 +354,12 @@ impl<'a> ResolutionOutcomeHashInput<'a> {
     }
 }
 
-fn resolution_outcome_hash(
-    input: &ResolutionOutcomeHashInput<'_>,
-) -> Result<ContentHash, CanonicalDigestError> {
-    CanonicalDigest::content_hash_json(input)
+impl TryFrom<&ResolutionOutcomeHashInput<'_>> for ContentHash {
+    type Error = CanonicalDigestError;
+
+    fn try_from(input: &ResolutionOutcomeHashInput<'_>) -> Result<Self, Self::Error> {
+        CanonicalDigest::content_hash_json(input)
+    }
 }
 
 fn validate_fields(
@@ -426,29 +428,31 @@ mod tests {
         ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("valid hash")
     }
 
-    fn outcome() -> NewRecommendationResolutionOutcome {
-        let resolved_at = Utc
-            .with_ymd_and_hms(2026, 7, 1, 0, 0, 0)
-            .single()
-            .expect("timestamp");
-        NewRecommendationResolutionOutcome {
-            recommendation_id: RecommendationId::from_v7(),
-            market_id: MarketId::new("0xmarket"),
-            token_id: TokenId::new("123"),
-            resolution_kind: RecommendationResolutionKind::SplitPayout,
-            token_payout_ratio: PayoutRatio::try_new(dec!(0.5)).expect("split payout"),
-            resolved_at,
-            source_observed_at: resolved_at + Duration::seconds(1),
-            source_checkpoint_hash: hash('a'),
-            resolution_fact_hash: hash('b'),
-            resolution_fact_log_index: 1,
-            resolution_fact_schema_version: SchemaVersion::FIRST,
+    impl NewRecommendationResolutionOutcome {
+        fn test_fixture() -> Self {
+            let resolved_at = Utc
+                .with_ymd_and_hms(2026, 7, 1, 0, 0, 0)
+                .single()
+                .expect("timestamp");
+            Self {
+                recommendation_id: RecommendationId::from_v7(),
+                market_id: MarketId::new("0xmarket"),
+                token_id: TokenId::new("123"),
+                resolution_kind: RecommendationResolutionKind::SplitPayout,
+                token_payout_ratio: PayoutRatio::try_new(dec!(0.5)).expect("split payout"),
+                resolved_at,
+                source_observed_at: resolved_at + Duration::seconds(1),
+                source_checkpoint_hash: hash('a'),
+                resolution_fact_hash: hash('b'),
+                resolution_fact_log_index: 1,
+                resolution_fact_schema_version: SchemaVersion::FIRST,
+            }
         }
     }
 
     #[test]
-    fn database_availability_is_hash_bound_and_resolution_shape_is_validated() {
-        let outcome = outcome();
+    fn database_availability_hash_validated() {
+        let outcome = NewRecommendationResolutionOutcome::test_fixture();
         assert!(outcome.validate().is_ok());
         let available_at = outcome.source_observed_at + Duration::seconds(1);
         let outcome_hash = outcome
@@ -476,8 +480,8 @@ mod tests {
     }
 
     #[test]
-    fn page_query_is_bounded_and_cursor_must_remain_in_window() {
-        let outcome = outcome();
+    fn page_query_bounded_window() {
+        let outcome = NewRecommendationResolutionOutcome::test_fixture();
         let available_at = outcome.source_observed_at + Duration::seconds(1);
         let invalid_limit = RecommendationResolutionOutcomePageQuery {
             available_from: outcome.resolved_at,

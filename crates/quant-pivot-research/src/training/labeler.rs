@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn return_to_horizon_resolves_when_mature() {
+    fn return_horizon_resolves_mature() {
         let market = MarketId::new("m");
         let token = TokenId::new("t");
         let window = forward(vec![sample(60, "0.55", "0.56", "0.54")], 120, None);
@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_uses_exact_token_payout_ratio() {
+    fn settlement_uses_exact_ratio() {
         let market = MarketId::new("m");
         let yes = TokenId::new("101");
         let no = TokenId::new("202");
@@ -629,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn hold_vs_exit_uses_book_when_mark_is_missing() {
+    fn hold_vs_uses_missing() {
         let market = MarketId::new("m");
         let token = TokenId::new("t");
         let terminal = LotTerminalSnapshot {
@@ -676,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn hold_vs_exit_proceeds_requires_exit_decision_context() {
+    fn hold_vs_requires_context() {
         let market = MarketId::new("m");
         let token = TokenId::new("t");
         let window = forward(Vec::new(), 0, None);
@@ -696,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn liquidity_exit_requires_depth_threshold() {
+    fn liquidity_exit_requires_threshold() {
         let market = MarketId::new("m");
         let token = TokenId::new("t");
         let shallow = ForwardSample {
@@ -739,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn horizon_outside_chrono_range_is_invalid_not_saturated() {
+    fn horizon_invalid_not_saturated() {
         let market = MarketId::new("m");
         let token = TokenId::new("t");
         let window = forward(Vec::new(), 120, None);

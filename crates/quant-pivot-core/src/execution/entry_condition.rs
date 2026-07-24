@@ -336,7 +336,7 @@ fn evaluate_market_event(
             evaluate_weather_entered(condition, input)
         }
         MarketEventCondition::WeatherDailyTemperatureCrossedTerminalBound(condition) => {
-            evaluate_weather_crossed_terminal_bound(condition, input)
+            evaluate_terminal_weather_bound(condition, input)
         }
         MarketEventCondition::WeatherObservationDayClosedOutsideBand(condition) => {
             evaluate_weather_closed_outside(condition, input)
@@ -556,7 +556,7 @@ fn evaluate_weather_entered(
     })
 }
 
-fn evaluate_weather_crossed_terminal_bound(
+fn evaluate_terminal_weather_bound(
     condition: &WeatherDailyTemperatureCrossedTerminalBound,
     input: &EntryConditionInputSet,
 ) -> (ConditionTruth, ConditionLeafEvidence) {
@@ -943,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn crypto_outcome_honors_strict_and_owned_band_boundaries() {
+    fn crypto_outcome_honors_boundaries() {
         let strike = Some(Usd::new(dec!(100)));
         let price = Usd::new(dec!(100));
         assert_eq!(
@@ -1075,7 +1075,7 @@ mod tests {
         inputs
     }
 
-    fn assert_crypto_baseline_and_transient_recross(
+    fn assert_crypto_baseline_recross(
         artifact: &EntryConditionArtifactV1,
         source: &EntryConditionSourceBinding,
         evaluated_at: DateTime<Utc>,
@@ -1107,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    fn all_prefers_unsatisfied_over_unavailable() {
+    fn all_prefers_unsatisfied_unavailable() {
         let children = [
             node(
                 1,
@@ -1122,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn any_prefers_satisfied_over_unavailable() {
+    fn prefers_satisfied_unavailable() {
         let children = [
             node(
                 1,
@@ -1141,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn composite_truth_tables_are_total_and_deterministic() {
+    fn composite_truth_tables_deterministic() {
         let unavailable = ConditionTruth::Unavailable(ConditionUnavailableReason::InputMissing);
         let truths = [
             ConditionTruth::Satisfied,
@@ -1182,7 +1182,7 @@ mod tests {
     }
 
     #[test]
-    fn same_pit_inputs_produce_identical_evaluation_hashes() {
+    fn pit_inputs_produce_hashes() {
         let artifact = artifact(ConfirmationPolicy::none());
         let input = input(&artifact, timestamp());
         let live = evaluate_entry_condition(&artifact, &input).expect("live evaluation");
@@ -1207,7 +1207,7 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_resets_after_gap_or_unavailable() {
+    fn confirmation_resets_after_unavailable() {
         let artifact = artifact(ConfirmationPolicy {
             required_continuous_ms: 2_000,
             max_observation_gap_ms: 1_000,
@@ -1272,7 +1272,7 @@ mod tests {
     }
 
     #[test]
-    fn crypto_recross_revokes_and_cross_source_input_cannot_substitute() {
+    fn crypto_revokes_cannot_substitute() {
         let evaluated_at = timestamp();
         let frozen_source = source(
             DomainSourceId::chainlink_data_streams(),
@@ -1352,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    fn crypto_fold_baseline_transient_gap_correction_and_restart_are_deterministic() {
+    fn crypto_fold_baseline_deterministic() {
         let evaluated_at = timestamp();
         let frozen_source = source(
             DomainSourceId::chainlink_data_streams(),
@@ -1369,7 +1369,7 @@ mod tests {
             }),
             frozen_source.clone(),
         );
-        assert_crypto_baseline_and_transient_recross(&artifact, &frozen_source, evaluated_at);
+        assert_crypto_baseline_recross(&artifact, &frozen_source, evaluated_at);
 
         let initial = crypto_input_set(
             &artifact,
@@ -1446,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn weather_maximum_yes_and_bounded_no_follow_corrected_whole_degree_extreme() {
+    fn weather_maximum_no_extreme() {
         let evaluated_at = timestamp();
         let local_date = NaiveDate::from_ymd_opt(2026, 7, 13).expect("local date");
         let frozen_source = source(DomainSourceId::aviation_weather(), "AVIATION_WEATHER:KJFK");
@@ -1521,7 +1521,7 @@ mod tests {
     }
 
     #[test]
-    fn weather_minimum_crosses_lower_terminal_bound_and_rejects_maximum_input() {
+    fn weather_minimum_rejects_input() {
         let evaluated_at = timestamp();
         let local_date = NaiveDate::from_ymd_opt(2026, 7, 13).expect("local date");
         let frozen_source = source(DomainSourceId::aviation_weather(), "AVIATION_WEATHER:KJFK");
@@ -1568,7 +1568,7 @@ mod tests {
     }
 
     #[test]
-    fn weather_open_upper_no_requires_observation_day_close() {
+    fn weather_no_requires_close() {
         let evaluated_at = timestamp();
         let local_date = NaiveDate::from_ymd_opt(2026, 7, 13).expect("local date");
         let frozen_source = source(DomainSourceId::aviation_weather(), "AVIATION_WEATHER:KJFK");

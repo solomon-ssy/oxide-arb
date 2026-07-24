@@ -102,7 +102,7 @@ mod tests {
     use crate::test_fixtures::execution_pg_seed::prepared_order;
 
     #[test]
-    fn execution_projection_maps_core_fields() {
+    fn execution_projection_maps_fields() {
         let now = Utc::now();
         let order = ExecutionOrderInfo {
             execution_order_id: ExecutionOrderId::from_v7(),
@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn position_projection_maps_state_and_side() {
+    fn position_projection_maps_side() {
         let now = Utc::now();
         let position = PositionInfo {
             position_id: PositionId::from_v7(),

@@ -19,7 +19,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    model::{LabelSelector, objective::training_objective_from_runtime_config},
+    model::{LabelSelector, objective::runtime_training_objective},
     training::LabelName,
     validation::PurgeConfig,
 };
@@ -82,7 +82,7 @@ impl CoreModelTrainingPort {
             },
             ModelTrainerConfig {
                 factors: runtime.profile_artifacts.scoring.definition.clone(),
-                objective: training_objective_from_runtime_config(
+                objective: runtime_training_objective(
                     &runtime.profile_artifacts.research_method.research.training,
                 )?,
                 validation_purge: PurgeConfig {
@@ -138,7 +138,7 @@ impl ModelTrainingPort for CoreModelTrainingPort {
     ) -> QuantResult<TrainedModelView> {
         if let Some(existing) = self
             .model_registry_repo
-            .find_model_version_by_id(&model_version_id)
+            .find_model_version(&model_version_id)
             .await
             .map_err(QuantError::from)?
         {
@@ -162,7 +162,7 @@ impl ModelTrainingPort for CoreModelTrainingPort {
         })?;
         let model_spec = self
             .model_registry_repo
-            .find_model_spec_by_id(&dataset.model_spec_id)
+            .find_model_spec(&dataset.model_spec_id)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| StorageError::NotFound {
@@ -242,7 +242,7 @@ impl ModelTrainingPort for CoreModelTrainingPort {
         model_version_id: &ModelVersionId,
     ) -> QuantResult<Option<ModelVersionInfo>> {
         self.model_registry_repo
-            .find_model_version_by_id(model_version_id)
+            .find_model_version(model_version_id)
             .await
             .map_err(QuantError::from)
     }

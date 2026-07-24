@@ -155,7 +155,7 @@ async fn create_ready(
         .expect("complete build");
 }
 
-pub async fn quant_training_dataset_migration_and_crud() {
+pub async fn quant_training_dataset_crud() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -183,7 +183,7 @@ pub async fn quant_training_dataset_migration_and_crud() {
     assert_eq!(found.dataset_hash, created.dataset_hash);
 }
 
-pub async fn training_dataset_plan_rejects_model_spec_definition_drift() {
+pub async fn training_dataset_rejects_drift() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -201,7 +201,7 @@ pub async fn training_dataset_plan_rejects_model_spec_definition_drift() {
     ));
 }
 
-pub async fn training_dataset_status_transitions_enforce_state_machine() {
+pub async fn training_dataset_status_machine() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -258,7 +258,7 @@ pub async fn training_dataset_status_transitions_enforce_state_machine() {
     );
 }
 
-pub async fn model_version_training_dataset_foreign_key() {
+pub async fn model_version_training_key() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;

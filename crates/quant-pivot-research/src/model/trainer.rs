@@ -271,62 +271,64 @@ impl ModelTrainer for WeightedFactorTrainer {
     }
 
     async fn train(&self, request: TrainModelRequest) -> QuantResult<TrainedModelArtifact> {
-        train_weighted(&request)
+        request.train_weighted()
     }
 }
 
-/// The pure training routine (CPU-bound, deterministic).
-fn train_weighted(request: &TrainModelRequest) -> QuantResult<TrainedModelArtifact> {
-    let fit = fit_simplex_weights(
-        &request.examples,
-        &request.label,
-        &request.seed_weights,
-        &request.objective,
-        request.validation,
-        Some(&request.factor_cross_section),
-        &request.cancellation,
-    )?;
+impl TrainModelRequest {
+    /// The pure training routine (CPU-bound, deterministic).
+    fn train_weighted(&self) -> QuantResult<TrainedModelArtifact> {
+        let fit = fit_simplex_weights(
+            &self.examples,
+            &self.label,
+            &self.seed_weights,
+            &self.objective,
+            self.validation,
+            Some(&self.factor_cross_section),
+            &self.cancellation,
+        )?;
 
-    let factors = fit
-        .factor_weights
-        .iter()
-        .map(|weight| weight.factor.clone())
-        .collect::<Vec<_>>();
-    let training_input_hash = weighted_training_input_hash(
-        &request.examples,
-        &request.label,
-        &factors,
-        &fit.frozen_reference_quantiles,
-        Some(&request.factor_cross_section),
-    )?;
-    let input_contract_hash = model_input_contract_hash(&request.input_contract)?;
-    let artifact = WeightedFactorModelArtifact {
-        header: request.header.clone(),
-        training_dataset_hash: request.training_dataset_hash,
-        training_input_hash,
-        input_contract: request.input_contract.clone(),
-        input_contract_hash,
-        weights: fit.factor_weights,
-        prediction_horizon_secs: request.prediction_horizon_secs,
-        multipliers: request.multipliers.clone(),
-        substitution_confidence_rules: request.substitution_rules.clone(),
-        return_model: request.return_model.clone(),
-        factor_cross_section: request.factor_cross_section.clone(),
-        frozen_reference_quantiles: fit.frozen_reference_quantiles,
-        objective_report: Some(fit.objective_report.clone()),
-        category_scope: request.category_scope,
-    };
-    validate_category_scope_weights(request.category_scope, &artifact.weights)?;
-    artifact.validate()?;
-    let model_artifact = ModelArtifact::WeightedFactor(Box::new(artifact));
-    let artifact_hash = model_artifact.content_hash()?;
+        let factors = fit
+            .factor_weights
+            .iter()
+            .map(|weight| weight.factor.clone())
+            .collect::<Vec<_>>();
+        let training_input_hash = weighted_training_input_hash(
+            &self.examples,
+            &self.label,
+            &factors,
+            &fit.frozen_reference_quantiles,
+            Some(&self.factor_cross_section),
+        )?;
+        let input_contract_hash = model_input_contract_hash(&self.input_contract)?;
+        let artifact = WeightedFactorModelArtifact {
+            header: self.header.clone(),
+            training_dataset_hash: self.training_dataset_hash,
+            training_input_hash,
+            input_contract: self.input_contract.clone(),
+            input_contract_hash,
+            weights: fit.factor_weights,
+            prediction_horizon_secs: self.prediction_horizon_secs,
+            multipliers: self.multipliers.clone(),
+            substitution_confidence_rules: self.substitution_rules.clone(),
+            return_model: self.return_model.clone(),
+            factor_cross_section: self.factor_cross_section.clone(),
+            frozen_reference_quantiles: fit.frozen_reference_quantiles,
+            objective_report: Some(fit.objective_report.clone()),
+            category_scope: self.category_scope,
+        };
+        validate_category_scope_weights(self.category_scope, &artifact.weights)?;
+        artifact.validate()?;
+        let model_artifact = ModelArtifact::WeightedFactor(Box::new(artifact));
+        let artifact_hash = model_artifact.content_hash()?;
 
-    Ok(TrainedModelArtifact {
-        artifact: model_artifact,
-        artifact_hash,
-        in_sample_metrics: fit.objective_report,
-        validation_metrics: fit.validation,
-    })
+        Ok(TrainedModelArtifact {
+            artifact: model_artifact,
+            artifact_hash,
+            in_sample_metrics: fit.objective_report,
+            validation_metrics: fit.validation,
+        })
+    }
 }
 
 /// Fit one empirical raw-factor CDF per model input from the supplied training
@@ -781,7 +783,7 @@ fn fit_validation_fold(
         apply_reference_quantiles(context.examples, &references, context.factor_cross_section)?;
     let fold_dataset =
         TrainingDataset::build(&transformed_examples, context.label, context.factors)?;
-    ensure_fold_spine(timeline_dataset, &fold_dataset, fold_index)?;
+    timeline_dataset.ensure_fold_spine(&fold_dataset, fold_index)?;
     let train_groups = train_indices
         .iter()
         .map(|index| fold_dataset.groups[*index].clone())
@@ -810,27 +812,25 @@ fn fit_validation_fold(
     })
 }
 
-fn ensure_fold_spine(
-    timeline_dataset: &TrainingDataset,
-    fold_dataset: &TrainingDataset,
-    fold_index: usize,
-) -> QuantResult<()> {
-    let changed = fold_dataset.groups.len() != timeline_dataset.groups.len()
-        || fold_dataset
-            .groups
-            .iter()
-            .zip(&timeline_dataset.groups)
-            .any(|(transformed, timeline)| transformed.decision_at != timeline.decision_at);
-    if changed {
-        return Err(ResearchError::Determinism {
-            detail: format!(
-                "weighted fold {} reference transform changed the timeline group spine",
-                fold_index + 1
-            ),
+impl TrainingDataset {
+    fn ensure_fold_spine(&self, transformed: &Self, fold_index: usize) -> QuantResult<()> {
+        let changed = transformed.groups.len() != self.groups.len()
+            || transformed
+                .groups
+                .iter()
+                .zip(&self.groups)
+                .any(|(transformed, timeline)| transformed.decision_at != timeline.decision_at);
+        if changed {
+            return Err(ResearchError::Determinism {
+                detail: format!(
+                    "weighted fold {} reference transform changed the timeline group spine",
+                    fold_index + 1
+                ),
+            }
+            .into());
         }
-        .into());
+        Ok(())
     }
-    Ok(())
 }
 
 fn fit_final_full_window(
@@ -1414,7 +1414,6 @@ mod tests {
             },
             objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow},
             runtime::ModelFamily,
-            trainer::train_weighted,
         },
         test_support::content_hash as hash,
         training::{LabelName, TrainingExample, TrainingLabel, fixtures},
@@ -1552,7 +1551,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn weighted_trainer_produces_stable_hash() {
+    async fn weighted_trainer_produces_hash() {
         let trainer = WeightedFactorTrainer::new();
         // Same request (identical version id + data) ⇒ identical artifact hash.
         let req = request(momentum_dataset());
@@ -1582,7 +1581,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn weighted_trainer_honors_cancellation_before_matrix_build() {
+    async fn weighted_trainer_before_build() {
         let mut request = request(momentum_dataset());
         request.cancellation = CancellationProbe::new(|| true);
 
@@ -1598,7 +1597,7 @@ mod tests {
     }
 
     #[test]
-    fn future_validation_block_cannot_change_an_earlier_fold_transform() {
+    fn future_validation_cannot_transform() {
         let baseline_examples = momentum_dataset();
         let mut shifted_examples = baseline_examples.clone();
         let mut group_times = baseline_examples
@@ -1626,8 +1625,8 @@ mod tests {
             .factor_cross_section
             .small_cross_section_policy = SmallCrossSectionPolicy::FrozenReferenceQuantile;
 
-        let baseline = train_weighted(&baseline_request).expect("baseline folds");
-        let shifted = train_weighted(&shifted_request).expect("shifted folds");
+        let baseline = baseline_request.train_weighted().expect("baseline folds");
+        let shifted = shifted_request.train_weighted().expect("shifted folds");
         assert_eq!(
             baseline.validation_metrics.fold_components[0],
             shifted.validation_metrics.fold_components[0],
@@ -1640,7 +1639,7 @@ mod tests {
     }
 
     #[test]
-    fn weighted_training_input_hash_binds_decision_boundary() {
+    fn weighted_training_binds_boundary() {
         let examples = momentum_dataset();
         let label = LabelSelector {
             name: label_name(),
@@ -1677,7 +1676,7 @@ mod tests {
     /// coordinate search + fold reduction is a pure, source-ordered computation,
     /// so a 1-thread pool and a 4-thread pool must produce a byte-identical model.
     #[test]
-    fn weighted_trainer_is_thread_count_invariant() {
+    fn weighted_trainer_thread_invariant() {
         let req = request(momentum_dataset());
         let single = ThreadPoolBuilder::new()
             .num_threads(1)
@@ -1688,9 +1687,9 @@ mod tests {
             .build()
             .expect("multi-thread pool");
         let a = single
-            .install(|| train_weighted(&req))
+            .install(|| req.train_weighted())
             .expect("train single");
-        let b = many.install(|| train_weighted(&req)).expect("train many");
+        let b = many.install(|| req.train_weighted()).expect("train many");
         assert_eq!(
             a.artifact_hash, b.artifact_hash,
             "rayon thread count must not change the trained artifact"
@@ -1698,7 +1697,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn weighted_trainer_seeds_from_config_factor_weights() {
+    async fn weighted_trainer_seeds_weights() {
         // Momentum predicts the label; the optimizer should give momentum more
         // weight than the 0.5 seed.
         let factor_trainer = WeightedFactorTrainer::new();
@@ -1743,7 +1742,7 @@ mod tests {
     }
 
     #[test]
-    fn time_split_operates_on_atomic_decision_groups() {
+    fn time_split_atomic_groups() {
         // `TrainingDataset::build` collapses each decision_at into one group; TimeSplit
         // indexes groups (not rows), so a cross-section cannot be bisected.
         let examples = momentum_dataset();
@@ -1788,7 +1787,7 @@ mod tests {
     }
 
     #[test]
-    fn singleton_decision_groups_are_dropped_and_counted() {
+    fn singleton_decision_groups_counted() {
         // Pair even/odd into one decision instant via `idx / 2`. Inject one singleton.
         let mut examples = momentum_dataset();
         examples.push(example(
@@ -1814,7 +1813,7 @@ mod tests {
     }
 
     #[test]
-    fn lambda_tail_changes_total_loss_when_pseudo_topn_is_negative() {
+    fn lambda_tail_changes_negative() {
         // Two-row group: selecting the high-score name yields a large loss.
         let group = CrossSectionGroup {
             decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
@@ -1862,8 +1861,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validation_exposes_dropped_singleton_and_rank_loss_group_count() {
-        let outcome = train_weighted(&request(momentum_dataset())).expect("train");
+    async fn validation_exposes_dropped_count() {
+        let outcome = request(momentum_dataset()).train_weighted().expect("train");
         assert_eq!(outcome.validation_metrics.dropped_singleton_groups, 0);
         assert!(outcome.in_sample_metrics.components.rank_loss_group_count > 0);
         assert!(
@@ -1876,10 +1875,12 @@ mod tests {
 
     #[cfg(not(feature = "optimize"))]
     #[test]
-    fn argmin_without_optimize_feature_fails_closed() {
+    fn argmin_without_optimize_rejects() {
         let mut req = request(momentum_dataset());
         req.objective.optimizer = TrainingOptimizerKind::Argmin;
-        let err = train_weighted(&req).expect_err("argmin must fail closed");
+        let err = (&req)
+            .train_weighted()
+            .expect_err("argmin must fail closed");
         let detail = err.to_string();
         assert!(
             detail.contains("optimize"),
@@ -1890,7 +1891,7 @@ mod tests {
     /// Long label horizons that overlap the held-out fold must be purged from
     /// the trainer CV train set (same semantics as CPCV `PurgedSplitter`).
     #[test]
-    fn trainer_cv_respects_label_horizon_purge() {
+    fn trainer_cv_respects_purge() {
         // 6 decision-time groups (2 markets each). Held-out fold for folds=3 is the
         // last 2 groups. Give early groups a matured_at that overlaps the
         // held-out decision time so purge removes them from train.
@@ -1927,7 +1928,7 @@ mod tests {
             min_embargo_secs: 0,
         };
         // With aggressive overlap, purged train may be empty → fail closed.
-        let result = train_weighted(&req);
+        let result = req.train_weighted();
         match result {
             Ok(outcome) => {
                 // If enough non-overlapping groups remain, training succeeds
@@ -1945,7 +1946,7 @@ mod tests {
     }
 
     #[test]
-    fn coordinate_search_effective_n_at_least_seed() {
+    fn coordinate_search_effective_seed() {
         let groups = vec![CrossSectionGroup {
             decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
@@ -2047,7 +2048,7 @@ mod optimize_tests {
     /// result is deterministic on a fixed platform — the cross-platform `f64`
     /// optimizer is only a candidate generator; adoption is decided in Decimal).
     #[test]
-    fn optimize_refine_is_deterministic_on_fixed_platform() {
+    fn optimize_refine_deterministic_platform() {
         let groups = synth_group(7, 3, 60);
         let seed = vec![dec!(0.2), dec!(0.3), dec!(0.5)];
         let evaluator = evaluator(dec!(0.01));
@@ -2060,7 +2061,7 @@ mod optimize_tests {
     /// Over many random simplex seeds, the accepted (grid + refine) objective is
     /// never worse than the grid objective, and the result stays on the simplex.
     #[test]
-    fn optimize_never_worsens_grid_objective() {
+    fn optimize_never_worsens_objective() {
         let l2 = dec!(0.01);
         for trial in 0..100u64 {
             let n = 3;
@@ -2098,7 +2099,7 @@ mod optimize_tests {
     /// On a dataset where the grid already sits at the global vertex optimum,
     /// refinement cannot improve it, so the trainer falls back to the grid weights.
     #[test]
-    fn optimize_converges_and_falls_back_to_grid() {
+    fn optimize_converges_falls_grid() {
         let l2 = Decimal::ZERO;
         let groups = synth_group(42, 3, 80);
         let evaluator = evaluator(l2);

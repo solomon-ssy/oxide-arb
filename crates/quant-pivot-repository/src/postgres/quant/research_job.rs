@@ -20,7 +20,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::{error, primitives, query::paginate_mapped},
+    postgres::{primitives, query::paginate_mapped},
     traits::{KindRunningCount, ReclaimOutcome, ResearchJobRepository},
 };
 
@@ -196,7 +196,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
             .await
             .map_err(StorageError::from)?;
         if result.rows_affected == 0 {
-            return Err(finalize_guard_failure(&self.db, job_id).await);
+            return Err(Self::finalize_guard_failure(&self.db, job_id).await);
         }
         Entity::find_by_id(*job_id)
             .one(&self.db)
@@ -235,108 +235,115 @@ impl ResearchJobRepository for PgResearchJobRepository {
         now: DateTime<Utc>,
     ) -> Result<ReclaimOutcome, StorageError> {
         // Boot recovery: reclaim rows whose lease is expired / dead-epoch.
-        reclaim_by_condition(&self.db, orphaned_condition(owner, now)).await
+        Self::reclaim_by_condition(&self.db, orphaned_condition(owner, now)).await
     }
 
     async fn requeue_inflight(&self, owner: &WorkerId) -> Result<ReclaimOutcome, StorageError> {
         // Graceful drain: reclaim this owner's own still-`running` rows (lease may
         // still be valid) so a new epoch re-leases them without a lease-expiry wait.
-        reclaim_by_condition(&self.db, owned_running_condition(owner)).await
+        Self::reclaim_by_condition(&self.db, owned_running_condition(owner)).await
     }
 }
 
-/// Quarantine-then-requeue a set of `running` rows selected by `base` (a
-/// `status = running` predicate plus an ownership/lease clause).
-///
-/// Quarantines rows already at the recovery cap to `failed` (poison-pill guard),
-/// then re-queues the rest with `recovery_attempt += 1`. Both branches clear the
-/// lease so the row is free to be re-leased.
-async fn reclaim_by_condition(
-    db: &DatabaseConnection,
-    base: Condition,
-) -> Result<ReclaimOutcome, StorageError> {
-    let quarantined = Entity::update_many()
-        .col_expr(
-            Column::Status,
-            primitives::enum_value(&ResearchJobStatus::Failed),
-        )
-        .col_expr(Column::LeaseOwner, Expr::value(None::<WorkerId>))
-        .col_expr(Column::LeaseExpiresAt, Expr::value(None::<DateTime<Utc>>))
-        .col_expr(Column::FinishedAt, Expr::value(Utc::now()))
-        .col_expr(
-            Column::ErrorJson,
-            Expr::value(ResearchJobError::new(
-                ResearchJobErrorCode::InterruptedExceededAttempts,
-                "exceeded max recovery attempts after repeated interruption",
-            )),
-        )
-        .filter(base.clone())
-        .filter(Expr::col(Column::RecoveryAttempt).gte(Expr::col(Column::MaxRecoveryAttempts)))
-        .exec(db)
-        .await
-        .map_err(StorageError::from)?
-        .rows_affected;
+impl PgResearchJobRepository {
+    /// Quarantine-then-requeue a set of `running` rows selected by `base` (a
+    /// `status = running` predicate plus an ownership/lease clause).
+    ///
+    /// Quarantines rows already at the recovery cap to `failed` (poison-pill guard),
+    /// then re-queues the rest with `recovery_attempt += 1`. Both branches clear the
+    /// lease so the row is free to be re-leased.
+    async fn reclaim_by_condition(
+        db: &DatabaseConnection,
+        base: Condition,
+    ) -> Result<ReclaimOutcome, StorageError> {
+        let quarantined = Entity::update_many()
+            .col_expr(
+                Column::Status,
+                primitives::enum_value(&ResearchJobStatus::Failed),
+            )
+            .col_expr(Column::LeaseOwner, Expr::value(None::<WorkerId>))
+            .col_expr(Column::LeaseExpiresAt, Expr::value(None::<DateTime<Utc>>))
+            .col_expr(Column::FinishedAt, Expr::value(Utc::now()))
+            .col_expr(
+                Column::ErrorJson,
+                Expr::value(ResearchJobError::new(
+                    ResearchJobErrorCode::InterruptedExceededAttempts,
+                    "exceeded max recovery attempts after repeated interruption",
+                )),
+            )
+            .filter(base.clone())
+            .filter(Expr::col(Column::RecoveryAttempt).gte(Expr::col(Column::MaxRecoveryAttempts)))
+            .exec(db)
+            .await
+            .map_err(StorageError::from)?
+            .rows_affected;
 
-    let requeued = Entity::update_many()
-        .col_expr(
-            Column::Status,
-            primitives::enum_value(&ResearchJobStatus::Queued),
-        )
-        .col_expr(
-            Column::RecoveryAttempt,
-            Expr::col(Column::RecoveryAttempt).add(1),
-        )
-        .col_expr(Column::LeaseOwner, Expr::value(None::<WorkerId>))
-        .col_expr(Column::LeaseExpiresAt, Expr::value(None::<DateTime<Utc>>))
-        .col_expr(
-            Column::ProgressJson,
-            Expr::value(None::<ResearchJobProgress>),
-        )
-        .col_expr(Column::StartedAt, Expr::value(None::<DateTime<Utc>>))
-        .col_expr(
-            Column::ErrorJson,
-            Expr::value(ResearchJobError::new(
-                ResearchJobErrorCode::InterruptedByRestart,
-                "re-queued after service interruption",
-            )),
-        )
-        .filter(base)
-        .filter(Expr::col(Column::RecoveryAttempt).lt(Expr::col(Column::MaxRecoveryAttempts)))
-        .exec(db)
-        .await
-        .map_err(StorageError::from)?
-        .rows_affected;
+        let requeued = Entity::update_many()
+            .col_expr(
+                Column::Status,
+                primitives::enum_value(&ResearchJobStatus::Queued),
+            )
+            .col_expr(
+                Column::RecoveryAttempt,
+                Expr::col(Column::RecoveryAttempt).add(1),
+            )
+            .col_expr(Column::LeaseOwner, Expr::value(None::<WorkerId>))
+            .col_expr(Column::LeaseExpiresAt, Expr::value(None::<DateTime<Utc>>))
+            .col_expr(
+                Column::ProgressJson,
+                Expr::value(None::<ResearchJobProgress>),
+            )
+            .col_expr(Column::StartedAt, Expr::value(None::<DateTime<Utc>>))
+            .col_expr(
+                Column::ErrorJson,
+                Expr::value(ResearchJobError::new(
+                    ResearchJobErrorCode::InterruptedByRestart,
+                    "re-queued after service interruption",
+                )),
+            )
+            .filter(base)
+            .filter(Expr::col(Column::RecoveryAttempt).lt(Expr::col(Column::MaxRecoveryAttempts)))
+            .exec(db)
+            .await
+            .map_err(StorageError::from)?
+            .rows_affected;
 
-    Ok(ReclaimOutcome {
-        requeued,
-        quarantined,
-    })
+        Ok(ReclaimOutcome {
+            requeued,
+            quarantined,
+        })
+    }
 }
 
-/// Diagnose why a guarded finalize touched zero rows.
-async fn finalize_guard_failure(db: &DatabaseConnection, job_id: &ResearchJobId) -> StorageError {
-    let row = match Entity::find_by_id(*job_id).one(db).await {
-        Ok(row) => row,
-        Err(err) => return StorageError::from(err),
-    };
-    let Some(row) = row else {
-        return StorageError::not_found(QUANT_RESEARCH_JOB, job_id);
-    };
-    if row.status.is_terminal() {
-        return error::state_conflict(
+impl PgResearchJobRepository {
+    /// Diagnose why a guarded finalize touched zero rows.
+    async fn finalize_guard_failure(
+        db: &DatabaseConnection,
+        job_id: &ResearchJobId,
+    ) -> StorageError {
+        let row = match Entity::find_by_id(*job_id).one(db).await {
+            Ok(row) => row,
+            Err(err) => return StorageError::from(err),
+        };
+        let Some(row) = row else {
+            return StorageError::not_found(QUANT_RESEARCH_JOB, job_id);
+        };
+        if row.status.is_terminal() {
+            return StorageError::state_conflict(
+                QUANT_RESEARCH_JOB,
+                Some(job_id),
+                format!("already finalized as {}", row.status),
+            );
+        }
+        StorageError::state_conflict(
             QUANT_RESEARCH_JOB,
             Some(job_id),
-            format!("already finalized as {}", row.status),
-        );
+            format!(
+                "cannot finalize from status {} (lease_owner={:?})",
+                row.status, row.lease_owner
+            ),
+        )
     }
-    error::state_conflict(
-        QUANT_RESEARCH_JOB,
-        Some(job_id),
-        format!(
-            "cannot finalize from status {} (lease_owner={:?})",
-            row.status, row.lease_owner
-        ),
-    )
 }
 
 /// A `running` row is orphaned when it is owned by a different (dead) lease

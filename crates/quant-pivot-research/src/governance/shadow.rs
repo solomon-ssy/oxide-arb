@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn identical_rankings_have_full_overlap_and_no_divergence() {
+    fn identical_rankings_no_divergence() {
         let active = vec![
             candidate("a", 1, dec!(0.9), OutcomeSide::Yes),
             candidate("b", 2, dec!(0.7), OutcomeSide::Yes),
@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn large_score_gap_flags_hard_divergence() {
+    fn large_score_gap_divergence() {
         let active = vec![candidate("a", 1, dec!(0.90), OutcomeSide::Yes)];
         let shadow = vec![candidate("a", 1, dec!(0.40), OutcomeSide::No)];
         let comparison = compute_shadow_comparison(&ShadowComparisonRequest {
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn shadow_comparison_records_topn_delta() {
+    fn shadow_comparison_topn_delta() {
         // Active ranks a > b; shadow flips them → rank delta + partial overlap.
         let active = vec![
             candidate("a", 1, dec!(0.90), OutcomeSide::Yes),
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn disjoint_topn_has_zero_overlap() {
+    fn disjoint_topn_zero_overlap() {
         let active = vec![candidate("a", 1, dec!(0.9), OutcomeSide::Yes)];
         let shadow = vec![candidate("b", 1, dec!(0.9), OutcomeSide::Yes)];
         let comparison = compute_shadow_comparison(&ShadowComparisonRequest {

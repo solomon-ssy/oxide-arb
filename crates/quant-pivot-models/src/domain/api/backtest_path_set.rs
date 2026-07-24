@@ -68,13 +68,13 @@ mod request_tests {
     }
 
     #[test]
-    fn cpcv_request_only_accepts_dataset_runtime_and_reason() {
+    fn cpcv_request_accepts_reason() {
         serde_json::from_value::<RunCpcvBacktestRequest>(request())
             .expect("minimal frozen CPCV request");
     }
 
     #[test]
-    fn cpcv_request_rejects_client_owned_training_contract_fields() {
+    fn cpcv_request_rejects_fields() {
         for field in [
             "model_family",
             "label_name",

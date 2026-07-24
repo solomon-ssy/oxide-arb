@@ -79,7 +79,7 @@ impl DomainCatalogClassifier {
         markets: &[MarketInfo],
         events: &BTreeMap<EventId, EventInfo>,
     ) -> QuantResult<DomainCatalogClassificationArtifact> {
-        let mature_weather_groups = mature_weather_decision_group_counts(markets, events)?;
+        let mature_weather_groups = weather_group_counts(markets, events)?;
         let mut classifications = Vec::new();
         for market in markets {
             let Some(family) = domain_family(market)? else {
@@ -153,7 +153,7 @@ impl DomainCatalogClassifier {
                 DomainMarketClassificationOutcome::Excluded { reason_code },
             ));
         }
-        if looks_like_crypto_price_contract(&text) && find_alias(&text).is_none() {
+        if is_crypto_price_contract(&text) && find_alias(&text).is_none() {
             return Ok((
                 None,
                 DomainMarketClassificationOutcome::Excluded {
@@ -188,7 +188,7 @@ impl DomainCatalogClassifier {
             };
             return Ok((Some(contract_family), outcome));
         }
-        if looks_like_crypto_price_contract(&text) {
+        if is_crypto_price_contract(&text) {
             Ok((
                 None,
                 DomainMarketClassificationOutcome::UnsupportedTemplate {
@@ -217,7 +217,7 @@ impl DomainCatalogClassifier {
     )> {
         let text = catalog_text(market, event);
         let tags = normalized_tags(event);
-        if let Some(reason_code) = pre_family_weather_exclusion_reason(&text, &tags) {
+        if let Some(reason_code) = early_weather_exclusion(&text, &tags) {
             return Ok((
                 None,
                 DomainMarketClassificationOutcome::Excluded { reason_code },
@@ -232,7 +232,7 @@ impl DomainCatalogClassifier {
             ));
         };
         if contract_family == DomainContractFamily::WeatherDailyTemperature
-            && is_hko_fractional_daily_temperature(&text)
+            && is_hko_fractional_temp(&text)
         {
             return Ok((
                 Some(contract_family),
@@ -299,7 +299,7 @@ impl DomainCatalogClassifier {
     }
 }
 
-fn is_hko_fractional_daily_temperature(text: &str) -> bool {
+fn is_hko_fractional_temp(text: &str) -> bool {
     text.contains("hong kong observatory")
         && text.contains("weather.gov.hk/en/cis/climat.htm")
         && text.contains("one decimal place")
@@ -328,7 +328,7 @@ fn grounded_weather_research_contract(contract_family: DomainContractFamily, tex
                 && text.contains("pm2.5")
                 && text.contains("below 100")
                 && text.contains("airnow.gov/state/?name=new-york"))
-                || grounded_airnow_pm25_daily_city_contract(text)
+                || grounded_airnow_contract(text)
                 || (text.contains("highest pm2.5 air quality index")
                     && text.contains("east rutherford, new jersey")
                     && text.contains("between the opening kickoff and the end of gameplay")
@@ -382,7 +382,7 @@ fn grounded_weather_research_contract(contract_family: DomainContractFamily, tex
     }
 }
 
-fn grounded_airnow_pm25_daily_city_contract(text: &str) -> bool {
+fn grounded_airnow_contract(text: &str) -> bool {
     let exact_source = [
         ("philadelphia", "airnow.gov/state/?name=pennsylvania"),
         ("columbus", "airnow.gov/state/?name=ohio"),
@@ -397,7 +397,7 @@ fn grounded_airnow_pm25_daily_city_contract(text: &str) -> bool {
         && text.contains("daily aqi for pm2.5")
 }
 
-fn mature_weather_decision_group_counts(
+fn weather_group_counts(
     markets: &[MarketInfo],
     events: &BTreeMap<EventId, EventInfo>,
 ) -> QuantResult<BTreeMap<DomainContractFamily, u64>> {
@@ -522,21 +522,21 @@ fn detect_weather_contract_family(
     text: &str,
     tags: &BTreeSet<String>,
 ) -> Option<DomainContractFamily> {
-    if tag(tags, "daily-temperature")
-        || tag(tags, "highest-temperature")
-        || tag(tags, "lowest-temperature")
+    if tags.contains("daily-temperature")
+        || tags.contains("highest-temperature")
+        || tags.contains("lowest-temperature")
     {
         return Some(DomainContractFamily::WeatherDailyTemperature);
     }
-    if tag(tags, "precipitation")
+    if tags.contains("precipitation")
         || contains_any(text, &["precipitation", "rainfall", "total rain"])
     {
         return Some(DomainContractFamily::WeatherPrecipitation);
     }
-    if tag(tags, "aqi") || contains_any(text, &["air quality index", " aqi "]) {
+    if tags.contains("aqi") || contains_any(text, &["air quality index", " aqi "]) {
         return Some(DomainContractFamily::WeatherAqi);
     }
-    if tag(tags, "tornadoes") || text.contains("tornado") {
+    if tags.contains("tornadoes") || text.contains("tornado") {
         return Some(DomainContractFamily::WeatherTornado);
     }
     if contains_any(
@@ -550,7 +550,7 @@ fn detect_weather_contract_family(
     ) {
         return Some(DomainContractFamily::WeatherTropicalCyclone);
     }
-    if tag(tags, "global-temp")
+    if tags.contains("global-temp")
         || contains_any(
             text,
             &[
@@ -581,7 +581,7 @@ fn weather_exclusion_reason(text: &str, tags: &BTreeSet<String>) -> DomainCapabi
         .unwrap_or(DomainCapabilityReasonCode::WeatherNonAtmosphericTagNoise)
 }
 
-fn pre_family_weather_exclusion_reason(
+fn early_weather_exclusion(
     text: &str,
     tags: &BTreeSet<String>,
 ) -> Option<DomainCapabilityReasonCode> {
@@ -597,16 +597,17 @@ fn explicit_weather_exclusion_reason(
     text: &str,
     tags: &BTreeSet<String>,
 ) -> Option<DomainCapabilityReasonCode> {
-    if contains_any(text, &["natural disaster", "multiple disasters"]) || tag(tags, "parlays") {
+    if contains_any(text, &["natural disaster", "multiple disasters"]) || tags.contains("parlays") {
         return Some(DomainCapabilityReasonCode::WeatherMixedHazardContract);
     }
     if contains_any(text, &["earthquake", "megaquake", "seismic"])
-        || tag(tags, "earthquake")
-        || tag(tags, "earthquakes")
+        || tags.contains("earthquake")
+        || tags.contains("earthquakes")
     {
         return Some(DomainCapabilityReasonCode::WeatherEarthquakeContract);
     }
-    if contains_any(text, &["volcano", "volcanic", "eruption", " vei "]) || tag(tags, "volcano") {
+    if contains_any(text, &["volcano", "volcanic", "eruption", " vei "]) || tags.contains("volcano")
+    {
         return Some(DomainCapabilityReasonCode::WeatherVolcanoContract);
     }
     if contains_any(
@@ -621,14 +622,14 @@ fn explicit_weather_exclusion_reason(
             "flu hospitalization",
             "cyclosporiasis",
         ],
-    ) || tag(tags, "pandemics")
+    ) || tags.contains("pandemics")
     {
         return Some(DomainCapabilityReasonCode::WeatherHealthContract);
     }
     if contains_any(
         text,
         &["meteor", "asteroid", "astroid", "in space", "spacex"],
-    ) || tag(tags, "space")
+    ) || tags.contains("space")
     {
         return Some(DomainCapabilityReasonCode::WeatherSpaceContract);
     }
@@ -641,14 +642,14 @@ fn explicit_weather_exclusion_reason(
             "software or control system",
             "engine failure",
         ],
-    ) || tag(tags, "tech")
+    ) || tags.contains("tech")
     {
         return Some(DomainCapabilityReasonCode::WeatherTechnologyContract);
     }
     None
 }
 
-fn looks_like_crypto_price_contract(text: &str) -> bool {
+fn is_crypto_price_contract(text: &str) -> bool {
     contains_any(
         text,
         &[
@@ -745,10 +746,6 @@ fn crypto_exclusion_reason(text: &str) -> Option<DomainCapabilityReasonCode> {
     None
 }
 
-fn tag(tags: &BTreeSet<String>, expected: &str) -> bool {
-    tags.contains(expected)
-}
-
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
 }
@@ -778,9 +775,8 @@ mod tests {
 
     use super::{
         DomainCatalogClassifier, WeatherStationRegistry, crypto_exclusion_reason,
-        detect_weather_contract_family, grounded_airnow_pm25_daily_city_contract,
-        grounded_weather_research_contract, is_hko_fractional_daily_temperature,
-        looks_like_crypto_price_contract, pre_family_weather_exclusion_reason,
+        detect_weather_contract_family, early_weather_exclusion, grounded_airnow_contract,
+        grounded_weather_research_contract, is_crypto_price_contract, is_hko_fractional_temp,
         weather_exclusion_reason,
     };
 
@@ -789,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn weather_family_detection_covers_every_supported_contract() {
+    fn weather_family_detection_contract() {
         for (text, tags, expected) in [
             (
                 "highest temperature in nyc",
@@ -837,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn tagged_noise_has_stable_specific_exclusion_reasons() {
+    fn tagged_noise_stable_reasons() {
         for (text, expected) in [
             (
                 "magnitude 6.5 earthquake",
@@ -869,23 +865,23 @@ mod tests {
     }
 
     #[test]
-    fn only_mixed_hazard_contracts_preempt_weather_family_detection() {
+    fn only_mixed_hazard_detection() {
         assert_eq!(
-            pre_family_weather_exclusion_reason(
+            early_weather_exclusion(
                 "will a natural disaster or category 5 hurricane occur",
                 &tags(&[]),
             ),
             Some(DomainCapabilityReasonCode::WeatherMixedHazardContract)
         );
         assert_eq!(
-            pre_family_weather_exclusion_reason(
+            early_weather_exclusion(
                 "minimum arctic sea ice extent from the national snow and ice data center",
                 &tags(&[]),
             ),
             None
         );
         assert_eq!(
-            pre_family_weather_exclusion_reason(
+            early_weather_exclusion(
                 "category 5 hurricane with event tags shared by an earthquake collection",
                 &tags(&["earthquake"]),
             ),
@@ -894,14 +890,10 @@ mod tests {
     }
 
     #[test]
-    fn crypto_price_detection_does_not_promote_non_price_events() {
-        assert!(looks_like_crypto_price_contract(
-            "will bitcoin price reach $150000"
-        ));
-        assert!(looks_like_crypto_price_contract(
-            "bitcoin up or down july 18"
-        ));
-        assert!(!looks_like_crypto_price_contract(
+    fn crypto_never_promotes_events() {
+        assert!(is_crypto_price_contract("will bitcoin price reach $150000"));
+        assert!(is_crypto_price_contract("bitcoin up or down july 18"));
+        assert!(!is_crypto_price_contract(
             "will congress pass a bitcoin reserve bill"
         ));
         assert!(matches!(
@@ -913,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn crypto_out_of_scope_families_have_stable_exclusion_reasons() {
+    fn crypto_out_scope_reasons() {
         for (text, expected) in [
             (
                 "will bitcoin fully diluted valuation exceed $100b",
@@ -941,20 +933,18 @@ mod tests {
     }
 
     #[test]
-    fn hko_fractional_temperature_requires_explicit_bucket_ownership() {
+    fn hko_fractional_requires_ownership() {
         let rules = "The Hong Kong Observatory Absolute Daily Max resolves from \
                      https://www.weather.gov.hk/en/cis/climat.htm and measures temperatures to \
                      one decimal place.";
-        assert!(is_hko_fractional_daily_temperature(
-            &rules.to_ascii_lowercase()
-        ));
-        assert!(!is_hko_fractional_daily_temperature(
+        assert!(is_hko_fractional_temp(&rules.to_ascii_lowercase()));
+        assert!(!is_hko_fractional_temp(
             "Wunderground measures temperatures to whole degrees."
         ));
     }
 
     #[test]
-    fn research_only_weather_templates_ground_literal_official_sources() {
+    fn research_only_weather_sources() {
         for (family, text) in [
             (
                 DomainContractFamily::WeatherPrecipitation,
@@ -1009,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn airnow_daily_pm25_city_templates_require_exact_city_state_source() {
+    fn airnow_daily_pm25_source() {
         for text in [
             "Philadelphia PM2.5 Air Quality Index below 100. Use the Historical Air Quality tab, \
              finalized city row under Daily AQI for PM2.5 at \
@@ -1019,11 +1009,9 @@ mod tests {
             "Chicago PM2.5 AQI below 100. Historical Air Quality and Daily AQI for PM2.5 at \
              https://www.airnow.gov/state/?name=Illinois",
         ] {
-            assert!(grounded_airnow_pm25_daily_city_contract(
-                &text.to_ascii_lowercase()
-            ));
+            assert!(grounded_airnow_contract(&text.to_ascii_lowercase()));
         }
-        assert!(!grounded_airnow_pm25_daily_city_contract(
+        assert!(!grounded_airnow_contract(
             "Columbus PM2.5 AQI below 100. Historical Air Quality and Daily AQI for PM2.5 at \
              https://www.airnow.gov/state/?name=Indiana"
                 .to_ascii_lowercase()
@@ -1032,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn daily_temperature_without_official_history_is_insufficient_evidence() {
+    fn daily_temperature_without_evidence() {
         let station_registry = WeatherStationRegistry::try_new(BTreeMap::from([(
             "ZBAA".to_owned(),
             WeatherStationProfileConfig {

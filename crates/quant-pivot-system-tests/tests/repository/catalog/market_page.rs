@@ -14,7 +14,7 @@ use quant_pivot_system_tests::{
     support::catalog_fixtures::{make_event, make_market},
 };
 
-pub async fn market_page_filters_by_event_id_and_category() {
+pub async fn market_page_filters_category() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let event_repo = PgEventRepository::new(db.clone());

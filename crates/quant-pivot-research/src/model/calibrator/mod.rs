@@ -218,47 +218,49 @@ mod tests {
 
     use super::ResolvedCalibration;
 
-    fn resolved() -> ResolvedCalibration {
-        ResolvedCalibration {
-            artifact_id: CalibrationArtifactId::from_v7(),
-            mapping: MonotoneMapping::Isotonic {
-                knots: vec![
-                    IsotonicKnot {
-                        score: dec!(0),
-                        probability: dec!(0.5),
-                    },
-                    IsotonicKnot {
-                        score: dec!(1),
-                        probability: dec!(0.5),
-                    },
-                ],
-            },
-            reliability: ReliabilityReport {
-                bins: vec![ReliabilityBin {
-                    predicted_lo: dec!(0),
-                    predicted_hi: dec!(1),
-                    sample_count: 100,
-                    mean_predicted: Probability::new(dec!(0.5)),
-                    empirical_frequency: Probability::new(dec!(0.5)),
-                    wilson_ci: (Probability::new(dec!(0.4)), Probability::new(dec!(0.6))),
-                    mean_adverse_excursion_bps: Some(dec!(-500)),
-                }],
-                brier_score: dec!(0.1),
-                log_loss: dec!(0.3),
-                ece: dec!(0.05),
-                n_samples: 100,
-            },
+    impl ResolvedCalibration {
+        fn test_fixture() -> Self {
+            Self {
+                artifact_id: CalibrationArtifactId::from_v7(),
+                mapping: MonotoneMapping::Isotonic {
+                    knots: vec![
+                        IsotonicKnot {
+                            score: dec!(0),
+                            probability: dec!(0.5),
+                        },
+                        IsotonicKnot {
+                            score: dec!(1),
+                            probability: dec!(0.5),
+                        },
+                    ],
+                },
+                reliability: ReliabilityReport {
+                    bins: vec![ReliabilityBin {
+                        predicted_lo: dec!(0),
+                        predicted_hi: dec!(1),
+                        sample_count: 100,
+                        mean_predicted: Probability::new(dec!(0.5)),
+                        empirical_frequency: Probability::new(dec!(0.5)),
+                        wilson_ci: (Probability::new(dec!(0.4)), Probability::new(dec!(0.6))),
+                        mean_adverse_excursion_bps: Some(dec!(-500)),
+                    }],
+                    brier_score: dec!(0.1),
+                    log_loss: dec!(0.3),
+                    ece: dec!(0.05),
+                    n_samples: 100,
+                },
+            }
         }
     }
 
     #[test]
-    fn estimate_return_rejects_boundary_market_prices() {
+    fn estimate_return_rejects_prices() {
         // `market_price` outside the *open* interval `(0, 1)` — a price of
         // exactly 0 or 1 is not an executable YES-leg price on a real
         // Polymarket order book, and `p=0` would divide by zero in
         // `(1-p)/p` if not rejected first — must be a typed inference failure,
         // never a zero-valued business prediction.
-        let resolved = resolved();
+        let resolved = ResolvedCalibration::test_fixture();
         for boundary in [dec!(0), dec!(1)] {
             assert!(
                 resolved
@@ -270,8 +272,8 @@ mod tests {
     }
 
     #[test]
-    fn estimate_return_accepts_interior_market_prices() {
-        let resolved = resolved();
+    fn estimate_return_accepts_prices() {
+        let resolved = ResolvedCalibration::test_fixture();
         let estimate = resolved
             .estimate_return(dec!(0.5), Price::new(dec!(0.01)))
             .expect("interior estimate");
@@ -283,8 +285,8 @@ mod tests {
     }
 
     #[test]
-    fn estimate_return_rejects_missing_downside_evidence() {
-        let mut resolved = resolved();
+    fn estimate_rejects_missing_evidence() {
+        let mut resolved = ResolvedCalibration::test_fixture();
         resolved.reliability.bins[0].mean_adverse_excursion_bps = None;
         assert!(
             resolved
@@ -294,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_isotonic_mapping_fails_closed() {
+    fn empty_isotonic_mapping_rejects() {
         let mapping = MonotoneMapping::Isotonic { knots: Vec::new() };
         assert!(super::apply_mapping(&mapping, dec!(0.5)).is_err());
     }

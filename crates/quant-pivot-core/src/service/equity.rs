@@ -5,10 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
-    domain::quant::{
-        EquitySnapshotInfo, NewAccountSnapshot, NewEquitySnapshot, PositionInfo, capital_drawdown,
-        capital_hwm,
-    },
+    domain::quant::{EquitySnapshotInfo, NewAccountSnapshot, NewEquitySnapshot, PositionInfo},
     types::{AccountPositions, AccountSnapshotId, EquitySnapshotId, ExecutionAccountId, Usd},
 };
 use quant_pivot_repository::traits::{EquitySnapshotRepository, PositionRepository};
@@ -140,11 +137,12 @@ impl EquitySnapshotService {
             .equity_snapshots
             .latest_at_or_before(account.as_of)
             .await?;
-        let high_water_mark_usd = capital_hwm(
+        let high_water_mark_usd = EquitySnapshotInfo::high_water_mark(
             previous.map(|snapshot| snapshot.high_water_mark_usd),
             account.capital_base_usd,
         );
-        let fresh_drawdown = capital_drawdown(account.capital_base_usd, high_water_mark_usd);
+        let fresh_drawdown =
+            EquitySnapshotInfo::drawdown(account.capital_base_usd, high_water_mark_usd);
         Ok(SizingDrawdownResolution {
             drawdown_state: floor.conservative_max(DrawdownState {
                 current_drawdown: fresh_drawdown,

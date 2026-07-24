@@ -25,7 +25,10 @@ use quant_pivot_models::{
 use reqwest::{Client, Url};
 use serde::Deserialize;
 
-use super::adapter::PreparedSettlementCall;
+use super::{
+    adapter::PreparedSettlementCall,
+    typed::{IntoEvmBlockHash, IntoEvmTransactionHash, IntoEvmUint, SettlementValueError},
+};
 use crate::{keystore::OrderSigner, wallet::WalletTopology};
 
 const POLYGON_CHAIN_ID: u64 = 137;
@@ -191,6 +194,14 @@ pub enum EoaSettlementError {
     CorruptDurableEnvelope,
 }
 
+impl From<SettlementValueError> for EoaSettlementError {
+    fn from(error: SettlementValueError) -> Self {
+        Self::InvalidPreparedValue {
+            detail: error.detail().to_owned(),
+        }
+    }
+}
+
 /// Minimum Polygon RPC boundary required by the EOA journal.
 #[async_trait]
 pub trait EoaSettlementRpc: Send + Sync {
@@ -273,7 +284,7 @@ impl EoaSettlementEnvelopeBuilder {
             })?;
         let signed_envelope = transaction.into_signed(signature).encoded_2718();
         let signed_envelope_hash = content_hash(&signed_envelope);
-        let transaction_hash = typed_transaction_hash(keccak256(&signed_envelope))?;
+        let transaction_hash = (keccak256(&signed_envelope)).into_evm_transaction_hash()?;
 
         Ok(PreparedEoaEnvelope {
             target_adapter: call.target_adapter().clone(),
@@ -281,8 +292,8 @@ impl EoaSettlementEnvelopeBuilder {
             deployment_digest: call.deployment_digest(),
             calldata_hash: call.calldata_hash().clone(),
             prepared_block,
-            nonce: typed_uint(nonce)?,
-            gas_limit: typed_uint(gas_limit)?,
+            nonce: (nonce).into_evm_uint()?,
+            gas_limit: (gas_limit).into_evm_uint()?,
             signed_envelope,
             signed_envelope_hash,
             transaction_hash,
@@ -306,7 +317,7 @@ impl EoaSettlementEnvelopeBuilder {
                     detail: other.to_string(),
                 },
             })?;
-        let returned = typed_transaction_hash(returned_hash)?;
+        let returned = (returned_hash).into_evm_transaction_hash()?;
         if returned != prepared.transaction_hash {
             return Err(EoaSettlementError::BroadcastHashMismatch {
                 expected: prepared.transaction_hash.to_string(),
@@ -365,7 +376,7 @@ impl EoaSettlementRpc for AlloyEoaSettlementRpc {
         let block = block.ok_or(EoaSettlementError::MissingCanonicalHead)?;
         Ok(EoaPreparedBlock {
             number: block.number,
-            hash: typed_block_hash(block.hash)?,
+            hash: (block.hash).into_evm_block_hash()?,
         })
     }
 
@@ -417,7 +428,10 @@ impl EoaSettlementRpc for AlloyEoaSettlementRpc {
             )
             .await
             .map_err(|error| rpc_error("eth_getBlockByNumber(canonical recheck)", &error))?;
-        block.map(|value| typed_block_hash(value.hash)).transpose()
+        block
+            .map(|value| (value.hash).into_evm_block_hash())
+            .transpose()
+            .map_err(Into::into)
     }
 
     async fn broadcast_raw(&self, envelope: &[u8]) -> Result<B256, EoaSettlementError> {
@@ -469,28 +483,6 @@ fn buffered_gas_limit(estimate: u64) -> Result<u64, EoaSettlementError> {
 
 fn content_hash(bytes: &[u8]) -> ContentHash {
     ContentHash::from_bytes(*blake3::hash(bytes).as_bytes())
-}
-
-fn typed_uint(value: u64) -> Result<EvmUint256, EoaSettlementError> {
-    EvmUint256::parse(value.to_string()).map_err(|error| EoaSettlementError::InvalidPreparedValue {
-        detail: error.to_string(),
-    })
-}
-
-fn typed_transaction_hash(hash: B256) -> Result<EvmTransactionHash, EoaSettlementError> {
-    EvmTransactionHash::parse(format!("{hash:#x}")).map_err(|error| {
-        EoaSettlementError::InvalidPreparedValue {
-            detail: error.to_string(),
-        }
-    })
-}
-
-fn typed_block_hash(hash: B256) -> Result<EvmBlockHash, EoaSettlementError> {
-    EvmBlockHash::parse(format!("{hash:#x}")).map_err(|error| {
-        EoaSettlementError::InvalidPreparedValue {
-            detail: error.to_string(),
-        }
-    })
 }
 
 fn rpc_error(operation: &'static str, error: &impl ToString) -> EoaSettlementError {
@@ -582,9 +574,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn freezes_nonce_envelope_and_hash_before_exact_replay() {
+    async fn freezes_nonce_before_replay() {
         let signer = OrderSigner::from_bytes(&[0x11; 32]).expect("test signer");
-        let topology = topology(&signer);
+        let topology = signer.topology();
         let block_hash =
             EvmBlockHash::parse(format!("0x{}", "55".repeat(32))).expect("canonical block hash");
         let capability = verified_deployment_fixture_at(
@@ -634,9 +626,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_rpc_hash_that_differs_from_the_local_envelope_hash() {
+    async fn rejects_mismatched_rpc_hash() {
         let signer = OrderSigner::from_bytes(&[0x12; 32]).expect("test signer");
-        let topology = topology(&signer);
+        let topology = signer.topology();
         let block_hash =
             EvmBlockHash::parse(format!("0x{}", "66".repeat(32))).expect("canonical block hash");
         let capability = verified_deployment_fixture_at(
@@ -671,13 +663,15 @@ mod tests {
         ));
     }
 
-    fn topology(signer: &OrderSigner) -> WalletTopology {
-        WalletTopology {
-            kind: ExecutionWalletKind::Eoa,
-            signer: signer.address(),
-            owner: signer.address(),
-            funder: signer.address(),
-            signature_type: SignatureType::Eoa,
+    impl OrderSigner {
+        fn topology(&self) -> WalletTopology {
+            WalletTopology {
+                kind: ExecutionWalletKind::Eoa,
+                signer: self.address(),
+                owner: self.address(),
+                funder: self.address(),
+                signature_type: SignatureType::Eoa,
+            }
         }
     }
 }

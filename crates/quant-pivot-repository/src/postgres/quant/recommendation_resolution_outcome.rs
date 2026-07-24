@@ -33,11 +33,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::{
-        error::{invariant_violation, not_found, state_conflict},
-        primitives::statement_timestamp,
-    },
-    traits::RecommendationResolutionOutcomeRepository,
+    postgres::primitives::statement_timestamp, traits::RecommendationResolutionOutcomeRepository,
 };
 
 /// PostgreSQL-backed immutable recommendation-resolution outcome repository.
@@ -59,7 +55,7 @@ impl RecommendationResolutionOutcomeRepository for PgRecommendationResolutionOut
         fact: &MarketResolutionRow,
     ) -> Result<InsertResolutionOutcomeResult, StorageError> {
         fact.validate().map_err(|error| {
-            invariant_violation(Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME), error)
+            StorageError::invariant_violation(Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME), error)
         })?;
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
         let recommendation = QuantRecommendationEntity::find_by_id(*recommendation_id)
@@ -67,9 +63,9 @@ impl RecommendationResolutionOutcomeRepository for PgRecommendationResolutionOut
             .one(&transaction)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| not_found(QUANT_RECOMMENDATION, recommendation_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION, recommendation_id))?;
         let outcome = derive_outcome(&recommendation, fact)?;
-        let result = insert_derived(&transaction, outcome).await?;
+        let result = Self::insert_derived(&transaction, outcome).await?;
         transaction.commit().await.map_err(StorageError::from)?;
         Ok(result)
     }
@@ -82,7 +78,7 @@ impl RecommendationResolutionOutcomeRepository for PgRecommendationResolutionOut
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
-            .map(validated_info)
+            .map(Self::validated_info)
             .transpose()
     }
 
@@ -133,7 +129,7 @@ impl RecommendationResolutionOutcomeRepository for PgRecommendationResolutionOut
         query: RecommendationResolutionOutcomePageQuery,
     ) -> Result<RecommendationResolutionOutcomePage, StorageError> {
         query.validate().map_err(|error| {
-            invariant_violation(Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME), error)
+            StorageError::invariant_violation(Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME), error)
         })?;
         let keyset = query.after.map(|cursor| {
             Condition::any()
@@ -157,7 +153,7 @@ impl RecommendationResolutionOutcomeRepository for PgRecommendationResolutionOut
             .await
             .map_err(StorageError::from)?
             .into_iter()
-            .map(validated_info)
+            .map(Self::validated_info)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(RecommendationResolutionOutcomePage::new(outcomes))
     }
@@ -168,7 +164,7 @@ fn derive_outcome(
     fact: &MarketResolutionRow,
 ) -> Result<NewRecommendationResolutionOutcome, StorageError> {
     if recommendation.market_id != fact.market_id {
-        return Err(invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME),
             format!(
                 "recommendation {} is bound to market {}, not resolution market {}",
@@ -177,16 +173,16 @@ fn derive_outcome(
         ));
     }
     let token_payout_ratio = fact.payout_for(&recommendation.token_id).map_err(|error| {
-        invariant_violation(Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME), error)
+        StorageError::invariant_violation(Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME), error)
     })?;
     let resolution_kind = fact.resolution_kind().map_err(|error| {
-        invariant_violation(Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME), error)
+        StorageError::invariant_violation(Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME), error)
     })?;
     let resolved_at = Utc
         .timestamp_millis_opt(fact.resolved_at)
         .single()
         .ok_or_else(|| {
-            invariant_violation(
+            StorageError::invariant_violation(
                 Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME),
                 format!(
                     "resolution fact timestamp {} is outside the UTC millisecond range",
@@ -198,7 +194,7 @@ fn derive_outcome(
         .timestamp_millis_opt(fact.observed_at)
         .single()
         .ok_or_else(|| {
-            invariant_violation(
+            StorageError::invariant_violation(
                 Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME),
                 format!(
                     "resolution observation timestamp {} is outside the UTC millisecond range",
@@ -207,7 +203,7 @@ fn derive_outcome(
             )
         })?;
     let resolution_fact_log_index = i64::try_from(fact.source_log_index).map_err(|_| {
-        invariant_violation(
+        StorageError::invariant_violation(
             Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME),
             format!(
                 "resolution fact log index {} exceeds PostgreSQL BIGINT",
@@ -230,80 +226,87 @@ fn derive_outcome(
     })
 }
 
-async fn insert_derived(
-    transaction: &DatabaseTransaction,
-    outcome: NewRecommendationResolutionOutcome,
-) -> Result<InsertResolutionOutcomeResult, StorageError> {
-    validate_new(&outcome)?;
-    let available_at = statement_timestamp(transaction).await?;
-    let outcome_hash = outcome
-        .expected_outcome_hash(available_at)
-        .map_err(|error| {
-            invariant_violation(Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME), error)
-        })?;
-    let mut active_outcome = outcome.clone().into_active_model();
-    active_outcome.available_at = ActiveValue::Set(available_at);
-    active_outcome.outcome_hash = ActiveValue::Set(outcome_hash);
+impl PgRecommendationResolutionOutcomeRepository {
+    async fn insert_derived(
+        transaction: &DatabaseTransaction,
+        outcome: NewRecommendationResolutionOutcome,
+    ) -> Result<InsertResolutionOutcomeResult, StorageError> {
+        validate_new(&outcome)?;
+        let available_at = statement_timestamp(transaction).await?;
+        let outcome_hash = outcome
+            .expected_outcome_hash(available_at)
+            .map_err(|error| {
+                StorageError::invariant_violation(
+                    Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME),
+                    error,
+                )
+            })?;
+        let mut active_outcome = outcome.clone().into_active_model();
+        active_outcome.available_at = ActiveValue::Set(available_at);
+        active_outcome.outcome_hash = ActiveValue::Set(outcome_hash);
 
-    let inserted = match QuantRecommendationResolutionOutcomeEntity::insert(active_outcome)
-        .on_conflict(
-            OnConflict::column(Column::RecommendationId)
-                .do_nothing()
-                .to_owned(),
-        )
-        .exec_with_returning(transaction)
-        .await
-    {
-        Ok(row) => Some(row),
-        Err(DbErr::RecordNotFound(_)) => None,
-        Err(error) => return Err(StorageError::from(error)),
-    };
-    let (row, was_inserted) = match inserted {
-        Some(row) => (row, true),
-        None => (
-            QuantRecommendationResolutionOutcomeEntity::find_by_id(outcome.recommendation_id)
-                .one(transaction)
-                .await
-                .map_err(StorageError::from)?
-                .ok_or_else(|| {
-                    invariant_violation(
-                        Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME),
-                        "outcome conflict completed without an observable stored row",
-                    )
-                })?,
-            false,
-        ),
-    };
-    let stored = validated_info(row)?;
-    if !stored.has_same_derivation(&outcome) {
-        return Err(state_conflict(
-            QUANT_RECOMMENDATION_RESOLUTION_OUTCOME,
-            Some(outcome.recommendation_id),
-            "recommendation id is already bound to different immutable resolution content",
-        ));
-    }
-    if was_inserted {
-        Ok(InsertResolutionOutcomeResult::Inserted(stored))
-    } else {
-        Ok(InsertResolutionOutcomeResult::AlreadyPresent(stored))
+        let inserted = match QuantRecommendationResolutionOutcomeEntity::insert(active_outcome)
+            .on_conflict(
+                OnConflict::column(Column::RecommendationId)
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .exec_with_returning(transaction)
+            .await
+        {
+            Ok(row) => Some(row),
+            Err(DbErr::RecordNotFound(_)) => None,
+            Err(error) => return Err(StorageError::from(error)),
+        };
+        let (row, was_inserted) = match inserted {
+            Some(row) => (row, true),
+            None => (
+                QuantRecommendationResolutionOutcomeEntity::find_by_id(outcome.recommendation_id)
+                    .one(transaction)
+                    .await
+                    .map_err(StorageError::from)?
+                    .ok_or_else(|| {
+                        StorageError::invariant_violation(
+                            Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME),
+                            "outcome conflict completed without an observable stored row",
+                        )
+                    })?,
+                false,
+            ),
+        };
+        let stored = Self::validated_info(row)?;
+        if !stored.has_same_derivation(&outcome) {
+            return Err(StorageError::state_conflict(
+                QUANT_RECOMMENDATION_RESOLUTION_OUTCOME,
+                Some(outcome.recommendation_id),
+                "recommendation id is already bound to different immutable resolution content",
+            ));
+        }
+        if was_inserted {
+            Ok(InsertResolutionOutcomeResult::Inserted(stored))
+        } else {
+            Ok(InsertResolutionOutcomeResult::AlreadyPresent(stored))
+        }
     }
 }
 
 fn validate_new(outcome: &NewRecommendationResolutionOutcome) -> Result<(), StorageError> {
-    outcome
-        .validate()
-        .map_err(|error| invariant_violation(Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME), error))
+    outcome.validate().map_err(|error| {
+        StorageError::invariant_violation(Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME), error)
+    })
 }
 
-fn validated_info(
-    row: QuantRecommendationResolutionOutcomeModel,
-) -> Result<RecommendationResolutionOutcomeInfo, StorageError> {
-    let outcome: RecommendationResolutionOutcomeInfo = row.into();
-    outcome.validate().map_err(|error| {
-        invariant_violation(
-            Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME),
-            format!("stored outcome failed integrity validation: {error}"),
-        )
-    })?;
-    Ok(outcome)
+impl PgRecommendationResolutionOutcomeRepository {
+    fn validated_info(
+        row: QuantRecommendationResolutionOutcomeModel,
+    ) -> Result<RecommendationResolutionOutcomeInfo, StorageError> {
+        let outcome: RecommendationResolutionOutcomeInfo = row.into();
+        outcome.validate().map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_RECOMMENDATION_RESOLUTION_OUTCOME),
+                format!("stored outcome failed integrity validation: {error}"),
+            )
+        })?;
+        Ok(outcome)
+    }
 }

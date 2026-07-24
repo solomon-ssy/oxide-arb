@@ -51,7 +51,7 @@ pub trait PositionRepository: Send + Sync {
     ) -> Result<Vec<PositionInfo>, StorageError>;
 
     /// Open lots for one immutable execution account and market.
-    async fn find_open_by_market_account(
+    async fn find_open_position(
         &self,
         market_id: &MarketId,
         execution_account_id: &ExecutionAccountId,

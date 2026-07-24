@@ -60,7 +60,7 @@ fn alert(market_id: &str, basis: i64, as_of: DateTime<Utc>) -> NewBasisAlert {
     }
 }
 
-pub async fn record_persists_and_round_trips() {
+pub async fn record_persists_round_trips() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_market(&db, "0xbasis1").await;
@@ -78,7 +78,7 @@ pub async fn record_persists_and_round_trips() {
     assert_eq!(recorded.as_of, as_of);
 }
 
-pub async fn latest_for_market_picks_the_newest_as_of() {
+pub async fn latest_market_picks_newest() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_market(&db, "0xbasis2").await;
@@ -116,7 +116,7 @@ pub async fn latest_for_market_picks_the_newest_as_of() {
     );
 }
 
-pub async fn batched_latest_returns_one_newest_alert_per_market() {
+pub async fn batched_latest_returns_market() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_market(&db, "0xbasis-batch-a").await;
@@ -148,7 +148,7 @@ pub async fn batched_latest_returns_one_newest_alert_per_market() {
     assert_eq!(a.basis_bps.inner(), dec!(80));
 }
 
-pub async fn page_filters_by_market_and_time_range() {
+pub async fn page_filters_market_range() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_market(&db, "0xbasis3").await;
@@ -179,7 +179,7 @@ pub async fn page_filters_by_market_and_time_range() {
     assert_eq!(page.items[1].basis_bps.inner(), dec!(70));
 }
 
-pub async fn acknowledge_marks_the_alert_and_is_idempotent() {
+pub async fn acknowledge_marks_alert_idempotent() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_market(&db, "0xbasis4").await;
@@ -225,7 +225,7 @@ pub async fn acknowledge_marks_the_alert_and_is_idempotent() {
     assert!(open_page.items.is_empty(), "acknowledged alert is not open");
 }
 
-pub async fn acknowledge_missing_alert_fails_closed() {
+pub async fn acknowledge_missing_alert_rejects() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgBasisAlertRepository::new(db.clone());

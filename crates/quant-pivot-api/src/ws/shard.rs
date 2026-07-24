@@ -412,7 +412,7 @@ async fn connect_and_stream(
         opened_at_ms,
         token_sequences: &token_sequences,
     };
-    close_stream_session(deps, closing, stream_end_reason(&end)).await;
+    close_stream_session(deps, closing, end.stream_end_reason()).await;
     end
 }
 
@@ -503,12 +503,14 @@ fn subscription_token_hash(tokens: &[TokenId]) -> Result<ContentHash, String> {
     CanonicalDigest::content_hash_json(&token_ids).map_err(|error| error.to_string())
 }
 
-const fn stream_end_reason(end: &StreamEnd) -> StreamSessionEndReason {
-    match end {
-        StreamEnd::Shutdown | StreamEnd::RouterDropped => StreamSessionEndReason::Shutdown,
-        StreamEnd::Resubscribe => StreamSessionEndReason::Resubscribe,
-        StreamEnd::Overflow(_) => StreamSessionEndReason::Overflow,
-        StreamEnd::Failed(_) => StreamSessionEndReason::Disconnect,
+impl StreamEnd {
+    const fn stream_end_reason(&self) -> StreamSessionEndReason {
+        match self {
+            Self::Shutdown | Self::RouterDropped => StreamSessionEndReason::Shutdown,
+            Self::Resubscribe => StreamSessionEndReason::Resubscribe,
+            Self::Overflow(_) => StreamSessionEndReason::Overflow,
+            Self::Failed(_) => StreamSessionEndReason::Disconnect,
+        }
     }
 }
 
@@ -684,7 +686,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_preserves_every_event_when_capacity_is_available() {
+    async fn dispatch_preserves_event_available() {
         let (tx, rx) = flume::bounded(3);
         let dropped = Arc::new(AtomicU64::new(0));
         let hook: WsSessionInvalidationHook = {
@@ -720,7 +722,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn data_batch_fails_closed_after_bounded_enqueue_wait() {
+    async fn batch_rejects_after_wait() {
         let (tx, _rx) = flume::bounded(1);
         tx.send(NormalizedIngressBatch::new(
             vec![PipelineEvent::ShardStatus {
@@ -753,7 +755,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_close_and_all_gaps_use_one_ingress_batch() {
+    async fn session_close_gaps_batch() {
         let (tx, rx) = flume::bounded(1);
         let deps = test_deps(tx, None);
         let token = TokenId::new("1");
@@ -781,7 +783,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn failed_session_close_notifies_full_token_scope_without_gap_fanout() {
+    async fn failed_session_without_fanout() {
         let (tx, rx) = flume::bounded(1);
         tx.send(NormalizedIngressBatch::new(
             vec![PipelineEvent::ShardStatus {
@@ -833,7 +835,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn debounce_waits_for_token_set_to_settle() {
+    async fn debounce_waits_token_settle() {
         let (tx, mut rx) = watch::channel(ShardAssignment::empty());
         let shutdown = CancellationToken::new();
 
@@ -864,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_generation_changes_assignment_without_token_churn() {
+    fn restart_changes_without_churn() {
         let tokens = Arc::new(HashSet::from([TokenId::new("1")]));
         let first = ShardAssignment {
             tokens: Arc::clone(&tokens),

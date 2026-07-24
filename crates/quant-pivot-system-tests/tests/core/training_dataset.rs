@@ -274,7 +274,7 @@ impl QuantFactReadRepository for ControllableFactRead {
         Ok(Vec::new())
     }
 
-    async fn trade_tape_window_by_market(
+    async fn market_tape_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
@@ -931,10 +931,10 @@ async fn seed_catalog_with_category(
 }
 
 async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
-    seed_model_spec_with_contract(db, ModelInputContract::single_required("book.mid")).await
+    seed_model_spec_contract(db, ModelInputContract::single_required("book.mid")).await
 }
 
-async fn seed_model_spec_with_contract(
+async fn seed_model_spec_contract(
     db: &DatabaseConnection,
     input_contract: ModelInputContract,
 ) -> ModelSpecId {
@@ -958,7 +958,7 @@ async fn model_spec_definition_hash(
     model_spec_id: &ModelSpecId,
 ) -> ContentHash {
     PgModelRegistryRepository::new(db.clone())
-        .find_model_spec_by_id(model_spec_id)
+        .find_model_spec(model_spec_id)
         .await
         .expect("load model spec")
         .expect("model spec exists")
@@ -987,7 +987,7 @@ fn service_with_selection(
     fact_read: Arc<dyn QuantFactReadRepository>,
     selection: SelectionConfig,
 ) -> TrainingDatasetService {
-    service_with_selection_and_linkage(
+    service_selection_linkage(
         db,
         store,
         fact_read,
@@ -1004,7 +1004,7 @@ fn service_with_selection(
 /// (`features_config` intentionally excludes `Domain` for the plain
 /// Sports-market fixtures; a crypto-domain test needs it enabled so the
 /// governed schema actually registers `domain.crypto.*` feature specs).
-fn service_with_selection_and_linkage(
+fn service_selection_linkage(
     db: &DatabaseConnection,
     store: Arc<dyn ArtifactStore>,
     fact_read: Arc<dyn QuantFactReadRepository>,
@@ -1128,7 +1128,7 @@ fn assert_no_feature_leakage(artifact: &TrainingDatasetArtifact, knowledge_lag_s
     }
 }
 
-pub async fn historical_pit_no_look_ahead_via_dataset_build() {
+pub async fn historical_pit_no_build() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1160,7 +1160,7 @@ pub async fn historical_pit_no_look_ahead_via_dataset_build() {
     );
 }
 
-pub async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
+pub async fn calibration_dataset_rejects_overlap() {
     // P1-8: a `purpose = Calibration` dataset whose window
     // overlaps a `Ready` training dataset must fail closed at *build* time
     // (not only later, at calibrator-fit time) — the purge primitive shared
@@ -1275,7 +1275,7 @@ pub async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
     );
 }
 
-pub async fn build_cancelled_before_spine_yields_cancelled_and_no_row() {
+pub async fn build_before_no_row() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1322,7 +1322,7 @@ pub async fn build_cancelled_before_spine_yields_cancelled_and_no_row() {
     );
 }
 
-pub async fn pit_selection_excludes_disabled_category_market() {
+pub async fn pit_selection_excludes_market() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1372,13 +1372,13 @@ pub async fn pit_selection_excludes_disabled_category_market() {
     );
 }
 
-pub async fn pit_selection_excludes_crypto_market_when_model_requires_unavailable_domain_feature() {
+pub async fn pit_excludes_requires_feature() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog_with_category(&db, window_start, MarketCategory::Crypto).await;
-    let model_spec_id = seed_model_spec_with_contract(
+    let model_spec_id = seed_model_spec_contract(
         &db,
         ModelInputContract::single_required("domain.crypto.distance_to_strike"),
     )
@@ -1391,7 +1391,7 @@ pub async fn pit_selection_excludes_crypto_market_when_model_requires_unavailabl
     // `EmptyLinkageRepo` never resolves a binding ⇒ `DomainAvailability::Unresolved`
     // ⇒ the required domain feature is genuinely unavailable (not a schema gap:
     // `crypto_features_config` enables `Domain` so the spec IS registered).
-    let svc = service_with_selection_and_linkage(
+    let svc = service_selection_linkage(
         &db,
         Arc::clone(&store),
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
@@ -1494,13 +1494,13 @@ fn crypto_close_observation(event_time_ms: i64) -> DomainObservationRow {
     }
 }
 
-async fn build_crypto_pit_dataset_with_resolved_linkage() -> TrainingDatasetArtifact {
+async fn build_crypto_pit_linkage() -> TrainingDatasetArtifact {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog_with_category(&db, window_start, MarketCategory::Crypto).await;
-    let model_spec_id = seed_model_spec_with_contract(
+    let model_spec_id = seed_model_spec_contract(
         &db,
         ModelInputContract::single_required("domain.crypto.distance_to_strike"),
     )
@@ -1540,7 +1540,7 @@ async fn build_crypto_pit_dataset_with_resolved_linkage() -> TrainingDatasetArti
         .await
         .expect("backdate linkage availability");
 
-    let svc = service_with_selection_and_linkage(
+    let svc = service_selection_linkage(
         &db,
         Arc::clone(&store),
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
@@ -1575,7 +1575,7 @@ async fn build_crypto_pit_dataset_with_resolved_linkage() -> TrainingDatasetArti
     svc.build(plan).await.expect("build")
 }
 
-fn assert_crypto_pit_selection_includes_domain_feature(artifact: &TrainingDatasetArtifact) {
+fn assert_crypto_pit_feature(artifact: &TrainingDatasetArtifact) {
     assert!(
         artifact.coverage.pit_selection_candidates > 0,
         "the crypto market should enter the PIT funnel as a candidate",
@@ -1613,12 +1613,12 @@ fn assert_crypto_pit_selection_includes_domain_feature(artifact: &TrainingDatase
     );
 }
 
-pub async fn pit_selection_includes_crypto_market_when_domain_feature_is_resolved_and_available() {
-    let artifact = build_crypto_pit_dataset_with_resolved_linkage().await;
-    assert_crypto_pit_selection_includes_domain_feature(&artifact);
+pub async fn pit_selection_includes_available() {
+    let artifact = build_crypto_pit_linkage().await;
+    assert_crypto_pit_feature(&artifact);
 }
 
-pub async fn plan_estimates_pit_keep_rate() {
+pub async fn plan_estimates_keep_rate() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1667,7 +1667,7 @@ pub async fn plan_estimates_pit_keep_rate() {
     );
 }
 
-pub async fn dataset_builder_rejects_future_features() {
+pub async fn dataset_builder_rejects_features() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1723,7 +1723,7 @@ pub async fn dataset_builder_rejects_future_features() {
     );
 }
 
-pub async fn settlement_label_not_mature_before_resolution() {
+pub async fn settlement_not_before_resolution() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1754,7 +1754,7 @@ pub async fn settlement_label_not_mature_before_resolution() {
     }
 }
 
-pub async fn settlement_label_available_after_resolution() {
+pub async fn settlement_label_after_resolution() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1797,7 +1797,7 @@ pub async fn settlement_label_available_after_resolution() {
     );
 }
 
-pub async fn plan_build_reuses_training_dataset_id() {
+pub async fn plan_build_reuses_id() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1844,7 +1844,7 @@ pub async fn plan_build_reuses_training_dataset_id() {
     );
 }
 
-pub async fn build_status_insufficient_labels_when_no_labels_mature() {
+pub async fn build_status_no_mature() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1874,7 +1874,7 @@ pub async fn build_status_insufficient_labels_when_no_labels_mature() {
     assert_eq!(row.status, TrainingDatasetStatus::InsufficientLabels);
 }
 
-pub async fn build_status_failed_when_zero_examples() {
+pub async fn build_failed_zero_examples() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1904,7 +1904,7 @@ pub async fn build_status_failed_when_zero_examples() {
     assert_eq!(row.status, TrainingDatasetStatus::Failed);
 }
 
-pub async fn build_records_book_decode_failures() {
+pub async fn build_book_decode_failures() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1938,7 +1938,7 @@ pub async fn build_records_book_decode_failures() {
     );
 }
 
-pub async fn settlement_label_visible_without_micro_past_resolution() {
+pub async fn settlement_label_without_resolution() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1990,7 +1990,7 @@ pub async fn settlement_label_visible_without_micro_past_resolution() {
     );
 }
 
-pub async fn model_version_training_dataset_id_is_typed() {
+pub async fn model_version_training_typed() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -2079,14 +2079,14 @@ pub async fn model_version_training_dataset_id_is_typed() {
         .expect("typed FK insert");
 
     let loaded = PgModelRegistryRepository::new(db)
-        .find_model_version_by_id(&version_id)
+        .find_model_version(&version_id)
         .await
         .expect("load")
         .expect("version");
     assert_eq!(loaded.training_dataset_id, Some(dataset_id));
 }
 
-pub async fn plan_count_respects_sample_sources() {
+pub async fn plan_count_respects_sources() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;

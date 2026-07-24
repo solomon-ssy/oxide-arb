@@ -4,7 +4,7 @@ use quant_pivot_api::keystore::Keystore;
 use quant_pivot_models::config::KeysConfig;
 
 #[test]
-fn keystore_loads_valid_hex_key() {
+fn keystore_loads_valid_key() {
     let config = KeysConfig {
         private_key: Some(
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".into(),
@@ -41,7 +41,7 @@ fn keystore_rejects_wrong_length() {
 }
 
 #[test]
-fn keystore_fails_without_private_key() {
+fn keystore_fails_without_key() {
     let config = KeysConfig::default();
     let result = Keystore::from_config(&config);
     assert!(result.is_err());

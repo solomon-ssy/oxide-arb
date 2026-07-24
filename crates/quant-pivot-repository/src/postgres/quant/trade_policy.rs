@@ -103,13 +103,13 @@ impl TradePolicyRepository for PgTradePolicyRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| {
-                error::invariant_violation(
+                StorageError::invariant_violation(
                     Some("quant_trade_policy_trial_attempt"),
                     "trial attempt was not visible after append",
                 )
             })?;
         if !trial_attempt_matches(&stored, &attempt) {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 "quant_trade_policy_trial_attempt",
                 Some(&attempt.trial_attempt_id),
                 "trial attempt id is already bound to different immutable content",
@@ -194,9 +194,9 @@ impl TradePolicyRepository for PgTradePolicyRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_TRADE_POLICY_ARTIFACT, artifact_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_TRADE_POLICY_ARTIFACT, artifact_id))?;
         if row.status != expected || !row.status.allows_transition_to(target) {
-            return Err(error::illegal_transition(
+            return Err(StorageError::illegal_transition(
                 QUANT_TRADE_POLICY_ARTIFACT,
                 Some(artifact_id),
                 row.status.as_str(),
@@ -208,7 +208,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
             || audit.to_status != target
             || audit.content_hash != row.content_hash
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_TRADE_POLICY_ARTIFACT),
                 "trade-policy governance audit does not match the locked artifact transition",
             ));
@@ -268,7 +268,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| {
-                error::invariant_violation(
+                StorageError::invariant_violation(
                     Some("quant_trade_policy_validation"),
                     "validation run was not visible after insert",
                 )
@@ -311,7 +311,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
                     .is_none_or(|expected| expected.row_hash != stored.row_hash)
             })
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 "quant_trade_policy_validation_row",
                 Some(&rows[0].validation_run_id),
                 "validation row ordinal is already bound to different content",
@@ -328,7 +328,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
         let run = validation_run_for_update(&transaction, validation_run_id).await?;
         if run.status != TradePolicyValidationStatus::Running {
-            return Err(error::illegal_transition(
+            return Err(StorageError::illegal_transition(
                 "quant_trade_policy_validation",
                 Some(validation_run_id),
                 run.status,
@@ -342,7 +342,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
             || failed_rows != 0
             || total_rows == 0
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some("quant_trade_policy_validation"),
                 "validation completion counts do not match persisted row diagnostics",
             ));
@@ -352,10 +352,10 @@ impl TradePolicyRepository for PgTradePolicyRepository {
             .one(&transaction)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_TRADE_POLICY_ARTIFACT, run.artifact_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_TRADE_POLICY_ARTIFACT, run.artifact_id))?;
         if artifact.status != TradePolicyStatus::Draft || artifact.content_hash != run.artifact_hash
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_TRADE_POLICY_ARTIFACT,
                 Some(&run.artifact_id),
                 "validation completion requires the exact immutable Draft",
@@ -367,7 +367,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
             || audit.to_status != TradePolicyStatus::Validated
             || audit.content_hash != artifact.content_hash
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_TRADE_POLICY_ARTIFACT),
                 "validation audit does not bind the locked Draft",
             ));
@@ -408,7 +408,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
             TradePolicyValidationStatus::Failed | TradePolicyValidationStatus::Cancelled
         ) || failure.failure_detail.trim().is_empty()
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some("quant_trade_policy_validation"),
                 "validation failure requires a terminal failure status and detail",
             ));
@@ -416,7 +416,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
         let run = validation_run_for_update(&transaction, validation_run_id).await?;
         if run.status != TradePolicyValidationStatus::Running {
-            return Err(error::illegal_transition(
+            return Err(StorageError::illegal_transition(
                 "quant_trade_policy_validation",
                 Some(validation_run_id),
                 run.status,
@@ -528,7 +528,7 @@ impl TradePolicyRepository for PgTradePolicyRepository {
 
 fn validate_new_validation(run: &NewTradePolicyValidationRun) -> Result<(), StorageError> {
     if run.status != TradePolicyValidationStatus::Running || run.reason.trim().is_empty() {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some("quant_trade_policy_validation"),
             "new validation run must be Running with a non-empty reason",
         ));
@@ -575,7 +575,7 @@ fn validate_trial_attempt(attempt: &NewTradePolicyTrialAttempt) -> Result<(), St
         }
     };
     let expected_hash = attempt.expected_row_hash().map_err(|error| {
-        error::invariant_violation(
+        StorageError::invariant_violation(
             Some("quant_trade_policy_trial_attempt"),
             format!("trial attempt cannot be canonically hashed: {error}"),
         )
@@ -587,7 +587,7 @@ fn validate_trial_attempt(attempt: &NewTradePolicyTrialAttempt) -> Result<(), St
         || !terminal_shape_valid
         || expected_hash != attempt.row_hash
     {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some("quant_trade_policy_trial_attempt"),
             "trial attempt scope, terminal payload, evidence, ordinal, or row hash is invalid",
         ));
@@ -627,7 +627,7 @@ fn ensure_validation_identity(
         || stored.actor_id != expected.actor_id
         || stored.reason != expected.reason
     {
-        return Err(error::state_conflict(
+        return Err(StorageError::state_conflict(
             "quant_trade_policy_validation",
             Some(&expected.validation_run_id),
             "validation run id is already bound to a different immutable contract",
@@ -665,7 +665,7 @@ fn validate_validation_rows(rows: &[NewTradePolicyValidationRow]) -> Result<(), 
             || !evidence_kind_valid
             || row.record_key.trim().is_empty()
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some("quant_trade_policy_validation_row"),
                 "validation row batch has mixed runs, duplicate ordinals, or invalid diagnostics",
             ));
@@ -686,7 +686,7 @@ where
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found("quant_trade_policy_validation", validation_run_id))
+        .ok_or_else(|| StorageError::not_found("quant_trade_policy_validation", validation_run_id))
 }
 
 async fn validation_row_counts<C>(
@@ -707,7 +707,7 @@ where
         .await
         .map_err(StorageError::from)?;
     let failed = total.checked_sub(passed).ok_or_else(|| {
-        error::invariant_violation(
+        StorageError::invariant_violation(
             Some("quant_trade_policy_validation_row"),
             "passed row count exceeds total",
         )
@@ -717,7 +717,7 @@ where
 
 fn exact_i64(value: u64) -> Result<i64, StorageError> {
     i64::try_from(value).map_err(|error| {
-        error::invariant_violation(
+        StorageError::invariant_violation(
             Some("quant_trade_policy_validation"),
             format!("validation row count exceeds Postgres bigint: {error}"),
         )

@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn hourly_et_slug_parses_dst_correctly() {
+    fn hourly_et_parses_correctly() {
         // July → EDT (UTC-4): 3pm ET = 19:00Z.
         let metadata = metadata(
             "bitcoin-up-or-down-july-7-3pm-et",
@@ -567,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn daily_slug_spans_noon_et_to_noon_et() {
+    fn daily_slug_spans_et() {
         let metadata = metadata(
             "bitcoin-up-or-down-on-july-7",
             "Bitcoin Up or Down on July 7",
@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn threshold_question_extracts_comparator_strike_and_binance_oracle() {
+    fn threshold_question_extracts_oracle() {
         let metadata = metadata(
             "will-bitcoin-reach-150000-in-july",
             "Will Bitcoin reach $150,000 in July?",
@@ -641,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_oracle_or_direction_fails_through() {
+    fn missing_oracle_direction_fails() {
         // No description ⇒ threshold questions cannot ground an oracle.
         let no_rules = metadata(
             "will-bitcoin-reach-150000-in-july",
@@ -670,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn every_supported_asset_parses_hourly_and_full_name_above_templates() {
+    fn supported_asset_parses_templates() {
         for rule in rules() {
             let ticker = rule.ticker.to_ascii_lowercase();
             let feed = rule.chainlink_feed.to_ascii_lowercase();
@@ -721,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn real_hourly_binance_templates_freeze_one_hour_and_optional_dollar_strike() {
+    fn real_hourly_optional_strike() {
         let updown_rules = "This market resolves using the Binance BTC/USDT 1 hour candle close.";
         let updown = metadata(
             "bitcoin-up-or-down-july-18-2026-8pm-et",
@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn up_down_template_without_description_fails_through_never_guesses_oracle() {
+    fn up_without_fails_never() {
         // Regression guard for the audited fail-open bug: an hourly/daily
         // up/down slug with NO description must yield no candidate, never a
         // ruleset-default Chainlink oracle.
@@ -797,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn year_boundary_slug_infers_the_correct_side_of_the_boundary() {
+    fn year_boundary_slug_boundary() {
         // `end_date` lands just after New Year; the yearless December slug
         // must resolve to the PRIOR year, not `end_date`'s own year.
         let end_date = Utc.with_ymd_and_hms(2027, 1, 1, 5, 30, 0).unwrap(); // Jan 1 00:30 ET
@@ -823,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn implausible_year_drift_fails_closed() {
+    fn implausible_year_drift_rejects() {
         // `end_date` is many months away from any calendar-year candidate for
         // this month/day — the inference must refuse to guess.
         let metadata = LinkageSourceMetadata {

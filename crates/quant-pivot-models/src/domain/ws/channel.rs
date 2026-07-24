@@ -234,7 +234,7 @@ mod tests {
     use crate::{enums::rbac::ResourceType, types::MarketId};
 
     #[test]
-    fn materialization_channel_reads_materialization_resource() {
+    fn materialization_channel_reads_resource() {
         // The run-update channel is a materialization-run lifecycle stream, so it
         // gates on `materialization:read` — not `publication:read`.
         assert_eq!(
@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_round_trips_via_from_str() {
+    fn channel_round_trips_str() {
         for channel in WsChannel::ALL {
             let parsed = WsChannel::from_str(channel.as_str()).expect("known channel");
             assert_eq!(parsed, channel);
@@ -252,12 +252,12 @@ mod tests {
     }
 
     #[test]
-    fn from_str_rejects_unknown_channel() {
+    fn str_rejects_unknown_channel() {
         assert!(WsChannel::from_str("does.not_exist").is_err());
     }
 
     #[test]
-    fn only_book_update_is_market_scoped() {
+    fn only_book_update_scoped() {
         for channel in WsChannel::ALL {
             let expected = if channel == WsChannel::MarketBookUpdate {
                 ChannelScope::Market
@@ -269,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn new_drops_market_on_global_channels() {
+    fn drops_market_global_channels() {
         let key = SubscriptionKey::new(WsChannel::SystemStatus, Some(MarketId::new("0xabc")));
         assert_eq!(key.market, None, "global channel must not carry a market");
 
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn display_matches_wire_key_format() {
+    fn display_matches_wire_format() {
         assert_eq!(
             SubscriptionKey::global(WsChannel::QuantReport).to_string(),
             "quant.report"

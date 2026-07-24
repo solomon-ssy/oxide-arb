@@ -16,7 +16,7 @@ use quant_pivot_models::{
     domain::data_plane::CryptoPriceReport,
     enums::domain::BinanceMarketSegment,
     hashing::CanonicalDigest,
-    types::{BinanceSymbol, DomainInstrumentKey, DomainSourceId, Shares, Usd},
+    types::{BinanceSymbol, Shares, Usd},
 };
 use reqwest::Client;
 use rust_decimal::Decimal;
@@ -72,7 +72,7 @@ impl BinanceAggTradeSource {
         Self::connect_for_market(config, request_budget, compute, BinanceMarketSegment::Spot)
     }
 
-    pub fn connect_usdm_futures_with_budget(
+    pub fn connect_usdm_futures(
         config: BinanceSourceConfig,
         request_budget: BinanceRequestBudget,
         compute: Arc<ComputeExecutor>,
@@ -159,9 +159,7 @@ impl BinanceAggTradeSource {
         limit: u16,
         available_at: DateTime<Utc>,
     ) -> QuantResult<Vec<CryptoPriceReport>> {
-        self.request_budget
-            .acquire(agg_trade_request_weight(self.market))
-            .await;
+        self.request_budget.acquire(self.request_weight()).await;
         let base = self.config.rest_url.trim_end_matches('/');
         let prefix = self.rest_prefix();
         let wire_symbol = symbol.as_str();
@@ -265,12 +263,12 @@ impl BinanceAggTradeSource {
             BinanceMarketSegment::UsdmFutures => "/fapi/v1",
         }
     }
-}
 
-const fn agg_trade_request_weight(market: BinanceMarketSegment) -> u32 {
-    match market {
-        BinanceMarketSegment::Spot => SPOT_AGG_TRADE_REQUEST_WEIGHT,
-        BinanceMarketSegment::UsdmFutures => USDM_FUTURES_AGG_TRADE_REQUEST_WEIGHT,
+    const fn request_weight(&self) -> u32 {
+        match self.market {
+            BinanceMarketSegment::Spot => SPOT_AGG_TRADE_REQUEST_WEIGHT,
+            BinanceMarketSegment::UsdmFutures => USDM_FUTURES_AGG_TRADE_REQUEST_WEIGHT,
+        }
     }
 }
 
@@ -383,8 +381,8 @@ fn map_report(
     })?;
     let report_hash = CanonicalDigest::content_hash_bytes(raw_report.as_bytes());
     Ok(CryptoPriceReport {
-        source_id: agg_trade_source_id(market),
-        instrument_key: agg_trade_instrument(market, symbol),
+        source_id: market.trade_source(),
+        instrument_key: market.trade_instrument(symbol),
         source_sequence: row.aggregate_trade_id,
         price: Usd::new(row.price),
         quantity: Some(Shares::new(row.quantity)),
@@ -499,8 +497,8 @@ fn map_archive_row(
     let raw_report = row.iter().collect::<Vec<_>>().join(",");
     let report_hash = CanonicalDigest::content_hash_bytes(raw_report.as_bytes());
     Ok(CryptoPriceReport {
-        source_id: agg_trade_source_id(market),
-        instrument_key: agg_trade_instrument(market, symbol),
+        source_id: market.trade_source(),
+        instrument_key: market.trade_instrument(symbol),
         source_sequence: aggregate_trade_id,
         price: Usd::new(price),
         quantity: Some(Shares::new(quantity)),
@@ -513,25 +511,6 @@ fn map_archive_row(
         report_hash,
         raw_report,
     })
-}
-
-fn agg_trade_source_id(market: BinanceMarketSegment) -> DomainSourceId {
-    match market {
-        BinanceMarketSegment::Spot => DomainSourceId::binance_agg_trade(),
-        BinanceMarketSegment::UsdmFutures => DomainSourceId::binance_usdm_futures_agg_trade(),
-    }
-}
-
-fn agg_trade_instrument(
-    market: BinanceMarketSegment,
-    symbol: &BinanceSymbol,
-) -> DomainInstrumentKey {
-    match market {
-        BinanceMarketSegment::Spot => DomainInstrumentKey::binance_agg_trade(symbol),
-        BinanceMarketSegment::UsdmFutures => {
-            DomainInstrumentKey::binance_usdm_futures_agg_trade(symbol)
-        }
-    }
 }
 
 fn parse_archive_bool(raw: &str) -> QuantResult<bool> {
@@ -563,7 +542,6 @@ mod tests {
     use quant_pivot_compute::ComputeExecutor;
     use quant_pivot_models::{
         config::BinanceSourceConfig,
-        enums::domain::BinanceMarketSegment,
         types::{BinanceSymbol, DomainInstrumentKey, DomainSourceId},
     };
     use rust_decimal_macros::dec;
@@ -576,7 +554,7 @@ mod tests {
     };
     use zip::{ZipWriter, write::SimpleFileOptions};
 
-    use super::{BinanceAggTradeSource, agg_trade_request_weight, decode_archive};
+    use super::{BinanceAggTradeSource, decode_archive};
     use crate::binance::{BinanceRequestBudget, archive::verify_archive_checksum};
 
     fn test_compute() -> Arc<ComputeExecutor> {
@@ -596,7 +574,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_recovery_maps_exact_trade_id_and_timestamps() {
+    async fn rest_recovery_maps_timestamps() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v3/aggTrades"))
@@ -638,7 +616,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn latest_bootstrap_omits_from_id_and_preserves_futures_provenance() {
+    async fn bootstrap_omits_id_only() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/fapi/v1/aggTrades"))
@@ -661,7 +639,7 @@ mod tests {
             rest_url: server.uri(),
             ..BinanceSourceConfig::usdm_futures_default()
         };
-        let source = BinanceAggTradeSource::connect_usdm_futures_with_budget(
+        let source = BinanceAggTradeSource::connect_usdm_futures(
             config.clone(),
             BinanceRequestBudget::new(&config).expect("budget"),
             test_compute(),
@@ -674,13 +652,10 @@ mod tests {
             .expect("latest")
             .expect("latest report");
         assert_eq!(report.source_sequence, 225_496_651);
-        assert_eq!(
-            report.source_id,
-            DomainSourceId::binance_usdm_futures_agg_trade()
-        );
+        assert_eq!(report.source_id, DomainSourceId::binance_futures_trade());
         assert_eq!(
             report.instrument_key,
-            DomainInstrumentKey::binance_usdm_futures_agg_trade(&symbol)
+            DomainInstrumentKey::binance_futures_trade(&symbol)
         );
         let requests = server.received_requests().await.expect("requests");
         assert_eq!(requests.len(), 1);
@@ -693,7 +668,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_stream_maps_raw_usdm_trade_with_bound_provenance() {
+    async fn websocket_stream_maps_provenance() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind local WebSocket server");
@@ -725,7 +700,7 @@ mod tests {
             websocket_url: format!("ws://{address}"),
             ..BinanceSourceConfig::usdm_futures_default()
         };
-        let source = BinanceAggTradeSource::connect_usdm_futures_with_budget(
+        let source = BinanceAggTradeSource::connect_usdm_futures(
             config.clone(),
             BinanceRequestBudget::new(&config).expect("budget"),
             test_compute(),
@@ -736,29 +711,33 @@ mod tests {
         let report = stream.next_report().await.expect("map aggregate trade");
 
         assert_eq!(report.source_sequence, 225_496_651);
-        assert_eq!(
-            report.source_id,
-            DomainSourceId::binance_usdm_futures_agg_trade()
-        );
+        assert_eq!(report.source_id, DomainSourceId::binance_futures_trade());
         assert_eq!(
             report.instrument_key,
-            DomainInstrumentKey::binance_usdm_futures_agg_trade(&symbol)
+            DomainInstrumentKey::binance_futures_trade(&symbol)
         );
         assert_eq!(report.price.inner(), dec!(58.833));
         server.await.expect("local WebSocket server");
     }
 
     #[test]
-    fn request_weight_is_source_native() {
-        assert_eq!(agg_trade_request_weight(BinanceMarketSegment::Spot), 4);
-        assert_eq!(
-            agg_trade_request_weight(BinanceMarketSegment::UsdmFutures),
-            20
-        );
+    fn request_weight_source_native() {
+        let spot = BinanceAggTradeSource::connect(BinanceSourceConfig::default(), test_compute())
+            .expect("spot source");
+        let futures_config = BinanceSourceConfig::usdm_futures_default();
+        let futures = BinanceAggTradeSource::connect_usdm_futures(
+            futures_config.clone(),
+            BinanceRequestBudget::new(&futures_config).expect("futures budget"),
+            test_compute(),
+        )
+        .expect("futures source");
+
+        assert_eq!(spot.request_weight(), 4);
+        assert_eq!(futures.request_weight(), 20);
     }
 
     #[tokio::test]
-    async fn usdm_futures_recovery_uses_fapi_and_preserves_provenance() {
+    async fn usdm_uses_preserves_provenance() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/fapi/v1/aggTrades"))
@@ -783,7 +762,7 @@ mod tests {
             rest_url: server.uri(),
             ..BinanceSourceConfig::default()
         };
-        let source = BinanceAggTradeSource::connect_usdm_futures_with_budget(
+        let source = BinanceAggTradeSource::connect_usdm_futures(
             config.clone(),
             BinanceRequestBudget::new(&config).expect("budget"),
             test_compute(),
@@ -797,16 +776,16 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert_eq!(
             reports[0].source_id,
-            DomainSourceId::binance_usdm_futures_agg_trade()
+            DomainSourceId::binance_futures_trade()
         );
         assert_eq!(
             reports[0].instrument_key,
-            DomainInstrumentKey::binance_usdm_futures_agg_trade(&symbol)
+            DomainInstrumentKey::binance_futures_trade(&symbol)
         );
     }
 
     #[tokio::test]
-    async fn official_archive_decodes_through_bounded_batches() {
+    async fn official_archive_decodes_batches() {
         let server = MockServer::start().await;
         let bytes = archive_bytes(
             "42,65000.125,0.01,100,101,1735689600010866,False,True\n\
@@ -866,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_checksum_and_microsecond_rows_are_strictly_decoded() {
+    fn archive_checksum_microsecond_decoded() {
         let bytes = archive_bytes(
             "agg_trade_id,price,quantity,first_trade_id,last_trade_id,timestamp,\
              buyer_is_market_maker,best_price_match\n\

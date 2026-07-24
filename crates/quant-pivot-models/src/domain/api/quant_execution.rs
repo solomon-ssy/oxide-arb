@@ -557,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn statuses_csv_decodes_each_wire_label() {
+    fn statuses_csv_decodes_label() {
         assert_eq!(
             parse_statuses("approved,approved_by_policy"),
             Some(vec![
@@ -568,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn statuses_csv_trims_and_skips_blanks() {
+    fn statuses_csv_skips_blanks() {
         assert_eq!(
             parse_statuses(" submitted , , partially_filled "),
             Some(vec![
@@ -579,20 +579,20 @@ mod tests {
     }
 
     #[test]
-    fn statuses_csv_empty_is_none() {
+    fn statuses_csv_empty_none() {
         assert_eq!(parse_statuses(""), None);
         assert_eq!(parse_statuses("   "), None);
     }
 
     #[test]
-    fn statuses_csv_rejects_unknown_label() {
+    fn statuses_rejects_unknown_label() {
         let result: Result<OrderIntentListQuery, _> =
             serde_json::from_value(serde_json::json!({ "statuses": "approved,bogus" }));
         assert!(result.is_err());
     }
 
     #[test]
-    fn absent_statuses_defaults_to_none() {
+    fn absent_statuses_defaults_none() {
         let query: OrderIntentListQuery = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(query.statuses, None);
     }

@@ -71,10 +71,7 @@ pub use research::{
 use serde::Deserialize;
 pub use web::{JwtConfig, WebConfig};
 
-use crate::{
-    config::validation::{validate_deploy_common, validate_deploy_for_quant_mode},
-    enums::quant::QuantRuntimeMode,
-};
+use crate::{config::validation::validate_deploy_mode, enums::quant::QuantRuntimeMode};
 
 /// Deserialized deploy-configuration root.
 ///
@@ -153,7 +150,7 @@ impl DeployConfig {
     /// Warnings are streamed to `tracing::warn` as a side effect so callers
     /// get uniform telemetry. Also used by [`Self::load`].
     pub fn ensure_valid_common(&self) -> QuantResult<()> {
-        let report = validate_deploy_common(self);
+        let report = self.validate_deploy_common();
         for w in &report.warnings {
             tracing::warn!("Deploy config warning: {w}");
         }
@@ -168,7 +165,7 @@ impl DeployConfig {
     /// is known — the persisted operational mode, not a config value.
     #[must_use]
     pub fn validate_for_quant_mode(&self, mode: QuantRuntimeMode) -> ConfigValidationReport {
-        let report = validate_deploy_for_quant_mode(self, mode);
+        let report = validate_deploy_mode(self, mode);
         for w in &report.warnings {
             tracing::warn!(mode = ?mode, "Deploy config warning: {w}");
         }
@@ -176,7 +173,7 @@ impl DeployConfig {
     }
 
     /// Fail-closed gate for quant-mode-aware validation.
-    pub fn ensure_valid_for_quant_mode(&self, mode: QuantRuntimeMode) -> QuantResult<()> {
+    pub fn ensure_mode_valid(&self, mode: QuantRuntimeMode) -> QuantResult<()> {
         let report = self.validate_for_quant_mode(mode);
         if report.has_errors() {
             return Err(ConfigError::from(report).into());
@@ -199,7 +196,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_loads_when_file_absent() {
+    fn default_config_loads_absent() {
         let deploy = DeployConfig::load("nonexistent_dir_for_test");
         assert!(deploy.is_ok(), "defaults should load: {deploy:?}");
     }
@@ -212,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn public_rpc_endpoint_rejects_secret_bearing_url_shapes() {
+    fn public_rpc_rejects_shapes() {
         let mut deploy = DeployConfig::default();
         deploy.polymarket.onchain.rpc_endpoint = PolygonRpcEndpoint::Public {
             url: "https://provider.invalid/v2/provider-key".to_owned(),
@@ -226,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_rpc_endpoint_accepts_authenticated_url_without_debug_leakage() {
+    fn protected_accepts_without_leakage() {
         let mut deploy = DeployConfig::default();
         deploy.polymarket.onchain.rpc_endpoint = PolygonRpcEndpoint::Protected {
             url: SecretText::from("https://provider.invalid/v2/provider-key?tenant=private"),
@@ -238,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn deploy_debug_redacts_every_credential_family() {
+    fn deploy_debug_redacts_family() {
         let sentinel = "qp-secret-redaction-sentinel";
         let mut deploy = DeployConfig::default();
         deploy.polymarket.onchain.rpc_endpoint = PolygonRpcEndpoint::Protected {
@@ -277,21 +274,21 @@ mod tests {
     }
 
     #[test]
-    fn report_only_validates_with_credentials() {
+    fn report_only_validates_credentials() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.quant.account.funder = Some("0xfunder".into());
         deploy.web.jwt.signing_key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into();
         deploy
-            .ensure_valid_for_quant_mode(QuantRuntimeMode::ReportOnly)
+            .ensure_mode_valid(QuantRuntimeMode::ReportOnly)
             .expect("report_only with credentials must validate");
     }
 
     #[test]
-    fn ensure_valid_for_quant_mode_fails_on_auto_execution_missing_credentials() {
+    fn ensure_fails_missing_credentials() {
         let deploy = DeployConfig::default();
         let err = deploy
-            .ensure_valid_for_quant_mode(QuantRuntimeMode::AutoExecution)
+            .ensure_mode_valid(QuantRuntimeMode::AutoExecution)
             .expect_err("AutoExecution without credentials must fail closed");
         assert!(err.to_string().contains("missing required credentials"));
     }
@@ -304,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_sections_are_rejected_in_deploy_toml() {
+    fn runtime_sections_rejected_toml() {
         for section in [
             "detection",
             "risk",
@@ -345,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn secret_text_deserializes_plaintext_and_stays_redacted() {
+    fn secret_text_deserializes_redacted() {
         let plaintext: DeployConfig =
             toml::from_str("[keys]\nprivate_key = \"0xplaintext\"\n").expect("plaintext secret");
         assert_eq!(plaintext.keys.private_key(), Some("0xplaintext"));
@@ -353,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn local_toml_overrides_base_values() {
+    fn local_toml_overrides_values() {
         let dir = env::temp_dir().join(format!("quant_pivot_local_cfg_test_{}", process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp config dir");
@@ -376,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn local_plaintext_overlay_reaches_postgres_adapter_and_stays_redacted() {
+    fn local_plaintext_overlay_redacted() {
         let dir = env::temp_dir().join(format!("quant_pivot_local_secret_{}", process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp config dir");
@@ -406,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn production_example_deserializes_and_placeholders_fail_validation() {
+    fn placeholders_fail_validation() {
         let template = workspace_config_dir().join("quant-pivot.production.example.toml");
         if !template.exists() {
             eprintln!("skipping production_example_toml_deserializes: {template:?} missing");
@@ -422,7 +419,7 @@ mod tests {
         ));
         assert!(
             parsed
-                .ensure_valid_for_quant_mode(QuantRuntimeMode::ReportOnly)
+                .ensure_mode_valid(QuantRuntimeMode::ReportOnly)
                 .is_err(),
             "production placeholders must be replaced before startup"
         );

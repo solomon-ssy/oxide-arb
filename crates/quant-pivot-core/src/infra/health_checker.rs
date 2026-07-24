@@ -112,7 +112,7 @@ impl HealthChecker {
 
     /// Milliseconds since the last CLOB websocket message on any shard.
     #[must_use]
-    pub fn ws_last_message_age_ms(&self) -> Option<u64> {
+    pub fn ws_message_age_ms(&self) -> Option<u64> {
         self.ws_health.last_message_age_ms()
     }
 

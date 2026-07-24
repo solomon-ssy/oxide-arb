@@ -61,7 +61,7 @@ mod tests {
     use super::SecretText;
 
     #[test]
-    fn plaintext_deserializes_and_debug_never_exposes_it() {
+    fn plaintext_deserializes_never_exposes() {
         let secret: SecretText =
             serde_json::from_str("\"correct horse battery staple\"").expect("deserialize secret");
         assert_eq!(secret.expose_secret(), "correct horse battery staple");

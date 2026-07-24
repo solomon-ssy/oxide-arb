@@ -34,7 +34,7 @@ pub use admission::{
     AdmissionCheck, AdmissionCheckTrace, AdmissionDecision, AdmissionExposureState, AdmissionInput,
     AdmissionInputBuilder, AdmissionInputBuilderDeps, AdmissionModelState, AdmissionSeams,
     AdmissionVenueMetadata, DefaultAdmissionEngine, ExecutionAdmissionEngine, StateVersion,
-    VenueHealth, prepare_entry_order,
+    VenueHealth,
 };
 pub use breaker::{ExecutionBreaker, VenueHealthHandle};
 pub use dispatch_wake::DispatchWake;
@@ -51,7 +51,7 @@ pub use exit_dispatcher::{CoreExitDispatcher, ExitDispatcherDeps, ExitSubmitRequ
 pub use exit_monitor::{
     CompositeExitSignalEvaluator, ExitDecision, ExitMonitorHealth, ExitMonitorHealthHandle,
     ExitMonitorInput, ExitOrderSpec, ExitSignalContext, ExitSignalEvaluation, ExitSignalEvaluator,
-    ExitSignalVerdict, decide_exit,
+    ExitSignalVerdict,
 };
 pub use exit_monitor_service::{ExitMonitorService, ExitMonitorServiceDeps};
 pub use intent_lifecycle::IntentLifecyclePublisher;
@@ -69,6 +69,5 @@ pub use reconciliation::{
     ClobReconciliationReader, CollectedReconciliation, EvidenceCollector,
     OperatorReconcileResolution, ReconcileFacts, ReconciliationDecision, ReconciliationService,
     ReconciliationServiceDeps, VenueEvidenceCollector, VenuePresence, VenueReconciliationReader,
-    decide,
 };
 pub use trade_policy_guard::require_frozen_trade_policy;

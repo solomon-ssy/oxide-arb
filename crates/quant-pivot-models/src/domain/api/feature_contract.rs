@@ -59,7 +59,7 @@ mod tests {
     };
 
     #[test]
-    fn feature_contract_serializes_the_hash_bound_wire_shape() {
+    fn feature_contract_serializes_shape() {
         let view = FeatureContractView {
             feature_schema_hash: ContentHash::parse(concat!(
                 "blake3:",

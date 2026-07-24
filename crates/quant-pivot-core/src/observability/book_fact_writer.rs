@@ -19,7 +19,7 @@ use quant_pivot_models::{
         },
         common::{Side, TickSize},
     },
-    types::{ContentHash, MarketId, PartitionId, Price, Shares, TokenId, Usd},
+    types::{Bps, ContentHash, MarketId, PartitionId, Price, Shares, TokenId, Usd},
 };
 use quant_pivot_storage::write::{AsyncWriter, DurableWriter};
 use rust_decimal::Decimal;
@@ -422,9 +422,9 @@ fn merge_mean_decimal(
     next_count: u64,
 ) -> Option<ChDecimal64> {
     opt_weighted_mean(
-        current.map(ChDecimal64::to_decimal),
+        current.map(Decimal::from),
         current_count,
-        next.map(ChDecimal64::to_decimal),
+        next.map(Decimal::from),
         next_count,
     )
     .map(ChDecimal64::from)
@@ -442,24 +442,24 @@ fn merge_microstructure_row(current: &mut BookMicrostructureRow, next: BookMicro
 
     // Best-bid / best-ask OHLC: open untouched (first), close = latest.
     current.best_bid_high = opt_max(
-        current.best_bid_high.map(|v| v.to_price().inner()),
-        next.best_bid_high.map(|v| v.to_price().inner()),
+        current.best_bid_high.map(|v| Price::from(v).inner()),
+        next.best_bid_high.map(|v| Price::from(v).inner()),
     )
     .map(|d| ChPrice::from(Price::new(d)));
     current.best_bid_low = opt_min(
-        current.best_bid_low.map(|v| v.to_price().inner()),
-        next.best_bid_low.map(|v| v.to_price().inner()),
+        current.best_bid_low.map(|v| Price::from(v).inner()),
+        next.best_bid_low.map(|v| Price::from(v).inner()),
     )
     .map(|d| ChPrice::from(Price::new(d)));
     current.best_bid_close = next.best_bid_close;
     current.best_ask_high = opt_max(
-        current.best_ask_high.map(|v| v.to_price().inner()),
-        next.best_ask_high.map(|v| v.to_price().inner()),
+        current.best_ask_high.map(|v| Price::from(v).inner()),
+        next.best_ask_high.map(|v| Price::from(v).inner()),
     )
     .map(|d| ChPrice::from(Price::new(d)));
     current.best_ask_low = opt_min(
-        current.best_ask_low.map(|v| v.to_price().inner()),
-        next.best_ask_low.map(|v| v.to_price().inner()),
+        current.best_ask_low.map(|v| Price::from(v).inner()),
+        next.best_ask_low.map(|v| Price::from(v).inner()),
     )
     .map(|d| ChPrice::from(Price::new(d)));
     current.best_ask_close = next.best_ask_close;
@@ -467,19 +467,19 @@ fn merge_microstructure_row(current: &mut BookMicrostructureRow, next: BookMicro
 
     // Spread band: real min / max, true mean.
     current.spread_bps_min = opt_min(
-        current.spread_bps_min.map(|v| v.to_bps().inner()),
-        next.spread_bps_min.map(|v| v.to_bps().inner()),
+        current.spread_bps_min.map(|v| Bps::from(v).inner()),
+        next.spread_bps_min.map(|v| Bps::from(v).inner()),
     )
     .map(ChBps::from);
     current.spread_bps_max = opt_max(
-        current.spread_bps_max.map(|v| v.to_bps().inner()),
-        next.spread_bps_max.map(|v| v.to_bps().inner()),
+        current.spread_bps_max.map(|v| Bps::from(v).inner()),
+        next.spread_bps_max.map(|v| Bps::from(v).inner()),
     )
     .map(ChBps::from);
     current.spread_bps_avg = opt_weighted_mean(
-        current.spread_bps_avg.map(|v| v.to_bps().inner()),
+        current.spread_bps_avg.map(|v| Bps::from(v).inner()),
         prior_count,
-        next.spread_bps_avg.map(|v| v.to_bps().inner()),
+        next.spread_bps_avg.map(|v| Bps::from(v).inner()),
         next_count,
     )
     .map(ChBps::from);
@@ -487,23 +487,23 @@ fn merge_microstructure_row(current: &mut BookMicrostructureRow, next: BookMicro
     // Depth (`_avg`) and imbalance: true observation-weighted means, so the
     // `_avg` column name is honest instead of "last value wins".
     current.top1_depth_usd_avg = opt_weighted_mean(
-        current.top1_depth_usd_avg.map(|v| v.to_usd().inner()),
+        current.top1_depth_usd_avg.map(|v| Usd::from(v).inner()),
         prior_count,
-        next.top1_depth_usd_avg.map(|v| v.to_usd().inner()),
+        next.top1_depth_usd_avg.map(|v| Usd::from(v).inner()),
         next_count,
     )
     .map(ChUsd::from);
     current.top5_depth_usd_avg = opt_weighted_mean(
-        current.top5_depth_usd_avg.map(|v| v.to_usd().inner()),
+        current.top5_depth_usd_avg.map(|v| Usd::from(v).inner()),
         prior_count,
-        next.top5_depth_usd_avg.map(|v| v.to_usd().inner()),
+        next.top5_depth_usd_avg.map(|v| Usd::from(v).inner()),
         next_count,
     )
     .map(ChUsd::from);
     current.top20_depth_usd_avg = opt_weighted_mean(
-        current.top20_depth_usd_avg.map(|v| v.to_usd().inner()),
+        current.top20_depth_usd_avg.map(|v| Usd::from(v).inner()),
         prior_count,
-        next.top20_depth_usd_avg.map(|v| v.to_usd().inner()),
+        next.top20_depth_usd_avg.map(|v| Usd::from(v).inner()),
         next_count,
     )
     .map(ChUsd::from);
@@ -611,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn imbalance_is_share_weighted_not_usd_biased() {
+    fn imbalance_share_not_biased() {
         // Low-mid book with EQUAL shares per side. The old full-book USD formula
         // returned a large negative value (ask price ≫ bid price); the top-N
         // share formula is zero — the correct "balanced" reading.
@@ -620,25 +620,25 @@ mod tests {
     }
 
     #[test]
-    fn imbalance_is_minus_one_when_bids_empty() {
+    fn imbalance_minus_one_empty() {
         let snap = snapshot(&[], &[level(60, 10)]);
         assert_eq!(snap.summary.imbalance, Some(Decimal::NEGATIVE_ONE));
     }
 
     #[test]
-    fn imbalance_is_plus_one_when_asks_empty() {
+    fn imbalance_plus_one_empty() {
         let snap = snapshot(&[level(40, 10)], &[]);
         assert_eq!(snap.summary.imbalance, Some(Decimal::ONE));
     }
 
     #[test]
-    fn imbalance_none_when_both_sides_empty() {
+    fn imbalance_none_both_empty() {
         let snap = snapshot(&[], &[]);
         assert_eq!(snap.summary.imbalance, None);
     }
 
     #[test]
-    fn partition_accumulator_rolls_and_flushes_one_bucket() {
+    fn partition_accumulator_rolls_bucket() {
         let token_id = TokenId::new("token");
         let snap = snapshot(&[level(40, 10)], &[level(60, 10)]);
         let mut accumulator = MicrostructureAccumulator::default();
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn partition_accumulator_flushes_quiet_completed_bucket() {
+    fn partition_accumulator_flushes_bucket() {
         let token_id = TokenId::new("token");
         let snap = snapshot(&[level(40, 10)], &[level(60, 10)]);
         let mut accumulator = MicrostructureAccumulator::default();
@@ -689,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn opt_weighted_mean_respects_observation_counts() {
+    fn opt_weighted_mean_counts() {
         // 0.2 over 3 obs merged with 0.6 over 1 obs → (0.2*3 + 0.6*1)/4 = 0.3.
         assert_eq!(
             opt_weighted_mean(Some(Decimal::new(2, 1)), 3, Some(Decimal::new(6, 1)), 1),
@@ -703,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn opt_min_max_track_extrema_over_none() {
+    fn opt_min_max_none() {
         assert_eq!(
             opt_min(Some(Decimal::TEN), Some(Decimal::ONE)),
             Some(Decimal::ONE)
@@ -717,22 +717,22 @@ mod tests {
     }
 
     #[test]
-    fn merge_mean_decimal_is_a_true_running_mean() {
+    fn merge_mean_decimal_mean() {
         let current = Some(ChDecimal64::from(Decimal::new(2, 1))); // 0.2, 1 obs
         let next = Some(ChDecimal64::from(Decimal::new(6, 1))); // 0.6, 1 obs
         let merged = merge_mean_decimal(current, 1, next, 1).expect("some");
-        assert_eq!(merged.to_decimal(), Decimal::new(4, 1)); // 0.4
+        assert_eq!(Decimal::from(merged), Decimal::new(4, 1)); // 0.4
     }
 
     #[test]
-    fn merge_mean_decimal_ignores_none_contributions() {
+    fn merge_mean_ignores_contributions() {
         let value = Some(ChDecimal64::from(Decimal::new(3, 1)));
         assert_eq!(
-            merge_mean_decimal(value, 5, None, 1).map(ChDecimal64::to_decimal),
+            merge_mean_decimal(value, 5, None, 1).map(Decimal::from),
             Some(Decimal::new(3, 1)),
         );
         assert_eq!(
-            merge_mean_decimal(None, 5, value, 1).map(ChDecimal64::to_decimal),
+            merge_mean_decimal(None, 5, value, 1).map(Decimal::from),
             Some(Decimal::new(3, 1)),
         );
     }

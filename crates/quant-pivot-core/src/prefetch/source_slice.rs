@@ -565,7 +565,7 @@ impl SourceSliceMaterializer {
                 identity.pit_cutoff,
             )
             .await?;
-        let (gap_records, invalid_sessions) = gap_evidence(&prefetched)?;
+        let (gap_records, invalid_sessions) = prefetched.gap_evidence()?;
         Ok(SourceSliceInputs {
             prefetched,
             clob_market_info,
@@ -620,8 +620,8 @@ impl SourceSliceMaterializer {
                 SourceSliceObjectKind::L2Ledger,
                 records(
                     &inputs.l2_ledger,
-                    |row| millis(row.venue_event_time),
-                    |row| millis(row.persisted_time),
+                    |row| DateTime::from_timestamp_millis(row.venue_event_time),
+                    |row| DateTime::from_timestamp_millis(row.persisted_time),
                 )?,
             )
             .await?,
@@ -631,8 +631,8 @@ impl SourceSliceMaterializer {
                 SourceSliceObjectKind::L2Session,
                 records(
                     &inputs.sessions,
-                    |row| millis(row.opened_at),
-                    |row| millis(row.recorded_at),
+                    |row| DateTime::from_timestamp_millis(row.opened_at),
+                    |row| DateTime::from_timestamp_millis(row.recorded_at),
                 )?,
             )
             .await?,
@@ -647,8 +647,8 @@ impl SourceSliceMaterializer {
                 SourceSliceObjectKind::BookMicrostructure,
                 records(
                     &micro,
-                    |row| millis(row.bucket_time),
-                    |row| millis(row.available_at),
+                    |row| DateTime::from_timestamp_millis(row.bucket_time),
+                    |row| DateTime::from_timestamp_millis(row.available_at),
                 )?,
             )
             .await?,
@@ -659,8 +659,8 @@ impl SourceSliceMaterializer {
                 SourceSliceObjectKind::TradeTape,
                 records(
                     &trades,
-                    |row| millis(row.event_time),
-                    |row| millis(row.ingestion_time),
+                    |row| DateTime::from_timestamp_millis(row.event_time),
+                    |row| DateTime::from_timestamp_millis(row.ingestion_time),
                 )?,
             )
             .await?,
@@ -671,8 +671,8 @@ impl SourceSliceMaterializer {
                 SourceSliceObjectKind::Resolution,
                 records(
                     &resolutions,
-                    |row| millis(row.resolved_at),
-                    |row| millis(row.observed_at),
+                    |row| DateTime::from_timestamp_millis(row.resolved_at),
+                    |row| DateTime::from_timestamp_millis(row.observed_at),
                 )?,
             )
             .await?,
@@ -1017,38 +1017,40 @@ fn merge_l2_ledger(
     Ok(canonical)
 }
 
-fn gap_evidence(
-    prefetched: &Prefetched,
-) -> QuantResult<(Vec<SourceSliceRecord>, Vec<SourceSliceInvalidSession>)> {
-    let mut gap_rows = Vec::new();
-    let mut invalid = BTreeMap::new();
-    for (token_id, series) in &prefetched.micro {
-        for row in series.iter().filter(|row| row.gap_count > 0) {
-            let event_at = millis(row.bucket_time);
-            let available_at = millis(row.available_at);
-            gap_rows.push(source_record(row, event_at, available_at)?);
-            let snapshot = prefetched.books.get(token_id).and_then(|rows| {
-                rows.iter()
-                    .rev()
-                    .find(|snapshot| snapshot.venue_event_time <= row.bucket_time)
-            });
-            if let (Some(event_at), Some(snapshot)) = (event_at, snapshot) {
-                let diagnostic_hash = CanonicalDigest::content_hash_json(row)?;
-                invalid
-                    .entry((token_id.to_string(), snapshot.stream_session_id.to_string()))
-                    .or_insert_with(|| SourceSliceInvalidSession {
-                        token_id: token_id.to_string(),
-                        session_id: snapshot.stream_session_id.to_string(),
-                        invalidated_at: event_at,
-                        first_failure_sequence: None,
-                        reason: SourceSliceSessionInvalidationReason::SequenceGap,
-                        diagnostic_hash,
-                    });
+impl Prefetched {
+    fn gap_evidence(
+        &self,
+    ) -> QuantResult<(Vec<SourceSliceRecord>, Vec<SourceSliceInvalidSession>)> {
+        let mut gap_rows = Vec::new();
+        let mut invalid = BTreeMap::new();
+        for (token_id, series) in &self.micro {
+            for row in series.iter().filter(|row| row.gap_count > 0) {
+                let event_at = DateTime::from_timestamp_millis(row.bucket_time);
+                let available_at = DateTime::from_timestamp_millis(row.available_at);
+                gap_rows.push(source_record(row, event_at, available_at)?);
+                let snapshot = self.books.get(token_id).and_then(|rows| {
+                    rows.iter()
+                        .rev()
+                        .find(|snapshot| snapshot.venue_event_time <= row.bucket_time)
+                });
+                if let (Some(event_at), Some(snapshot)) = (event_at, snapshot) {
+                    let diagnostic_hash = CanonicalDigest::content_hash_json(row)?;
+                    invalid
+                        .entry((token_id.to_string(), snapshot.stream_session_id.to_string()))
+                        .or_insert_with(|| SourceSliceInvalidSession {
+                            token_id: token_id.to_string(),
+                            session_id: snapshot.stream_session_id.to_string(),
+                            invalidated_at: event_at,
+                            first_failure_sequence: None,
+                            reason: SourceSliceSessionInvalidationReason::SequenceGap,
+                            diagnostic_hash,
+                        });
+                }
             }
         }
+        gap_rows.sort_by(|left, right| left.record_key.cmp(&right.record_key));
+        Ok((gap_rows, invalid.into_values().collect()))
     }
-    gap_rows.sort_by(|left, right| left.record_key.cmp(&right.record_key));
-    Ok((gap_rows, invalid.into_values().collect()))
 }
 
 async fn catalog_proof(
@@ -1239,10 +1241,6 @@ fn group_weather_forecasts(
         grouped.entry(station).or_insert_with(Vec::new).push(value);
     }
     Ok(grouped)
-}
-
-const fn millis(value: i64) -> Option<DateTime<Utc>> {
-    DateTime::from_timestamp_millis(value)
 }
 
 fn ensure_not_cancelled(cancel: &CancellationToken, stage: &'static str) -> QuantResult<()> {

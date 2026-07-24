@@ -1081,7 +1081,7 @@ fn execute_exit(
             continue;
         };
         saw_book = true;
-        let max_book_age_ms = candidate_entry_max_book_age(&candidate.entry_execution);
+        let max_book_age_ms = candidate_max_book_age(&candidate.entry_execution);
         if book_is_stale(book, observation.at, max_book_age_ms)? {
             continue;
         }
@@ -1191,7 +1191,7 @@ fn book_is_stale(book: &PolicyReplayBook, at: DateTime<Utc>, max_age_ms: u64) ->
     Ok(u64::try_from(age).map_or(true, |age| age > max_age_ms))
 }
 
-const fn candidate_entry_max_book_age(entry: &EntryOrderTemplate) -> u64 {
+const fn candidate_max_book_age(entry: &EntryOrderTemplate) -> u64 {
     match entry {
         EntryOrderTemplate::PassivePostOnly {
             max_book_age_ms, ..
@@ -1349,7 +1349,7 @@ mod tests {
     }
 
     #[test]
-    fn aggressive_entry_scale_out_and_take_profit_are_cash_conserving() {
+    fn aggressive_entry_scale_conserving() {
         let observations = vec![
             observation(0, dec!(0.49), dec!(0.50)),
             observation(60, dec!(0.53), dec!(0.54)),
@@ -1383,7 +1383,7 @@ mod tests {
     }
 
     #[test]
-    fn two_x_latency_uses_a_later_book_instead_of_scaling_returns() {
+    fn two_x_uses_returns() {
         let observations = vec![
             observation(0, dec!(0.49), dec!(0.50)),
             observation(1, dec!(0.50), dec!(0.51)),
@@ -1423,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn fok_never_turns_insufficient_depth_into_a_partial_position() {
+    fn fok_never_turns_position() {
         let mut first = observation(0, dec!(0.49), dec!(0.50));
         first.book.as_mut().expect("book").asks = vec![level(dec!(0.50), dec!(1))];
         let outcome = replay_policy_candidate(
@@ -1447,7 +1447,7 @@ mod tests {
     }
 
     #[test]
-    fn future_evidence_is_rejected_fail_closed() {
+    fn future_evidence_is_rejected() {
         let mut invalid = observation(0, dec!(0.49), dec!(0.50));
         invalid.book.as_mut().expect("book").available_at = at(1);
         assert!(
@@ -1467,7 +1467,7 @@ mod tests {
     }
 
     #[test]
-    fn signal_invalidation_precedes_take_profit() {
+    fn signal_invalidation_precedes_profit() {
         let mut invalidated = observation(60, dec!(0.56), dec!(0.57));
         invalidated
             .signal
@@ -1491,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn passive_entry_requires_reconciled_opposite_side_trade_after_queue_ahead() {
+    fn passive_requires_after_ahead() {
         let mut passive = candidate(FillRequirement::AllowPartial);
         passive.entry_execution = EntryOrderTemplate::PassivePostOnly {
             placement: PassivePlacement::JoinBestBid,
@@ -1529,7 +1529,7 @@ mod tests {
     }
 
     #[test]
-    fn trailing_stop_activates_from_peak_and_liquidates_the_residual() {
+    fn trailing_stop_activates_residual() {
         let mut trailing = candidate(FillRequirement::AllowPartial);
         trailing.exit.upper_barrier_bps = Bps::new(dec!(20_000));
         trailing.exit.trailing_stop = Some(TrailingStopTemplate {
@@ -1558,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn hold_to_resolution_uses_fractional_token_payout_without_a_fee_schedule() {
+    fn hold_uses_without_schedule() {
         let mut held = candidate(FillRequirement::AllowPartial);
         held.exit.settlement_mode = ExitSettlementMode::HoldToResolution;
         held.exit.upper_barrier_bps = Bps::new(dec!(20_000));
@@ -1597,7 +1597,7 @@ mod tests {
     }
 
     #[test]
-    fn time_axis_rejects_duplicate_heartbeats() {
+    fn time_rejects_duplicate_heartbeats() {
         let duplicated = observation(0, dec!(0.49), dec!(0.50));
         assert!(
             replay_policy_candidate(
@@ -1616,7 +1616,7 @@ mod tests {
     }
 
     #[test]
-    fn latency_delay_is_ceil_quantized() {
+    fn latency_delay_ceil_quantized() {
         let observations = vec![
             observation(0, dec!(0.49), dec!(0.50)),
             observation(1, dec!(0.50), dec!(0.51)),

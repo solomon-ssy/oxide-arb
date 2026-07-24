@@ -230,7 +230,7 @@ mod tests {
     use crate::model::calibrator::{ProbabilityCalibrator, isotonic::IsotonicCalibrator};
 
     #[test]
-    fn truly_calibrated_isotonic_has_near_zero_ece() {
+    fn truly_calibrated_zero_ece() {
         // Ten groups, one per reliability bin, each carrying a score that
         // *is* its own bin midpoint and an empirical win rate exactly equal
         // to that midpoint. A perfect isotonic fit reproduces `calibrated ==
@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn reliability_ece_bins_on_predicted_probability_not_raw_score() {
+    fn reliability_ece_not_score() {
         // A steep Platt sigmoid (a=-10, b=5) maps score=0.55 to a calibrated
         // probability of ≈0.622. Binning on the *raw score* would place this
         // sample in bucket 5 (`[0.5, 0.6)`); binning on the *calibrated
@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn log_loss_never_infinite_at_extreme_probabilities() {
+    fn log_loss_never_probabilities() {
         let mapping = MonotoneMapping::Isotonic {
             knots: vec![
                 IsotonicKnot {
@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn brier_and_log_loss_match_known_closed_form() {
+    fn brier_log_loss_form() {
         // An identity mapping (knots at (0,0)/(1,1), exact linear
         // interpolation) makes `calibrated == score`, so Brier/log-loss can
         // be hand-verified against a fixed, independently-computed golden
@@ -392,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_split_yields_zeroed_report() {
+    fn empty_split_yields_report() {
         let mapping = MonotoneMapping::Isotonic { knots: Vec::new() };
         let report = compute_reliability(&mapping, &[], dec!(0.95)).expect("reliability");
         assert_eq!(report.n_samples, 0);
@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn isotonic_calibration_improves_brier_vs_uncalibrated() {
+    fn isotonic_calibration_improves_uncalibrated() {
         let mut scores = Vec::new();
         let mut outcomes = Vec::new();
         for i in 0..300_i32 {

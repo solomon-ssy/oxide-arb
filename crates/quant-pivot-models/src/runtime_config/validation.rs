@@ -32,23 +32,25 @@ pub type FeaturesConfigValidator = fn(&FeaturesConfig, &mut ConfigValidationRepo
 #[distributed_slice]
 pub static FEATURES_CONFIG_VALIDATORS: [FeaturesConfigValidator] = [..];
 
-/// Mode-agnostic invariants for the boot policy-resource bundle.
-#[must_use]
-pub fn validate_runtime_config(config: &DecisionPolicySnapshot) -> ConfigValidationReport {
-    let mut report = ConfigValidationReport::default();
-    validate_selection(config, &mut report);
-    validate_data_quality(config, &mut report);
-    validate_features(config, &mut report);
-    validate_factors(config, &mut report);
-    validate_domain(config, &mut report);
-    validate_model(config, &mut report);
-    validate_quality_gate(config, &mut report);
-    validate_training(config, &mut report);
-    validate_reports(config, &mut report);
-    validate_portfolio(config, &mut report);
-    validate_execution(config, &mut report);
-    validate_research(config, &mut report);
-    report
+impl DecisionPolicySnapshot {
+    /// Mode-agnostic invariants for the boot policy-resource bundle.
+    #[must_use]
+    pub fn validate_runtime_config(&self) -> ConfigValidationReport {
+        let mut report = ConfigValidationReport::default();
+        validate_selection(self, &mut report);
+        validate_data_quality(self, &mut report);
+        validate_features(self, &mut report);
+        validate_factors(self, &mut report);
+        validate_domain(self, &mut report);
+        validate_model(self, &mut report);
+        validate_quality_gate(self, &mut report);
+        validate_training(self, &mut report);
+        validate_reports(self, &mut report);
+        validate_portfolio(self, &mut report);
+        validate_execution(self, &mut report);
+        validate_research(self, &mut report);
+        report
+    }
 }
 
 fn validate_domain(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
@@ -232,18 +234,15 @@ fn validate_features(config: &DecisionPolicySnapshot, report: &mut ConfigValidat
     for validator in FEATURES_CONFIG_VALIDATORS {
         validator(&config.profile_artifacts.features.definition, report);
     }
-    validate_executable_price_feature_family(config, report);
-    validate_feature_family_domain_coherence(config, report);
+    validate_price_features(config, report);
+    validate_feature_domains(config, report);
 }
 
 /// Every model family prices candidates from the actual primary/secondary
 /// best-ask cells. Disabling the price-book family would make the runtime emit
 /// an empty batch while appearing otherwise healthy, so reject that config at
 /// its governed boundary.
-fn validate_executable_price_feature_family(
-    config: &DecisionPolicySnapshot,
-    report: &mut ConfigValidationReport,
-) {
+fn validate_price_features(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
     if !config
         .profile_artifacts
         .features
@@ -272,10 +271,7 @@ fn validate_executable_price_feature_family(
 ///   vertical no feature/factor ever consumes (wasted ingest with zero
 ///   consumer, and a silent trap for anyone who later flips `Domain` on
 ///   expecting history to already exist consistently).
-fn validate_feature_family_domain_coherence(
-    config: &DecisionPolicySnapshot,
-    report: &mut ConfigValidationReport,
-) {
+fn validate_feature_domains(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
     let domain_family_enabled = config
         .profile_artifacts
         .features
@@ -1235,15 +1231,12 @@ fn validate_research_validation(
     report: &mut ConfigValidationReport,
 ) {
     let validation = &config.profile_artifacts.research_method.research.validation;
-    validate_research_validation_purge_cpcv(validation, report);
+    validate_cpcv_purge(validation, report);
     validate_research_validation_trials(&validation.trials, report);
-    validate_research_validation_pbo_gates(validation, report);
+    validate_pbo_gates(validation, report);
 }
 
-fn validate_research_validation_purge_cpcv(
-    validation: &ResearchValidationConfig,
-    report: &mut ConfigValidationReport,
-) {
+fn validate_cpcv_purge(validation: &ResearchValidationConfig, report: &mut ConfigValidationReport) {
     half_open_unit(
         "research.validation.purge.embargo_pct",
         &validation.purge.embargo_pct,
@@ -1331,10 +1324,7 @@ fn validate_research_validation_trials(
     }
 }
 
-fn validate_research_validation_pbo_gates(
-    validation: &ResearchValidationConfig,
-    report: &mut ConfigValidationReport,
-) {
+fn validate_pbo_gates(validation: &ResearchValidationConfig, report: &mut ConfigValidationReport) {
     if validation.pbo.block_count < 4 || !validation.pbo.block_count.is_multiple_of(2) {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "research.validation.pbo.block_count",
@@ -1452,7 +1442,7 @@ fn non_empty_numbers(field: &'static str, values: &[u64], report: &mut ConfigVal
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigValidationError, DecisionPolicySnapshot, validate_runtime_config};
+    use super::{ConfigValidationError, DecisionPolicySnapshot};
     use crate::{
         enums::factor::FactorFamily,
         runtime_config::{
@@ -1463,13 +1453,13 @@ mod tests {
     };
 
     #[test]
-    fn default_runtime_config_is_valid() {
-        let report = validate_runtime_config(&DecisionPolicySnapshot::default());
+    fn default_runtime_config_valid() {
+        let report = DecisionPolicySnapshot::default().validate_runtime_config();
         assert!(!report.has_errors());
     }
 
     #[test]
-    fn outcome_reconciliation_policy_is_bounded() {
+    fn outcome_reconciliation_policy_bounded() {
         let mut zero = DecisionPolicySnapshot::default();
         zero.operational_control.outcome_reconciliation.sweep_secs = 0;
         zero.operational_control
@@ -1478,7 +1468,7 @@ mod tests {
         zero.operational_control
             .outcome_reconciliation
             .source_block_span = 0;
-        let zero_report = validate_runtime_config(&zero);
+        let zero_report = zero.validate_runtime_config();
         for field in [
             "operational_control.outcome_reconciliation.sweep_secs",
             "operational_control.outcome_reconciliation.candidate_batch_size",
@@ -1502,7 +1492,7 @@ mod tests {
             .operational_control
             .outcome_reconciliation
             .source_block_span = OutcomeReconciliationPolicy::MAX_SOURCE_BLOCK_SPAN + 1;
-        let oversized_report = validate_runtime_config(&oversized);
+        let oversized_report = oversized.validate_runtime_config();
         assert_eq!(
             oversized_report
                 .errors
@@ -1521,10 +1511,10 @@ mod tests {
     }
 
     #[test]
-    fn report_top_n_has_an_absolute_cascade_budget() {
+    fn report_top_n_budget() {
         let mut config = DecisionPolicySnapshot::default();
         config.recommendation.reports.max_top_n = MAX_REPORT_TOP_N + 1;
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.errors.iter().any(|error| matches!(
             error,
             ConfigValidationError::InvalidValue {
@@ -1543,19 +1533,19 @@ mod tests {
     }
 
     #[test]
-    fn kill_switch_emergency_exit_slippage_must_be_positive() {
+    fn kill_switch_emergency_positive() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .operational_control
             .kill_switch
             .emergency_exit
             .max_slippage_bps = 0;
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.has_errors());
     }
 
     #[test]
-    fn execution_breaker_rejects_invalid_thresholds_and_loss_cap() {
+    fn execution_rejects_invalid_cap() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .execution_risk
@@ -1569,20 +1559,20 @@ mod tests {
         config.execution_risk.breaker.venue_min_window_samples = 0;
         config.execution_risk.breaker.venue_window_secs = 0;
         config.execution_risk.breaker.cooldown_secs = 0;
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.has_errors());
 
         let mut config = DecisionPolicySnapshot::default();
         config.execution_risk.breaker.daily_realized_loss_cap_usd =
             DecimalValue::new(rust_decimal_macros::dec!(-1));
-        assert!(validate_runtime_config(&config).has_errors());
+        assert!(config.validate_runtime_config().has_errors());
     }
 
     #[test]
-    fn runtime_config_rejects_zero_embargo_secs() {
+    fn rejects_zero_embargo() {
         let mut config = DecisionPolicySnapshot::default();
         config.model_routing.model.calibration.embargo_secs = 0;
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(
             report.has_errors(),
             "a zero embargo defeats the purge/embargo anti-leakage guarantee"
@@ -1590,11 +1580,11 @@ mod tests {
     }
 
     #[test]
-    fn runtime_config_rejects_calibration_ci_confidence_outside_open_interval() {
+    fn runtime_config_rejects_interval() {
         let mut config = DecisionPolicySnapshot::default();
         config.model_routing.model.calibration.ci_confidence =
             DecimalValue::new(rust_decimal_macros::dec!(0.5));
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(
             report.has_errors(),
             "ci_confidence must be strictly greater than 0.5"
@@ -1603,7 +1593,7 @@ mod tests {
         let mut config = DecisionPolicySnapshot::default();
         config.model_routing.model.calibration.ci_confidence =
             DecimalValue::new(rust_decimal_macros::dec!(1.0));
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(
             report.has_errors(),
             "ci_confidence must be strictly less than 1.0"
@@ -1612,7 +1602,7 @@ mod tests {
         let mut config = DecisionPolicySnapshot::default();
         config.model_routing.model.calibration.ci_confidence =
             DecimalValue::new(rust_decimal_macros::dec!(0.90));
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(
             !report.has_errors(),
             "0.90 is within the valid (0.5, 1) range"
@@ -1620,7 +1610,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_config_rejects_malformed_bias_table_ref_before_activation() {
+    fn runtime_rejects_malformed_before() {
         // A malformed ref must be caught at the pure semantic-validation pass
         // (this function, no IO), not deferred to `BiasTableApplicator::reload`
         // at config activation time.
@@ -1632,7 +1622,7 @@ mod tests {
             .structural
             .favorite_longshot
             .bias_table_ref = Some("not-a-uuid".to_owned());
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(
             report.has_errors(),
             "a non-UUID bias_table_ref must fail validation before activation"
@@ -1646,7 +1636,7 @@ mod tests {
             .structural
             .favorite_longshot
             .bias_table_ref = Some(CalibrationArtifactId::from_v7().to_string());
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(
             !report.has_errors(),
             "a well-formed CalibrationArtifactId UUID must pass the format check"
@@ -1660,19 +1650,19 @@ mod tests {
             .structural
             .favorite_longshot
             .bias_table_ref = None;
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(!report.has_errors(), "None must never be rejected");
     }
 
     #[test]
-    fn runtime_config_rejects_unbounded_edge_uncertainty_k() {
+    fn runtime_rejects_unbounded_k() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .execution_risk
             .portfolio
             .kelly_safety
             .edge_uncertainty_k = DecimalValue::new(rust_decimal_macros::dec!(10.01));
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(
             report.has_errors(),
             "an unbounded k silently collapses every calibrated candidate's shrink to the floor"
@@ -1684,19 +1674,19 @@ mod tests {
             .portfolio
             .kelly_safety
             .edge_uncertainty_k = DecimalValue::new(rust_decimal_macros::dec!(10));
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(!report.has_errors(), "10 is the inclusive upper bound");
     }
 
     #[test]
-    fn runtime_config_rejects_zero_edge_uncertainty_floor() {
+    fn runtime_rejects_zero_floor() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .execution_risk
             .portfolio
             .kelly_safety
             .edge_uncertainty_floor = DecimalValue::new(rust_decimal_macros::dec!(0));
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(
             report.has_errors(),
             "a zero floor lets edge-uncertainty shrink zero out Kelly sizing entirely"
@@ -1714,7 +1704,7 @@ mod tests {
     }
 
     #[test]
-    fn research_training_tail_fraction_must_be_positive_unit_fraction() {
+    fn research_training_tail_fraction() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .profile_artifacts
@@ -1722,7 +1712,7 @@ mod tests {
             .research
             .training
             .tail_fraction = DecimalValue::new(rust_decimal_macros::dec!(0));
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.has_errors());
 
         let mut config = DecisionPolicySnapshot::default();
@@ -1732,7 +1722,7 @@ mod tests {
             .research
             .training
             .tail_fraction = DecimalValue::new(rust_decimal_macros::dec!(1.01));
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.has_errors());
 
         let mut config = DecisionPolicySnapshot::default();
@@ -1742,12 +1732,12 @@ mod tests {
             .research
             .training
             .tail_fraction = DecimalValue::new(rust_decimal_macros::dec!(0.10));
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(!report.has_errors());
     }
 
     #[test]
-    fn research_training_ndcg_and_pseudo_top_n_must_fit_max_top_n() {
+    fn research_training_ndcg_n() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .profile_artifacts
@@ -1755,7 +1745,7 @@ mod tests {
             .research
             .training
             .ndcg_k = 0;
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.has_errors());
 
         let mut config = DecisionPolicySnapshot::default();
@@ -1765,7 +1755,7 @@ mod tests {
             .research
             .training
             .pseudo_top_n = config.recommendation.reports.max_top_n + 1;
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.has_errors());
 
         let mut config = DecisionPolicySnapshot::default();
@@ -1781,12 +1771,12 @@ mod tests {
             .research
             .training
             .pseudo_top_n = 20;
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(!report.has_errors());
     }
 
     #[test]
-    fn structural_family_in_config_is_accepted() {
+    fn structural_family_config_accepted() {
         let config = DecisionPolicySnapshot::default();
         assert!(
             config
@@ -1797,12 +1787,12 @@ mod tests {
                 .contains(&FactorFamily::Structural),
             "default config must enable the structural family"
         );
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(!report.has_errors());
     }
 
     #[test]
-    fn duplicate_factor_family_is_rejected() {
+    fn duplicate_factor_family_rejected() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .profile_artifacts
@@ -1810,12 +1800,12 @@ mod tests {
             .definition
             .enabled_factor_families
             .push(FactorFamily::Liquidity);
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.has_errors());
     }
 
     #[test]
-    fn empty_factor_families_is_rejected() {
+    fn empty_factor_families_rejected() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .profile_artifacts
@@ -1823,12 +1813,12 @@ mod tests {
             .definition
             .enabled_factor_families
             .clear();
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.has_errors());
     }
 
     #[test]
-    fn invalid_enabled_cron_schedule_is_rejected() {
+    fn invalid_enabled_cron_rejected() {
         let mut config = DecisionPolicySnapshot::default();
         config.report_schedule.schedules = vec![ReportScheduleConfig {
             schedule_id: "bad".into(),
@@ -1840,23 +1830,23 @@ mod tests {
                 timezone: None,
             },
         }];
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.has_errors());
     }
 
     #[test]
-    fn duplicate_schedule_id_is_rejected() {
+    fn duplicate_schedule_id_rejected() {
         let mut config = DecisionPolicySnapshot::default();
         config.report_schedule.schedules = vec![
             ReportScheduleConfig::default(),
             ReportScheduleConfig::default(),
         ];
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.has_errors());
     }
 
     #[test]
-    fn price_book_feature_family_is_required_for_executable_model_prices() {
+    fn price_book_required_prices() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .profile_artifacts
@@ -1865,7 +1855,7 @@ mod tests {
             .enabled_feature_families
             .retain(|family| *family != FeatureFamily::PriceBook);
 
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.errors.iter().any(|error| matches!(
             error,
             ConfigValidationError::InvalidValue { field, detail }
@@ -1875,7 +1865,7 @@ mod tests {
     }
 
     #[test]
-    fn domain_feature_family_without_any_enabled_vertical_is_rejected() {
+    fn rejects_domain_without_vertical() {
         let mut config = DecisionPolicySnapshot::default();
         assert!(
             config
@@ -1896,12 +1886,12 @@ mod tests {
         {
             *enabled = false;
         }
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.has_errors());
     }
 
     #[test]
-    fn enabled_vertical_without_domain_feature_family_is_rejected() {
+    fn enabled_vertical_without_rejected() {
         let mut config = DecisionPolicySnapshot::default();
         config
             .profile_artifacts
@@ -1919,16 +1909,16 @@ mod tests {
                 .any(|&on| on),
             "default config enables the crypto vertical"
         );
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(report.has_errors());
     }
 
     #[test]
-    fn domain_feature_family_coherent_with_enabled_vertical_is_accepted() {
+    fn domain_feature_family_accepted() {
         // The default config keeps both sides coherent — no regression beyond
-        // `default_runtime_config_is_valid`, but explicit for this invariant.
+        // `default_runtime_config_valid`, but explicit for this invariant.
         let config = DecisionPolicySnapshot::default();
-        let report = validate_runtime_config(&config);
+        let report = config.validate_runtime_config();
         assert!(!report.has_errors());
     }
 }

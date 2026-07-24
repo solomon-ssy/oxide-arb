@@ -452,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn cohort_matrix_keeps_resolution_execution_and_policy_truth_orthogonal() {
+    fn cohort_matrix_keeps_orthogonal() {
         let context = context(QuantRuntimeMode::SemiAuto);
         let window = window(&context);
         let resolution = resolution_outcome(&context, window.cutoff() - Duration::minutes(2));
@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn report_only_and_no_attempt_never_become_execution_learning_negatives() {
+    fn report_no_never_negatives() {
         let report_only = context(QuantRuntimeMode::ReportOnly);
         let report_only_window = window(&report_only);
         let report_only_decision = evaluate_feedback_cohort(
@@ -559,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_late_truth_is_censored_without_blocking_policy_evaluation() {
+    fn missing_late_without_evaluation() {
         let context = context(QuantRuntimeMode::SemiAuto);
         let window = window(&context);
         let late_resolution = resolution_outcome(&context, window.cutoff() + Duration::minutes(1));
@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn publication_kind_window_and_profile_are_closed_boundaries() {
+    fn publication_kind_window_boundaries() {
         let (mut recommendation, mut report) =
             recommendation_and_report(QuantRuntimeMode::SemiAuto);
         recommendation.status = RecommendationStatus::Prepared;
@@ -714,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_tamper_fails_closed_but_unconsumed_plane_stays_orthogonal() {
+    fn visible_tamper_rejects_orthogonal() {
         let context = context(QuantRuntimeMode::SemiAuto);
         let window = window(&context);
         let resolution = resolution_outcome(&context, window.cutoff() - Duration::minutes(2));
@@ -775,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn submitted_execution_evidence_is_mandatory_and_report_only_is_fail_closed() {
+    fn submitted_execution_evidence_rejects() {
         let semi_auto = context(QuantRuntimeMode::SemiAuto);
         let semi_auto_window = window(&semi_auto);
         let (_, outcome) =

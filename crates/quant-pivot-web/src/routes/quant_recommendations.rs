@@ -109,7 +109,7 @@ pub async fn entry_condition(
     };
     let latest_authoritative_evaluation = state
         .quant_facts
-        .latest_applied_entry_condition_evaluation(&instance.condition_instance_id)
+        .latest_entry_evaluation(&instance.condition_instance_id)
         .await?
         .map(|row| evaluation_view(&row))
         .transpose()?;
@@ -311,7 +311,7 @@ mod tests {
     use super::evidence_metadata;
 
     #[test]
-    fn price_evidence_exposes_a_structured_source_checkpoint() {
+    fn price_evidence_exposes_checkpoint() {
         let observed_at = "2026-07-14T04:29:45.570Z";
         let evidence = serde_json::from_value::<ConditionLeafEvidence>(json!({
             "kind": "price",

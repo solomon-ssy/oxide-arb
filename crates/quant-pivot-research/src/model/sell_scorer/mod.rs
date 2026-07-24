@@ -23,8 +23,8 @@ pub mod trainer;
 use std::collections::BTreeMap;
 
 pub use position_state::{
-    LotStateInput, PositionStateFeatures, is_position_state_factor, position_state_features,
-    position_state_signed, position_state_signed_contribution,
+    LotStateInput, PositionStateFeatures, is_position_state_factor,
+    position_state_signed_contribution,
 };
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::types::{
@@ -134,7 +134,7 @@ impl WeightedSellScorerRuntime {
             }
         }
 
-        for (name, signed) in position_state_signed(&input.position_state) {
+        for (name, signed) in input.position_state.position_state_signed() {
             let Some(signed) = signed else {
                 continue;
             };
@@ -314,42 +314,44 @@ mod tests {
         test_support::content_hash as hash,
     };
 
-    fn artifact() -> SellScorerArtifact {
-        let input_contract = ModelInputContract::single_required("book.mid");
-        let input_contract_hash =
-            model_input_contract_hash(&input_contract).expect("input contract hash");
-        SellScorerArtifact {
-            header: ModelArtifactHeader {
-                model_version_id: ModelVersionId::from_v7(),
-                model_spec_definition_hash: hash("spec"),
-                profile_ref: builtin_research_profiles()
-                    .expect("built-in profiles")
-                    .remove(0)
-                    .profile_ref,
-                model_family: ModelFamily::HoldVsExitWeighted,
-                feature_schema_hash: hash("aa"),
-                factor_schema_hash: hash("bb"),
-                trade_policy_artifact_id: None,
-                trade_policy_hash: None,
-            },
-            weights: vec![
-                FactorWeight {
-                    factor: names::MOMENTUM_ROC,
-                    weight: dec!(0.5),
+    impl SellScorerArtifact {
+        fn test_fixture() -> Self {
+            let input_contract = ModelInputContract::single_required("book.mid");
+            let input_contract_hash =
+                model_input_contract_hash(&input_contract).expect("input contract hash");
+            Self {
+                header: ModelArtifactHeader {
+                    model_version_id: ModelVersionId::from_v7(),
+                    model_spec_definition_hash: hash("spec"),
+                    profile_ref: builtin_research_profiles()
+                        .expect("built-in profiles")
+                        .remove(0)
+                        .profile_ref,
+                    model_family: ModelFamily::HoldVsExitWeighted,
+                    feature_schema_hash: hash("aa"),
+                    factor_schema_hash: hash("bb"),
+                    trade_policy_artifact_id: None,
+                    trade_policy_hash: None,
                 },
-                FactorWeight {
-                    factor: names::POSITION_UNREALIZED_PNL,
-                    weight: dec!(0.5),
-                },
-            ],
-            prediction_horizon_secs: 86_400,
-            output_spec: SellScorerOutputSpec::conservative(),
-            label_schema_hash: hash("cc"),
-            training_dataset_hash: hash("dd"),
-            training_input_hash: hash("ee"),
-            input_contract,
-            input_contract_hash,
-            objective_report: None,
+                weights: vec![
+                    FactorWeight {
+                        factor: names::MOMENTUM_ROC,
+                        weight: dec!(0.5),
+                    },
+                    FactorWeight {
+                        factor: names::POSITION_UNREALIZED_PNL,
+                        weight: dec!(0.5),
+                    },
+                ],
+                prediction_horizon_secs: 86_400,
+                output_spec: SellScorerOutputSpec::conservative(),
+                label_schema_hash: hash("cc"),
+                training_dataset_hash: hash("dd"),
+                training_input_hash: hash("ee"),
+                input_contract,
+                input_contract_hash,
+                objective_report: None,
+            }
         }
     }
 
@@ -371,8 +373,9 @@ mod tests {
     }
 
     #[test]
-    fn strong_exit_signal_scores_positive_alpha_and_high_p_exit() {
-        let runtime = WeightedSellScorerRuntime::new(artifact()).expect("runtime");
+    fn strong_exit_signal_exit() {
+        let runtime =
+            WeightedSellScorerRuntime::new(SellScorerArtifact::test_fixture()).expect("runtime");
         let score = runtime
             .score(&SellScoreInput {
                 market_factors: vec![market_factor(
@@ -393,8 +396,9 @@ mod tests {
     }
 
     #[test]
-    fn hold_signal_scores_negative_alpha_and_low_p_exit() {
-        let runtime = WeightedSellScorerRuntime::new(artifact()).expect("runtime");
+    fn hold_signal_scores_exit() {
+        let runtime =
+            WeightedSellScorerRuntime::new(SellScorerArtifact::test_fixture()).expect("runtime");
         let score = runtime
             .score(&SellScoreInput {
                 market_factors: vec![market_factor(
@@ -414,13 +418,13 @@ mod tests {
     }
 
     #[test]
-    fn logistic_probability_preserves_neutral_baseline() {
+    fn logistic_probability_preserves_baseline() {
         let probability = logistic_probability(dec!(0)).expect("finite logistic input");
         assert_eq!(probability.inner(), dec!(0.5));
     }
 
     #[test]
-    fn sell_signal_policy_research_baseline_has_no_thresholds() {
+    fn sell_signal_no_thresholds() {
         let policy = SellSignalPolicy::research_baseline();
         assert_eq!(policy.min_confidence, dec!(0));
         assert_eq!(policy.min_p_exit_better, dec!(0));

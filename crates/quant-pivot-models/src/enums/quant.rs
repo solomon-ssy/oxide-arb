@@ -129,6 +129,12 @@ impl RecommendationReportStatus {
             )
         )
     }
+
+    /// Whether this lifecycle state is valid only after publication.
+    #[must_use]
+    pub const fn requires_publication(self) -> bool {
+        matches!(self, Self::Published | Self::Superseded | Self::Expired)
+    }
 }
 
 pg_enum! {
@@ -240,6 +246,19 @@ impl RecommendationStatus {
         )
     }
 
+    /// Whether this lifecycle state is valid only after publication.
+    #[must_use]
+    pub const fn requires_publication(self) -> bool {
+        matches!(
+            self,
+            Self::Published
+                | Self::Superseded
+                | Self::Expired
+                | Self::IntentCreated
+                | Self::Executed
+        )
+    }
+
     /// Statuses that retain new-intent authority for SQL `IN` filters.
     pub const NEW_INTENT_AUTHORITY: [Self; 2] = [Self::Published, Self::IntentCreated];
 
@@ -280,6 +299,20 @@ impl OutcomeSide {
             Self::Yes => 1,
             Self::No => 2,
         }
+    }
+}
+
+impl FeedbackCohort {
+    /// Whether samples in this cohort require finalized resolution evidence.
+    #[must_use]
+    pub const fn requires_resolution(self) -> bool {
+        matches!(self, Self::ModelLearning | Self::PolicyEvaluation)
+    }
+
+    /// Whether samples in this cohort require real execution evidence.
+    #[must_use]
+    pub const fn requires_execution(self) -> bool {
+        matches!(self, Self::ExecutionLearning | Self::PolicyEvaluation)
     }
 }
 
@@ -1376,7 +1409,7 @@ mod tests {
     };
 
     #[test]
-    fn feedback_outcome_enums_are_closed_and_wire_stable() {
+    fn feedback_outcome_enums_stable() {
         for (state, wire) in [
             (
                 RecommendationResolutionKind::WinnerTakeAll,
@@ -1433,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn cohort_reason_codes_are_closed_and_disjoint() {
+    fn cohort_reason_codes_disjoint() {
         for (reason, wire) in [
             (
                 CohortExclusionReason::RecommendationNotPublished,
@@ -1493,7 +1526,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_parity_stage_wire_contract_includes_capture_and_data_quality() {
+    fn feature_parity_stage_quality() {
         for (wire, stage) in [
             ("capture", FeatureParityStage::Capture),
             ("data_quality", FeatureParityStage::DataQuality),
@@ -1507,7 +1540,7 @@ mod tests {
     }
 
     #[test]
-    fn recommendation_status_predicates_are_orthogonal_and_exhaustive() {
+    fn recommendation_status_predicates_exhaustive() {
         for (status, allows_new_intent, completes_rollup) in [
             (RecommendationStatus::Prepared, false, false),
             (RecommendationStatus::Published, true, false),
@@ -1538,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn order_intent_status_predicates_match_sql_arrays() {
+    fn order_intent_status_arrays() {
         for status in [
             OrderIntentStatus::Draft,
             OrderIntentStatus::PendingApproval,

@@ -33,7 +33,7 @@ pub trait AccountReadPort: Send + Sync {
 
     async fn latest_equity_snapshot(&self) -> QuantResult<Option<EquitySnapshotInfo>>;
 
-    async fn find_equity_snapshot_by_id(
+    async fn find_equity_snapshot(
         &self,
         id: &EquitySnapshotId,
     ) -> QuantResult<Option<EquitySnapshotInfo>>;

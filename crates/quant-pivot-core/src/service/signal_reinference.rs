@@ -260,8 +260,8 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
                     score_retention: signal.composite_score.inner() / entry_score.inner(),
                     expected_return_bps: signal.expected_return_bps,
                     execution_eligible: signal.auto_exec_eligible,
-                    verdict: reinference_verdict_kind(&verdict),
-                    detail: reinference_verdict_detail(&verdict),
+                    verdict: verdict.reinference_verdict_kind(),
+                    detail: verdict.reinference_verdict_detail(),
                     shadow: policy.signal_reinference.shadow_mode,
                 })
         });
@@ -277,24 +277,24 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
     }
 }
 
-const fn reinference_verdict_kind(verdict: &ExitSignalVerdict) -> ExitReinferenceVerdictKind {
-    match verdict {
-        ExitSignalVerdict::ThesisInvalidated { .. } => {
-            ExitReinferenceVerdictKind::ThesisInvalidated
+impl ExitSignalVerdict {
+    const fn reinference_verdict_kind(&self) -> ExitReinferenceVerdictKind {
+        match self {
+            Self::ThesisInvalidated { .. } => ExitReinferenceVerdictKind::ThesisInvalidated,
+            Self::Holds | Self::OpportunisticSell { .. } => ExitReinferenceVerdictKind::Holds,
+            Self::Indeterminate { .. } => ExitReinferenceVerdictKind::Indeterminate,
         }
-        ExitSignalVerdict::Holds | ExitSignalVerdict::OpportunisticSell { .. } => {
-            ExitReinferenceVerdictKind::Holds
-        }
-        ExitSignalVerdict::Indeterminate { .. } => ExitReinferenceVerdictKind::Indeterminate,
     }
 }
 
-fn reinference_verdict_detail(verdict: &ExitSignalVerdict) -> String {
-    match verdict {
-        ExitSignalVerdict::ThesisInvalidated { detail }
-        | ExitSignalVerdict::OpportunisticSell { detail, .. }
-        | ExitSignalVerdict::Indeterminate { detail } => detail.clone(),
-        ExitSignalVerdict::Holds => "thesis holds".to_owned(),
+impl ExitSignalVerdict {
+    fn reinference_verdict_detail(&self) -> String {
+        match self {
+            Self::ThesisInvalidated { detail }
+            | Self::OpportunisticSell { detail, .. }
+            | Self::Indeterminate { detail } => detail.clone(),
+            Self::Holds => "thesis holds".to_owned(),
+        }
     }
 }
 

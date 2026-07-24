@@ -269,7 +269,7 @@ mod tests {
     use super::wilson_lower_bound;
 
     #[test]
-    fn wilson_bound_is_fail_closed_for_empty_samples() {
+    fn wilson_rejects_empty_samples() {
         assert_eq!(wilson_lower_bound(0, 0).expect("bound"), Decimal::ZERO);
         assert!(wilson_lower_bound(2, 1).is_err());
     }

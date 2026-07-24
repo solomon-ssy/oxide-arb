@@ -7,6 +7,6 @@ pub mod ledger;
 pub mod market;
 
 pub use clob_market_info::PgClobMarketInfoRepository;
-pub use event::{PgEventRepository, PgEventRepositoryTxn};
+pub use event::PgEventRepository;
 pub use ledger::PgCatalogLedgerRepository;
-pub use market::{PgMarketRepository, PgMarketRepositoryTxn};
+pub use market::PgMarketRepository;

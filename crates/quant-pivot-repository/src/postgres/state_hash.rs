@@ -39,7 +39,7 @@ mod tests {
     use super::apply_transition_hashes;
 
     #[test]
-    fn apply_transition_hashes_populates_before_and_after() {
+    fn apply_transition_before_after() {
         let log = NewOperationLog {
             id: OperationLogId::from_v7(),
             request_id: "test".into(),

@@ -170,7 +170,7 @@ impl BacktestPort for CoreBacktestPort {
         };
         let comparison = self
             .comparison_report_repo
-            .find_by_backtest_report_id(backtest_report_id)
+            .find_by_backtest_report(backtest_report_id)
             .await
             .map_err(QuantError::from)?;
         Ok(Some(BacktestReportView::from_info(
@@ -179,12 +179,12 @@ impl BacktestPort for CoreBacktestPort {
         )))
     }
 
-    async fn comparison_ids_for_backtest_reports(
+    async fn backtest_comparison_ids(
         &self,
         backtest_report_ids: &[BacktestReportId],
     ) -> QuantResult<HashMap<BacktestReportId, ModelComparisonReportId>> {
         self.comparison_report_repo
-            .comparison_ids_for_backtest_reports(backtest_report_ids)
+            .backtest_comparison_ids(backtest_report_ids)
             .await
             .map_err(QuantError::from)
     }

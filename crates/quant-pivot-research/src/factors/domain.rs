@@ -245,23 +245,27 @@ fn beta_regime_factor() -> (FactorDefinitionDocument, Arc<dyn FactorComputer>) {
     (spec, Arc::new(computer))
 }
 
-/// Whether a vector's market routes to the crypto vertical.
-fn routes_to_crypto(features: &FeatureVector) -> bool {
-    match features.value(&CATEGORY) {
-        Some(FeatureValue::Category(category)) => {
-            DomainFamily::for_category(*category) == Some(DomainFamily::Crypto)
+impl FeatureVector {
+    /// Whether a vector's market routes to the crypto vertical.
+    fn routes_to_crypto(&self) -> bool {
+        match self.value(&CATEGORY) {
+            Some(FeatureValue::Category(category)) => {
+                DomainFamily::for_category(*category) == Some(DomainFamily::Crypto)
+            }
+            // No readable category ⇒ the vertical structurally cannot apply.
+            _ => false,
         }
-        // No readable category ⇒ the vertical structurally cannot apply.
-        _ => false,
     }
 }
 
-fn routes_to_weather(features: &FeatureVector) -> bool {
-    match features.value(&CATEGORY) {
-        Some(FeatureValue::Category(category)) => {
-            DomainFamily::for_category(*category) == Some(DomainFamily::Weather)
+impl FeatureVector {
+    fn routes_to_weather(&self) -> bool {
+        match self.value(&CATEGORY) {
+            Some(FeatureValue::Category(category)) => {
+                DomainFamily::for_category(*category) == Some(DomainFamily::Weather)
+            }
+            _ => false,
         }
-        _ => false,
     }
 }
 
@@ -357,7 +361,7 @@ impl FactorComputer for WeatherIdentityFactor {
     }
 
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
-        if !routes_to_weather(features) {
+        if !(features).routes_to_weather() {
             return Ok(not_applicable(&self.spec));
         }
         match read_input(features, &self.feature) {
@@ -391,7 +395,7 @@ impl FactorComputer for StrikePressureFactor {
     }
 
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
-        if !routes_to_crypto(features) {
+        if !(features).routes_to_crypto() {
             return Ok(not_applicable(&self.spec));
         }
         let (distance_state, tto_state) = (
@@ -455,7 +459,7 @@ impl FactorComputer for BetaRegimeFactor {
     }
 
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
-        if !routes_to_crypto(features) {
+        if !(features).routes_to_crypto() {
             return Ok(not_applicable(&self.spec));
         }
         let (momentum_state, vol_state) = (
@@ -583,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_routes_by_category_and_respects_family_gate() {
+    fn registry_routes_category_gate() {
         let registry = DomainFactorRegistry::build(&DomainConfig::default());
         assert_eq!(registry.for_category(MarketCategory::Crypto).len(), 2);
         assert!(registry.for_category(MarketCategory::Sports).is_empty());
@@ -594,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn crypto_factors_compute_and_fail_closed() {
+    fn crypto_factors_compute_rejects() {
         let factors = crypto_domain_factors();
 
         // Mapped category + present slice → scored raw values.
@@ -623,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn structural_not_applicable_input_never_collapses_to_domain_missing() {
+    fn structural_not_never_missing() {
         // A crypto-mapped market whose strike-pressure inputs are explicitly
         // `NullReason::NotApplicable` (not merely absent/unavailable) must
         // report `RawFactorEligibility::NotApplicable` — the SAME structural
@@ -653,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn beta_regime_is_vol_normalized() {
+    fn beta_regime_vol_normalized() {
         let factors = crypto_domain_factors();
         let (_, beta) = &factors[1];
         let raw = beta

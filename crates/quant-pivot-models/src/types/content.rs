@@ -465,6 +465,12 @@ impl SchemaVersion {
     }
 }
 
+impl Default for SchemaVersion {
+    fn default() -> Self {
+        Self::FIRST
+    }
+}
+
 impl Display for SchemaVersion {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.0)
@@ -548,7 +554,7 @@ mod tests {
         "blake3:0000000000000000000000000000000000000000000000000000000000000000";
 
     #[test]
-    fn content_hash_accepts_canonical_blake3() {
+    fn content_hash_accepts_blake3() {
         let h = ContentHash::parse(VALID_HASH).expect("valid");
         assert_eq!(h.to_string(), VALID_HASH);
         assert_eq!(h.as_bytes(), &[0; 32]);
@@ -556,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_is_inline_copy_value() {
+    fn content_hash_inline_value() {
         fn assert_copy<T: Copy>() {}
 
         assert_copy::<ContentHash>();
@@ -565,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_raw_blake3_golden_is_cross_platform_stable() {
+    fn content_hash_raw_stable() {
         let hash = CanonicalDigest::content_hash_bytes(b"abc");
         assert_eq!(
             hash.to_string(),
@@ -575,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_rejects_non_blake3_prefix() {
+    fn content_rejects_non_prefix() {
         let sha = format!("sha256:{}", "a".repeat(BLAKE3_HEX_LEN));
         assert!(ContentHash::parse(&sha).is_err());
         assert!(ContentHash::parse("blake3:short").is_err());
@@ -591,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_binary_wire_form_matches_canonical_string() {
+    fn content_hash_matches_string() {
         let hash = ContentHash::parse(VALID_HASH).expect("valid");
         let canonical = VALID_HASH.to_owned();
 
@@ -621,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_seaorm_value_type_validates() {
+    fn content_hash_seaorm_validates() {
         let valid = Value::String(Some(VALID_HASH.to_owned()));
         let parsed = <ContentHash as ValueType>::try_from(valid).expect("valid db value");
         assert_eq!(parsed.to_string(), VALID_HASH);
@@ -634,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_seaorm_roundtrip_value() {
+    fn content_hash_seaorm_value() {
         let hash = ContentHash::parse(VALID_HASH).expect("valid");
         let value: Value = hash.into();
         let back = <ContentHash as ValueType>::try_from(value).expect("roundtrip");
@@ -650,14 +656,14 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_try_new_rejects_non_positive() {
+    fn schema_version_rejects_non() {
         assert!(SchemaVersion::try_new(0).is_err());
         assert_eq!(SchemaVersion::try_new(3).unwrap().get(), 3);
         assert_eq!(SchemaVersion::FIRST.get(), 1);
     }
 
     #[test]
-    fn schema_version_serde_is_transparent_integer() {
+    fn schema_version_serde_integer() {
         let v = SchemaVersion::new(3);
         assert_eq!(serde_json::to_string(&v).unwrap(), "3");
         let back: SchemaVersion = serde_json::from_str("3").unwrap();
@@ -665,13 +671,13 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_serde_rejects_non_positive() {
+    fn schema_serde_rejects_non() {
         assert!(serde_json::from_str::<SchemaVersion>("0").is_err());
         assert!(serde_json::from_str::<SchemaVersion>("-1").is_err());
     }
 
     #[test]
-    fn schema_version_seaorm_value_type_validates() {
+    fn schema_version_seaorm_validates() {
         let valid = Value::Int(Some(3));
         assert_eq!(
             <SchemaVersion as ValueType>::try_from(valid)
@@ -686,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_seaorm_roundtrip_value() {
+    fn schema_version_seaorm_value() {
         let version = SchemaVersion::new(7);
         let value: Value = version.into();
         let back = <SchemaVersion as ValueType>::try_from(value).expect("roundtrip");

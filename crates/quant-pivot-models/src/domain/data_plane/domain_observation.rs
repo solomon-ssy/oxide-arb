@@ -72,7 +72,7 @@ impl DomainObservation {
             source_id: row.source_id.clone(),
             instrument_key: row.instrument_key.clone(),
             metric: DomainMetric::from_str(&row.metric).ok()?,
-            value: row.value.to_decimal(),
+            value: Decimal::from(row.value),
             observed_at: millis_to_utc(row.event_time)?,
             publish_time: millis_to_utc(row.publish_time)?,
             available_at: Some(millis_to_utc(row.ingestion_time)?),
@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_family_label_fails_closed() {
+    fn unknown_family_label_rejects() {
         let observation = DomainObservation {
             family: DomainFamily::Crypto,
             source_id: DomainSourceId::binance(),

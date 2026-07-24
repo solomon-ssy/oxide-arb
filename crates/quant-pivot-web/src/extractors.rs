@@ -25,9 +25,10 @@ use quant_pivot_models::{
         rbac::RoleInfo,
     },
     enums::rbac::RoleStatus,
-    types::RoleId,
+    types::{RoleId, UserId},
 };
 use serde::de::DeserializeOwned;
+use uuid::Error as UuidError;
 use validator::Validate;
 
 use crate::{error::WebError, jwt::Claims};
@@ -73,11 +74,11 @@ impl Pagination {
     pub const fn page_window(&self) -> PageWindow {
         self.0
     }
+}
 
-    /// Consume and return the hardened [`PageWindow`].
-    #[must_use]
-    pub const fn into_inner(self) -> PageWindow {
-        self.0
+impl From<Pagination> for PageWindow {
+    fn from(pagination: Pagination) -> Self {
+        pagination.0
     }
 }
 
@@ -172,6 +173,13 @@ pub struct AuthedActor {
     pub claims: Claims,
     /// The roles currently bound to the actor.
     pub roles: ActorRoles,
+}
+
+impl AuthedActor {
+    /// Parse the authenticated subject into the canonical user-id namespace.
+    pub fn user_id(&self) -> Result<UserId, UuidError> {
+        self.claims.sub.parse()
+    }
 }
 
 impl FromRequest for AuthedActor {

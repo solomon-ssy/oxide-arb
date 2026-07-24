@@ -99,7 +99,7 @@ fn successful_attempt(
     attempt
 }
 
-pub async fn trial_ledger_is_ordered_idempotent_cutoff_bound_and_append_only() {
+pub async fn trial_ledger_ordered_only() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let jobs = PgResearchJobRepository::new(db.clone());
@@ -156,7 +156,7 @@ pub async fn trial_ledger_is_ordered_idempotent_cutoff_bound_and_append_only() {
     );
 }
 
-pub async fn trial_ledger_rejects_row_hash_or_terminal_shape_tampering() {
+pub async fn trial_ledger_rejects_tampering() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let jobs = PgResearchJobRepository::new(db.clone());

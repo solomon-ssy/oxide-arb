@@ -193,7 +193,7 @@ mod tests {
     use super::AviationWeatherSource;
 
     #[tokio::test]
-    async fn maps_metar_and_correction_without_losing_same_time_revision() {
+    async fn maps_metar_preserves_revision() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/metar"))
@@ -237,7 +237,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preserves_a_source_receipt_that_precedes_nominal_observation_time() {
+    async fn preserves_source_receipt_time() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/metar"))

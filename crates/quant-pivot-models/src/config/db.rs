@@ -79,22 +79,22 @@ pub struct PostgresConfig {
 impl PostgresConfig {
     /// Build the connection URL for the configured application database.
     pub fn try_connection_url(&self) -> Result<String, ParseError> {
-        self.try_connection_url_with_database(&self.database)
+        self.try_database_url(&self.database)
     }
 
     /// Build a connection URL targeting a specific database name on the same
     /// server (e.g. the `postgres` maintenance catalog).
-    pub fn try_connection_url_with_database(&self, database: &str) -> Result<String, ParseError> {
+    pub fn try_database_url(&self, database: &str) -> Result<String, ParseError> {
         let mut url = Url::parse("postgres://localhost/")?;
         url.set_host(Some(self.host.as_str()))?;
         url.set_port(Some(self.port))
             .map_err(|()| ParseError::InvalidPort)?;
-        let escaped_user = escape_percent_for_url_setter(&self.user);
+        let escaped_user = escape_url_percent(&self.user);
         if url.set_username(&escaped_user).is_err() {
             return Err(ParseError::InvalidDomainCharacter);
         }
         if !self.password.is_empty() {
-            let escaped_password = escape_percent_for_url_setter(self.password.expose_secret());
+            let escaped_password = escape_url_percent(self.password.expose_secret());
             url.set_password(Some(&escaped_password))
                 .map_err(|()| ParseError::InvalidDomainCharacter)?;
         }
@@ -129,7 +129,7 @@ impl PostgresConfig {
 
 /// The `url` setters intentionally preserve percent-escape sequences. Escape a
 /// literal percent first so credentials such as `%2F` retain their exact bytes.
-fn escape_percent_for_url_setter(value: &str) -> String {
+fn escape_url_percent(value: &str) -> String {
     value.replace('%', "%25")
 }
 
@@ -149,7 +149,7 @@ impl Default for PostgresConfig {
             acquire_timeout_secs: default_acquire_timeout(),
             max_lifetime_secs: default_max_lifetime(),
             statement_timeout_ms: default_statement_timeout_ms(),
-            idle_in_transaction_timeout_ms: default_idle_in_transaction_timeout_ms(),
+            idle_in_transaction_timeout_ms: default_idle_timeout_ms(),
             lock_timeout_ms: default_lock_timeout_ms(),
             work_mem: default_work_mem(),
             verify_session_params: default_verify_session_params(),
@@ -195,7 +195,7 @@ const fn default_max_lifetime() -> u64 {
 const fn default_statement_timeout_ms() -> u64 {
     30_000
 }
-const fn default_idle_in_transaction_timeout_ms() -> u64 {
+const fn default_idle_timeout_ms() -> u64 {
     60_000
 }
 const fn default_lock_timeout_ms() -> u64 {
@@ -253,7 +253,7 @@ impl Default for ClickHouseConfig {
             password: SecretText::default(),
             flush_interval_secs: default_ch_flush_interval(),
             batch_size: default_ch_batch_size(),
-            max_concurrent_inserts: default_ch_max_concurrent_inserts(),
+            max_concurrent_inserts: default_ch_insert_limit(),
         }
     }
 }
@@ -273,7 +273,7 @@ const fn default_ch_flush_interval() -> u64 {
 const fn default_ch_batch_size() -> usize {
     5000
 }
-const fn default_ch_max_concurrent_inserts() -> usize {
+const fn default_ch_insert_limit() -> usize {
     8
 }
 
@@ -284,7 +284,7 @@ mod tests {
     use super::PostgresConfig;
 
     #[test]
-    fn postgres_url_percent_encodes_reserved_password_characters() {
+    fn postgres_url_encodes_characters() {
         let config = PostgresConfig {
             password: "@:/?#%".into(),
             ..PostgresConfig::default()

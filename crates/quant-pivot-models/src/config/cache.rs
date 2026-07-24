@@ -209,14 +209,14 @@ mod tests {
     use super::RedisConfig;
 
     #[test]
-    fn connection_url_without_auth_uses_host_and_port() {
+    fn authless_url_uses_port() {
         let cfg = RedisConfig::default();
         assert_eq!(cfg.connection_url(), "redis://localhost:6379");
         assert_eq!(cfg.endpoint(), "localhost:6379");
     }
 
     #[test]
-    fn connection_url_password_only_auth() {
+    fn connection_url_password_auth() {
         let cfg = RedisConfig {
             password: "s3cret".into(),
             ..RedisConfig::default()
@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn connection_url_user_and_password_auth() {
+    fn connection_url_user_auth() {
         let cfg = RedisConfig {
             user: "oxide".into(),
             password: "s3cret".into(),
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn connection_url_percent_encodes_special_characters() {
+    fn connection_url_encodes_characters() {
         let cfg = RedisConfig {
             password: "p@ss:w/rd".into(),
             ..RedisConfig::default()
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn connection_url_includes_database_when_non_zero() {
+    fn connection_url_non_zero() {
         let cfg = RedisConfig {
             database: 2,
             ..RedisConfig::default()

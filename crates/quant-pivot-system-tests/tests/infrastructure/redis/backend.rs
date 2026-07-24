@@ -39,7 +39,7 @@ pub async fn redis_set_get_roundtrip() {
     assert_eq!(val, Some(b"v1".to_vec()));
 }
 
-pub async fn redis_get_missing_returns_none() {
+pub async fn redis_missing_returns_none() {
     let (backend, _container) = setup_redis().await;
     let val = backend.get("nonexistent").await.unwrap();
     assert_eq!(val, None);
@@ -78,7 +78,7 @@ pub async fn redis_health_check() {
     backend.health_check().await.expect("health check");
 }
 
-pub async fn preproduction_cleanup_is_namespace_exact() {
+pub async fn preproduction_cleanup_namespace_exact() {
     let mut config = fresh_redis_config("redis_cleanup_exact");
     config.database = 0;
     "qp:".clone_into(&mut config.key_prefix);
@@ -124,7 +124,7 @@ pub async fn preproduction_cleanup_is_namespace_exact() {
     assert_eq!(preserved.as_deref(), Some("value"));
 }
 
-pub async fn preproduction_cleanup_fails_closed_with_a_concurrent_writer() {
+pub async fn preproduction_rejects_concurrent_writer() {
     let mut config = fresh_redis_config("redis_cleanup_concurrent");
     config.database = 0;
     "qp:".clone_into(&mut config.key_prefix);

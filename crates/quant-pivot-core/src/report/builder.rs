@@ -23,7 +23,7 @@ use quant_pivot_models::{
     runtime_config::DecisionPolicySnapshot,
     types::{
         Bps, ContentHash, EntryConditionTemplate, EntryConditionTemplateV1, FeatureVectorId,
-        MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId, PortfolioPlanId,
+        MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId, PortfolioPlanId, Price,
         ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportFunnelReason,
         ReportFunnelStage, Usd,
     },
@@ -207,9 +207,9 @@ impl DefaultReportBuilder {
         {
             return Ok(report);
         }
-        if let Some(report) = self.compose_if_trade_policy_unavailable(
-            &request, &context, &selection, &account, &equity,
-        )? {
+        if let Some(report) =
+            self.compose_without_policy(&request, &context, &selection, &account, &equity)?
+        {
             return Ok(report);
         }
 
@@ -250,7 +250,7 @@ impl DefaultReportBuilder {
                 account: &account,
                 equity: &equity,
                 empty: EmptyReportContext {
-                    reason: empty_reason_from_planner_rejections(
+                    reason: planner_empty_reason(
                         &plan.rejected,
                         plan.plan_row.optimizer_meta_json.status,
                     ),
@@ -264,7 +264,7 @@ impl DefaultReportBuilder {
                 model_run_id: Some(model_outcome.model_run_id),
                 market_selection_count: market_selection_count(&selection.included)?,
                 captures: artifacts.captures,
-                feature_vector_by_market: feature_vector_by_market(&features),
+                feature_vector_by_market: features.feature_vector_by_market(),
                 data_quality_snapshot: artifacts.data_quality_snapshot,
                 portfolio_plan: Some(plan.plan_row),
                 planner_rejected: &plan.rejected,
@@ -310,7 +310,7 @@ impl DefaultReportBuilder {
             equity,
             features,
         };
-        if let Some(report) = self.compose_if_no_accepted_features(&stage)? {
+        if let Some(report) = self.compose_without_features(&stage)? {
             return Ok(Err(report));
         }
 
@@ -319,7 +319,7 @@ impl DefaultReportBuilder {
             captures: features.captures.clone(),
             data_quality_snapshot: features.data_quality_snapshot.clone(),
         };
-        if let Some(report) = self.compose_if_no_model_signals(&stage, &model_outcome, artifacts)? {
+        if let Some(report) = self.compose_without_signals(&stage, &model_outcome, artifacts)? {
             return Ok(Err(report));
         }
         Ok(Ok(model_outcome))
@@ -415,7 +415,7 @@ impl DefaultReportBuilder {
         .map(Some)
     }
 
-    fn compose_if_trade_policy_unavailable(
+    fn compose_without_policy(
         &self,
         request: &BuildReportRequest,
         context: &BuildContext,
@@ -467,7 +467,7 @@ impl DefaultReportBuilder {
         .map(Some)
     }
 
-    fn compose_if_no_accepted_features(
+    fn compose_without_features(
         &self,
         stage: &FeatureStageRefs<'_>,
     ) -> QuantResult<Option<ComposedReport>> {
@@ -494,7 +494,7 @@ impl DefaultReportBuilder {
             model_run_id: None,
             market_selection_count: market_selection_count(&stage.selection.included)?,
             captures: stage.features.captures.clone(),
-            feature_vector_by_market: feature_vector_by_market(stage.features),
+            feature_vector_by_market: (stage.features).feature_vector_by_market(),
             data_quality_snapshot: stage.features.data_quality_snapshot.clone(),
             portfolio_plan: None,
             planner_rejected: &[],
@@ -505,7 +505,7 @@ impl DefaultReportBuilder {
         .map(Some)
     }
 
-    fn compose_if_no_model_signals(
+    fn compose_without_signals(
         &self,
         stage: &FeatureStageRefs<'_>,
         model_outcome: &ModelRunOutcome,
@@ -531,7 +531,7 @@ impl DefaultReportBuilder {
             model_run_id: Some(model_outcome.model_run_id),
             market_selection_count: market_selection_count(&stage.selection.included)?,
             captures: artifacts.captures,
-            feature_vector_by_market: feature_vector_by_market(stage.features),
+            feature_vector_by_market: (stage.features).feature_vector_by_market(),
             data_quality_snapshot: artifacts.data_quality_snapshot,
             portfolio_plan: None,
             planner_rejected: &[],
@@ -880,7 +880,7 @@ impl DefaultReportBuilder {
                 by_token
                     .entry(row.token_id.to_string())
                     .or_default()
-                    .insert(row.bucket_ms, price.to_price().inner());
+                    .insert(row.bucket_ms, Price::from(price).inner());
                 grid.insert(row.bucket_ms);
             }
         }
@@ -962,7 +962,7 @@ impl DefaultReportBuilder {
             {
                 prices.insert(
                     planned.candidate.market_id.clone(),
-                    Usd::new(report.price.to_decimal()),
+                    Usd::new(Decimal::from(report.price)),
                 );
             }
         }
@@ -1005,7 +1005,7 @@ impl DefaultReportBuilder {
             model_decisions: &input.model_outcome.decisions,
             early_funnel_terminal: None,
             captures: input.features.captures.clone(),
-            feature_vector_by_market: feature_vector_by_market(input.features),
+            feature_vector_by_market: (input.features).feature_vector_by_market(),
             data_quality_snapshot: input.features.data_quality_snapshot.clone(),
             model_run_id: Some(input.model_outcome.model_run_id),
             candidate_count: input.model_outcome.emitted,
@@ -1304,15 +1304,14 @@ fn empty_data_quality_snapshot(
     }
 }
 
-fn feature_vector_by_market(
-    features: &FeaturePipelineResult,
-) -> HashMap<MarketId, FeatureVectorId> {
-    features
-        .persisted
-        .iter()
-        .zip(features.accepted.iter())
-        .map(|(info, vector)| (vector.market_id.clone(), info.feature_vector_id))
-        .collect()
+impl FeaturePipelineResult {
+    fn feature_vector_by_market(&self) -> HashMap<MarketId, FeatureVectorId> {
+        self.persisted
+            .iter()
+            .zip(self.accepted.iter())
+            .map(|(info, vector)| (vector.market_id.clone(), info.feature_vector_id))
+            .collect()
+    }
 }
 
 const fn portfolio_caps(config: &DecisionPolicySnapshot) -> PortfolioCaps {
@@ -1415,7 +1414,7 @@ fn liquidity_score_cap(config: &DecisionPolicySnapshot) -> Usd {
 /// 4. any `AvailableCashExhausted` -> `AvailableCashExhausted` (distinct from
 ///    "no signal" so operators can tell "out of cash" from "no edge");
 /// 5. otherwise -> `NoPositiveSignal`.
-fn empty_reason_from_planner_rejections(
+fn planner_empty_reason(
     rejected: &[RejectedCandidate],
     solver_status: OptimizerSolverStatus,
 ) -> EmptyReportReason {
@@ -1452,7 +1451,7 @@ mod tests {
     };
     use quant_pivot_research::portfolio::RejectedCandidate;
 
-    use super::{empty_reason_from_planner_rejections, enforce_candidate_ceiling};
+    use super::{enforce_candidate_ceiling, planner_empty_reason};
 
     fn rejected(reason: RejectionReason) -> RejectedCandidate {
         RejectedCandidate {
@@ -1464,16 +1463,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_reason_uses_portfolio_budget_only_for_budget_exhausted() {
+    fn empty_reason_uses_exhausted() {
         assert_eq!(
-            empty_reason_from_planner_rejections(
+            planner_empty_reason(
                 &[rejected(RejectionReason::BudgetExhausted)],
                 OptimizerSolverStatus::Optimal
             ),
             EmptyReportReason::PortfolioBudgetExhausted
         );
         assert_eq!(
-            empty_reason_from_planner_rejections(
+            planner_empty_reason(
                 &[rejected(RejectionReason::MarketCapExhausted)],
                 OptimizerSolverStatus::Optimal
             ),
@@ -1482,9 +1481,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_reason_keeps_available_cash_distinct_from_no_signal() {
+    fn empty_keeps_no_signal() {
         assert_eq!(
-            empty_reason_from_planner_rejections(
+            planner_empty_reason(
                 &[rejected(RejectionReason::AvailableCashExhausted)],
                 OptimizerSolverStatus::Optimal
             ),
@@ -1493,9 +1492,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_reason_exposes_uncalibrated_return_model() {
+    fn empty_reason_exposes_model() {
         assert_eq!(
-            empty_reason_from_planner_rejections(
+            planner_empty_reason(
                 &[rejected(RejectionReason::ReturnModelUncalibrated)],
                 OptimizerSolverStatus::Optimal
             ),
@@ -1504,9 +1503,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_reason_maps_solver_unavailable_to_system_degraded() {
+    fn empty_reason_maps_degraded() {
         assert_eq!(
-            empty_reason_from_planner_rejections(
+            planner_empty_reason(
                 &[rejected(RejectionReason::BeyondTopN)],
                 OptimizerSolverStatus::SolverUnavailable
             ),
@@ -1515,7 +1514,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_capacity_ceiling_fails_the_report_instead_of_truncating() {
+    fn catalog_capacity_fails_truncating() {
         assert!(enforce_candidate_ceiling(100_000, 100_000).is_ok());
         assert!(matches!(
             enforce_candidate_ceiling(100_001, 100_000),

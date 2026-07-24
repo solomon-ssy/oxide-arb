@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn tier0_wins_before_tier1_and_unrecognized_fails_closed() {
+    fn tier0_wins_before_rejects() {
         let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
 
         let tier0 = resolver
@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn grounding_rejects_field_absent_from_source() {
+    fn grounding_rejects_field_source() {
         // Anti-hallucination: a candidate whose spans do not literally appear
         // in the source metadata must be rejected by the single gate.
         // Build a valid candidate, then corrupt one span's text.
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn public_chainlink_assets_route_to_rtds_and_private_assets_fail_closed() {
+    fn public_chainlink_assets_rejects() {
         let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
         let btc = resolver
             .resolve(
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn public_binance_oracle_routes_live_event_to_rtds() {
+    fn public_binance_routes_rtds() {
         let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
         let outcome = resolver
             .resolve(

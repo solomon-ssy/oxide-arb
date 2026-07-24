@@ -348,130 +348,128 @@ fn submit_or_manual(
     }
 }
 
-/// The deterministic exit priority ladder. Pure: same input ⇒
-/// same decision (modulo `input.now` / `mark_price`).
-#[must_use]
-pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
-    let lot = &input.lot;
-    let policy = &input.exit_policy;
-    let shares = lot.shares;
+impl ExitMonitorInput {
+    /// The deterministic exit priority ladder. Pure: same input ⇒
+    /// same decision (modulo `input.now` / `mark_price`).
+    #[must_use]
+    pub fn decide_exit(&self) -> ExitDecision {
+        let lot = &self.lot;
+        let policy = &self.exit_policy;
+        let shares = lot.shares;
 
-    // 1. Kill-switch emergency — overrides the auto-exit gate, applies policy.
-    if input.kill_switch.requires_emergency_exit() {
-        return match input.emergency_policy.kind {
-            EmergencyExitKind::ManualOnly => ExitDecision::RequireManualReview {
-                reason: ExitReason::KillSwitchEmergency,
-            },
-            EmergencyExitKind::LiquidateAll => match input.mark_price {
-                // Liquidate within the configured slippage as an immediate FOK.
-                Some(mark) if shares.is_positive() => {
-                    let slip = bps_fraction(Decimal::from(input.emergency_policy.max_slippage_bps));
-                    let limit = mark * (Decimal::ONE - slip);
-                    ExitDecision::SubmitExitOrder {
-                        reason: ExitReason::KillSwitchEmergency,
-                        order: sell_order(&lot.token_id, shares, limit, OrderType::Fok),
-                        pending_scale_out: None,
-                    }
-                }
-                // Cannot price the liquidation → fail closed to manual.
-                _ => ExitDecision::RequireManualReview {
+        // 1. Kill-switch emergency — overrides the auto-exit gate, applies policy.
+        if self.kill_switch.requires_emergency_exit() {
+            return match self.emergency_policy.kind {
+                EmergencyExitKind::ManualOnly => ExitDecision::RequireManualReview {
                     reason: ExitReason::KillSwitchEmergency,
                 },
-            },
-        };
-    }
-
-    // 2. Data stale beyond threshold → manual (never guess a price).
-    if !input.book_fresh {
-        return ExitDecision::RequireManualReview {
-            reason: ExitReason::DataStale,
-        };
-    }
-
-    // 3. Market abnormal (crossed / empty / non-tradable) → manual.
-    if input.market_abnormal {
-        return ExitDecision::RequireManualReview {
-            reason: ExitReason::MarketAbnormal,
-        };
-    }
-
-    // 4. Stop-loss (with trailing folded into the effective stop).
-    if let (Some(mark), Some(stop)) = (
-        input.mark_price,
-        policy.effective_stop(lot.avg_price, input.peak_mark_price),
-    ) && mark <= stop
-    {
-        return submit_or_manual(input, ExitReason::StopLoss, shares, Some(mark));
-    }
-
-    // 5. Thesis invalidated (model re-inference) — forced full exit (protective:
-    // fires even under hold-to-resolution).
-    if let ExitSignalVerdict::ThesisInvalidated { .. } = &input.signal {
-        return submit_or_manual(
-            input,
-            ExitReason::SignalInvalidated,
-            shares,
-            input.mark_price,
-        );
-    }
-
-    // A `HoldToResolution` lot is held to settlement: it skips the take-gains /
-    // time-out tiers below (only the protective exits above and the emergency
-    // override act). Resolution recovery is owned by the separate settlement
-    // lifecycle and is never submitted by the exit monitor.
-    if policy.settlement_mode == ExitSettlementMode::HoldToResolution {
-        return ExitDecision::Hold;
-    }
-
-    // 6. Time exit.
-    if time_exit_due(policy, lot.opened_at, input.now) {
-        return submit_or_manual(input, ExitReason::TimeExit, shares, input.mark_price);
-    }
-
-    // 7. Manual-review checkpoint (frozen absolute deadline → operator).
-    if policy.manual_review_at.is_some_and(|at| input.now >= at) {
-        return ExitDecision::RequireManualReview {
-            reason: ExitReason::Manual,
-        };
-    }
-
-    // 8. Take-profit.
-    if let (Some(mark), Some(target)) =
-        (input.mark_price, take_profit_target(policy, lot.avg_price))
-        && mark >= target
-    {
-        // Sell at the target (the resting bid is at or above it).
-        return submit_or_manual(input, ExitReason::TakeProfit, shares, Some(target));
-    }
-
-    // 9. Deterministic cumulative scale-out target.
-    if let Some((target_shares, pending)) = next_scale_out_shares(input) {
-        return submit_or_manual_with_target(
-            input,
-            ExitReason::PartialExit,
-            target_shares,
-            input.mark_price,
-            pending,
-        );
-    }
-
-    // 10. Opportunistic Sell (advisory; Sell scorer). Idempotent
-    // scale-out: the verdict is a *target cumulative* fraction of a frozen
-    // denominator, so repeated ticks at the same target only ever sell the
-    // incremental delta — never re-firing the whole fraction each tick.
-    if let ExitSignalVerdict::OpportunisticSell {
-        target_cumulative_exit_pct,
-        ..
-    } = &input.signal
-    {
-        if let Some(delta) = opportunistic_delta(input, *target_cumulative_exit_pct) {
-            return submit_or_manual_opportunistic(input, delta, *target_cumulative_exit_pct);
+                EmergencyExitKind::LiquidateAll => match self.mark_price {
+                    // Liquidate within the configured slippage as an immediate FOK.
+                    Some(mark) if shares.is_positive() => {
+                        let slip =
+                            bps_fraction(Decimal::from(self.emergency_policy.max_slippage_bps));
+                        let limit = mark * (Decimal::ONE - slip);
+                        ExitDecision::SubmitExitOrder {
+                            reason: ExitReason::KillSwitchEmergency,
+                            order: sell_order(&lot.token_id, shares, limit, OrderType::Fok),
+                            pending_scale_out: None,
+                        }
+                    }
+                    // Cannot price the liquidation → fail closed to manual.
+                    _ => ExitDecision::RequireManualReview {
+                        reason: ExitReason::KillSwitchEmergency,
+                    },
+                },
+            };
         }
-        return ExitDecision::Hold;
-    }
 
-    // 11. Otherwise hold and keep monitoring.
-    ExitDecision::Hold
+        // 2. Data stale beyond threshold → manual (never guess a price).
+        if !self.book_fresh {
+            return ExitDecision::RequireManualReview {
+                reason: ExitReason::DataStale,
+            };
+        }
+
+        // 3. Market abnormal (crossed / empty / non-tradable) → manual.
+        if self.market_abnormal {
+            return ExitDecision::RequireManualReview {
+                reason: ExitReason::MarketAbnormal,
+            };
+        }
+
+        // 4. Stop-loss (with trailing folded into the effective stop).
+        if let (Some(mark), Some(stop)) = (
+            self.mark_price,
+            policy.effective_stop(lot.avg_price, self.peak_mark_price),
+        ) && mark <= stop
+        {
+            return submit_or_manual(self, ExitReason::StopLoss, shares, Some(mark));
+        }
+
+        // 5. Thesis invalidated (model re-inference) — forced full exit (protective:
+        // fires even under hold-to-resolution).
+        if let ExitSignalVerdict::ThesisInvalidated { .. } = &self.signal {
+            return submit_or_manual(self, ExitReason::SignalInvalidated, shares, self.mark_price);
+        }
+
+        // A `HoldToResolution` lot is held to settlement: it skips the take-gains /
+        // time-out tiers below (only the protective exits above and the emergency
+        // override act). Resolution recovery is owned by the separate settlement
+        // lifecycle and is never submitted by the exit monitor.
+        if policy.settlement_mode == ExitSettlementMode::HoldToResolution {
+            return ExitDecision::Hold;
+        }
+
+        // 6. Time exit.
+        if time_exit_due(policy, lot.opened_at, self.now) {
+            return submit_or_manual(self, ExitReason::TimeExit, shares, self.mark_price);
+        }
+
+        // 7. Manual-review checkpoint (frozen absolute deadline → operator).
+        if policy.manual_review_at.is_some_and(|at| self.now >= at) {
+            return ExitDecision::RequireManualReview {
+                reason: ExitReason::Manual,
+            };
+        }
+
+        // 8. Take-profit.
+        if let (Some(mark), Some(target)) =
+            (self.mark_price, take_profit_target(policy, lot.avg_price))
+            && mark >= target
+        {
+            // Sell at the target (the resting bid is at or above it).
+            return submit_or_manual(self, ExitReason::TakeProfit, shares, Some(target));
+        }
+
+        // 9. Deterministic cumulative scale-out target.
+        if let Some((target_shares, pending)) = (self).next_scale_out_shares() {
+            return submit_target_exit(
+                self,
+                ExitReason::PartialExit,
+                target_shares,
+                self.mark_price,
+                pending,
+            );
+        }
+
+        // 10. Opportunistic Sell (advisory; Sell scorer). Idempotent
+        // scale-out: the verdict is a *target cumulative* fraction of a frozen
+        // denominator, so repeated ticks at the same target only ever sell the
+        // incremental delta — never re-firing the whole fraction each tick.
+        if let ExitSignalVerdict::OpportunisticSell {
+            target_cumulative_exit_pct,
+            ..
+        } = &self.signal
+        {
+            if let Some(delta) = opportunistic_delta(self, *target_cumulative_exit_pct) {
+                return submit_or_manual_opportunistic(self, delta, *target_cumulative_exit_pct);
+            }
+            return ExitDecision::Hold;
+        }
+
+        // 11. Otherwise hold and keep monitoring.
+        ExitDecision::Hold
+    }
 }
 
 /// The incremental opportunistic sell quantity and the frozen denominator, or
@@ -530,8 +528,8 @@ fn submit_or_manual_opportunistic(
     }
 }
 
-/// Like [`submit_or_manual`] but carries the deterministic target id.
-fn submit_or_manual_with_target(
+/// Submit an exit carrying the deterministic scale-out target id.
+fn submit_target_exit(
     input: &ExitMonitorInput,
     reason: ExitReason,
     shares: Shares,
@@ -551,20 +549,22 @@ fn submit_or_manual_with_target(
     }
 }
 
-/// The next due scale-out target's share quantity and stable id, if any target is
-/// currently active, not yet settled, and the mark satisfies its trigger.
-fn next_scale_out_shares(input: &ExitMonitorInput) -> Option<(Shares, PendingScaleOut)> {
-    let projection = input.exit_policy.next_scale_out(
-        &input.scale_out_state,
-        input.lot.shares,
-        input.mark_price,
-        input.now,
-    )?;
-    Some((
-        projection.delta_shares,
-        PendingScaleOut {
-            target_id: Some(projection.target_id),
-            target_cumulative_exit_pct: projection.target_cumulative_exit_pct,
-        },
-    ))
+impl ExitMonitorInput {
+    /// The next due scale-out target's share quantity and stable id, if any target is
+    /// currently active, not yet settled, and the mark satisfies its trigger.
+    fn next_scale_out_shares(&self) -> Option<(Shares, PendingScaleOut)> {
+        let projection = self.exit_policy.next_scale_out(
+            &self.scale_out_state,
+            self.lot.shares,
+            self.mark_price,
+            self.now,
+        )?;
+        Some((
+            projection.delta_shares,
+            PendingScaleOut {
+                target_id: Some(projection.target_id),
+                target_cumulative_exit_pct: projection.target_cumulative_exit_pct,
+            },
+        ))
+    }
 }

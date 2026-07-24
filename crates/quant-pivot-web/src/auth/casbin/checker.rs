@@ -90,7 +90,7 @@ impl PermChecker {
         if roles.contains_enabled(SUPER_ADMIN_ROLE) {
             let acting_role = rule
                 .filter(|rule| rule.is_governed())
-                .map(|_| Rule::resolve_super_admin_acting_role(roles, acting_role));
+                .map(|_| Rule::resolve_admin_role(roles, acting_role));
             return Ok(AuthzOutcome { acting_role });
         }
         match rule {
@@ -114,20 +114,22 @@ mod tests {
     };
     use crate::{extractors::ActorRoles, jwt::TokenUse};
 
-    fn claims() -> Claims {
-        Claims {
-            jti: "jti".to_owned(),
-            sub: "user-1".to_owned(),
-            iss: "quant-pivot".to_owned(),
-            aud: "quant-pivot-web".to_owned(),
-            iat: 0,
-            nbf: 0,
-            exp: 0,
-            username: "tester".to_owned(),
-            token_use: TokenUse::Access,
-            family_id: "family-1".to_owned(),
-            session_exp: 4_102_444_800,
-            generation: 0,
+    impl Claims {
+        fn checker_fixture() -> Self {
+            Self {
+                jti: "jti".to_owned(),
+                sub: "user-1".to_owned(),
+                iss: "quant-pivot".to_owned(),
+                aud: "quant-pivot-web".to_owned(),
+                iat: 0,
+                nbf: 0,
+                exp: 0,
+                username: "tester".to_owned(),
+                token_use: TokenUse::Access,
+                family_id: "family-1".to_owned(),
+                session_exp: 4_102_444_800,
+                generation: 0,
+            }
         }
     }
 
@@ -151,14 +153,14 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn enabled_super_admin_bypasses_even_unregistered_routes() {
+    async fn enabled_super_admin_routes() {
         let casbin = CasbinService::in_memory().await;
         let checker = PermChecker::new();
         let outcome: AuthzOutcome = checker
             .check(
                 &Method::DELETE,
                 "/api/anything/unregistered",
-                &claims(),
+                &Claims::checker_fixture(),
                 &roles(&[(SUPER_ADMIN_ROLE, RoleStatus::Enabled)]),
                 &casbin,
                 None,
@@ -169,7 +171,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn super_admin_on_governed_route_records_explicit_held_acting_role() {
+    async fn super_admin_governed_role() {
         let casbin = CasbinService::in_memory().await;
         let mut checker = PermChecker::new();
         checker.register(
@@ -181,7 +183,7 @@ mod tests {
             .check(
                 &Method::POST,
                 "/api/runtime-config/{id}/activate",
-                &claims(),
+                &Claims::checker_fixture(),
                 &roles(&[
                     (SUPER_ADMIN_ROLE, RoleStatus::Enabled),
                     ("risk_owner", RoleStatus::Enabled),
@@ -195,7 +197,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn super_admin_on_governed_route_without_held_role_records_super_admin() {
+    async fn super_admin_without_admin() {
         let casbin = CasbinService::in_memory().await;
         let mut checker = PermChecker::new();
         checker.register(
@@ -208,7 +210,7 @@ mod tests {
             .check(
                 &Method::POST,
                 "/api/runtime-config/{id}/activate",
-                &claims(),
+                &Claims::checker_fixture(),
                 &roles(&[(SUPER_ADMIN_ROLE, RoleStatus::Enabled)]),
                 &casbin,
                 None,
@@ -221,7 +223,7 @@ mod tests {
             .check(
                 &Method::POST,
                 "/api/runtime-config/{id}/activate",
-                &claims(),
+                &Claims::checker_fixture(),
                 &roles(&[(SUPER_ADMIN_ROLE, RoleStatus::Enabled)]),
                 &casbin,
                 Some("risk_owner"),
@@ -232,14 +234,14 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn disabled_super_admin_does_not_bypass() {
+    async fn disabled_admin_never_bypasses() {
         let casbin = CasbinService::in_memory().await;
         let checker = PermChecker::new();
         let result = checker
             .check(
                 &Method::GET,
                 "/api/users",
-                &claims(),
+                &Claims::checker_fixture(),
                 &roles(&[(SUPER_ADMIN_ROLE, RoleStatus::Disabled)]),
                 &casbin,
                 None,
@@ -249,14 +251,14 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn unregistered_route_is_denied_fail_closed() {
+    async fn unregistered_route_denied_rejects() {
         let casbin = CasbinService::in_memory().await;
         let checker = PermChecker::new();
         let result = checker
             .check(
                 &Method::GET,
                 "/api/users",
-                &claims(),
+                &Claims::checker_fixture(),
                 &roles(&[("viewer", RoleStatus::Enabled)]),
                 &casbin,
                 None,
@@ -266,7 +268,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn registered_authenticated_only_rule_is_admitted() {
+    async fn registered_authenticated_only_admitted() {
         let casbin = CasbinService::in_memory().await;
         let mut checker = PermChecker::new();
         checker.register(Method::GET, "/api/auth/me", Rule::AuthenticatedOnly);
@@ -275,7 +277,7 @@ mod tests {
                 .check(
                     &Method::GET,
                     "/api/auth/me",
-                    &claims(),
+                    &Claims::checker_fixture(),
                     &roles(&[("viewer", RoleStatus::Enabled)]),
                     &casbin,
                     None,

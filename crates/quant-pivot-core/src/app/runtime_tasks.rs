@@ -113,7 +113,7 @@ impl AppContext {
                 }
             });
         }
-        if let Some(worker) = self.build_trade_tape_reconciliation_worker() {
+        if let Some(worker) = self.build_tape_reconciler() {
             runner.spawn(
                 TaskId::TradeTapeReconciliationWorker,
                 move |token| async move {
@@ -191,7 +191,7 @@ impl AppContext {
                     None
                 },
                 |budget| {
-                    BinanceAggTradeSource::connect_usdm_futures_with_budget(
+                    BinanceAggTradeSource::connect_usdm_futures(
                         sources.binance_usdm_futures.clone(),
                         budget,
                         Arc::clone(&self.compute),
@@ -509,7 +509,7 @@ impl AppContext {
         sources: ConnectedCryptoSources,
     ) {
         if let Some(worker) =
-            self.build_crypto_kline_ingest_worker(binance_budgets, Arc::clone(&source_supervisor))
+            self.build_kline_worker(binance_budgets, Arc::clone(&source_supervisor))
         {
             runner.spawn(TaskId::CryptoKlineIngestWorker, move |token| async move {
                 if let Err(error) = worker.run(token).await {
@@ -581,7 +581,7 @@ impl AppContext {
         )))
     }
 
-    fn build_trade_tape_reconciliation_worker(&self) -> Option<Arc<TradeTapeReconciliationWorker>> {
+    fn build_tape_reconciler(&self) -> Option<Arc<TradeTapeReconciliationWorker>> {
         let config = &self.config.market_data.trade_tape_on_chain;
         config.enabled.then(|| {
             Arc::new(TradeTapeReconciliationWorker::new(
@@ -596,7 +596,7 @@ impl AppContext {
         })
     }
 
-    fn build_crypto_kline_ingest_worker(
+    fn build_kline_worker(
         &self,
         binance_budgets: BinanceBudgets,
         source_supervisor: Arc<DomainSourceSupervisor>,
@@ -631,7 +631,7 @@ impl AppContext {
 
         if sources_config.binance_usdm_futures.enabled {
             let budget = binance_budgets.usdm_futures?;
-            let source = match BinanceKlineSource::connect_usdm_futures_with_budget(
+            let source = match BinanceKlineSource::connect_usdm_futures(
                 sources_config.binance_usdm_futures.clone(),
                 budget,
                 Arc::clone(&self.compute),

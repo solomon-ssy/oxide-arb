@@ -407,7 +407,7 @@ fn plan_forecast_rows(
             candidate.revision,
             candidate.available_at.timestamp_millis(),
         )?;
-        rows.push(Some(candidate.to_clickhouse_row()));
+        rows.push(Some(WeatherForecastFactRow::from(&candidate)));
     }
     Ok(rows)
 }
@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn correction_chain_is_monotonic_and_exact_retry_is_suppressed() {
+    fn correction_chain_monotonic_suppressed() {
         let local_date = NaiveDate::from_ymd_opt(2026, 7, 18).expect("date");
         let first = report('a', 1);
         let correction = report('b', 2);
@@ -536,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_rows_are_batched_below_clickhouse_partition_limit() {
+    fn historical_rows_batched_limit() {
         let rows = (0_u32..=240)
             .map(|month| {
                 let year_offset = i32::try_from(month / 12).expect("test year offset");

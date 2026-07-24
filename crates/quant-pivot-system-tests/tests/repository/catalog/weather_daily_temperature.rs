@@ -74,7 +74,7 @@ const fn checkpoint(report: &WeatherObservationReport, revision: u32) -> DomainS
     }
 }
 
-pub async fn weather_projection_tracks_maximum_and_minimum_with_independent_events() {
+pub async fn weather_projection_tracks_events() {
     let (pool, _container) = setup_pg().await;
     let projections = PgDomainProjectionRepository::new(pool.connection().clone());
     let conditions = PgEntryConditionRepository::new(pool.connection().clone());

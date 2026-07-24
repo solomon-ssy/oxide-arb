@@ -67,7 +67,6 @@ use quant_pivot_models::{
         TradePolicyValidationEvidence, TradePolicyValidationRunId, TrainingDatasetId,
         TrainingExampleId, TrainingSampleSource, UserId, VerticalActivationTarget,
         VerticalGateEvidence, builtin_research_profiles, canonicalize_policy_candidates,
-        resolve_builtin_research_profile,
     },
 };
 use quant_pivot_repository::traits::{
@@ -430,7 +429,7 @@ impl TradePolicyService {
         let model_version_id = model_reference.id;
         let model_version = self
             .model_registry
-            .find_model_version_by_id(&model_version_id)
+            .find_model_version(&model_version_id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
                 entity: "quant_model_version",
@@ -449,7 +448,7 @@ impl TradePolicyService {
         }
         let model_spec = self
             .model_registry
-            .find_model_spec_by_id(&model_version.model_spec_id)
+            .find_model_spec(&model_version.model_spec_id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
                 entity: "quant_model_spec",
@@ -540,7 +539,11 @@ impl TradePolicyService {
                 false
             }
         };
-        let profile = match resolve_builtin_research_profile(&request.selection.profile_ref) {
+        let profile = match request
+            .selection
+            .profile_ref
+            .resolve_builtin_research_profile()
+        {
             Ok(profile) => Some(profile),
             Err(detail) => {
                 messages.push(detail);
@@ -975,7 +978,10 @@ impl TradePolicyService {
             .policies
             .list_trial_attempts(&manifest.fit_job_id, Some(manifest.trial_ledger_cutoff))
             .await?;
-        let profile = resolve_builtin_research_profile(&payload.fit_contract.profile_ref)
+        let profile = payload
+            .fit_contract
+            .profile_ref
+            .resolve_builtin_research_profile()
             .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
         let expected_experiment_family =
             weather_experiment_family_hash(WeatherExperimentFamilyInput {
@@ -1499,7 +1505,7 @@ impl TradePolicyService {
                 entity: "quant_training_dataset",
                 id: source_dataset_id.to_string(),
             })?;
-        require_ready_policy_fit_dataset(&dataset)?;
+        require_fit_dataset(&dataset)?;
         let materialization = require_dataset_materialization(&dataset)?;
         let dataset_bytes = self.artifacts.get(materialization.parquet_uri).await?;
         let examples = verify_frozen_dataset_artifact(&dataset, &dataset_bytes)?;
@@ -1520,7 +1526,7 @@ impl TradePolicyService {
             .into());
         };
         let frozen_source = self.read_validation_source_slice(&dataset).await?;
-        require_replayable_validation_source(&frozen_source)?;
+        frozen_source.require_replayable_validation_source()?;
         Ok(FitDatasetInputs {
             source_dataset_id,
             dataset_hash: *materialization.dataset_hash,
@@ -1828,7 +1834,7 @@ impl TradePolicyService {
         ensure_policy_replay_active(input.purpose, input.cancel, "before model re-inference")?;
         let model_version = self
             .model_registry
-            .find_model_version_by_id(input.model_version_id)
+            .find_model_version(input.model_version_id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
                 entity: "quant_model_version",
@@ -2379,7 +2385,7 @@ impl TradePolicyService {
             0,
         ));
         let source = self.read_validation_source_slice(&inputs.dataset).await?;
-        require_replayable_validation_source(&source)?;
+        source.require_replayable_validation_source()?;
         ensure_validation_active(cancel, "before evidence verification")?;
         progress.report(ResearchJobProgress::indeterminate(
             "verifying_evidence_bundle",
@@ -2393,7 +2399,10 @@ impl TradePolicyService {
             .fit_contract
             .validate()
             .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
-        let profile = resolve_builtin_research_profile(&payload.fit_contract.profile_ref)
+        let profile = payload
+            .fit_contract
+            .profile_ref
+            .resolve_builtin_research_profile()
             .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
         let runtime_limits = self
             .runtime_policy_limits(&payload.fit_contract.decision_policy_snapshot_id, &profile)
@@ -2737,7 +2746,7 @@ fn build_fit_artifact_payload(
         }
         .into());
     }
-    let aggregate = aggregate_policy_evidence(&evidence)?;
+    let aggregate = evidence.aggregate_policy_evidence()?;
     let fee_model_hash = CanonicalDigest::content_hash_json(
         &data
             .frozen_source
@@ -2847,71 +2856,71 @@ fn policy_validation_evidence(
     })
 }
 
-fn aggregate_policy_evidence(
-    evidence: &WeatherPolicyEvidence,
-) -> QuantResult<AggregatePolicyEvidence> {
-    let first = evidence
-        .cohorts
-        .first()
-        .ok_or_else(|| ResearchError::ValidationMethodology {
-            detail: "passing Weather fit has no fitted cohort".to_owned(),
-        })?;
-    Ok(AggregatePolicyEvidence {
-        cpcv_path_count: evidence
+impl WeatherPolicyEvidence {
+    fn aggregate_policy_evidence(&self) -> QuantResult<AggregatePolicyEvidence> {
+        let first = self
             .cohorts
-            .iter()
-            .map(|cohort| cohort.cpcv_path_count)
-            .min()
-            .unwrap_or(first.cpcv_path_count),
-        deflated_sharpe_ratio: evidence
-            .cohorts
-            .iter()
-            .map(|cohort| cohort.deflated_sharpe_ratio)
-            .min()
-            .unwrap_or(first.deflated_sharpe_ratio),
-        probability_of_backtest_overfitting: evidence
-            .cohorts
-            .iter()
-            .map(|cohort| cohort.probability_of_backtest_overfitting)
-            .max()
-            .unwrap_or(first.probability_of_backtest_overfitting),
-        effective_sample_size: evidence
-            .cohorts
-            .iter()
-            .map(|cohort| cohort.effective_sample_size)
-            .min()
-            .unwrap_or(first.effective_sample_size),
-        ambiguous_touch_rate: evidence
-            .cohorts
-            .iter()
-            .map(|cohort| cohort.ambiguous_touch_rate)
-            .max()
-            .unwrap_or(first.ambiguous_touch_rate),
-        depth_failure_rate: evidence
-            .cohorts
-            .iter()
-            .map(|cohort| cohort.depth_failure_rate)
-            .max()
-            .unwrap_or(first.depth_failure_rate),
-        common_candidate_support: evidence
-            .cohorts
-            .iter()
-            .map(|cohort| cohort.common_candidate_support)
-            .min()
-            .unwrap_or(first.common_candidate_support),
-        fee_catalog_coverage: evidence
-            .cohorts
-            .iter()
-            .map(|cohort| cohort.fee_catalog_coverage)
-            .min()
-            .unwrap_or(first.fee_catalog_coverage),
-        eligible_market_coverage: evidence
-            .cohorts
-            .iter()
-            .map(|cohort| cohort.executable_coverage)
-            .min()
-            .unwrap_or(first.executable_coverage),
-    })
+            .first()
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "passing Weather fit has no fitted cohort".to_owned(),
+            })?;
+        Ok(AggregatePolicyEvidence {
+            cpcv_path_count: self
+                .cohorts
+                .iter()
+                .map(|cohort| cohort.cpcv_path_count)
+                .min()
+                .unwrap_or(first.cpcv_path_count),
+            deflated_sharpe_ratio: self
+                .cohorts
+                .iter()
+                .map(|cohort| cohort.deflated_sharpe_ratio)
+                .min()
+                .unwrap_or(first.deflated_sharpe_ratio),
+            probability_of_backtest_overfitting: self
+                .cohorts
+                .iter()
+                .map(|cohort| cohort.probability_of_backtest_overfitting)
+                .max()
+                .unwrap_or(first.probability_of_backtest_overfitting),
+            effective_sample_size: self
+                .cohorts
+                .iter()
+                .map(|cohort| cohort.effective_sample_size)
+                .min()
+                .unwrap_or(first.effective_sample_size),
+            ambiguous_touch_rate: self
+                .cohorts
+                .iter()
+                .map(|cohort| cohort.ambiguous_touch_rate)
+                .max()
+                .unwrap_or(first.ambiguous_touch_rate),
+            depth_failure_rate: self
+                .cohorts
+                .iter()
+                .map(|cohort| cohort.depth_failure_rate)
+                .max()
+                .unwrap_or(first.depth_failure_rate),
+            common_candidate_support: self
+                .cohorts
+                .iter()
+                .map(|cohort| cohort.common_candidate_support)
+                .min()
+                .unwrap_or(first.common_candidate_support),
+            fee_catalog_coverage: self
+                .cohorts
+                .iter()
+                .map(|cohort| cohort.fee_catalog_coverage)
+                .min()
+                .unwrap_or(first.fee_catalog_coverage),
+            eligible_market_coverage: self
+                .cohorts
+                .iter()
+                .map(|cohort| cohort.executable_coverage)
+                .min()
+                .unwrap_or(first.executable_coverage),
+        })
+    }
 }
 
 fn append_statistical_attempts(
@@ -3237,26 +3246,28 @@ const fn evidence_kind_name(kind: TradePolicyEvidenceObjectKind) -> &'static str
     }
 }
 
-fn require_replayable_validation_source(source: &FrozenSourceSlice) -> QuantResult<()> {
-    if !source.invalid_sessions.is_empty() {
-        return Err(ResearchError::ValidationMethodology {
-            detail: format!(
-                "Source Slice contains {} invalid L2 sessions",
-                source.invalid_sessions.len()
-            ),
+impl FrozenSourceSlice {
+    fn require_replayable_validation_source(&self) -> QuantResult<()> {
+        if !self.invalid_sessions.is_empty() {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "Source Slice contains {} invalid L2 sessions",
+                    self.invalid_sessions.len()
+                ),
+            }
+            .into());
         }
-        .into());
-    }
-    if source.l2_ledger.is_empty() || source.prefetched.books.is_empty() {
-        return Err(ResearchError::ValidationMethodology {
-            detail: "Source Slice has no replayable L2 event/checkpoint evidence".to_owned(),
+        if self.l2_ledger.is_empty() || self.prefetched.books.is_empty() {
+            return Err(ResearchError::ValidationMethodology {
+                detail: "Source Slice has no replayable L2 event/checkpoint evidence".to_owned(),
+            }
+            .into());
         }
-        .into());
+        Ok(())
     }
-    Ok(())
 }
 
-fn require_ready_policy_fit_dataset(dataset: &TrainingDatasetInfo) -> QuantResult<()> {
+fn require_fit_dataset(dataset: &TrainingDatasetInfo) -> QuantResult<()> {
     if dataset.status == TrainingDatasetStatus::Ready
         && dataset.purpose == DatasetPurpose::PolicyFit
     {
@@ -3708,18 +3719,20 @@ const fn reusable_dataset_ready(
         && dataset.fee_model_present.is_pass()
 }
 
-fn estimated_fit_work(contract: &ContractPreflight) -> QuantResult<(u64, u64)> {
-    let trials = contract
-        .canonical_candidates
-        .as_ref()
-        .and_then(|candidates| u64::try_from(candidates.len()).ok())
-        .unwrap_or(0);
-    let folds = trials.checked_mul(56).ok_or_else(|| {
-        QuantError::from(ResearchError::ValidationMethodology {
-            detail: "estimated policy fold-evaluation count overflow".to_owned(),
-        })
-    })?;
-    Ok((trials, folds))
+impl ContractPreflight {
+    fn estimated_fit_work(&self) -> QuantResult<(u64, u64)> {
+        let trials = self
+            .canonical_candidates
+            .as_ref()
+            .and_then(|candidates| u64::try_from(candidates.len()).ok())
+            .unwrap_or(0);
+        let folds = trials.checked_mul(56).ok_or_else(|| {
+            QuantError::from(ResearchError::ValidationMethodology {
+                detail: "estimated policy fold-evaluation count overflow".to_owned(),
+            })
+        })?;
+        Ok((trials, folds))
+    }
 }
 
 fn assemble_preflight_view(
@@ -3730,7 +3743,7 @@ fn assemble_preflight_view(
     mut dataset: DatasetPreflight,
     mut operational: OperationalPreflight,
 ) -> QuantResult<TradePolicyFitPreflightView> {
-    let (estimated_candidate_trials, estimated_fold_evaluations) = estimated_fit_work(&contract)?;
+    let (estimated_candidate_trials, estimated_fold_evaluations) = contract.estimated_fit_work()?;
     let source_slice_messages =
         append_preflight_diagnostics(&mut contract, &mut dataset, &mut operational);
     let reusable_dataset_ready = reusable_dataset_ready(dataset_info, &dataset);
@@ -4320,10 +4333,12 @@ fn ensure_policy_replay_active(
     }
 }
 
-const fn replay_progress_stage(purpose: PolicyReplayPurpose) -> &'static str {
-    match purpose {
-        PolicyReplayPurpose::Fit => "replaying",
-        PolicyReplayPurpose::Validation => "recomputing_replay",
+impl PolicyReplayPurpose {
+    const fn replay_progress_stage(self) -> &'static str {
+        match self {
+            Self::Fit => "replaying",
+            Self::Validation => "recomputing_replay",
+        }
     }
 }
 
@@ -4352,7 +4367,7 @@ fn collect_weather_replay_inputs(
         }
     })?;
     input.progress.report(ResearchJobProgress::with_total(
-        replay_progress_stage(input.purpose),
+        (input.purpose).replay_progress_stage(),
         0,
         total,
     ));
@@ -4428,7 +4443,7 @@ fn collect_weather_replay_inputs(
             }
         })?;
         input.progress.report(ResearchJobProgress::with_total(
-            replay_progress_stage(input.purpose),
+            (input.purpose).replay_progress_stage(),
             completed,
             total,
         ));
@@ -4599,7 +4614,7 @@ mod tests {
     };
 
     #[test]
-    fn decision_inside_fit_window_with_label_maturing_after_cutoff_is_excluded() {
+    fn decision_inside_after_excluded() {
         let start = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
         let end = start + Duration::days(10);
         let pit_cutoff = end + Duration::days(2);
@@ -4622,7 +4637,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_trajectory_gate_distinguishes_missing_unmatured_and_complete_rows() {
+    fn raw_distinguishes_missing_rows() {
         let decision_at = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
         let horizon_secs = 86_400;
         let matured_at = decision_at + Duration::seconds(86_400);
@@ -4662,7 +4677,7 @@ mod tests {
     }
 
     #[test]
-    fn independent_evidence_comparison_detects_tampering_and_missing_rows() {
+    fn independent_detects_missing_rows() {
         let sealed =
             PolicyEvidenceRecord::from_typed("candidate/key", None, &1_u32).expect("sealed record");
         let recomputed = PolicyEvidenceRecord::from_typed("candidate/key", None, &2_u32)
@@ -4686,7 +4701,7 @@ mod tests {
     }
 
     #[test]
-    fn independent_evidence_index_rejects_duplicate_record_keys() {
+    fn independent_rejects_duplicate_keys() {
         let record =
             PolicyEvidenceRecord::from_typed("candidate/key", None, &1_u32).expect("record");
         let records = vec![record.clone(), record];

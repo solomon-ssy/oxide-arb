@@ -32,7 +32,7 @@ pub const WHALE_FIXTURE_PARTICIPANT_COUNT: usize = 25;
 /// `unique_participants - 1` retail makers split the rest evenly. Taker rows are
 /// omitted so the estimand matches production (maker-primary concentration).
 #[must_use]
-pub fn whale_concentration_trade_tape_rows(
+pub fn whale_tape_rows(
     market_id: &MarketId,
     token_id: &TokenId,
     event_time_ms: i64,
@@ -79,7 +79,7 @@ pub fn whale_concentration_by_market(
 ) -> HashMap<MarketId, Vec<TradeTapeRow>> {
     HashMap::from([(
         market_id.clone(),
-        whale_concentration_trade_tape_rows(
+        whale_tape_rows(
             market_id,
             token_id,
             event_time_ms,
@@ -178,7 +178,7 @@ impl TradeTapeBlockCursorRepository for LiveTradeTapeBlockCursorRepo {
 
 /// Healthy ingest cursor repo for tests.
 #[must_use]
-pub fn live_trade_tape_block_cursor_repo() -> Arc<dyn TradeTapeBlockCursorRepository> {
+pub fn live_tape_cursor_repo() -> Arc<dyn TradeTapeBlockCursorRepository> {
     Arc::new(LiveTradeTapeBlockCursorRepo)
 }
 
@@ -304,7 +304,7 @@ impl QuantFactReadRepository for ConfigurableFactRead {
             .await
     }
 
-    async fn trade_tape_window_by_market(
+    async fn market_tape_window(
         &self,
         market_ids: Vec<MarketId>,
         from_ms: i64,

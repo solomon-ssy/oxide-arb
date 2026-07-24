@@ -77,6 +77,25 @@ pub(crate) struct DepositWalletVerificationCatalog {
     pub wallet_implementation_code_size: u64,
 }
 
+impl DepositWalletVerificationCatalog {
+    pub(crate) const fn current() -> Self {
+        Self {
+            factory: DEPOSIT_WALLET_FACTORY,
+            factory_implementation: DEPOSIT_WALLET_FACTORY_IMPLEMENTATION,
+            beacon: DEPOSIT_WALLET_BEACON,
+            wallet_implementation: DEPOSIT_WALLET_BEACON_IMPLEMENTATION,
+            factory_code_hash: UUPS_PROXY_CODE_HASH,
+            factory_code_size: 61,
+            factory_implementation_code_hash: DEPOSIT_WALLET_FACTORY_IMPLEMENTATION_CODE_HASH,
+            factory_implementation_code_size: 9_250,
+            beacon_code_hash: DEPOSIT_WALLET_BEACON_CODE_HASH,
+            beacon_code_size: 1_540,
+            wallet_implementation_code_hash: DEPOSIT_WALLET_BEACON_IMPLEMENTATION_CODE_HASH,
+            wallet_implementation_code_size: 20_858,
+        }
+    }
+}
+
 /// Resolved, validated wallet identity for money-moving venue operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalletTopology {
@@ -379,23 +398,6 @@ pub(crate) fn deposit_wallet_runtime_code(owner: Address) -> Vec<u8> {
     runtime
 }
 
-pub(crate) const fn deposit_wallet_verification_catalog() -> DepositWalletVerificationCatalog {
-    DepositWalletVerificationCatalog {
-        factory: DEPOSIT_WALLET_FACTORY,
-        factory_implementation: DEPOSIT_WALLET_FACTORY_IMPLEMENTATION,
-        beacon: DEPOSIT_WALLET_BEACON,
-        wallet_implementation: DEPOSIT_WALLET_BEACON_IMPLEMENTATION,
-        factory_code_hash: UUPS_PROXY_CODE_HASH,
-        factory_code_size: 61,
-        factory_implementation_code_hash: DEPOSIT_WALLET_FACTORY_IMPLEMENTATION_CODE_HASH,
-        factory_implementation_code_size: 9_250,
-        beacon_code_hash: DEPOSIT_WALLET_BEACON_CODE_HASH,
-        beacon_code_size: 1_540,
-        wallet_implementation_code_hash: DEPOSIT_WALLET_BEACON_IMPLEMENTATION_CODE_HASH,
-        wallet_implementation_code_size: 20_858,
-    }
-}
-
 fn derive_deposit_wallet(owner: Address) -> Address {
     let factory = DEPOSIT_WALLET_FACTORY;
     let args = deposit_wallet_args(owner, factory);
@@ -485,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn deposit_wallet_derivation_matches_current_beacon_chain_vector() {
+    fn deposit_wallet_matches_vector() {
         let owner = Address::from_str(BEACON_DEPOSIT_OWNER).expect("fixture owner");
         let wallet = Address::from_str(BEACON_DEPOSIT_WALLET).expect("fixture Deposit Wallet");
         assert_eq!(derive_deposit_wallet_address(owner), wallet);
@@ -494,7 +496,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deposit_wallet_always_requires_on_chain_control_attestation() {
+    async fn deposit_wallet_requires_attestation() {
         let verifier = StubVerifier::new(true);
         let topology = WalletTopology::resolve_verified(
             ExecutionWalletKind::DepositWallet,
@@ -510,7 +512,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn derivable_funder_skips_on_chain_check() {
+    async fn derivable_funder_skips_check() {
         let verifier = StubVerifier::new(false);
         let topology = WalletTopology::resolve_verified(
             ExecutionWalletKind::GnosisSafe,
@@ -526,7 +528,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_derivable_funder_accepted_when_owned() {
+    async fn non_derivable_funder_owned() {
         let verifier = StubVerifier::new(true);
         let topology = WalletTopology::resolve_verified(
             ExecutionWalletKind::Proxy,
@@ -546,7 +548,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_derivable_funder_rejected_when_not_owned() {
+    async fn rejects_unowned_funder() {
         let verifier = StubVerifier::new(false);
         let error = WalletTopology::resolve_verified(
             ExecutionWalletKind::Proxy,
@@ -564,7 +566,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eoa_mismatch_never_falls_back() {
+    async fn eoa_never_falls_back() {
         let verifier = StubVerifier::new(true);
         let error = WalletTopology::resolve_verified(
             ExecutionWalletKind::Eoa,

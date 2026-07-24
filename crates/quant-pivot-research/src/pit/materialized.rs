@@ -394,7 +394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn boundary_book_lookup_enforces_effective_availability_and_staleness() {
+    async fn boundary_book_enforces_staleness() {
         let token = TokenId::new("t");
         let decision_at = Utc.timestamp_millis_opt(12_000).single().expect("ts");
         let boundary = DecisionClock::new(2)
@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn boundary_market_lookup_enforces_effective_and_availability_clocks() {
+    async fn boundary_market_enforces_clocks() {
         let market_id = MarketId::new("m");
         let t0 = Utc.timestamp_millis_opt(1_000).single().expect("ts");
         let t1 = Utc.timestamp_millis_opt(5_000).single().expect("ts");

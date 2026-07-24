@@ -120,13 +120,13 @@ mod tests {
     use super::{NullablePatch, Patch};
 
     #[test]
-    fn patch_converts_to_optional_write_intent() {
+    fn patch_converts_optional_intent() {
         assert_eq!(Patch::<i32>::Keep.into_option(), None);
         assert_eq!(Patch::set(7).into_option(), Some(7));
     }
 
     #[test]
-    fn nullable_patch_preserves_keep_set_and_clear() {
+    fn nullable_preserves_keep_clear() {
         assert_eq!(NullablePatch::<i32>::Keep.into_nested_option(), None);
         assert_eq!(NullablePatch::set(7).into_nested_option(), Some(Some(7)));
         assert_eq!(

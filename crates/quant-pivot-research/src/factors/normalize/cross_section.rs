@@ -407,15 +407,17 @@ mod tests {
         }
     }
 
-    fn score(outcome: &NormalizedFactor) -> Decimal {
-        match outcome {
-            NormalizedFactor::Scored { score, .. } => score.inner(),
-            other => panic!("expected a scored outcome, got {other:?}"),
+    impl NormalizedFactor {
+        fn score(&self) -> Decimal {
+            match self {
+                Self::Scored { score, .. } => score.inner(),
+                other => panic!("expected a scored outcome, got {other:?}"),
+            }
         }
     }
 
     #[test]
-    fn winsorize_caps_at_configured_percentile() {
+    fn winsorize_caps_configured_percentile() {
         // With a 20% winsorize the far outlier (1000) is capped to the top
         // non-outlier level (4) before standardizing, so it scores identically to
         // that legitimate maximum and records a winsorize clamp — the raw tail
@@ -429,11 +431,11 @@ mod tests {
         assert!(matches!(stats, NormalizationStats::WinsorizedZScore { .. }));
         let out = normalizer.apply(&raw, &stats, NormalizationSource::CrossSection);
         assert_eq!(
-            score(&out[4]),
-            score(&out[3]),
+            out[4].score(),
+            out[3].score(),
             "the winsorized outlier scores the same as the capped maximum"
         );
-        assert!(score(&out[4]) <= Decimal::ONE);
+        assert!(out[4].score() <= Decimal::ONE);
         match &out[4] {
             NormalizedFactor::Scored { clamp, .. } => {
                 assert!(
@@ -446,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_variance_column_is_degenerate() {
+    fn zero_variance_column_degenerate() {
         let normalizer = WinsorizedZScoreNormalizer {
             winsor_p: Decimal::new(1, 2),
             clamp_sigma: Decimal::from(3),
@@ -469,19 +471,19 @@ mod tests {
     }
 
     #[test]
-    fn rank_orders_into_unit_interval() {
+    fn rank_orders_into_interval() {
         let normalizer = RankNormalizer;
         let raw = column(&[Some(10), Some(30), Some(20), None]);
         let stats = normalizer.fit(&raw).expect("fit normalization");
         let out = normalizer.apply(&raw, &stats, NormalizationSource::CrossSection);
-        assert_eq!(score(&out[0]), Decimal::ZERO, "smallest → 0");
-        assert_eq!(score(&out[1]), Decimal::ONE, "largest → 1");
-        assert_eq!(score(&out[2]), Decimal::new(5, 1), "middle → 0.5");
+        assert_eq!(out[0].score(), Decimal::ZERO, "smallest → 0");
+        assert_eq!(out[1].score(), Decimal::ONE, "largest → 1");
+        assert_eq!(out[2].score(), Decimal::new(5, 1), "middle → 0.5");
         assert!(matches!(out[3], NormalizedFactor::MissingInput));
     }
 
     #[test]
-    fn min_max_clamps_and_audits() {
+    fn min_max_clamps_audits() {
         let normalizer = MinMaxNormalizer {
             lo: Decimal::ZERO,
             hi: Decimal::ONE,
@@ -492,7 +494,7 @@ mod tests {
         };
         let stats = normalizer.fit(&raw).expect("fit normalization");
         let out = normalizer.apply(&raw, &stats, NormalizationSource::PerMarket);
-        assert_eq!(score(&out[0]), Decimal::new(5, 1));
+        assert_eq!(out[0].score(), Decimal::new(5, 1));
         match &out[1] {
             NormalizedFactor::Scored { score, clamp, .. } => {
                 assert_eq!(score.inner(), Decimal::ONE, "5 clamps to the [0,1] top");

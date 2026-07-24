@@ -39,7 +39,6 @@ use quant_pivot_models::{
             EnqueueReportRunOutcome, FeatureVectorInfo, RecommendationInfo,
             RecommendationReportInfo, ReportDataQualitySnapshotInfo, ReportDiff,
             ReportFactDeliveryInfo, ReportRunInfo, ReportScheduleGapInfo, ReportScheduleHealthInfo,
-            compute_report_diff,
         },
     },
     enums::{
@@ -396,10 +395,7 @@ impl QuantReportPort for CoreQuantReportPort {
         Ok(self.report_run_repo.page(query).await?)
     }
 
-    async fn find_report_run_by_id(
-        &self,
-        run_id: &ReportRunId,
-    ) -> QuantResult<Option<ReportRunInfo>> {
+    async fn find_run_by_id(&self, run_id: &ReportRunId) -> QuantResult<Option<ReportRunInfo>> {
         Ok(self.report_run_repo.find_by_id(run_id).await?)
     }
 
@@ -501,7 +497,7 @@ impl QuantReportPort for CoreQuantReportPort {
                     let evidence = self
                         .load_pre_inference_features(&report, &data_quality, &boundary)
                         .await?;
-                    pre_inference_data_quality_diagnostics(&boundary, selection_count, evidence)?
+                    pre_inference_diagnostics(&boundary, selection_count, evidence)?
                 }
                 other => {
                     return Err(ResearchError::Determinism {
@@ -738,12 +734,7 @@ impl QuantReportPort for CoreQuantReportPort {
             .recommendation_repo
             .find_by_report(compare_report_id)
             .await?;
-        Ok(Some(compute_report_diff(
-            &base,
-            &base_recs,
-            &compare,
-            &compare_recs,
-        )))
+        Ok(Some(base.diff(&base_recs, &compare, &compare_recs)))
     }
 
     async fn enqueue_ad_hoc(
@@ -1027,7 +1018,7 @@ fn pre_inference_selection_diagnostics(
     }
 }
 
-fn pre_inference_data_quality_diagnostics(
+fn pre_inference_diagnostics(
     boundary: &DecisionBoundary,
     selection_count: u64,
     evidence: PreInferenceFeatureEvidence,
@@ -1446,7 +1437,7 @@ mod diagnostics_tests {
     }
 
     #[test]
-    fn pre_inference_selection_does_not_fabricate_later_stage_zeros() {
+    fn pre_inference_never_fabricates() {
         let view = pre_inference_selection_diagnostics(&boundary(), 0);
 
         assert!(view.evidence_complete);
@@ -1460,7 +1451,7 @@ mod diagnostics_tests {
     }
 
     #[test]
-    fn unavailable_model_run_evidence_is_none_not_zero() {
+    fn unavailable_model_not_zero() {
         let view =
             model_run_diagnostics(false, &[], &[], &boundary(), 2).expect("diagnostics projection");
 
@@ -1473,7 +1464,7 @@ mod diagnostics_tests {
     }
 
     #[test]
-    fn report_subject_rejects_impossible_pre_inference_reason() {
+    fn report_subject_rejects_reason() {
         let model_run_id = ModelRunId::from_v7();
         assert_eq!(
             report_diagnostics_execution(Some(&model_run_id), None)

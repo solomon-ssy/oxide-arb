@@ -54,8 +54,8 @@ impl Default for WebSocketConfig {
             reconnect_delay_ms: default_ws_reconnect(),
             max_reconnect_delay_ms: default_ws_max_reconnect(),
             max_subscriptions_per_connection: default_ws_max_subscriptions(),
-            engine_max_subscription_tokens: default_engine_max_subscription_tokens(),
-            engine_subscription_window_hours: default_engine_subscription_window_hours(),
+            engine_max_subscription_tokens: default_subscription_limit(),
+            engine_subscription_window_hours: default_subscription_window(),
         }
     }
 }
@@ -69,10 +69,10 @@ const fn default_ws_max_reconnect() -> u64 {
 const fn default_ws_max_subscriptions() -> usize {
     200
 }
-const fn default_engine_max_subscription_tokens() -> usize {
+const fn default_subscription_limit() -> usize {
     2_000
 }
-const fn default_engine_subscription_window_hours() -> u64 {
+const fn default_subscription_window() -> u64 {
     72
 }
 
@@ -98,8 +98,8 @@ impl Default for GammaConfig {
             base_url: default_gamma_url(),
             reconcile_interval_secs: default_gamma_reconcile_interval(),
             page_size: default_gamma_page_size(),
-            max_keyset_pages: default_gamma_max_keyset_pages(),
-            max_keyset_requests: default_gamma_max_keyset_requests(),
+            max_keyset_pages: default_gamma_pages(),
+            max_keyset_requests: default_gamma_requests(),
         }
     }
 }
@@ -113,10 +113,10 @@ const fn default_gamma_reconcile_interval() -> u64 {
 const fn default_gamma_page_size() -> u32 {
     100
 }
-const fn default_gamma_max_keyset_pages() -> u32 {
+const fn default_gamma_pages() -> u32 {
     10_000
 }
-const fn default_gamma_max_keyset_requests() -> u32 {
+const fn default_gamma_requests() -> u32 {
     50_000
 }
 /// Polymarket Data API configuration (keyless positions reads).
@@ -139,8 +139,8 @@ impl Default for DataApiConfig {
     fn default() -> Self {
         Self {
             base_url: default_data_api_url(),
-            page_size: default_data_api_page_size(),
-            size_threshold: default_data_api_size_threshold(),
+            page_size: default_api_page_size(),
+            size_threshold: default_api_size_limit(),
         }
     }
 }
@@ -148,10 +148,10 @@ impl Default for DataApiConfig {
 fn default_data_api_url() -> String {
     "https://data-api.polymarket.com".into()
 }
-const fn default_data_api_page_size() -> u32 {
+const fn default_api_page_size() -> u32 {
     500
 }
-const fn default_data_api_size_threshold() -> u32 {
+const fn default_api_size_limit() -> u32 {
     1
 }
 

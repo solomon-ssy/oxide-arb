@@ -23,6 +23,7 @@ quant-pivot-api = { workspace = true }
 quant-pivot-error = { workspace = true, features = ["storage"] }
 quant-pivot-models = { workspace = true }
 polymarket_client_sdk_v2 = { workspace = true }
+proc-macro2 = { workspace = true, features = ["span-locations"] }
 quant-pivot-migration = { path = "../quant-pivot-migration" }
 quant-pivot-repository = { workspace = true }
 quant-pivot-storage = { workspace = true }

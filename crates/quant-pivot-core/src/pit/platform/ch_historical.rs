@@ -27,7 +27,7 @@ use quant_pivot_models::{
         clickhouse::{ChCanonicalBookEventType, ChStreamSessionState},
         common::Side,
     },
-    types::{ContentHash, MarketId, TokenId},
+    types::{ContentHash, MarketId, Price, Shares, TokenId},
 };
 use quant_pivot_repository::traits::{
     CatalogLedgerRepository, ClobMarketInfoRepository, QuantFactReadRepository,
@@ -521,12 +521,12 @@ fn apply_replay_event(
                 .bid_prices
                 .iter()
                 .zip(&event.bid_sizes)
-                .map(|(price, size)| (Side::Buy, price.to_price(), size.to_shares()));
+                .map(|(price, size)| (Side::Buy, Price::from(*price), Shares::from(*size)));
             let asks = event
                 .ask_prices
                 .iter()
                 .zip(&event.ask_sizes)
-                .map(|(price, size)| (Side::Sell, price.to_price(), size.to_shares()));
+                .map(|(price, size)| (Side::Sell, Price::from(*price), Shares::from(*size)));
             book.apply_delta(bids.chain(asks), timestamp_ms);
         }
         ChCanonicalBookEventType::TickSizeChange | ChCanonicalBookEventType::LastTrade => {}
@@ -547,7 +547,7 @@ fn decode_event_levels(
         return Err(replay_error(token_id, "snapshot price/size vector lengths differ").into());
     }
     let decode = |price: &ChPrice, size: &ChShares| {
-        BookLevel::from_decimal(price.to_price(), size.to_shares())
+        BookLevel::from_decimal(Price::from(*price), Shares::from(*size))
             .map_err(|_| replay_error(token_id, "snapshot contains invalid level"))
     };
     let bids = event
@@ -669,7 +669,8 @@ pub fn decode_levels(
     }
     let mut levels = Vec::with_capacity(prices.len());
     for (price, size) in prices.iter().zip(sizes) {
-        let Some(level) = BookLevel::try_from_decimal(price.to_price(), size.to_shares()) else {
+        let Some(level) = BookLevel::try_from_decimal(Price::from(*price), Shares::from(*size))
+        else {
             return (Arc::from([]), BookDecodeStatus::InvalidLevel);
         };
         levels.push(level);
@@ -717,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_levels_valid_typed_arrays() {
+    fn decode_levels_valid_arrays() {
         let row = sample_row();
         let (levels, status) = decode_levels(&row.bid_prices, &row.bid_sizes);
         assert_eq!(status, BookDecodeStatus::Ok);
@@ -725,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_levels_rejects_mismatched_array_lengths() {
+    fn decode_levels_rejects_lengths() {
         let row = sample_row();
         let (levels, status) = decode_levels(&row.bid_prices, &[]);
         assert!(levels.is_empty());
@@ -734,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_from_row_rejects_invalid_typed_level() {
+    fn snapshot_rejects_invalid_level() {
         let mut row = sample_row();
         row.bid_sizes[0] = ChShares::from(Decimal::NEGATIVE_ONE);
         let decision_at = Utc.timestamp_millis_opt(1_000_000).single().expect("ts");
@@ -748,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn decoded_book_must_be_effective_and_available_within_boundary() {
+    fn decoded_book_effective_boundary() {
         let decision_at = Utc
             .timestamp_millis_opt(1_000_000)
             .single()

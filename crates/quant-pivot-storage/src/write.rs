@@ -634,7 +634,7 @@ mod tests {
     use super::{AsyncWriterObservability, DurableWriteError, DurableWriter, DurableWriterConfig};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn durable_writer_acknowledges_within_its_low_latency_batch_contract() {
+    async fn durable_writer_acknowledges_contract() {
         let persisted = Arc::new(Mutex::new(Vec::<u32>::new()));
         let observed = Arc::clone(&persisted);
         let (writer, worker) = DurableWriter::new(
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn async_durable_producers_fill_one_acknowledged_batch() {
+    async fn async_durable_producers_batch() {
         let persisted = Arc::new(Mutex::new(Vec::<u32>::new()));
         let observed = Arc::clone(&persisted);
         let (writer, worker) = DurableWriter::new(
@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn durable_writer_reports_closed_worker_without_false_acknowledgement() {
+    async fn durable_writer_without_acknowledgement() {
         let (writer, worker) = DurableWriter::new(
             DurableWriterConfig::new("closed-test"),
             |_rows: Vec<u32>| Box::pin(async { Ok(()) }),

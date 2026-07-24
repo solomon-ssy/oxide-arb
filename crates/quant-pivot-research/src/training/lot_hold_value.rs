@@ -91,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn hold_terminal_is_total_minus_realized_before() {
+    fn hold_terminal_total_before() {
         let snapshot = LotTerminalSnapshot {
             entry_shares: Shares::new(dec!(100)),
             opened_at: ts(0),

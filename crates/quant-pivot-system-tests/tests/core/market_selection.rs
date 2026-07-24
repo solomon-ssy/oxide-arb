@@ -73,44 +73,46 @@ const CATALOG: E2eCatalog = E2eCatalog {
     no_token: "22222",
 };
 
-fn registry_market(catalog: &E2eCatalog) -> MarketRegistryInfo {
-    MarketRegistryInfo {
-        market_id: MarketId::new(catalog.market_id),
-        event_id: EventId::new(catalog.event_id),
-        token_yes: TokenId::new(catalog.yes_token),
-        token_no: TokenId::new(catalog.no_token),
-        question: "Will it happen?".into(),
-        slug: "will-it-happen".into(),
-        description: None,
-        categories: CategorySet::from(MarketCategory::Sports),
-        status: MarketStatus::Active,
-        filter_reasons: CatalogFilterReasonSet::default(),
-        outcome: None,
-        neg_risk: false,
-        tick_size: TickSize::Hundredth,
-        tokens: vec![
-            TokenInfo {
-                token_id: TokenId::new(catalog.yes_token),
-                outcome: "Yes".into(),
-                neg_risk: false,
-            },
-            TokenInfo {
-                token_id: TokenId::new(catalog.no_token),
-                outcome: "No".into(),
-                neg_risk: false,
-            },
-        ],
-        best_bid: None,
-        best_ask: None,
-        depth_usd: None,
-        min_order_size: Decimal::ONE,
-        liquidity_usd: Some(Usd::new(Decimal::from(20_000))),
-        volume_24h: Some(Usd::new(Decimal::from(8_000))),
-        start_date: Some(Utc::now()),
-        end_date: Some(Utc::now() + Duration::days(7)),
-        resolved_at: None,
-        created_at: Some(Utc::now()),
-        updated_at: Utc::now(),
+impl E2eCatalog {
+    fn registry_market(&self) -> MarketRegistryInfo {
+        MarketRegistryInfo {
+            market_id: MarketId::new(self.market_id),
+            event_id: EventId::new(self.event_id),
+            token_yes: TokenId::new(self.yes_token),
+            token_no: TokenId::new(self.no_token),
+            question: "Will it happen?".into(),
+            slug: "will-it-happen".into(),
+            description: None,
+            categories: CategorySet::from(MarketCategory::Sports),
+            status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
+            outcome: None,
+            neg_risk: false,
+            tick_size: TickSize::Hundredth,
+            tokens: vec![
+                TokenInfo {
+                    token_id: TokenId::new(self.yes_token),
+                    outcome: "Yes".into(),
+                    neg_risk: false,
+                },
+                TokenInfo {
+                    token_id: TokenId::new(self.no_token),
+                    outcome: "No".into(),
+                    neg_risk: false,
+                },
+            ],
+            best_bid: None,
+            best_ask: None,
+            depth_usd: None,
+            min_order_size: Decimal::ONE,
+            liquidity_usd: Some(Usd::new(Decimal::from(20_000))),
+            volume_24h: Some(Usd::new(Decimal::from(8_000))),
+            start_date: Some(Utc::now()),
+            end_date: Some(Utc::now() + Duration::days(7)),
+            resolved_at: None,
+            created_at: Some(Utc::now()),
+            updated_at: Utc::now(),
+        }
     }
 }
 
@@ -139,7 +141,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn trade_tape_window_by_market(
+    async fn market_tape_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
@@ -265,7 +267,7 @@ async fn seed_catalog(db: &DatabaseConnection, catalog: &E2eCatalog) {
 }
 
 fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E2eCatalog) {
-    let market = registry_market(catalog);
+    let market = (catalog).registry_market();
     registry.register_event(EventRegistryInfo {
         event_id: market.event_id.clone(),
         title: "Selection E2E".to_owned(),
@@ -303,7 +305,7 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E
     );
 }
 
-pub async fn provider_selector_mapper_persist_round_trip() {
+pub async fn provider_selector_mapper_trip() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db, &CATALOG).await;

@@ -18,7 +18,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::query::{list_by_fk_ordered_desc, paginate_mapped},
+    postgres::query::{list_fk_desc, paginate_mapped},
     traits::ModelComparisonReportRepository,
 };
 
@@ -61,7 +61,7 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         &self,
         candidate_model_version_id: &ModelVersionId,
     ) -> Result<Vec<ModelComparisonReportInfo>, StorageError> {
-        list_by_fk_ordered_desc::<Entity, _, _, _>(
+        list_fk_desc::<Entity, _, _, _>(
             &self.db,
             Column::CandidateModelVersionId,
             *candidate_model_version_id,
@@ -94,7 +94,7 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         .await
     }
 
-    async fn find_by_backtest_report_id(
+    async fn find_by_backtest_report(
         &self,
         backtest_report_id: &BacktestReportId,
     ) -> Result<Option<ModelComparisonReportInfo>, StorageError> {
@@ -111,7 +111,7 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
             .map(|row| row.map(Into::into))
     }
 
-    async fn comparison_ids_for_backtest_reports(
+    async fn backtest_comparison_ids(
         &self,
         backtest_report_ids: &[BacktestReportId],
     ) -> Result<HashMap<BacktestReportId, ModelComparisonReportId>, StorageError> {

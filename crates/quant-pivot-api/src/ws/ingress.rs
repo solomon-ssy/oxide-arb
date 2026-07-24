@@ -108,7 +108,7 @@ mod tests {
     use super::{INGRESS_PERMIT_BYTES, NormalizedIngressBatch, ingress_permits};
 
     #[test]
-    fn accounting_rounds_up_to_kib_permits() {
+    fn accounting_rounds_up_permits() {
         let event = PipelineEvent::ShardStatus {
             shard_id: 0,
             status: ShardConnectionStatus::Connected,
@@ -121,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn split_batches_hold_budget_until_the_last_partition_finishes() {
+    fn split_batches_hold_finishes() {
         let budget = Arc::new(Semaphore::new(1));
         let source = NormalizedIngressBatch::new(
             vec![PipelineEvent::ShardStatus {

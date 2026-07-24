@@ -10,14 +10,21 @@ use quant_pivot_models::{
     types::{ContentHash, ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload},
 };
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-    sea_query::OnConflict,
+    ColumnTrait, DatabaseBackend, DatabaseConnection, EntityTrait, FromQueryResult,
+    IntoActiveModel, QueryFilter, QueryOrder, Statement, sea_query::OnConflict,
 };
 
-use crate::{
-    postgres::primitives,
-    traits::{ResearchReadinessEvidenceRepository, ShadowLatencyObservation},
-};
+use crate::traits::{ResearchReadinessEvidenceRepository, ShadowLatencyObservation};
+
+#[derive(Debug, FromQueryResult)]
+struct ShadowLatencyAggregate {
+    decision_prepared_count: i64,
+    decision_prepared_p95_ms: Option<i64>,
+    endpoint_rtt_count: i64,
+    endpoint_rtt_p95_ms: Option<i64>,
+    market_delay_count: i64,
+    market_delay_p95_ms: Option<i64>,
+}
 
 pub struct PgResearchReadinessEvidenceRepository {
     db: DatabaseConnection,
@@ -26,6 +33,65 @@ pub struct PgResearchReadinessEvidenceRepository {
 impl PgResearchReadinessEvidenceRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
+    }
+
+    /// Execute the `PostgreSQL` ordered-set aggregate owned by the readiness
+    /// repository. `SeaQuery` has no typed representation for
+    /// `percentile_cont ... WITHIN GROUP`.
+    async fn shadow_latency(
+        &self,
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+    ) -> Result<ShadowLatencyAggregate, StorageError> {
+        ShadowLatencyAggregate::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r"
+WITH decision_prepared AS (
+    SELECT
+        COUNT(*)::bigint AS sample_count,
+        percentile_cont(0.95) WITHIN GROUP (
+            ORDER BY EXTRACT(EPOCH FROM (created_at - decision_at)) * 1000
+        )::bigint AS p95_ms
+    FROM quant_recommendation_report
+    WHERE runtime_mode = 'report_only'
+      AND created_at >= $1 AND created_at < $2
+      AND decision_at <= created_at
+), endpoint_rtt AS (
+    SELECT
+        COUNT(*)::bigint AS sample_count,
+        percentile_cont(0.95) WITHIN GROUP (
+            ORDER BY EXTRACT(EPOCH FROM (fetched_at - started_at)) * 1000
+        )::bigint AS p95_ms
+    FROM catalog_sync_batch
+    WHERE status = 'committed'
+      AND fetched_at >= $1 AND fetched_at < $2
+      AND started_at <= fetched_at
+), market_delay AS (
+    SELECT
+        COUNT(*)::bigint AS sample_count,
+        percentile_cont(0.95) WITHIN GROUP (
+            ORDER BY COALESCE(minimum_order_age_secs, 0)::double precision * 1000
+        )::bigint AS p95_ms
+    FROM clob_market_info_version
+    WHERE available_at >= $1 AND available_at < $2
+)
+SELECT
+    decision_prepared.sample_count AS decision_prepared_count,
+    decision_prepared.p95_ms AS decision_prepared_p95_ms,
+    endpoint_rtt.sample_count AS endpoint_rtt_count,
+    endpoint_rtt.p95_ms AS endpoint_rtt_p95_ms,
+    market_delay.sample_count AS market_delay_count,
+    market_delay.p95_ms AS market_delay_p95_ms
+FROM decision_prepared, endpoint_rtt, market_delay
+",
+            [window_start.into(), window_end.into()],
+        ))
+        .one(&self.db)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| {
+            StorageError::invariant_violation(None, "shadow latency query returned no row")
+        })
     }
 }
 
@@ -104,7 +170,7 @@ impl ResearchReadinessEvidenceRepository for PgResearchReadinessEvidenceReposito
                 "shadow latency observation window must be half-open and non-empty",
             ));
         }
-        let row = primitives::shadow_latency_aggregate(&self.db, window_start, window_end).await?;
+        let row = self.shadow_latency(window_start, window_end).await?;
         Ok(ShadowLatencyObservation {
             decision_prepared_count: checked_count(
                 "decision_prepared_count",

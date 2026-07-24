@@ -110,7 +110,9 @@ use sea_orm::{
 use crate::{
     postgres::{
         error,
-        quant::{capital_allocation::complete_exit_capital, position},
+        quant::{
+            capital_allocation::PgCapitalAllocationRepository, position::PgPositionRepository,
+        },
         query::paginate_mapped,
         write::insert_many_chunked,
     },
@@ -163,14 +165,15 @@ struct SettlementDiscoveryRow {
     neg_risk: bool,
 }
 
-async fn discovery_scopes(
-    db: &impl ConnectionTrait,
-    limit: u64,
-) -> Result<Vec<SettlementDiscoveryScopeRow>, StorageError> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    QuantPositionEntity::find()
+impl PgSettlementRedeemRepository {
+    async fn discovery_scopes(
+        db: &impl ConnectionTrait,
+        limit: u64,
+    ) -> Result<Vec<SettlementDiscoveryScopeRow>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        QuantPositionEntity::find()
         .join(JoinType::InnerJoin, QuantPositionRelation::Market.def())
         .select_only()
         .column(QuantPositionColumn::MarketId)
@@ -191,6 +194,7 @@ async fn discovery_scopes(
         .all(db)
         .await
         .map_err(StorageError::from)
+    }
 }
 
 fn scope_condition(scopes: &[SettlementDiscoveryScopeRow]) -> Condition {
@@ -203,107 +207,109 @@ fn scope_condition(scopes: &[SettlementDiscoveryScopeRow]) -> Condition {
     })
 }
 
-async fn discovery_rows(
-    db: &impl ConnectionTrait,
-    scopes: &[SettlementDiscoveryScopeRow],
-) -> Result<Vec<SettlementDiscoveryRow>, StorageError> {
-    if scopes.is_empty() {
-        return Ok(Vec::new());
+impl PgSettlementRedeemRepository {
+    async fn discovery_rows(
+        db: &impl ConnectionTrait,
+        scopes: &[SettlementDiscoveryScopeRow],
+    ) -> Result<Vec<SettlementDiscoveryRow>, StorageError> {
+        if scopes.is_empty() {
+            return Ok(Vec::new());
+        }
+        QuantPositionEntity::find()
+            .join(
+                JoinType::InnerJoin,
+                QuantPositionRelation::OrderIntent.def(),
+            )
+            .join(JoinType::InnerJoin, QuantPositionRelation::Market.def())
+            .select_only()
+            .column_as(
+                Expr::col((QuantPositionEntity, QuantPositionColumn::PositionId)),
+                "position_id",
+            )
+            .column_as(
+                Expr::col((QuantPositionEntity, QuantPositionColumn::OrderIntentId)),
+                "order_intent_id",
+            )
+            .column_as(
+                Expr::col((QuantPositionEntity, QuantPositionColumn::ExecutionAccountId)),
+                "execution_account_id",
+            )
+            .column_as(
+                Expr::col((
+                    QuantOrderIntentEntity,
+                    QuantOrderIntentColumn::ExecutionAccountId,
+                )),
+                "intent_execution_account_id",
+            )
+            .column_as(
+                Expr::col((QuantPositionEntity, QuantPositionColumn::TokenId)),
+                "token_id",
+            )
+            .column_as(
+                Expr::col((QuantPositionEntity, QuantPositionColumn::Side)),
+                "side",
+            )
+            .column_as(
+                Expr::col((QuantPositionEntity, QuantPositionColumn::Shares)),
+                "shares",
+            )
+            .column_as(
+                Expr::col((QuantPositionEntity, QuantPositionColumn::CostUsd)),
+                "cost_basis_usd",
+            )
+            .column_as(
+                Expr::col((QuantPositionEntity, QuantPositionColumn::UpdatedAt)),
+                "position_version_at",
+            )
+            .column_as(
+                Expr::col((
+                    QuantOrderIntentEntity,
+                    QuantOrderIntentColumn::ExitPolicyJson,
+                )),
+                "exit_policy_json",
+            )
+            .column_as(
+                Expr::col((QuantOrderIntentEntity, QuantOrderIntentColumn::UpdatedAt)),
+                "intent_version_at",
+            )
+            .column_as(
+                Expr::col((QuantPositionEntity, QuantPositionColumn::MarketId)),
+                "market_id",
+            )
+            .column_as(
+                Expr::col((MarketEntity, MarketColumn::YesTokenId)),
+                "yes_token_id",
+            )
+            .column_as(
+                Expr::col((MarketEntity, MarketColumn::NoTokenId)),
+                "no_token_id",
+            )
+            .column_as(
+                Expr::col((MarketEntity, MarketColumn::Outcome)),
+                "resolution_outcome",
+            )
+            .column_as(
+                Expr::col((MarketEntity, MarketColumn::ResolvedAt)),
+                "resolved_at",
+            )
+            .column_as(
+                Expr::col((MarketEntity, MarketColumn::ContentHash)),
+                "resolution_content_hash",
+            )
+            .column_as(Expr::col((MarketEntity, MarketColumn::NegRisk)), "neg_risk")
+            .filter(scope_condition(scopes))
+            .filter(QuantPositionColumn::State.is_in(OPEN_INVENTORY_STATES))
+            .filter(MarketColumn::Status.eq(MarketStatus::Settled))
+            .filter(MarketColumn::Outcome.is_not_null())
+            .filter(MarketColumn::ResolvedAt.is_not_null())
+            .order_by_asc(QuantPositionColumn::MarketId)
+            .order_by_asc(QuantPositionColumn::ExecutionAccountId)
+            .order_by_asc(QuantPositionColumn::PositionId)
+            .into_model::<SettlementDiscoveryRow>()
+            .all(db)
+            .await
+            .map_err(StorageError::from)
     }
-    QuantPositionEntity::find()
-        .join(
-            JoinType::InnerJoin,
-            QuantPositionRelation::OrderIntent.def(),
-        )
-        .join(JoinType::InnerJoin, QuantPositionRelation::Market.def())
-        .select_only()
-        .column_as(
-            Expr::col((QuantPositionEntity, QuantPositionColumn::PositionId)),
-            "position_id",
-        )
-        .column_as(
-            Expr::col((QuantPositionEntity, QuantPositionColumn::OrderIntentId)),
-            "order_intent_id",
-        )
-        .column_as(
-            Expr::col((QuantPositionEntity, QuantPositionColumn::ExecutionAccountId)),
-            "execution_account_id",
-        )
-        .column_as(
-            Expr::col((
-                QuantOrderIntentEntity,
-                QuantOrderIntentColumn::ExecutionAccountId,
-            )),
-            "intent_execution_account_id",
-        )
-        .column_as(
-            Expr::col((QuantPositionEntity, QuantPositionColumn::TokenId)),
-            "token_id",
-        )
-        .column_as(
-            Expr::col((QuantPositionEntity, QuantPositionColumn::Side)),
-            "side",
-        )
-        .column_as(
-            Expr::col((QuantPositionEntity, QuantPositionColumn::Shares)),
-            "shares",
-        )
-        .column_as(
-            Expr::col((QuantPositionEntity, QuantPositionColumn::CostUsd)),
-            "cost_basis_usd",
-        )
-        .column_as(
-            Expr::col((QuantPositionEntity, QuantPositionColumn::UpdatedAt)),
-            "position_version_at",
-        )
-        .column_as(
-            Expr::col((
-                QuantOrderIntentEntity,
-                QuantOrderIntentColumn::ExitPolicyJson,
-            )),
-            "exit_policy_json",
-        )
-        .column_as(
-            Expr::col((QuantOrderIntentEntity, QuantOrderIntentColumn::UpdatedAt)),
-            "intent_version_at",
-        )
-        .column_as(
-            Expr::col((QuantPositionEntity, QuantPositionColumn::MarketId)),
-            "market_id",
-        )
-        .column_as(
-            Expr::col((MarketEntity, MarketColumn::YesTokenId)),
-            "yes_token_id",
-        )
-        .column_as(
-            Expr::col((MarketEntity, MarketColumn::NoTokenId)),
-            "no_token_id",
-        )
-        .column_as(
-            Expr::col((MarketEntity, MarketColumn::Outcome)),
-            "resolution_outcome",
-        )
-        .column_as(
-            Expr::col((MarketEntity, MarketColumn::ResolvedAt)),
-            "resolved_at",
-        )
-        .column_as(
-            Expr::col((MarketEntity, MarketColumn::ContentHash)),
-            "resolution_content_hash",
-        )
-        .column_as(Expr::col((MarketEntity, MarketColumn::NegRisk)), "neg_risk")
-        .filter(scope_condition(scopes))
-        .filter(QuantPositionColumn::State.is_in(OPEN_INVENTORY_STATES))
-        .filter(MarketColumn::Status.eq(MarketStatus::Settled))
-        .filter(MarketColumn::Outcome.is_not_null())
-        .filter(MarketColumn::ResolvedAt.is_not_null())
-        .order_by_asc(QuantPositionColumn::MarketId)
-        .order_by_asc(QuantPositionColumn::ExecutionAccountId)
-        .order_by_asc(QuantPositionColumn::PositionId)
-        .into_model::<SettlementDiscoveryRow>()
-        .all(db)
-        .await
-        .map_err(StorageError::from)
 }
 
 fn assemble_discovery_candidates(
@@ -313,7 +319,7 @@ fn assemble_discovery_candidates(
         HashMap::new();
     for row in rows {
         if row.execution_account_id != row.intent_execution_account_id {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_ORDER_INTENT,
                 Some(row.order_intent_id),
                 "position and intent execution-account lineage diverged",
@@ -349,7 +355,7 @@ fn assemble_discovery_candidates(
                     SettlementRoute::StandardV2
                 }
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 None::<SettlementRedeemId>,
                 "one market/account inventory query returned inconsistent resolution identity",
@@ -383,86 +389,93 @@ fn assemble_discovery_candidates(
     Ok(result)
 }
 
-async fn inventory_candidate(
-    db: &impl ConnectionTrait,
-    market_id: &MarketId,
-    execution_account_id: ExecutionAccountId,
-) -> Result<Option<SettlementDiscoveryCandidate>, StorageError> {
-    let scope = SettlementDiscoveryScopeRow {
-        market_id: market_id.clone(),
-        execution_account_id,
-    };
-    let mut candidates = assemble_discovery_candidates(discovery_rows(db, &[scope]).await?)?;
-    Ok(candidates.pop())
+impl PgSettlementRedeemRepository {
+    async fn inventory_candidate(
+        db: &impl ConnectionTrait,
+        market_id: &MarketId,
+        execution_account_id: ExecutionAccountId,
+    ) -> Result<Option<SettlementDiscoveryCandidate>, StorageError> {
+        let scope = SettlementDiscoveryScopeRow {
+            market_id: market_id.clone(),
+            execution_account_id,
+        };
+        let mut candidates =
+            assemble_discovery_candidates(Self::discovery_rows(db, &[scope]).await?)?;
+        Ok(candidates.pop())
+    }
 }
 
-async fn unsettled_execution_order_count(
-    db: &impl ConnectionTrait,
-    market_id: &MarketId,
-    execution_account_id: ExecutionAccountId,
-) -> Result<u64, StorageError> {
-    QuantExecutionOrderEntity::find()
-        .join(
-            JoinType::InnerJoin,
-            QuantExecutionOrderRelation::OrderIntent.def(),
-        )
-        .filter(QuantExecutionOrderColumn::MarketId.eq(market_id.clone()))
-        .filter(QuantOrderIntentColumn::ExecutionAccountId.eq(execution_account_id))
-        .filter(QuantExecutionOrderColumn::State.is_in(UNSETTLED_EXECUTION_ORDER_STATES))
-        .count(db)
-        .await
-        .map_err(StorageError::from)
+impl PgSettlementRedeemRepository {
+    async fn unsettled_execution_order_count(
+        db: &impl ConnectionTrait,
+        market_id: &MarketId,
+        execution_account_id: ExecutionAccountId,
+    ) -> Result<u64, StorageError> {
+        QuantExecutionOrderEntity::find()
+            .join(
+                JoinType::InnerJoin,
+                QuantExecutionOrderRelation::OrderIntent.def(),
+            )
+            .filter(QuantExecutionOrderColumn::MarketId.eq(market_id.clone()))
+            .filter(QuantOrderIntentColumn::ExecutionAccountId.eq(execution_account_id))
+            .filter(QuantExecutionOrderColumn::State.is_in(UNSETTLED_EXECUTION_ORDER_STATES))
+            .count(db)
+            .await
+            .map_err(StorageError::from)
+    }
 }
 
 pub struct PgSettlementRedeemRepository {
     db: DatabaseConnection,
 }
 
-async fn load_redeem_context(
-    db: &impl ConnectionTrait,
-    models: &[QuantSettlementRedeemModel],
-) -> Result<
-    (
-        HashMap<ExecutionAccountId, QuantExecutionAccountModel>,
-        HashMap<SettlementAuthorizationId, QuantSettlementAuthorizationModel>,
-    ),
-    StorageError,
-> {
-    if models.is_empty() {
-        return Ok((HashMap::new(), HashMap::new()));
-    }
-    let account_ids = models
-        .iter()
-        .map(|model| model.execution_account_id)
-        .collect::<Vec<_>>();
-    let authorization_ids = models
-        .iter()
-        .filter_map(|model| model.current_authorization_id)
-        .collect::<Vec<_>>();
-    let accounts = QuantExecutionAccountEntity::find()
-        .filter(QuantExecutionAccountColumn::ExecutionAccountId.is_in(account_ids))
-        .all(db)
-        .await
-        .map_err(StorageError::from)?
-        .into_iter()
-        .map(|account| (account.execution_account_id, account))
-        .collect();
-    let authorizations = if authorization_ids.is_empty() {
-        HashMap::new()
-    } else {
-        QuantSettlementAuthorizationEntity::find()
-            .filter(
-                QuantSettlementAuthorizationColumn::SettlementAuthorizationId
-                    .is_in(authorization_ids),
-            )
+impl PgSettlementRedeemRepository {
+    async fn load_redeem_context(
+        db: &impl ConnectionTrait,
+        models: &[QuantSettlementRedeemModel],
+    ) -> Result<
+        (
+            HashMap<ExecutionAccountId, QuantExecutionAccountModel>,
+            HashMap<SettlementAuthorizationId, QuantSettlementAuthorizationModel>,
+        ),
+        StorageError,
+    > {
+        if models.is_empty() {
+            return Ok((HashMap::new(), HashMap::new()));
+        }
+        let account_ids = models
+            .iter()
+            .map(|model| model.execution_account_id)
+            .collect::<Vec<_>>();
+        let authorization_ids = models
+            .iter()
+            .filter_map(|model| model.current_authorization_id)
+            .collect::<Vec<_>>();
+        let accounts = QuantExecutionAccountEntity::find()
+            .filter(QuantExecutionAccountColumn::ExecutionAccountId.is_in(account_ids))
             .all(db)
             .await
             .map_err(StorageError::from)?
             .into_iter()
-            .map(|authorization| (authorization.settlement_authorization_id, authorization))
-            .collect()
-    };
-    Ok((accounts, authorizations))
+            .map(|account| (account.execution_account_id, account))
+            .collect();
+        let authorizations = if authorization_ids.is_empty() {
+            HashMap::new()
+        } else {
+            QuantSettlementAuthorizationEntity::find()
+                .filter(
+                    QuantSettlementAuthorizationColumn::SettlementAuthorizationId
+                        .is_in(authorization_ids),
+                )
+                .all(db)
+                .await
+                .map_err(StorageError::from)?
+                .into_iter()
+                .map(|authorization| (authorization.settlement_authorization_id, authorization))
+                .collect()
+        };
+        Ok((accounts, authorizations))
+    }
 }
 
 fn assemble_redeem(
@@ -471,7 +484,7 @@ fn assemble_redeem(
     authorizations: &HashMap<SettlementAuthorizationId, QuantSettlementAuthorizationModel>,
 ) -> Result<SettlementRedeemInfo, StorageError> {
     let account = accounts.get(&model.execution_account_id).ok_or_else(|| {
-        error::state_conflict(
+        StorageError::state_conflict(
             QUANT_EXECUTION_ACCOUNT,
             Some(model.execution_account_id),
             "settlement case references a missing execution account",
@@ -480,14 +493,14 @@ fn assemble_redeem(
     let authorization = match model.current_authorization_id {
         Some(authorization_id) => {
             let authorization = authorizations.get(&authorization_id).ok_or_else(|| {
-                error::state_conflict(
+                StorageError::state_conflict(
                     QUANT_SETTLEMENT_AUTHORIZATION,
                     Some(authorization_id),
                     "settlement case references a missing authorization attempt",
                 )
             })?;
             if authorization.settlement_redeem_id != model.settlement_redeem_id {
-                return Err(error::state_conflict(
+                return Err(StorageError::state_conflict(
                     QUANT_SETTLEMENT_AUTHORIZATION,
                     Some(authorization_id),
                     "current authorization belongs to another settlement case",
@@ -556,12 +569,15 @@ fn assemble_redeem(
     })
 }
 
-async fn assemble_one_redeem(
-    db: &impl ConnectionTrait,
-    model: QuantSettlementRedeemModel,
-) -> Result<SettlementRedeemInfo, StorageError> {
-    let (accounts, authorizations) = load_redeem_context(db, slice::from_ref(&model)).await?;
-    assemble_redeem(model, &accounts, &authorizations)
+impl PgSettlementRedeemRepository {
+    async fn assemble_one_redeem(
+        db: &impl ConnectionTrait,
+        model: QuantSettlementRedeemModel,
+    ) -> Result<SettlementRedeemInfo, StorageError> {
+        let (accounts, authorizations) =
+            Self::load_redeem_context(db, slice::from_ref(&model)).await?;
+        assemble_redeem(model, &accounts, &authorizations)
+    }
 }
 
 fn validate_inventory_rows(
@@ -573,7 +589,7 @@ fn validate_inventory_rows(
     rows: &[NewSettlementInventoryLot],
 ) -> Result<(), StorageError> {
     if rows.len() != frozen_lots.len() {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_REDEEM),
             "settlement inventory rows do not match the durable open-lot set",
         ));
@@ -586,7 +602,7 @@ fn validate_inventory_rows(
             || row.contributor_lots_digest != contributor_lots_digest
             || by_position.insert(row.position_id, row).is_some()
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 "settlement inventory row identity or digest is inconsistent",
             ));
@@ -594,7 +610,7 @@ fn validate_inventory_rows(
     }
     for lot in frozen_lots {
         let row = by_position.get(&lot.position_id).ok_or_else(|| {
-            error::invariant_violation(
+            StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 "settlement inventory omitted a durable open lot",
             )
@@ -610,7 +626,7 @@ fn validate_inventory_rows(
             || row.position_version_at != lot.position_version_at
             || row.intent_version_at != lot.intent_version_at
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 "settlement inventory row diverges from the durable position and intent",
             ));
@@ -653,7 +669,7 @@ fn validate_pristine_discovery(redeem: &NewSettlementRedeem) -> Result<(), Stora
         || redeem.resolved_at > redeem.created_at
         || redeem.created_at != redeem.updated_at
     {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_REDEEM),
             "newly discovered settlement case must be pristine and capability-free",
         ));
@@ -693,7 +709,7 @@ fn validate_preflight_command(command: &PersistSettlementPreflight) -> Result<()
             .next_attempt_at
             .is_some_and(|retry_at| retry_at > command.observed_at);
     if !ready && !blocked {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_REDEEM),
             "settlement preflight must be either complete Ready evidence or closed Blocked evidence",
         ));
@@ -716,13 +732,13 @@ fn validate_frozen_case(
         || redeem.resolution_outcome != candidate.resolution_outcome
         || redeem.resolved_at != candidate.resolved_at
     {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_REDEEM),
             "discovered case identity diverges from the durable resolved market",
         ));
     }
     let frozen = candidate.freeze().map_err(|source| {
-        error::invariant_violation(
+        StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_REDEEM),
             format!("cannot freeze durable settlement inventory: {source}"),
         )
@@ -731,7 +747,7 @@ fn validate_frozen_case(
         || redeem.inventory_digest != frozen.inventory_digest
         || redeem.contributor_lots_digest != frozen.contributor_lots_digest
     {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_REDEEM),
             "discovered case policy or digest diverges from the canonical inventory",
         ));
@@ -746,59 +762,63 @@ fn validate_frozen_case(
     )
 }
 
-async fn current_authorization(
-    db: &impl ConnectionTrait,
-    model: &QuantSettlementRedeemModel,
-) -> Result<Option<QuantSettlementAuthorizationModel>, StorageError> {
-    let Some(authorization_id) = model.current_authorization_id else {
-        return Ok(None);
-    };
-    let authorization = QuantSettlementAuthorizationEntity::find_by_id(authorization_id)
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| {
-            error::state_conflict(
+impl PgSettlementRedeemRepository {
+    async fn current_authorization(
+        db: &impl ConnectionTrait,
+        model: &QuantSettlementRedeemModel,
+    ) -> Result<Option<QuantSettlementAuthorizationModel>, StorageError> {
+        let Some(authorization_id) = model.current_authorization_id else {
+            return Ok(None);
+        };
+        let authorization = QuantSettlementAuthorizationEntity::find_by_id(authorization_id)
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::state_conflict(
+                    QUANT_SETTLEMENT_AUTHORIZATION,
+                    Some(authorization_id),
+                    "settlement case references a missing authorization attempt",
+                )
+            })?;
+        if authorization.settlement_redeem_id != model.settlement_redeem_id {
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_AUTHORIZATION,
                 Some(authorization_id),
-                "settlement case references a missing authorization attempt",
-            )
-        })?;
-    if authorization.settlement_redeem_id != model.settlement_redeem_id {
-        return Err(error::state_conflict(
-            QUANT_SETTLEMENT_AUTHORIZATION,
-            Some(authorization_id),
-            "current authorization belongs to another settlement case",
-        ));
+                "current authorization belongs to another settlement case",
+            ));
+        }
+        Ok(Some(authorization))
     }
-    Ok(Some(authorization))
 }
 
-async fn invalidate_authorization_for_inventory_change(
-    db: &impl ConnectionTrait,
-    model: &QuantSettlementRedeemModel,
-    observed_at: DateTime<Utc>,
-) -> Result<(), StorageError> {
-    let Some(authorization) = current_authorization(db, model).await? else {
-        return Ok(());
-    };
-    if authorization.state == SettlementAuthorizationState::Consumed {
-        return Err(error::state_conflict(
-            QUANT_SETTLEMENT_REDEEM,
-            Some(model.settlement_redeem_id),
-            "consumed authorization forbids inventory invalidation",
-        ));
+impl PgSettlementRedeemRepository {
+    async fn invalidate_inventory_authorization(
+        db: &impl ConnectionTrait,
+        model: &QuantSettlementRedeemModel,
+        observed_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let Some(authorization) = Self::current_authorization(db, model).await? else {
+            return Ok(());
+        };
+        if authorization.state == SettlementAuthorizationState::Consumed {
+            return Err(StorageError::state_conflict(
+                QUANT_SETTLEMENT_REDEEM,
+                Some(model.settlement_redeem_id),
+                "consumed authorization forbids inventory invalidation",
+            ));
+        }
+        if matches!(
+            authorization.state,
+            SettlementAuthorizationState::Pending | SettlementAuthorizationState::Approved
+        ) {
+            let mut expired = authorization.into_active_model();
+            expired.state = ActiveValue::Set(SettlementAuthorizationState::Expired);
+            expired.expired_at = ActiveValue::Set(Some(observed_at));
+            expired.update(db).await.map_err(StorageError::from)?;
+        }
+        Ok(())
     }
-    if matches!(
-        authorization.state,
-        SettlementAuthorizationState::Pending | SettlementAuthorizationState::Approved
-    ) {
-        let mut expired = authorization.into_active_model();
-        expired.state = ActiveValue::Set(SettlementAuthorizationState::Expired);
-        expired.expired_at = ActiveValue::Set(Some(observed_at));
-        expired.update(db).await.map_err(StorageError::from)?;
-    }
-    Ok(())
 }
 
 fn reset_inventory_dependent_state(
@@ -835,151 +855,156 @@ fn reset_inventory_dependent_state(
     active.failed_at = ActiveValue::Set(None);
 }
 
-async fn claim_next(
-    db: &DatabaseConnection,
-    owner: &WorkerId,
-    now: DateTime<Utc>,
-    lease_expires_at: DateTime<Utc>,
-    class: SettlementClaimClass,
-) -> Result<Option<SettlementWorkClaim>, StorageError> {
-    if lease_expires_at <= now {
-        return Err(error::invariant_violation(
-            Some(QUANT_SETTLEMENT_REDEEM),
-            "settlement claim lease must expire after database now",
-        ));
-    }
-    let txn = db.begin().await.map_err(StorageError::from)?;
-    let active_ids = Query::select()
-        .column(QuantSettlementChainSubmissionColumn::SettlementRedeemId)
-        .from(QuantSettlementChainSubmissionEntity)
-        .and_where(QuantSettlementChainSubmissionColumn::SettlementRedeemId.is_not_null())
-        .and_where(
-            QuantSettlementChainSubmissionColumn::Purpose.eq(SettlementSubmissionPurpose::Redeem),
-        )
-        .and_where(QuantSettlementChainSubmissionColumn::State.is_in(ACTIVE_SUBMISSION_STATES))
-        .to_owned();
-    let lease_available = Condition::any()
-        .add(Column::ClaimOwner.is_null())
-        .add(Column::LeaseExpiresAt.lte(now));
-    let claimable_authorization_ids = Query::select()
-        .column(QuantSettlementAuthorizationColumn::SettlementAuthorizationId)
-        .from(QuantSettlementAuthorizationEntity)
-        .cond_where(
-            Condition::any()
-                .add(
-                    Condition::all()
-                        .add(
-                            QuantSettlementAuthorizationColumn::State
-                                .eq(SettlementAuthorizationState::Approved),
-                        )
-                        .add(QuantSettlementAuthorizationColumn::ExpiresAt.gt(now)),
-                )
-                .add(QuantSettlementAuthorizationColumn::State.is_in([
-                    SettlementAuthorizationState::Revoked,
-                    SettlementAuthorizationState::Expired,
-                ]))
-                .add(
-                    Condition::all()
-                        .add(QuantSettlementAuthorizationColumn::State.is_in([
-                            SettlementAuthorizationState::Pending,
-                            SettlementAuthorizationState::Approved,
-                        ]))
-                        .add(QuantSettlementAuthorizationColumn::ExpiresAt.lte(now)),
-                ),
-        )
-        .to_owned();
-    let mut query = Entity::find()
-        .filter(lease_available)
-        .order_by_asc(Column::CreatedAt);
-    query = match class {
-        SettlementClaimClass::Recovery => query
-            .filter(Column::SettlementRedeemId.in_subquery(active_ids))
-            .filter(
-                Condition::any()
-                    .add(Column::NextAttemptAt.is_null())
-                    .add(Column::NextAttemptAt.lte(now)),
-            ),
-        SettlementClaimClass::Preflight => query
-            .filter(Column::SettlementRedeemId.not_in_subquery(active_ids))
-            .filter(Column::ReadinessStatus.ne(SettlementReadinessStatus::Ready))
-            .filter(Column::State.is_in([
-                SettlementCaseState::Discovered,
-                SettlementCaseState::RetryScheduled,
-            ]))
-            .filter(
-                Condition::any()
-                    .add(Column::NextAttemptAt.is_null())
-                    .add(Column::NextAttemptAt.lte(now)),
-            ),
-        SettlementClaimClass::Submission => query
-            .filter(Column::SettlementRedeemId.not_in_subquery(active_ids))
-            .filter(Column::ReadinessStatus.eq(SettlementReadinessStatus::Ready))
-            .filter(Column::EffectivePolicy.eq(SettlementEffectivePolicy::AutomaticEligible))
-            .filter(Column::State.is_in([
-                SettlementCaseState::Discovered,
-                SettlementCaseState::Prepared,
-                SettlementCaseState::RetryScheduled,
-            ]))
-            .filter(
-                Condition::any()
-                    .add(Column::CurrentAuthorizationId.is_null())
-                    .add(Column::CurrentAuthorizationId.in_subquery(claimable_authorization_ids)),
+impl PgSettlementRedeemRepository {
+    async fn claim_next(
+        db: &DatabaseConnection,
+        owner: &WorkerId,
+        now: DateTime<Utc>,
+        lease_expires_at: DateTime<Utc>,
+        class: SettlementClaimClass,
+    ) -> Result<Option<SettlementWorkClaim>, StorageError> {
+        if lease_expires_at <= now {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_SETTLEMENT_REDEEM),
+                "settlement claim lease must expire after database now",
+            ));
+        }
+        let txn = db.begin().await.map_err(StorageError::from)?;
+        let active_ids = Query::select()
+            .column(QuantSettlementChainSubmissionColumn::SettlementRedeemId)
+            .from(QuantSettlementChainSubmissionEntity)
+            .and_where(QuantSettlementChainSubmissionColumn::SettlementRedeemId.is_not_null())
+            .and_where(
+                QuantSettlementChainSubmissionColumn::Purpose
+                    .eq(SettlementSubmissionPurpose::Redeem),
             )
-            .filter(
+            .and_where(QuantSettlementChainSubmissionColumn::State.is_in(ACTIVE_SUBMISSION_STATES))
+            .to_owned();
+        let lease_available = Condition::any()
+            .add(Column::ClaimOwner.is_null())
+            .add(Column::LeaseExpiresAt.lte(now));
+        let claimable_authorization_ids = Query::select()
+            .column(QuantSettlementAuthorizationColumn::SettlementAuthorizationId)
+            .from(QuantSettlementAuthorizationEntity)
+            .cond_where(
                 Condition::any()
-                    .add(Column::NextAttemptAt.is_null())
-                    .add(Column::NextAttemptAt.lte(now)),
-            ),
-    };
-    let candidate = query
-        .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
-        .one(&txn)
-        .await
-        .map_err(StorageError::from)?;
-    let Some(model) = candidate else {
-        txn.commit().await.map_err(StorageError::from)?;
-        return Ok(None);
-    };
-    let redeem_id = model.settlement_redeem_id;
-    let mut active = model.into_active_model();
-    active.claim_owner = ActiveValue::Set(Some(*owner));
-    active.lease_expires_at = ActiveValue::Set(Some(lease_expires_at));
-    let claimed = active.update(&txn).await.map_err(StorageError::from)?;
-    let submission = active_submission(&txn, redeem_id).await?;
-    if (class == SettlementClaimClass::Recovery) != submission.is_some() {
-        return Err(error::state_conflict(
-            QUANT_SETTLEMENT_REDEEM,
-            Some(redeem_id),
-            "settlement claim class changed while row was locked",
-        ));
-    }
-    let mut authorization = current_authorization(&txn, &claimed).await?;
-    if authorization.as_ref().is_some_and(|authorization| {
-        matches!(
-            authorization.state,
-            SettlementAuthorizationState::Pending | SettlementAuthorizationState::Approved
-        ) && authorization.expires_at <= now
-    }) {
-        let mut expired = authorization
-            .take()
-            .ok_or_else(|| {
-                error::invariant_violation(
-                    Some(QUANT_SETTLEMENT_AUTHORIZATION),
-                    "expired authorization disappeared during claim",
+                    .add(
+                        Condition::all()
+                            .add(
+                                QuantSettlementAuthorizationColumn::State
+                                    .eq(SettlementAuthorizationState::Approved),
+                            )
+                            .add(QuantSettlementAuthorizationColumn::ExpiresAt.gt(now)),
+                    )
+                    .add(QuantSettlementAuthorizationColumn::State.is_in([
+                        SettlementAuthorizationState::Revoked,
+                        SettlementAuthorizationState::Expired,
+                    ]))
+                    .add(
+                        Condition::all()
+                            .add(QuantSettlementAuthorizationColumn::State.is_in([
+                                SettlementAuthorizationState::Pending,
+                                SettlementAuthorizationState::Approved,
+                            ]))
+                            .add(QuantSettlementAuthorizationColumn::ExpiresAt.lte(now)),
+                    ),
+            )
+            .to_owned();
+        let mut query = Entity::find()
+            .filter(lease_available)
+            .order_by_asc(Column::CreatedAt);
+        query = match class {
+            SettlementClaimClass::Recovery => query
+                .filter(Column::SettlementRedeemId.in_subquery(active_ids))
+                .filter(
+                    Condition::any()
+                        .add(Column::NextAttemptAt.is_null())
+                        .add(Column::NextAttemptAt.lte(now)),
+                ),
+            SettlementClaimClass::Preflight => query
+                .filter(Column::SettlementRedeemId.not_in_subquery(active_ids))
+                .filter(Column::ReadinessStatus.ne(SettlementReadinessStatus::Ready))
+                .filter(Column::State.is_in([
+                    SettlementCaseState::Discovered,
+                    SettlementCaseState::RetryScheduled,
+                ]))
+                .filter(
+                    Condition::any()
+                        .add(Column::NextAttemptAt.is_null())
+                        .add(Column::NextAttemptAt.lte(now)),
+                ),
+            SettlementClaimClass::Submission => query
+                .filter(Column::SettlementRedeemId.not_in_subquery(active_ids))
+                .filter(Column::ReadinessStatus.eq(SettlementReadinessStatus::Ready))
+                .filter(Column::EffectivePolicy.eq(SettlementEffectivePolicy::AutomaticEligible))
+                .filter(Column::State.is_in([
+                    SettlementCaseState::Discovered,
+                    SettlementCaseState::Prepared,
+                    SettlementCaseState::RetryScheduled,
+                ]))
+                .filter(
+                    Condition::any()
+                        .add(Column::CurrentAuthorizationId.is_null())
+                        .add(
+                            Column::CurrentAuthorizationId.in_subquery(claimable_authorization_ids),
+                        ),
                 )
-            })?
-            .into_active_model();
-        expired.state = ActiveValue::Set(SettlementAuthorizationState::Expired);
-        expired.expired_at = ActiveValue::Set(Some(now));
-        authorization = Some(expired.update(&txn).await.map_err(StorageError::from)?);
+                .filter(
+                    Condition::any()
+                        .add(Column::NextAttemptAt.is_null())
+                        .add(Column::NextAttemptAt.lte(now)),
+                ),
+        };
+        let candidate = query
+            .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        let Some(model) = candidate else {
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(None);
+        };
+        let redeem_id = model.settlement_redeem_id;
+        let mut active = model.into_active_model();
+        active.claim_owner = ActiveValue::Set(Some(*owner));
+        active.lease_expires_at = ActiveValue::Set(Some(lease_expires_at));
+        let claimed = active.update(&txn).await.map_err(StorageError::from)?;
+        let submission = Self::active_submission(&txn, redeem_id).await?;
+        if (class == SettlementClaimClass::Recovery) != submission.is_some() {
+            return Err(StorageError::state_conflict(
+                QUANT_SETTLEMENT_REDEEM,
+                Some(redeem_id),
+                "settlement claim class changed while row was locked",
+            ));
+        }
+        let mut authorization = Self::current_authorization(&txn, &claimed).await?;
+        if authorization.as_ref().is_some_and(|authorization| {
+            matches!(
+                authorization.state,
+                SettlementAuthorizationState::Pending | SettlementAuthorizationState::Approved
+            ) && authorization.expires_at <= now
+        }) {
+            let mut expired = authorization
+                .take()
+                .ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some(QUANT_SETTLEMENT_AUTHORIZATION),
+                        "expired authorization disappeared during claim",
+                    )
+                })?
+                .into_active_model();
+            expired.state = ActiveValue::Set(SettlementAuthorizationState::Expired);
+            expired.expired_at = ActiveValue::Set(Some(now));
+            authorization = Some(expired.update(&txn).await.map_err(StorageError::from)?);
+        }
+        let redeem = Self::assemble_one_redeem(&txn, claimed).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(Some(SettlementWorkClaim {
+            redeem,
+            authorization: authorization.map(Into::into),
+            active_submission: submission.map(Into::into),
+        }))
     }
-    let redeem = assemble_one_redeem(&txn, claimed).await?;
-    txn.commit().await.map_err(StorageError::from)?;
-    Ok(Some(SettlementWorkClaim {
-        redeem,
-        authorization: authorization.map(Into::into),
-        active_submission: submission.map(Into::into),
-    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -989,56 +1014,67 @@ enum SettlementClaimClass {
     Submission,
 }
 
-async fn active_submission(
-    db: &impl ConnectionTrait,
-    settlement_redeem_id: SettlementRedeemId,
-) -> Result<Option<QuantSettlementChainSubmissionModel>, StorageError> {
-    QuantSettlementChainSubmissionEntity::find()
-        .filter(QuantSettlementChainSubmissionColumn::SettlementRedeemId.eq(settlement_redeem_id))
-        .filter(
-            QuantSettlementChainSubmissionColumn::Purpose.eq(SettlementSubmissionPurpose::Redeem),
-        )
-        .filter(QuantSettlementChainSubmissionColumn::State.is_in(ACTIVE_SUBMISSION_STATES))
-        .one(db)
-        .await
-        .map_err(StorageError::from)
-}
-
-async fn lock_case(
-    db: &impl ConnectionTrait,
-    settlement_redeem_id: SettlementRedeemId,
-) -> Result<QuantSettlementRedeemModel, StorageError> {
-    Entity::find_by_id(settlement_redeem_id)
-        .lock_exclusive()
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_SETTLEMENT_REDEEM, settlement_redeem_id))
-}
-
-async fn lock_dispatching_submission(
-    db: &impl ConnectionTrait,
-    settlement_redeem_id: SettlementRedeemId,
-    submission_id: SettlementChainSubmissionId,
-    expected_envelope_hash: ContentHash,
-) -> Result<QuantSettlementChainSubmissionModel, StorageError> {
-    let submission = QuantSettlementChainSubmissionEntity::find_by_id(submission_id)
-        .lock_exclusive()
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_SETTLEMENT_CHAIN_SUBMISSION, submission_id))?;
-    if submission.settlement_redeem_id != Some(settlement_redeem_id)
-        || submission.state != SettlementSubmissionState::Dispatching
-        || submission.signed_envelope_hash != Some(expected_envelope_hash)
-    {
-        return Err(error::state_conflict(
-            QUANT_SETTLEMENT_CHAIN_SUBMISSION,
-            Some(submission_id),
-            "dispatch acceptance envelope/case/state compare-and-swap failed",
-        ));
+impl PgSettlementRedeemRepository {
+    async fn active_submission(
+        db: &impl ConnectionTrait,
+        settlement_redeem_id: SettlementRedeemId,
+    ) -> Result<Option<QuantSettlementChainSubmissionModel>, StorageError> {
+        QuantSettlementChainSubmissionEntity::find()
+            .filter(
+                QuantSettlementChainSubmissionColumn::SettlementRedeemId.eq(settlement_redeem_id),
+            )
+            .filter(
+                QuantSettlementChainSubmissionColumn::Purpose
+                    .eq(SettlementSubmissionPurpose::Redeem),
+            )
+            .filter(QuantSettlementChainSubmissionColumn::State.is_in(ACTIVE_SUBMISSION_STATES))
+            .one(db)
+            .await
+            .map_err(StorageError::from)
     }
-    Ok(submission)
+}
+
+impl PgSettlementRedeemRepository {
+    async fn lock_case(
+        db: &impl ConnectionTrait,
+        settlement_redeem_id: SettlementRedeemId,
+    ) -> Result<QuantSettlementRedeemModel, StorageError> {
+        Entity::find_by_id(settlement_redeem_id)
+            .lock_exclusive()
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_SETTLEMENT_REDEEM, settlement_redeem_id))
+    }
+}
+
+impl PgSettlementRedeemRepository {
+    async fn lock_dispatching_submission(
+        db: &impl ConnectionTrait,
+        settlement_redeem_id: SettlementRedeemId,
+        submission_id: SettlementChainSubmissionId,
+        expected_envelope_hash: ContentHash,
+    ) -> Result<QuantSettlementChainSubmissionModel, StorageError> {
+        let submission = QuantSettlementChainSubmissionEntity::find_by_id(submission_id)
+            .lock_exclusive()
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::not_found(QUANT_SETTLEMENT_CHAIN_SUBMISSION, submission_id)
+            })?;
+        if submission.settlement_redeem_id != Some(settlement_redeem_id)
+            || submission.state != SettlementSubmissionState::Dispatching
+            || submission.signed_envelope_hash != Some(expected_envelope_hash)
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_SETTLEMENT_CHAIN_SUBMISSION,
+                Some(submission_id),
+                "dispatch acceptance envelope/case/state compare-and-swap failed",
+            ));
+        }
+        Ok(submission)
+    }
 }
 
 fn require_live_claim(
@@ -1051,7 +1087,7 @@ fn require_live_claim(
             .lease_expires_at
             .is_none_or(|lease_expires_at| lease_expires_at <= now)
     {
-        return Err(error::state_conflict(
+        return Err(StorageError::state_conflict(
             QUANT_SETTLEMENT_REDEEM,
             Some(model.settlement_redeem_id),
             "settlement case lease is absent, expired, or owned by another worker",
@@ -1060,80 +1096,84 @@ fn require_live_claim(
     Ok(())
 }
 
-async fn require_execution_quiescence(
-    db: &impl ConnectionTrait,
-    model: &QuantSettlementRedeemModel,
-) -> Result<(), StorageError> {
-    // Keep shared locks on every order/intent whose venue outcome can still
-    // change inventory until the caller's transaction commits. This includes
-    // a partial fill until its remainder is terminally resolved.
-    // Submission-result and reconciliation writes take an exclusive order
-    // lock before changing the position, so a late fill cannot land between
-    // this check and the settlement CAS.
-    let orders = QuantExecutionOrderEntity::find()
-        .join(
-            JoinType::InnerJoin,
-            QuantExecutionOrderRelation::OrderIntent.def(),
-        )
-        .filter(QuantExecutionOrderColumn::MarketId.eq(model.market_id.clone()))
-        .filter(QuantOrderIntentColumn::ExecutionAccountId.eq(model.execution_account_id))
-        .filter(QuantExecutionOrderColumn::State.is_in(UNSETTLED_EXECUTION_ORDER_STATES))
-        .lock_shared()
-        .all(db)
-        .await
-        .map_err(StorageError::from)?;
-    let unsettled = orders.len();
-    if unsettled > 0 {
-        return Err(error::state_conflict(
-            QUANT_SETTLEMENT_REDEEM,
-            Some(model.settlement_redeem_id),
-            format!(
-                "{unsettled} unsettled execution order(s) can still change the frozen inventory"
-            ),
-        ));
-    }
-    Ok(())
-}
-
-async fn require_current_inventory(
-    db: &impl ConnectionTrait,
-    model: &QuantSettlementRedeemModel,
-) -> Result<(), StorageError> {
-    let candidate = inventory_candidate(db, &model.market_id, model.execution_account_id)
-        .await?
-        .ok_or_else(|| {
-            error::state_conflict(
+impl PgSettlementRedeemRepository {
+    async fn require_execution_quiescence(
+        db: &impl ConnectionTrait,
+        model: &QuantSettlementRedeemModel,
+    ) -> Result<(), StorageError> {
+        // Keep shared locks on every order/intent whose venue outcome can still
+        // change inventory until the caller's transaction commits. This includes
+        // a partial fill until its remainder is terminally resolved.
+        // Submission-result and reconciliation writes take an exclusive order
+        // lock before changing the position, so a late fill cannot land between
+        // this check and the settlement CAS.
+        let orders = QuantExecutionOrderEntity::find()
+            .join(
+                JoinType::InnerJoin,
+                QuantExecutionOrderRelation::OrderIntent.def(),
+            )
+            .filter(QuantExecutionOrderColumn::MarketId.eq(model.market_id.clone()))
+            .filter(QuantOrderIntentColumn::ExecutionAccountId.eq(model.execution_account_id))
+            .filter(QuantExecutionOrderColumn::State.is_in(UNSETTLED_EXECUTION_ORDER_STATES))
+            .lock_shared()
+            .all(db)
+            .await
+            .map_err(StorageError::from)?;
+        let unsettled = orders.len();
+        if unsettled > 0 {
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
-                "durable open settlement inventory disappeared before money admission",
+                format!(
+                    "{unsettled} unsettled execution order(s) can still change the frozen inventory"
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl PgSettlementRedeemRepository {
+    async fn require_current_inventory(
+        db: &impl ConnectionTrait,
+        model: &QuantSettlementRedeemModel,
+    ) -> Result<(), StorageError> {
+        let candidate = Self::inventory_candidate(db, &model.market_id, model.execution_account_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::state_conflict(
+                    QUANT_SETTLEMENT_REDEEM,
+                    Some(model.settlement_redeem_id),
+                    "durable open settlement inventory disappeared before money admission",
+                )
+            })?;
+        let exact_resolution = candidate.market_id == model.market_id
+            && candidate.yes_token_id == model.yes_token_id
+            && candidate.no_token_id == model.no_token_id
+            && candidate.execution_account_id == model.execution_account_id
+            && candidate.route == model.route
+            && candidate.resolution_content_hash == model.resolution_content_hash
+            && candidate.resolution_outcome == model.resolution_outcome
+            && candidate.resolved_at == model.resolved_at;
+        let frozen = candidate.freeze().map_err(|source| {
+            StorageError::invariant_violation(
+                Some(QUANT_SETTLEMENT_REDEEM),
+                format!("cannot verify current settlement inventory: {source}"),
             )
         })?;
-    let exact_resolution = candidate.market_id == model.market_id
-        && candidate.yes_token_id == model.yes_token_id
-        && candidate.no_token_id == model.no_token_id
-        && candidate.execution_account_id == model.execution_account_id
-        && candidate.route == model.route
-        && candidate.resolution_content_hash == model.resolution_content_hash
-        && candidate.resolution_outcome == model.resolution_outcome
-        && candidate.resolved_at == model.resolved_at;
-    let frozen = candidate.freeze().map_err(|source| {
-        error::invariant_violation(
-            Some(QUANT_SETTLEMENT_REDEEM),
-            format!("cannot verify current settlement inventory: {source}"),
-        )
-    })?;
-    if !exact_resolution
-        || frozen.effective_policy != model.effective_policy
-        || frozen.inventory_digest != model.inventory_digest
-        || frozen.contributor_lots_digest != model.contributor_lots_digest
-    {
-        return Err(error::state_conflict(
-            QUANT_SETTLEMENT_REDEEM,
-            Some(model.settlement_redeem_id),
-            "current open inventory or effective policy changed after the case was frozen",
-        ));
+        if !exact_resolution
+            || frozen.effective_policy != model.effective_policy
+            || frozen.inventory_digest != model.inventory_digest
+            || frozen.contributor_lots_digest != model.contributor_lots_digest
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_SETTLEMENT_REDEEM,
+                Some(model.settlement_redeem_id),
+                "current open inventory or effective policy changed after the case was frozen",
+            ));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn require_current_ready_scope(
@@ -1150,7 +1190,7 @@ fn require_current_ready_scope(
         || model.verified_block_number.is_none()
         || model.verified_block_hash.is_none()
     {
-        return Err(error::state_conflict(
+        return Err(StorageError::state_conflict(
             QUANT_SETTLEMENT_REDEEM,
             Some(model.settlement_redeem_id),
             "settlement inventory policy or current verified capability no longer permits a new submission",
@@ -1167,7 +1207,7 @@ fn require_prepared_submission_scope(
 ) -> Result<(), StorageError> {
     let submission = &command.submission;
     let expected_ordinal = model.attempt_count.checked_add(1).ok_or_else(|| {
-        error::invariant_violation(
+        StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_REDEEM),
             "settlement attempt ordinal overflow",
         )
@@ -1196,7 +1236,7 @@ fn require_prepared_submission_scope(
         && submission.signed_envelope_hash.is_some()
         && submission.prepared_nonce.is_some();
     if !exact_capability {
-        return Err(error::state_conflict(
+        return Err(StorageError::state_conflict(
             QUANT_SETTLEMENT_CHAIN_SUBMISSION,
             Some(submission.settlement_chain_submission_id),
             "prepared submission does not exactly match the leased current capability",
@@ -1216,7 +1256,7 @@ fn require_prepared_submission_scope(
             )
         }) => {}
         _ => {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "settlement authorization is absent, expired, consumed, or digest-mismatched",
@@ -1242,7 +1282,7 @@ fn require_prepared_submission_scope(
                     .is_some_and(|(ceiling, expected)| ceiling >= expected) => {}
         (None, None) => {}
         _ => {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_GOVERNED_ACTION,
                 command.expected_canary_action_id,
                 "canary grant is absent, expired, consumed, or scope-mismatched",
@@ -1254,7 +1294,7 @@ fn require_prepared_submission_scope(
 
 fn validate_confirmation_write(write: &ConfirmSettlementRedeem) -> Result<(), StorageError> {
     if write.lots.is_empty() {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_REDEEM),
             "confirmed settlement redeem must close at least one lot",
         ));
@@ -1266,14 +1306,14 @@ fn validate_confirmation_write(write: &ConfirmSettlementRedeem) -> Result<(), St
             .iter()
             .any(|lot| lot.lot.settlement_redeem_id != write.settlement_redeem_id)
     {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_REDEEM),
             "settlement lot identities/payouts do not exactly match the confirmation",
         ));
     }
     let DomainEventPayload::SettlementRedeemConfirmed(event_payload) = &write.outbox_event.payload
     else {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_REDEEM),
             "settlement confirmation requires a settlement outbox payload",
         ));
@@ -1285,7 +1325,7 @@ fn validate_confirmation_write(write: &ConfirmSettlementRedeem) -> Result<(), St
         || event_payload.actual_payout_usd != write.actual_payout_usd
         || usize::try_from(event_payload.lot_count).ok() != Some(write.lots.len())
     {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SETTLEMENT_REDEEM),
             "settlement outbox identity or content digest is invalid",
         ));
@@ -1310,7 +1350,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .await
             .map_err(StorageError::from)?;
         match model {
-            Some(model) => assemble_one_redeem(&self.db, model).await.map(Some),
+            Some(model) => Self::assemble_one_redeem(&self.db, model).await.map(Some),
             None => Ok(None),
         }
     }
@@ -1328,13 +1368,13 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             |model| model,
         )
         .await?;
-        let (accounts, authorizations) = load_redeem_context(&self.db, &page.items).await?;
+        let (accounts, authorizations) = Self::load_redeem_context(&self.db, &page.items).await?;
         let redeems = page
             .items
             .into_iter()
             .map(|model| assemble_redeem(model, &accounts, &authorizations))
             .collect::<Result<Vec<_>, _>>()?;
-        let counts = inventory_lot_counts_for(
+        let counts = Self::inventory_lot_counts_for(
             &self.db,
             redeems
                 .iter()
@@ -1408,7 +1448,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .await
             .map_err(StorageError::from)?;
         match model {
-            Some(model) => assemble_one_redeem(&self.db, model).await.map(Some),
+            Some(model) => Self::assemble_one_redeem(&self.db, model).await.map(Some),
             None => Ok(None),
         }
     }
@@ -1417,8 +1457,8 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         &self,
         limit: u64,
     ) -> Result<Vec<SettlementDiscoveryCandidate>, StorageError> {
-        let scopes = discovery_scopes(&self.db, limit).await?;
-        assemble_discovery_candidates(discovery_rows(&self.db, &scopes).await?)
+        let scopes = Self::discovery_scopes(&self.db, limit).await?;
+        assemble_discovery_candidates(Self::discovery_rows(&self.db, &scopes).await?)
     }
 
     async fn load_inventory_candidate(
@@ -1426,7 +1466,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         market_id: &MarketId,
         execution_account_id: &ExecutionAccountId,
     ) -> Result<Option<SettlementDiscoveryCandidate>, StorageError> {
-        inventory_candidate(&self.db, market_id, *execution_account_id).await
+        Self::inventory_candidate(&self.db, market_id, *execution_account_id).await
     }
 
     async fn list_refreshable_inventory_cases(
@@ -1451,7 +1491,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .all(&self.db)
             .await
             .map_err(StorageError::from)?;
-        let (accounts, authorizations) = load_redeem_context(&self.db, &models).await?;
+        let (accounts, authorizations) = Self::load_redeem_context(&self.db, &models).await?;
         models
             .into_iter()
             .map(|model| assemble_redeem(model, &accounts, &authorizations))
@@ -1468,15 +1508,16 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .begin_with_config(Some(IsolationLevel::Serializable), None)
             .await
             .map_err(StorageError::from)?;
-        let candidate = inventory_candidate(&txn, &redeem.market_id, redeem.execution_account_id)
-            .await?
-            .ok_or_else(|| {
-                error::state_conflict(
-                    QUANT_SETTLEMENT_REDEEM,
-                    Some(redeem.settlement_redeem_id),
-                    "resolved market/account no longer has redeemable open inventory",
-                )
-            })?;
+        let candidate =
+            Self::inventory_candidate(&txn, &redeem.market_id, redeem.execution_account_id)
+                .await?
+                .ok_or_else(|| {
+                    StorageError::state_conflict(
+                        QUANT_SETTLEMENT_REDEEM,
+                        Some(redeem.settlement_redeem_id),
+                        "resolved market/account no longer has redeemable open inventory",
+                    )
+                })?;
         validate_frozen_case(&redeem, candidate, &lots)?;
         let model = Entity::insert(redeem.into_active_model())
             .exec_with_returning(&txn)
@@ -1489,7 +1530,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                 )
             })?;
         insert_many_chunked::<QuantSettlementInventoryLotEntity, _>(&txn, lots).await?;
-        let assembled = assemble_one_redeem(&txn, model).await?;
+        let assembled = Self::assemble_one_redeem(&txn, model).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(assembled)
     }
@@ -1503,9 +1544,9 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .begin_with_config(Some(IsolationLevel::Serializable), None)
             .await
             .map_err(StorageError::from)?;
-        let model = lock_case(&txn, command.settlement_redeem_id).await?;
+        let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         if model.inventory_digest != command.expected_inventory_digest {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "settlement inventory compare-and-swap failed",
@@ -1521,7 +1562,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .lease_expires_at
             .is_some_and(|lease_expires_at| lease_expires_at > command.observed_at)
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "claimed or post-prepare settlement inventory cannot be refreshed",
@@ -1537,22 +1578,23 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .map_err(StorageError::from)?
             .is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "durable submission identity forbids inventory refresh",
             ));
         }
-        invalidate_authorization_for_inventory_change(&txn, &model, command.observed_at).await?;
-        let candidate = inventory_candidate(&txn, &model.market_id, model.execution_account_id)
-            .await?
-            .ok_or_else(|| {
-                error::state_conflict(
-                    QUANT_SETTLEMENT_REDEEM,
-                    Some(model.settlement_redeem_id),
-                    "settlement inventory disappeared before refresh",
-                )
-            })?;
+        Self::invalidate_inventory_authorization(&txn, &model, command.observed_at).await?;
+        let candidate =
+            Self::inventory_candidate(&txn, &model.market_id, model.execution_account_id)
+                .await?
+                .ok_or_else(|| {
+                    StorageError::state_conflict(
+                        QUANT_SETTLEMENT_REDEEM,
+                        Some(model.settlement_redeem_id),
+                        "settlement inventory disappeared before refresh",
+                    )
+                })?;
         if command.resolution_content_hash != candidate.resolution_content_hash
             || command.yes_token_id != candidate.yes_token_id
             || command.no_token_id != candidate.no_token_id
@@ -1560,14 +1602,14 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             || command.resolved_at != candidate.resolved_at
             || model.route != candidate.route
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "resolved market identity changed before inventory refresh",
             ));
         }
         let frozen = candidate.freeze().map_err(|source| {
-            error::invariant_violation(
+            StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 format!("cannot refresh durable settlement inventory: {source}"),
             )
@@ -1578,7 +1620,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                     || lot.intent_version_at > command.observed_at
             })
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 "inventory refresh observation predates its durable contributors",
             ));
@@ -1587,7 +1629,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             || command.inventory_digest != frozen.inventory_digest
             || command.contributor_lots_digest != frozen.contributor_lots_digest
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 "inventory refresh policy or digest is not canonical",
             ));
@@ -1613,7 +1655,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         active.contributor_lots_digest = ActiveValue::Set(command.contributor_lots_digest);
         reset_inventory_dependent_state(&mut active, SettlementCaseState::Discovered);
         let updated = active.update(&txn).await.map_err(StorageError::from)?;
-        let assembled = assemble_one_redeem(&txn, updated).await?;
+        let assembled = Self::assemble_one_redeem(&txn, updated).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(assembled)
     }
@@ -1627,9 +1669,9 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .begin_with_config(Some(IsolationLevel::Serializable), None)
             .await
             .map_err(StorageError::from)?;
-        let model = lock_case(&txn, command.settlement_redeem_id).await?;
+        let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         if model.inventory_digest != command.expected_inventory_digest {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "absent-inventory compare-and-swap failed",
@@ -1645,7 +1687,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .lease_expires_at
             .is_some_and(|lease_expires_at| lease_expires_at > command.observed_at)
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "claimed or post-submission settlement case cannot become not-required",
@@ -1661,27 +1703,27 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .map_err(StorageError::from)?
             .is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "durable submission identity forbids absent-inventory transition",
             ));
         }
-        if inventory_candidate(&txn, &model.market_id, model.execution_account_id)
+        if Self::inventory_candidate(&txn, &model.market_id, model.execution_account_id)
             .await?
             .is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "durable open inventory still exists",
             ));
         }
-        invalidate_authorization_for_inventory_change(&txn, &model, command.observed_at).await?;
+        Self::invalidate_inventory_authorization(&txn, &model, command.observed_at).await?;
         let mut active = model.into_active_model();
         reset_inventory_dependent_state(&mut active, SettlementCaseState::NotRequired);
         let updated = active.update(&txn).await.map_err(StorageError::from)?;
-        let assembled = assemble_one_redeem(&txn, updated).await?;
+        let assembled = Self::assemble_one_redeem(&txn, updated).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(assembled)
     }
@@ -1694,7 +1736,9 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_SETTLEMENT_REDEEM, settlement_redeem_id))?;
+            .ok_or_else(|| {
+                StorageError::not_found(QUANT_SETTLEMENT_REDEEM, settlement_redeem_id)
+            })?;
         QuantSettlementInventoryLotEntity::find()
             .filter(QuantSettlementInventoryLotColumn::SettlementRedeemId.eq(*settlement_redeem_id))
             .filter(QuantSettlementInventoryLotColumn::InventoryDigest.eq(redeem.inventory_digest))
@@ -1710,7 +1754,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         market_id: &MarketId,
         execution_account_id: &ExecutionAccountId,
     ) -> Result<u64, StorageError> {
-        unsettled_execution_order_count(&self.db, market_id, *execution_account_id).await
+        Self::unsettled_execution_order_count(&self.db, market_id, *execution_account_id).await
     }
 
     async fn claim_next_recovery(
@@ -1719,7 +1763,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         now: DateTime<Utc>,
         lease_expires_at: DateTime<Utc>,
     ) -> Result<Option<SettlementWorkClaim>, StorageError> {
-        claim_next(
+        Self::claim_next(
             &self.db,
             owner,
             now,
@@ -1735,7 +1779,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         now: DateTime<Utc>,
         lease_expires_at: DateTime<Utc>,
     ) -> Result<Option<SettlementWorkClaim>, StorageError> {
-        claim_next(
+        Self::claim_next(
             &self.db,
             owner,
             now,
@@ -1751,7 +1795,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         now: DateTime<Utc>,
         lease_expires_at: DateTime<Utc>,
     ) -> Result<Option<SettlementWorkClaim>, StorageError> {
-        claim_next(
+        Self::claim_next(
             &self.db,
             owner,
             now,
@@ -1769,7 +1813,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         lease_expires_at: DateTime<Utc>,
     ) -> Result<bool, StorageError> {
         if lease_expires_at <= now {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 "settlement claim renewal must extend beyond database now",
             ));
@@ -1807,30 +1851,30 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
     ) -> Result<SettlementRedeemInfo, StorageError> {
         validate_preflight_command(&command)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let model = lock_case(&txn, command.settlement_redeem_id).await?;
+        let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         require_live_claim(&model, &command.owner, command.observed_at)?;
         if command.observed_at < model.resolved_at
             || model.inventory_digest != command.expected_inventory_digest
-            || active_submission(&txn, model.settlement_redeem_id)
+            || Self::active_submission(&txn, model.settlement_redeem_id)
                 .await?
                 .is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "settlement preflight inventory changed or a submission already exists",
             ));
         }
         if command.readiness_status == SettlementReadinessStatus::Ready {
-            require_execution_quiescence(&txn, &model).await?;
-            require_current_inventory(&txn, &model).await?;
+            Self::require_execution_quiescence(&txn, &model).await?;
+            Self::require_current_inventory(&txn, &model).await?;
         }
-        invalidate_authorization_for_inventory_change(&txn, &model, command.observed_at).await?;
+        Self::invalidate_inventory_authorization(&txn, &model, command.observed_at).await?;
         let retry_count = if command.readiness_status == SettlementReadinessStatus::Ready {
             0
         } else {
             model.retry_count.checked_add(1).ok_or_else(|| {
-                error::invariant_violation(
+                StorageError::invariant_violation(
                     Some(QUANT_SETTLEMENT_REDEEM),
                     "settlement preflight retry count overflow",
                 )
@@ -1865,7 +1909,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         active.lease_expires_at = ActiveValue::Set(None);
         active.updated_at = ActiveValue::Set(command.observed_at);
         let updated = active.update(&txn).await.map_err(StorageError::from)?;
-        let assembled = assemble_one_redeem(&txn, updated).await?;
+        let assembled = Self::assemble_one_redeem(&txn, updated).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(assembled)
     }
@@ -1878,21 +1922,21 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             || command.detail.len() > 2_048
             || command.next_attempt_at <= command.observed_at
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 "settlement retry requires bounded detail and a future next_attempt_at",
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let model = lock_case(&txn, command.settlement_redeem_id).await?;
+        let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         require_live_claim(&model, &command.owner, command.observed_at)?;
-        let submission = active_submission(&txn, model.settlement_redeem_id).await?;
+        let submission = Self::active_submission(&txn, model.settlement_redeem_id).await?;
         if submission
             .as_ref()
             .map(|value| value.settlement_chain_submission_id)
             != command.settlement_chain_submission_id
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "settlement retry durable submission identity changed",
@@ -1912,7 +1956,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             active.update(&txn).await.map_err(StorageError::from)?;
         }
         let retry_count = model.retry_count.checked_add(1).ok_or_else(|| {
-            error::invariant_violation(
+            StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 "settlement retry count overflow",
             )
@@ -1929,7 +1973,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         active.lease_expires_at = ActiveValue::Set(None);
         active.updated_at = ActiveValue::Set(command.observed_at);
         let updated = active.update(&txn).await.map_err(StorageError::from)?;
-        let assembled = assemble_one_redeem(&txn, updated).await?;
+        let assembled = Self::assemble_one_redeem(&txn, updated).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(assembled)
     }
@@ -1939,21 +1983,21 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         command: ScheduleSettlementWork,
     ) -> Result<SettlementRedeemInfo, StorageError> {
         if command.next_attempt_at <= command.observed_at {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 "settlement poll must be scheduled in the future",
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let model = lock_case(&txn, command.settlement_redeem_id).await?;
+        let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         require_live_claim(&model, &command.owner, command.observed_at)?;
-        let submission = active_submission(&txn, model.settlement_redeem_id).await?;
+        let submission = Self::active_submission(&txn, model.settlement_redeem_id).await?;
         if submission
             .as_ref()
             .map(|value| value.settlement_chain_submission_id)
             != command.settlement_chain_submission_id
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "settlement poll durable submission identity changed",
@@ -1965,7 +2009,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         active.lease_expires_at = ActiveValue::Set(None);
         active.updated_at = ActiveValue::Set(command.observed_at);
         let updated = active.update(&txn).await.map_err(StorageError::from)?;
-        let assembled = assemble_one_redeem(&txn, updated).await?;
+        let assembled = Self::assemble_one_redeem(&txn, updated).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(assembled)
     }
@@ -1975,10 +2019,10 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         command: StageSettlementAuthorization,
     ) -> Result<SettlementRedeemInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let model = lock_case(&txn, command.settlement_redeem_id).await?;
+        let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         require_live_claim(&model, &command.owner, command.staged_at)?;
         if command.expires_at <= command.staged_at {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 "settlement authorization expiry must be later than staged_at",
             ));
@@ -1988,19 +2032,19 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             &command.expected_target_adapter,
             command.expected_deployment_digest,
         )?;
-        require_execution_quiescence(&txn, &model).await?;
-        require_current_inventory(&txn, &model).await?;
+        Self::require_execution_quiescence(&txn, &model).await?;
+        Self::require_current_inventory(&txn, &model).await?;
         if model.balance_before_json.is_none() || model.expected_payout_usd.is_none() {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "authorization cannot be staged before exact balance and payout preflight",
             ));
         }
-        if let Some(current) = current_authorization(&txn, &model).await? {
+        if let Some(current) = Self::current_authorization(&txn, &model).await? {
             match current.state {
                 SettlementAuthorizationState::Consumed => {
-                    return Err(error::state_conflict(
+                    return Err(StorageError::state_conflict(
                         QUANT_SETTLEMENT_AUTHORIZATION,
                         Some(current.settlement_authorization_id),
                         "consumed authorization cannot be replaced",
@@ -2009,7 +2053,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                 SettlementAuthorizationState::Pending | SettlementAuthorizationState::Approved
                     if current.expires_at > command.staged_at =>
                 {
-                    return Err(error::state_conflict(
+                    return Err(StorageError::state_conflict(
                         QUANT_SETTLEMENT_AUTHORIZATION,
                         Some(current.settlement_authorization_id),
                         "live authorization attempt must be revoked or consumed before renewal",
@@ -2026,11 +2070,11 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                 | SettlementAuthorizationState::NotRequired => {}
             }
         }
-        if active_submission(&txn, model.settlement_redeem_id)
+        if Self::active_submission(&txn, model.settlement_redeem_id)
             .await?
             .is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "authorization cannot be staged after a durable submission exists",
@@ -2052,7 +2096,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                     .attempt_ordinal
                     .checked_add(1)
                     .ok_or_else(|| {
-                        error::invariant_violation(
+                        StorageError::invariant_violation(
                             Some(QUANT_SETTLEMENT_AUTHORIZATION),
                             "settlement authorization attempt ordinal overflow",
                         )
@@ -2088,7 +2132,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         active.prepared_at = ActiveValue::Set(Some(command.staged_at));
         active.current_authorization_id = ActiveValue::Set(Some(authorization_id));
         let staged = active.update(&txn).await.map_err(StorageError::from)?;
-        let assembled = assemble_one_redeem(&txn, staged).await?;
+        let assembled = Self::assemble_one_redeem(&txn, staged).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(assembled)
     }
@@ -2098,35 +2142,37 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         command: ApproveSettlementAuthorization,
     ) -> Result<SettlementRedeemInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let model = lock_case(&txn, command.settlement_redeem_id).await?;
+        let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         if model.effective_policy != SettlementEffectivePolicy::AutomaticEligible {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "manual-only settlement inventory cannot approve a new submission authorization",
             ));
         }
-        require_execution_quiescence(&txn, &model).await?;
-        require_current_inventory(&txn, &model).await?;
-        let authorization = current_authorization(&txn, &model).await?.ok_or_else(|| {
-            error::state_conflict(
-                QUANT_SETTLEMENT_REDEEM,
-                Some(model.settlement_redeem_id),
-                "settlement case has no authorization attempt",
-            )
-        })?;
+        Self::require_execution_quiescence(&txn, &model).await?;
+        Self::require_current_inventory(&txn, &model).await?;
+        let authorization = Self::current_authorization(&txn, &model)
+            .await?
+            .ok_or_else(|| {
+                StorageError::state_conflict(
+                    QUANT_SETTLEMENT_REDEEM,
+                    Some(model.settlement_redeem_id),
+                    "settlement case has no authorization attempt",
+                )
+            })?;
         if authorization.state == SettlementAuthorizationState::Approved
             && authorization.scope_digest == command.digest
             && authorization.approved_by == Some(command.actor)
         {
-            let assembled = assemble_one_redeem(&txn, model).await?;
+            let assembled = Self::assemble_one_redeem(&txn, model).await?;
             txn.commit().await.map_err(StorageError::from)?;
             return Ok(assembled);
         }
         if authorization.state != SettlementAuthorizationState::Pending
             || authorization.scope_digest != command.digest
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "authorization approval digest/state compare-and-swap failed",
@@ -2138,7 +2184,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             expired.expired_at = ActiveValue::Set(Some(command.approved_at));
             expired.update(&txn).await.map_err(StorageError::from)?;
             txn.commit().await.map_err(StorageError::from)?;
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(command.settlement_redeem_id),
                 "settlement authorization expired before approval",
@@ -2150,7 +2196,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         active.approved_by = ActiveValue::Set(Some(command.actor));
         active.approved_at = ActiveValue::Set(Some(command.approved_at));
         active.update(&txn).await.map_err(StorageError::from)?;
-        let approved = assemble_one_redeem(&txn, model).await?;
+        let approved = Self::assemble_one_redeem(&txn, model).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(approved)
     }
@@ -2160,25 +2206,27 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         command: RevokeSettlementAuthorization,
     ) -> Result<SettlementRedeemInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let model = lock_case(&txn, command.settlement_redeem_id).await?;
-        let authorization = current_authorization(&txn, &model).await?.ok_or_else(|| {
-            error::state_conflict(
-                QUANT_SETTLEMENT_REDEEM,
-                Some(model.settlement_redeem_id),
-                "settlement case has no authorization attempt",
-            )
-        })?;
+        let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
+        let authorization = Self::current_authorization(&txn, &model)
+            .await?
+            .ok_or_else(|| {
+                StorageError::state_conflict(
+                    QUANT_SETTLEMENT_REDEEM,
+                    Some(model.settlement_redeem_id),
+                    "settlement case has no authorization attempt",
+                )
+            })?;
         if authorization.state == SettlementAuthorizationState::Revoked
             && authorization.scope_digest == command.digest
         {
-            let assembled = assemble_one_redeem(&txn, model).await?;
+            let assembled = Self::assemble_one_redeem(&txn, model).await?;
             txn.commit().await.map_err(StorageError::from)?;
             return Ok(assembled);
         }
         if authorization.state != SettlementAuthorizationState::Approved
             || authorization.scope_digest != command.digest
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 "authorization revoke digest/state compare-and-swap failed",
@@ -2188,7 +2236,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .approved_at
             .is_some_and(|authorized_at| command.revoked_at < authorized_at)
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 "authorization revocation cannot predate approval",
             ));
@@ -2198,7 +2246,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         active.revoked_by = ActiveValue::Set(Some(command.actor));
         active.revoked_at = ActiveValue::Set(Some(command.revoked_at));
         active.update(&txn).await.map_err(StorageError::from)?;
-        let revoked = assemble_one_redeem(&txn, model).await?;
+        let revoked = Self::assemble_one_redeem(&txn, model).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(revoked)
     }
@@ -2209,14 +2257,14 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
     ) -> Result<SettlementChainSubmissionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let redeem_id = command.submission.settlement_redeem_id.ok_or_else(|| {
-            error::invariant_violation(
+            StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_CHAIN_SUBMISSION),
                 "redeem submission must reference exactly one settlement case",
             )
         })?;
-        let model = lock_case(&txn, redeem_id).await?;
+        let model = Self::lock_case(&txn, redeem_id).await?;
         require_live_claim(&model, &command.owner, command.persisted_at)?;
-        let authorization = current_authorization(&txn, &model).await?;
+        let authorization = Self::current_authorization(&txn, &model).await?;
         let canary = match command.expected_canary_action_id {
             Some(action_id) => Some(
                 QuantSettlementGovernedActionEntity::find_by_id(action_id)
@@ -2224,7 +2272,9 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                     .one(&txn)
                     .await
                     .map_err(StorageError::from)?
-                    .ok_or_else(|| error::not_found(QUANT_SETTLEMENT_GOVERNED_ACTION, action_id))?,
+                    .ok_or_else(|| {
+                        StorageError::not_found(QUANT_SETTLEMENT_GOVERNED_ACTION, action_id)
+                    })?,
             ),
             None => None,
         };
@@ -2234,8 +2284,8 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             canary.as_ref(),
             &command,
         )?;
-        require_execution_quiescence(&txn, &model).await?;
-        require_current_inventory(&txn, &model).await?;
+        Self::require_execution_quiescence(&txn, &model).await?;
+        Self::require_current_inventory(&txn, &model).await?;
 
         let inserted = QuantSettlementChainSubmissionEntity::insert(
             command.submission.clone().into_active_model(),
@@ -2256,7 +2306,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         active.update(&txn).await.map_err(StorageError::from)?;
         if command.expected_authorization_digest.is_some() {
             let authorization = authorization.ok_or_else(|| {
-                error::state_conflict(
+                StorageError::state_conflict(
                     QUANT_SETTLEMENT_REDEEM,
                     Some(redeem_id),
                     "approved authorization disappeared before durable submission",
@@ -2291,10 +2341,10 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         command: BeginSettlementDispatch,
     ) -> Result<SettlementChainSubmissionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let model = lock_case(&txn, command.settlement_redeem_id).await?;
+        let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         require_live_claim(&model, &command.owner, command.dispatching_at)?;
         if model.state != SettlementCaseState::Prepared {
-            return Err(error::illegal_transition(
+            return Err(StorageError::illegal_transition(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(model.settlement_redeem_id),
                 model.state,
@@ -2309,7 +2359,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         .await
         .map_err(StorageError::from)?
         .ok_or_else(|| {
-            error::not_found(
+            StorageError::not_found(
                 QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                 command.settlement_chain_submission_id,
             )
@@ -2321,7 +2371,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             && submission.calldata_hash == command.expected_calldata_hash
             && submission.signed_envelope_hash == Some(command.expected_signed_envelope_hash);
         if !exact_scope {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                 Some(submission.settlement_chain_submission_id),
                 "prepare-to-dispatch target/digest/calldata/envelope CAS failed",
@@ -2348,9 +2398,9 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         command: RecordEoaSettlementBroadcast,
     ) -> Result<SettlementChainSubmissionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let model = lock_case(&txn, command.settlement_redeem_id).await?;
+        let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         require_live_claim(&model, &command.owner, command.observed_at)?;
-        let submission = lock_dispatching_submission(
+        let submission = Self::lock_dispatching_submission(
             &txn,
             command.settlement_redeem_id,
             command.settlement_chain_submission_id,
@@ -2361,7 +2411,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             || submission.transaction_hash.is_none()
             || submission.relayer_transaction_id.is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                 Some(submission.settlement_chain_submission_id),
                 "EOA broadcast acceptance requires the frozen local transaction hash only",
@@ -2380,9 +2430,9 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         command: RecordRelayerSettlementAcceptance,
     ) -> Result<SettlementChainSubmissionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let model = lock_case(&txn, command.settlement_redeem_id).await?;
+        let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         require_live_claim(&model, &command.owner, command.observed_at)?;
-        let submission = lock_dispatching_submission(
+        let submission = Self::lock_dispatching_submission(
             &txn,
             command.settlement_redeem_id,
             command.settlement_chain_submission_id,
@@ -2393,7 +2443,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             || submission.transaction_hash.is_some()
             || submission.relayer_transaction_id.is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                 Some(submission.settlement_chain_submission_id),
                 "relayer acceptance requires an unbound opaque relayer identity",
@@ -2412,7 +2462,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         command: RecordRelayerSettlementChainHash,
     ) -> Result<SettlementChainSubmissionInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let model = lock_case(&txn, command.settlement_redeem_id).await?;
+        let model = Self::lock_case(&txn, command.settlement_redeem_id).await?;
         require_live_claim(&model, &command.owner, command.observed_at)?;
         let submission = QuantSettlementChainSubmissionEntity::find_by_id(
             command.settlement_chain_submission_id,
@@ -2422,7 +2472,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         .await
         .map_err(StorageError::from)?
         .ok_or_else(|| {
-            error::not_found(
+            StorageError::not_found(
                 QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                 command.settlement_chain_submission_id,
             )
@@ -2434,7 +2484,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                 != Some(&command.expected_relayer_transaction_id)
             || submission.transaction_hash.is_some()
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                 Some(command.settlement_chain_submission_id),
                 "relayer chain hash does not match the durable opaque identity and state",
@@ -2461,7 +2511,9 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_SETTLEMENT_REDEEM, write.settlement_redeem_id))?;
+            .ok_or_else(|| {
+                StorageError::not_found(QUANT_SETTLEMENT_REDEEM, write.settlement_redeem_id)
+            })?;
 
         if redeem.state == SettlementCaseState::Confirmed {
             let submission = QuantSettlementChainSubmissionEntity::find_by_id(
@@ -2477,13 +2529,13 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                             write.receipt_evidence_json.clone(),
                         )))
             }) {
-                return Err(error::state_conflict(
+                return Err(StorageError::state_conflict(
                     QUANT_SETTLEMENT_REDEEM,
                     Some(write.settlement_redeem_id),
                     "confirmed case does not match the requested submission evidence",
                 ));
             }
-            let assembled = assemble_one_redeem(&txn, redeem).await?;
+            let assembled = Self::assemble_one_redeem(&txn, redeem).await?;
             txn.commit().await.map_err(StorageError::from)?;
             return Ok(assembled);
         }
@@ -2492,7 +2544,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             redeem.state,
             SettlementCaseState::Submitted | SettlementCaseState::ReconciliationRequired
         ) {
-            return Err(error::illegal_transition(
+            return Err(StorageError::illegal_transition(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(write.settlement_redeem_id),
                 format!("{:?}", redeem.state),
@@ -2506,7 +2558,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                 .await
                 .map_err(StorageError::from)?
                 .ok_or_else(|| {
-                    error::not_found(
+                    StorageError::not_found(
                         QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                         write.settlement_chain_submission_id,
                     )
@@ -2517,7 +2569,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             || submission.transaction_hash.as_ref()
                 != Some(&write.receipt_evidence_json.transaction_hash)
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                 Some(write.settlement_chain_submission_id),
                 "settlement confirmation submission/case/state/hash mismatch",
@@ -2561,9 +2613,14 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                 .exec(&txn)
                 .await
                 .map_err(StorageError::from)?;
-            position::apply_exit(&txn, &intent_id, lot_write.position_exit).await?;
-            complete_exit_capital(&txn, &intent_id, "resolution redeem".to_owned()).await?;
-            mark_intent_redeemed(&txn, &intent_id).await?;
+            PgPositionRepository::apply_exit(&txn, &intent_id, lot_write.position_exit).await?;
+            PgCapitalAllocationRepository::complete_exit_capital(
+                &txn,
+                &intent_id,
+                "resolution redeem".to_owned(),
+            )
+            .await?;
+            Self::mark_intent_redeemed(&txn, &intent_id).await?;
         }
 
         QuantDomainEventOutboxEntity::insert(QuantDomainEventOutboxActiveModel {
@@ -2585,7 +2642,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         .await
         .map_err(StorageError::from)?;
 
-        let assembled = assemble_one_redeem(&txn, confirmed).await?;
+        let assembled = Self::assemble_one_redeem(&txn, confirmed).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(assembled)
     }
@@ -2595,13 +2652,13 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         write: RequireSettlementReconciliation,
     ) -> Result<SettlementRedeemInfo, StorageError> {
         if write.detail.trim().is_empty() {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SETTLEMENT_REDEEM),
                 "settlement reconciliation detail must not be empty",
             ));
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let redeem = lock_case(&txn, write.settlement_redeem_id).await?;
+        let redeem = Self::lock_case(&txn, write.settlement_redeem_id).await?;
         require_live_claim(&redeem, &write.owner, write.observed_at)?;
         let submission =
             QuantSettlementChainSubmissionEntity::find_by_id(write.settlement_chain_submission_id)
@@ -2610,7 +2667,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
                 .await
                 .map_err(StorageError::from)?
                 .ok_or_else(|| {
-                    error::not_found(
+                    StorageError::not_found(
                         QUANT_SETTLEMENT_CHAIN_SUBMISSION,
                         write.settlement_chain_submission_id,
                     )
@@ -2619,7 +2676,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             || submission.settlement_redeem_id != Some(write.settlement_redeem_id)
             || !ACTIVE_SUBMISSION_STATES.contains(&submission.state)
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_SETTLEMENT_REDEEM,
                 Some(write.settlement_redeem_id),
                 "reconciliation evidence does not match an active durable submission",
@@ -2658,7 +2715,7 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             .update(&txn)
             .await
             .map_err(StorageError::from)?;
-        let assembled = assemble_one_redeem(&txn, updated).await?;
+        let assembled = Self::assemble_one_redeem(&txn, updated).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(assembled)
     }
@@ -2670,68 +2727,74 @@ struct LotCountRow {
     inventory_lot_count: i64,
 }
 
-/// Count contributors for each case's exact current immutable inventory.
-async fn inventory_lot_counts_for(
-    db: &DatabaseConnection,
-    scopes: impl Iterator<Item = (SettlementRedeemId, ContentHash)>,
-) -> Result<HashMap<SettlementRedeemId, i64>, StorageError> {
-    let scopes: Vec<(SettlementRedeemId, ContentHash)> = scopes.collect();
-    if scopes.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let current_inventory = scopes.into_iter().fold(
-        Condition::any(),
-        |condition, (settlement_redeem_id, inventory_digest)| {
-            condition.add(
-                Condition::all()
-                    .add(
-                        QuantSettlementInventoryLotColumn::SettlementRedeemId
-                            .eq(settlement_redeem_id),
-                    )
-                    .add(QuantSettlementInventoryLotColumn::InventoryDigest.eq(inventory_digest)),
+impl PgSettlementRedeemRepository {
+    /// Count contributors for each case's exact current immutable inventory.
+    async fn inventory_lot_counts_for(
+        db: &DatabaseConnection,
+        scopes: impl Iterator<Item = (SettlementRedeemId, ContentHash)>,
+    ) -> Result<HashMap<SettlementRedeemId, i64>, StorageError> {
+        let scopes: Vec<(SettlementRedeemId, ContentHash)> = scopes.collect();
+        if scopes.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let current_inventory = scopes.into_iter().fold(
+            Condition::any(),
+            |condition, (settlement_redeem_id, inventory_digest)| {
+                condition.add(
+                    Condition::all()
+                        .add(
+                            QuantSettlementInventoryLotColumn::SettlementRedeemId
+                                .eq(settlement_redeem_id),
+                        )
+                        .add(
+                            QuantSettlementInventoryLotColumn::InventoryDigest.eq(inventory_digest),
+                        ),
+                )
+            },
+        );
+        let rows = QuantSettlementInventoryLotEntity::find()
+            .select_only()
+            .column(QuantSettlementInventoryLotColumn::SettlementRedeemId)
+            .column_as(
+                Expr::col(QuantSettlementInventoryLotColumn::SettlementInventoryLotId).count(),
+                "inventory_lot_count",
             )
-        },
-    );
-    let rows = QuantSettlementInventoryLotEntity::find()
-        .select_only()
-        .column(QuantSettlementInventoryLotColumn::SettlementRedeemId)
-        .column_as(
-            Expr::col(QuantSettlementInventoryLotColumn::SettlementInventoryLotId).count(),
-            "inventory_lot_count",
-        )
-        .filter(current_inventory)
-        .group_by(QuantSettlementInventoryLotColumn::SettlementRedeemId)
-        .into_model::<LotCountRow>()
-        .all(db)
-        .await
-        .map_err(StorageError::from)?;
-    Ok(rows
-        .into_iter()
-        .map(|row| (row.settlement_redeem_id, row.inventory_lot_count))
-        .collect())
+            .filter(current_inventory)
+            .group_by(QuantSettlementInventoryLotColumn::SettlementRedeemId)
+            .into_model::<LotCountRow>()
+            .all(db)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.settlement_redeem_id, row.inventory_lot_count))
+            .collect())
+    }
 }
 
-async fn mark_intent_redeemed(
-    db: &impl ConnectionTrait,
-    intent_id: &OrderIntentId,
-) -> Result<(), StorageError> {
-    let intent = QuantOrderIntentEntity::find_by_id(*intent_id)
-        .lock_exclusive()
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_ORDER_INTENT, intent_id))?;
-    let mut active = intent.into_active_model();
-    active.exit_state = ActiveValue::Set(ExitState::Exited);
-    active.exit_reason = ActiveValue::Set(Some(ExitReason::ResolutionRedeem));
-    let mut scale_out_state = active.scale_out_state.take().unwrap_or_default();
-    scale_out_state.pending_target = None;
-    active.scale_out_state = ActiveValue::Set(scale_out_state);
-    active
-        .update(db)
-        .await
-        .map_err(StorageError::from)
-        .map(|_| ())
+impl PgSettlementRedeemRepository {
+    async fn mark_intent_redeemed(
+        db: &impl ConnectionTrait,
+        intent_id: &OrderIntentId,
+    ) -> Result<(), StorageError> {
+        let intent = QuantOrderIntentEntity::find_by_id(*intent_id)
+            .lock_exclusive()
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_ORDER_INTENT, intent_id))?;
+        let mut active = intent.into_active_model();
+        active.exit_state = ActiveValue::Set(ExitState::Exited);
+        active.exit_reason = ActiveValue::Set(Some(ExitReason::ResolutionRedeem));
+        let mut scale_out_state = active.scale_out_state.take().unwrap_or_default();
+        scale_out_state.pending_target = None;
+        active.scale_out_state = ActiveValue::Set(scale_out_state);
+        active
+            .update(db)
+            .await
+            .map_err(StorageError::from)
+            .map(|_| ())
+    }
 }
 
 fn page_condition(query: &SettlementRedeemListQuery) -> Condition {

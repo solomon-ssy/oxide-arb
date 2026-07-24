@@ -4,7 +4,10 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::types::Usd;
 use sea_orm::DatabaseConnection;
 
-use crate::{postgres::quant::capital_allocation, traits::ReservedCapitalRepository};
+use crate::{
+    postgres::quant::capital_allocation::PgCapitalAllocationRepository,
+    traits::ReservedCapitalRepository,
+};
 
 /// Postgres-backed reserved-capital reader.
 pub struct PgReservedCapitalRepository {
@@ -20,6 +23,6 @@ impl PgReservedCapitalRepository {
 #[async_trait::async_trait]
 impl ReservedCapitalRepository for PgReservedCapitalRepository {
     async fn sum_reserved_usd(&self) -> Result<Usd, StorageError> {
-        capital_allocation::sum_reserved_usd(&self.db).await
+        PgCapitalAllocationRepository::sum_reserved_usd(&self.db).await
     }
 }

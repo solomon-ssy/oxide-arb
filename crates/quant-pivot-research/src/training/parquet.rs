@@ -361,8 +361,7 @@ mod tests {
         artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
         training::{
             DatasetHashContract, TrainingDatasetArtifact, TrainingExample,
-            dataset_source_fingerprint,
-            fixtures::{bind_capture_to_boundary, example},
+            dataset_source_fingerprint, fixtures::example,
         },
     };
 
@@ -438,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn parquet_roundtrip_preserves_complete_nonzero_decision_boundary() {
+    fn parquet_roundtrip_preserves_boundary() {
         let mut row = example("boundary", 100);
         let decision_at = row.feature_vector.decision_at;
         row.decision_boundary = DecisionClock::new(10)
@@ -448,7 +447,7 @@ mod tests {
             .expect("book cutoff")
             .with_source_cutoff(DecisionSource::DomainCrypto, 60)
             .expect("domain cutoff");
-        bind_capture_to_boundary(&mut row);
+        row.bind_capture_to_boundary();
         let examples = vec![row];
 
         let bytes = DatasetParquetCodec::encode(&examples, &manifest(&examples)).expect("encode");
@@ -470,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_parquet_without_format_version_is_rejected() {
+    fn legacy_parquet_without_rejected() {
         let example = example("legacy", 100);
         let payload = serde_json::to_string(&example).expect("payload");
         let mut frame =
@@ -483,7 +482,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn parquet_roundtrip_via_local_artifact_store() {
+    async fn parquet_roundtrip_via_store() {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());

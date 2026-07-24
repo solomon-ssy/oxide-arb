@@ -31,7 +31,7 @@ pub use builder::{
 };
 pub use decision_capture::{
     MarketDecisionCapture, MarketDecisionCaptureInput, RejectedMarketDraft, ResolvedMarketBundle,
-    draft_data_quality_snapshot, market_decision_capture_from_resolved,
+    capture_market_decision, draft_data_quality_snapshot,
 };
 pub use domain::{
     CryptoDomainFeatureBuilder, DomainComputeCtx, DomainFeatureBuilder, DomainSliceData,

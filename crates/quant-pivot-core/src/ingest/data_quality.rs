@@ -103,7 +103,7 @@ impl BookDataQualityService {
 
     /// Reset and return the peak ingest pipeline lag for the elapsed window.
     #[must_use]
-    pub fn take_worst_ingest_lag_ms(&self) -> u64 {
+    pub fn take_worst_lag_ms(&self) -> u64 {
         self.ingest_lag.take_worst_ms()
     }
 
@@ -223,33 +223,45 @@ impl DataQualityPort for BookDataQualityService {
 mod tests {
     use super::*;
 
-    fn policy() -> QualityPolicy {
-        QualityPolicy::from_config(&DataQualityConfig::default())
+    impl QualityPolicy {
+        fn test_fixture() -> Self {
+            Self::from_config(&DataQualityConfig::default())
+        }
     }
 
     #[test]
-    fn empty_book_is_insufficient_regardless_of_connection() {
-        let status =
-            BookDataQualityService::status_for(StalenessLevel::Fresh, false, true, true, &policy());
+    fn empty_book_insufficient_connection() {
+        let status = BookDataQualityService::status_for(
+            StalenessLevel::Fresh,
+            false,
+            true,
+            true,
+            &QualityPolicy::test_fixture(),
+        );
         assert_eq!(status, DataQualityStatus::Insufficient);
     }
 
     #[test]
     fn crossed_book_is_degraded() {
-        let status =
-            BookDataQualityService::status_for(StalenessLevel::Fresh, true, false, true, &policy());
+        let status = BookDataQualityService::status_for(
+            StalenessLevel::Fresh,
+            true,
+            false,
+            true,
+            &QualityPolicy::test_fixture(),
+        );
         assert_eq!(status, DataQualityStatus::Degraded);
     }
 
     #[test]
-    fn fresh_and_acceptable_pass_through() {
+    fn fresh_acceptable_pass() {
         assert_eq!(
             BookDataQualityService::status_for(
                 StalenessLevel::Fresh,
                 false,
                 false,
                 true,
-                &policy()
+                &QualityPolicy::test_fixture()
             ),
             DataQualityStatus::Fresh,
         );
@@ -259,29 +271,41 @@ mod tests {
                 false,
                 false,
                 true,
-                &policy(),
+                &QualityPolicy::test_fixture(),
             ),
             DataQualityStatus::Acceptable,
         );
     }
 
     #[test]
-    fn quiet_but_valid_book_stays_acceptable_when_connection_healthy() {
+    fn quiet_but_valid_healthy() {
         // On Polymarket a quiet book is not resent; an aged-but-valid book is
         // still the venue truth while the connection is healthy.
         for level in [StalenessLevel::Stale, StalenessLevel::Expired] {
             assert_eq!(
-                BookDataQualityService::status_for(level, false, false, true, &policy()),
+                BookDataQualityService::status_for(
+                    level,
+                    false,
+                    false,
+                    true,
+                    &QualityPolicy::test_fixture()
+                ),
                 DataQualityStatus::Acceptable,
             );
         }
     }
 
     #[test]
-    fn aged_book_is_stale_only_when_connection_unhealthy() {
+    fn aged_book_stale_unhealthy() {
         for level in [StalenessLevel::Stale, StalenessLevel::Expired] {
             assert_eq!(
-                BookDataQualityService::status_for(level, false, false, false, &policy()),
+                BookDataQualityService::status_for(
+                    level,
+                    false,
+                    false,
+                    false,
+                    &QualityPolicy::test_fixture()
+                ),
                 DataQualityStatus::Stale,
             );
         }

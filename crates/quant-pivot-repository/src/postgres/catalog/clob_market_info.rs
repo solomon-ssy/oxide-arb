@@ -101,7 +101,7 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
             .exec_without_returning(&self.db)
             .await
             .map_err(StorageError::from)?;
-        find_by_hash(&self.db, &market_id, &payload_hash)
+        Self::find_by_hash(&self.db, &market_id, &payload_hash)
             .await?
             .ok_or_else(|| {
                 invariant(
@@ -109,7 +109,7 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
                     "content-addressed row was not observable after insert".to_owned(),
                 )
             })
-            .and_then(model_to_domain)
+            .and_then(Self::decode_model)
     }
 
     async fn at(
@@ -127,7 +127,7 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
-            .map(model_to_domain)
+            .map(Self::decode_model)
             .transpose()
     }
 
@@ -141,7 +141,7 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
-            .map(model_to_domain)
+            .map(Self::decode_model)
             .transpose()
     }
 
@@ -167,7 +167,7 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
             .await
             .map_err(StorageError::from)?
             .into_iter()
-            .map(model_to_domain)
+            .map(Self::decode_model)
             .collect()
     }
 
@@ -215,7 +215,7 @@ impl ClobMarketInfoRepository for PgClobMarketInfoRepository {
                     &right.payload_hash,
                 ))
         });
-        selected.into_iter().map(model_to_domain).collect()
+        selected.into_iter().map(Self::decode_model).collect()
     }
 }
 
@@ -241,50 +241,54 @@ fn history_coverage(
     })
 }
 
-async fn find_by_hash(
-    db: &DatabaseConnection,
-    market_id: &MarketId,
-    payload_hash: &ContentHash,
-) -> Result<Option<Model>, StorageError> {
-    Entity::find()
-        .filter(Column::MarketId.eq(market_id.clone()))
-        .filter(Column::PayloadHash.eq(*payload_hash))
-        .one(db)
-        .await
-        .map_err(StorageError::from)
+impl PgClobMarketInfoRepository {
+    async fn find_by_hash(
+        db: &DatabaseConnection,
+        market_id: &MarketId,
+        payload_hash: &ContentHash,
+    ) -> Result<Option<Model>, StorageError> {
+        Entity::find()
+            .filter(Column::MarketId.eq(market_id.clone()))
+            .filter(Column::PayloadHash.eq(*payload_hash))
+            .one(db)
+            .await
+            .map_err(StorageError::from)
+    }
 }
 
-fn model_to_domain(model: Model) -> Result<ClobMarketInfoVersion, StorageError> {
-    Ok(ClobMarketInfoVersion {
-        version_id: model.version_id,
-        market_id: model.market_id,
-        tokens: model.tokens_json.0,
-        tick_size: model.tick_size,
-        minimum_order_size: model.minimum_order_size,
-        neg_risk: model.neg_risk,
-        taker_order_delay_enabled: model.taker_order_delay_enabled,
-        minimum_order_age_secs: model
-            .minimum_order_age_secs
-            .map(|value| {
-                u64::try_from(value)
-                    .map_err(|error| invariant("minimum_order_age_secs", error.to_string()))
-            })
-            .transpose()?,
-        blockaid_check_enabled: model.blockaid_check_enabled,
-        fee_details: model.fee_details_json,
-        builder_maker_fee_rate_bps: exact_u32(
-            "builder_maker_fee_rate_bps",
-            model.builder_maker_fee_rate_bps,
-        )?,
-        builder_taker_fee_rate_bps: exact_u32(
-            "builder_taker_fee_rate_bps",
-            model.builder_taker_fee_rate_bps,
-        )?,
-        effective_at: model.effective_at,
-        available_at: model.available_at,
-        payload_hash: model.payload_hash,
-        raw_payload: model.raw_payload.into_inner(),
-    })
+impl PgClobMarketInfoRepository {
+    fn decode_model(model: Model) -> Result<ClobMarketInfoVersion, StorageError> {
+        Ok(ClobMarketInfoVersion {
+            version_id: model.version_id,
+            market_id: model.market_id,
+            tokens: model.tokens_json.0,
+            tick_size: model.tick_size,
+            minimum_order_size: model.minimum_order_size,
+            neg_risk: model.neg_risk,
+            taker_order_delay_enabled: model.taker_order_delay_enabled,
+            minimum_order_age_secs: model
+                .minimum_order_age_secs
+                .map(|value| {
+                    u64::try_from(value)
+                        .map_err(|error| invariant("minimum_order_age_secs", error.to_string()))
+                })
+                .transpose()?,
+            blockaid_check_enabled: model.blockaid_check_enabled,
+            fee_details: model.fee_details_json,
+            builder_maker_fee_rate_bps: exact_u32(
+                "builder_maker_fee_rate_bps",
+                model.builder_maker_fee_rate_bps,
+            )?,
+            builder_taker_fee_rate_bps: exact_u32(
+                "builder_taker_fee_rate_bps",
+                model.builder_taker_fee_rate_bps,
+            )?,
+            effective_at: model.effective_at,
+            available_at: model.available_at,
+            payload_hash: model.payload_hash,
+            raw_payload: model.raw_payload.into_inner(),
+        })
+    }
 }
 
 fn exact_i32(field: &'static str, value: u32) -> Result<i32, StorageError> {

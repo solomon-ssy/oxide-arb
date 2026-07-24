@@ -266,7 +266,7 @@ mod intent_event_kind_tests {
     use super::{IntentEventKind, OrderIntentStatus};
 
     #[test]
-    fn post_submission_statuses_map_to_events() {
+    fn post_submission_statuses_events() {
         assert_eq!(
             IntentEventKind::for_execution_status(OrderIntentStatus::Submitted),
             Some(IntentEventKind::Submitted),
@@ -294,7 +294,7 @@ mod intent_event_kind_tests {
     }
 
     #[test]
-    fn pre_submission_and_transient_statuses_have_no_event() {
+    fn pre_submission_no_event() {
         for status in [
             OrderIntentStatus::Draft,
             OrderIntentStatus::PendingApproval,

@@ -173,7 +173,7 @@ mod tests {
     use super::batch_statement_budget;
 
     #[test]
-    fn batch_statement_budget_uses_columns_once() {
+    fn batch_statement_uses_once() {
         assert_eq!(batch_statement_budget::<casbin_rule::Entity>(0), 0);
         assert_eq!(batch_statement_budget::<casbin_rule::Entity>(8_191), 1);
         assert_eq!(batch_statement_budget::<casbin_rule::Entity>(8_192), 2);

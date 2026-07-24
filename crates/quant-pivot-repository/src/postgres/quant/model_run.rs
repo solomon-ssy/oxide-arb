@@ -13,7 +13,7 @@ use sea_orm::{
     QueryFilter, QueryOrder,
 };
 
-use crate::{postgres::error, traits::ModelRunRepository};
+use crate::traits::ModelRunRepository;
 
 /// Postgres-backed model-run repository: create a `Running` run, then finalize it
 /// to a terminal state through the guarded [`Self::succeed`] / [`Self::fail`]
@@ -37,10 +37,10 @@ impl PgModelRunRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(QUANT_MODEL_RUN, model_run_id));
+            return Err(StorageError::not_found(QUANT_MODEL_RUN, model_run_id));
         };
         if row.status != ModelRunStatus::Running {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_MODEL_RUN,
                 Some(model_run_id),
                 format!(

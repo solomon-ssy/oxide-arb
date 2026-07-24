@@ -185,7 +185,7 @@ mod tests {
     use super::ExpectedVsRealized;
 
     #[test]
-    fn fixed_document_rejects_unknown_and_missing_fields() {
+    fn fixed_rejects_unknown_missing() {
         let valid = json!({
             "mean_expected_bps": "1",
             "mean_realized_bps": "2",

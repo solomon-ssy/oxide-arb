@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn fails_closed_without_private_key() {
+    fn fails_closed_without_key() {
         let factory = AccountProviderFactory::new(
             None,
             Arc::new(MarketRegistry::new(Arc::new(DataPlane::new()))),

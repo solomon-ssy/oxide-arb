@@ -64,9 +64,8 @@ impl AppContext {
     #[must_use]
     pub fn register_execution_services(&self, runner: &mut AppRunner) -> Arc<dyn OrderIntentPort> {
         let service = self.build_order_intent_service();
-        self.report_lifecycle().set_intent_terminal_event_sink(
-            Arc::clone(&service) as Arc<dyn IntentTerminalEventSink>
-        );
+        self.report_lifecycle()
+            .set_intent_event_sink(Arc::clone(&service) as Arc<dyn IntentTerminalEventSink>);
         self.register_intent_expire_sweep(runner, Arc::clone(&service));
         self.register_intent_deadline_scheduler(runner, Arc::clone(&service));
         service as Arc<dyn OrderIntentPort>

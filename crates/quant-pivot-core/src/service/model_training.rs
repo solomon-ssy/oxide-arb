@@ -79,7 +79,7 @@ use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace},
     model::{ClassicalAdapterRegistry, ClassicalOutputSemantics, artifact::ClassicalModelArtifact},
     training::{
-        RETURN_TO_HORIZON, SETTLEMENT_OUTCOME, TrainingMatrix, build_training_matrix_from_refs,
+        RETURN_TO_HORIZON, SETTLEMENT_OUTCOME, TrainingMatrix, build_borrowed_matrix,
         matrix_spec_from_contract,
     },
 };
@@ -948,7 +948,7 @@ pub(crate) fn build_classical_matrix<'a>(
         label.name.clone(),
         label.horizon_secs,
     )?;
-    build_training_matrix_from_refs(&sorted, &spec)
+    build_borrowed_matrix(&sorted, &spec)
 }
 
 /// Classical training is not linked in this build.

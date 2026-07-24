@@ -250,7 +250,7 @@ pub fn probability_of_backtest_overfitting(
     }
     let block_count = usize::try_from(input.block_count)
         .map_err(|error| methodology(format!("pbo.block_count does not fit usize: {error}")))?;
-    validate_matrix(matrix)?;
+    (matrix).validate_matrix()?;
     if matrix.period_count() < block_count {
         return Err(ResearchError::ValidationMethodology {
             detail: format!(
@@ -369,20 +369,22 @@ fn negative_logit(
     Ok(logit < 0.0)
 }
 
-fn validate_matrix(matrix: &TrialPerformanceMatrix) -> QuantResult<()> {
-    let expected = matrix
-        .period_count()
-        .checked_mul(matrix.trial_count())
-        .ok_or_else(|| methodology("PBO matrix shape overflowed usize".to_owned()))?;
-    if matrix.returns.len() != expected {
-        return Err(methodology(format!(
-            "PBO matrix has {} values but shape {}x{} requires {expected}",
-            matrix.returns.len(),
-            matrix.period_count(),
-            matrix.trial_count()
-        )));
+impl TrialPerformanceMatrix {
+    fn validate_matrix(&self) -> QuantResult<()> {
+        let expected = self
+            .period_count()
+            .checked_mul(self.trial_count())
+            .ok_or_else(|| methodology("PBO matrix shape overflowed usize".to_owned()))?;
+        if self.returns.len() != expected {
+            return Err(methodology(format!(
+                "PBO matrix has {} values but shape {}x{} requires {expected}",
+                self.returns.len(),
+                self.period_count(),
+                self.trial_count()
+            )));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn methodology(detail: String) -> QuantError {
@@ -414,7 +416,7 @@ mod tests {
     /// OOS, so PBO should be well below 1 when the good trial dominates and
     /// well above 0 when the "good" trial's edge doesn't persist.
     #[test]
-    fn pbo_is_a_valid_probability_in_unit_interval() {
+    fn pbo_valid_probability_interval() {
         let rows: Vec<Vec<Decimal>> = (0..64)
             .map(|i| {
                 let base = if i % 2 == 0 { dec!(0.01) } else { dec!(-0.005) };
@@ -428,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn pbo_rejects_odd_block_count() {
+    fn pbo_rejects_odd_count() {
         let m = matrix(16, vec![vec![dec!(0.01), dec!(0.02)]; 16]);
         assert!(probability_of_backtest_overfitting(&m, &PboInput { block_count: 5 }).is_err());
     }
@@ -440,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn pbo_rejects_non_rectangular_matrix() {
+    fn pbo_rejects_non_matrix() {
         let periods = (0..16)
             .map(|i| Utc.timestamp_opt(1_700_000_000 + i * 3_600, 0).unwrap())
             .collect();
@@ -450,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn column_constructor_transposes_into_the_same_row_major_layout() {
+    fn column_constructor_transposes_layout() {
         let periods = (0..3)
             .map(|i| Utc.timestamp_opt(1_700_000_000 + i * 3_600, 0).unwrap())
             .collect::<Vec<_>>();
@@ -478,14 +480,14 @@ mod tests {
     }
 
     #[test]
-    fn pbo_rejects_period_axis_mismatch() {
+    fn pbo_rejects_period_mismatch() {
         let mut m = matrix(16, vec![vec![dec!(0.01), dec!(0.02)]; 16]);
         m.periods.pop();
         assert!(probability_of_backtest_overfitting(&m, &PboInput { block_count: 4 }).is_err());
     }
 
     #[test]
-    fn pbo_is_low_when_one_trial_dominates_every_block() {
+    fn pbo_low_one_block() {
         // Trial 1 is a constant `-0.06` shift of trial 0 in *every* period —
         // translation-invariant variance means trial 0's Sharpe exceeds
         // trial 1's Sharpe over any subset of periods, so trial 0 must win

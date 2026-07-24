@@ -48,7 +48,7 @@ use wiremock::{
 use crate::{
     stack::SystemStack,
     support::execution_pg_seed::{
-        ReportSeedConfig, enable_entry_admission_for_test, fill_entry_lot, seed_approved_intent,
+        ReportSeedConfig, enable_test_admission, fill_entry_lot, seed_approved_intent,
         seed_pending_intent, seed_report_fixture, seed_report_on_infra, seed_shared_demo_infra,
     },
 };
@@ -327,7 +327,7 @@ async fn start_at(
 
 async fn seed_browser_fixture(db: &DatabaseConnection) -> Result<RecommendationReportId> {
     let infra = seed_shared_demo_infra(db).await;
-    enable_entry_admission_for_test(db, "browser-e2e-fixture").await;
+    enable_test_admission(db, "browser-e2e-fixture").await;
     let settlement_report = seed_report_on_infra(
         db,
         &infra,

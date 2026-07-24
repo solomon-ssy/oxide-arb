@@ -20,10 +20,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::{
-        error, quant::order_intent::invalidate_pre_submission_for_recommendation,
-        query::find_models_by_id_chunks, state_hash,
-    },
+    postgres::{quant::order_intent::PgOrderIntentRepository, query::find_id_chunks, state_hash},
     traits::RecommendationRepository,
 };
 
@@ -68,13 +65,9 @@ impl RecommendationRepository for PgRecommendationRepository {
         &self,
         recommendation_ids: &[RecommendationId],
     ) -> Result<Vec<RecommendationInfo>, StorageError> {
-        find_models_by_id_chunks::<Entity, _, _>(
-            &self.db,
-            recommendation_ids,
-            Column::RecommendationId,
-        )
-        .await
-        .map(|rows| rows.into_iter().map(Into::into).collect())
+        find_id_chunks::<Entity, _, _>(&self.db, recommendation_ids, Column::RecommendationId)
+            .await
+            .map(|rows| rows.into_iter().map(Into::into).collect())
     }
 
     async fn find_expirable(
@@ -125,9 +118,9 @@ impl RecommendationRepository for PgRecommendationRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, recommendation_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION, recommendation_id))?;
         if !row.status.allows_new_intent() {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_RECOMMENDATION,
                 Some(recommendation_id),
                 format!(
@@ -137,7 +130,7 @@ impl RecommendationRepository for PgRecommendationRepository {
             ));
         }
         let before_info: RecommendationInfo = row.clone().into();
-        let invalidated = invalidate_pre_submission_for_recommendation(
+        let invalidated = PgOrderIntentRepository::invalidate_pre_submission(
             &txn,
             recommendation_id,
             ApprovalInvalidation::RecommendationExpired,

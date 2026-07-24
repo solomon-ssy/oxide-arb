@@ -45,7 +45,7 @@ use quant_pivot_repository::traits::{
     FactWriter, MarketLinkageRepository, QuantFactReadRepository,
 };
 use quant_pivot_research::{
-    features::domain::weather::{WeatherStationLeadBiasFit, fit_weather_station_lead_bias},
+    features::domain::weather::{WeatherStationLeadBiasFit, fit_station_lead_bias},
     linkage::weather_station_profile_hash,
 };
 use rust_decimal::Decimal;
@@ -318,7 +318,7 @@ impl WeatherIngestWorker {
             weather: configured_weather_targets(&self.station_profiles, Utc::now())?,
         };
         for row in rows {
-            let linkage = row.into_domain();
+            let linkage = MarketLinkage::from(row);
             self.add_discovered_linkage(&mut bindings, linkage)?;
         }
         Ok(bindings)
@@ -812,7 +812,7 @@ impl WeatherIngestWorker {
         let (observations, forecasts) = self
             .load_weather_calibration_facts(station_names, fit_start, fit_end, availability_cutoff)
             .await?;
-        let fit = fit_weather_station_lead_bias(
+        let fit = fit_station_lead_bias(
             &observations,
             &forecasts,
             fit_start,
@@ -1049,7 +1049,7 @@ impl WeatherIngestWorker {
         let (backfill_start, backfill_end) = self.gefs_backfill_window(now)?;
         let stations = weather_stations(bindings);
         let next_by_station = self
-            .next_gefs_backfill_by_station(&stations, backfill_start)
+            .next_station_backfill(&stations, backfill_start)
             .await?;
         let Some(reference_time) = next_by_station.values().copied().min() else {
             return Ok(());
@@ -1086,7 +1086,7 @@ impl WeatherIngestWorker {
                 .collect::<Vec<_>>(),
         ))?;
         let mut decoded = self
-            .decode_gefs_members_for_stations(source, &selected, reference_time)
+            .decode_station_members(source, &selected, reference_time)
             .await?;
         decoded.sort_by_key(|member| (member.lead_hours, member.member));
         let run_manifest_hash = CanonicalDigest::content_hash_json(&(
@@ -1142,7 +1142,7 @@ impl WeatherIngestWorker {
         Ok((backfill_start, backfill_end))
     }
 
-    async fn next_gefs_backfill_by_station(
+    async fn next_station_backfill(
         &self,
         stations: &BTreeMap<IcaoStation, Vec<WeatherTarget>>,
         backfill_start: DateTime<Utc>,
@@ -1184,7 +1184,7 @@ impl WeatherIngestWorker {
         let mut decoded = Vec::new();
         for lead_hours in (3..=self.gefs_config.max_lead_hours).step_by(3) {
             let valid_time = reference_time + Duration::hours(i64::from(lead_hours));
-            let stations = gefs_stations_for_valid_time(bindings, valid_time);
+            let stations = stations_at_valid_time(bindings, valid_time);
             if stations.is_empty() {
                 continue;
             }
@@ -1217,7 +1217,7 @@ impl WeatherIngestWorker {
         Ok(decoded)
     }
 
-    async fn decode_gefs_members_for_stations(
+    async fn decode_station_members(
         &self,
         source: &Arc<GefsSource>,
         stations: &[GefsStationBinding],
@@ -1469,7 +1469,7 @@ fn latest_gefs_cycle(now: DateTime<Utc>, publication_lag_secs: u64) -> QuantResu
         .ok_or_else(|| QuantError::config("GEFS cycle timestamp is outside chrono range"))
 }
 
-fn gefs_stations_for_valid_time(
+fn stations_at_valid_time(
     bindings: &BTreeMap<(String, NaiveDate), WeatherTarget>,
     valid_time: DateTime<Utc>,
 ) -> Vec<GefsStationBinding> {
@@ -1632,7 +1632,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_station_bootstraps_without_market_linkage() {
+    fn station_bootstraps_without_linkage() {
         let profiles = BTreeMap::from([(
             "KJFK".to_owned(),
             WeatherStationProfileConfig {
@@ -1661,7 +1661,7 @@ mod tests {
     }
 
     #[test]
-    fn day_close_requires_first_observation_from_the_following_local_day() {
+    fn day_close_requires_day() {
         let timezone = "America/New_York".parse().expect("timezone");
         let local_date = NaiveDate::from_ymd_opt(2026, 7, 1).expect("date");
         let target = WeatherTarget {
@@ -1688,7 +1688,7 @@ mod tests {
     }
 
     #[test]
-    fn same_time_correction_resumes_after_exact_report_hash() {
+    fn time_correction_after_hash() {
         let observed = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let first = report(observed, observed + Duration::minutes(1), 'a');
         let correction = report(observed, observed + Duration::minutes(2), 'b');

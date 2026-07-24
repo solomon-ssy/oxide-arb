@@ -210,7 +210,7 @@ impl FeatureParityRunCoordinator {
             window_end: Some(window_end),
             reason: request.reason.clone(),
         };
-        let run = queued_full_run(QueuedFullRunArgs {
+        let run = (QueuedFullRunArgs {
             run_id: parity_run_id,
             window_start,
             window_end,
@@ -219,7 +219,8 @@ impl FeatureParityRunCoordinator {
             acting_role: ctx.acting_role.clone(),
             reason: request.reason,
             feature_contract_hash,
-        });
+        })
+        .queued_full_run();
         let job = self.build_job(
             parity_run_id,
             resolved_request,
@@ -289,7 +290,7 @@ impl FeatureParityRunCoordinator {
             window_end: Some(window_end),
             reason: reason.clone(),
         };
-        let run = queued_full_run(QueuedFullRunArgs {
+        let run = (QueuedFullRunArgs {
             run_id,
             window_start,
             window_end,
@@ -298,7 +299,8 @@ impl FeatureParityRunCoordinator {
             acting_role: SYSTEM_ACTING_ROLE.to_owned(),
             reason,
             feature_contract_hash,
-        });
+        })
+        .queued_full_run();
         let job = self.build_job(
             run_id,
             request,
@@ -543,7 +545,7 @@ impl FeatureParityGatePort for RepositoryFeatureParityGate {
         reason: String,
     ) -> QuantResult<FeatureParityRunId> {
         self.parity
-            .record_integrity_failure_and_open_latch(source_run_id, reason)
+            .record_integrity_failure(source_run_id, reason)
             .await
             .map(|(run, _state)| run.run_id)
             .map_err(QuantError::from)
@@ -630,7 +632,7 @@ impl FeatureIntegrityPort for FeatureIntegrityService {
             .current_state()
             .await
             .map_err(QuantError::from)?;
-        self.metrics.set_feature_parity_latch_open(
+        self.metrics.set_parity_latch_open(
             state
                 .as_ref()
                 .is_none_or(|state| state.state == FeatureParityLatchState::Open),
@@ -743,7 +745,7 @@ impl FeatureIntegrityPort for FeatureIntegrityService {
             )
             .await
             .map_err(QuantError::from)?;
-        self.metrics.set_feature_parity_latch_open(false);
+        self.metrics.set_parity_latch_open(false);
         Ok(FeatureIntegrityLatchView::from(state))
     }
 }
@@ -858,33 +860,35 @@ struct QueuedFullRunArgs {
     feature_contract_hash: ContentHash,
 }
 
-fn queued_full_run(args: QueuedFullRunArgs) -> NewFeatureParityRun {
-    NewFeatureParityRun {
-        run_id: args.run_id,
-        kind: FeatureParityRunKind::Full,
-        status: FeatureParityRunStatus::Queued,
-        window_start: args.window_start,
-        window_end: args.window_end,
-        report_id: None,
-        model_version_id: None,
-        training_dataset_id: None,
-        triggered_by: args.triggered_by,
-        requested_by: args.requested_by,
-        acting_role: RoleCode::new(args.acting_role),
-        reason: args.reason,
-        total_count: 0,
-        compared_count: 0,
-        matched_count: 0,
-        mismatched_count: 0,
-        pending_materialization_count: 0,
-        feature_contract_hash: Some(args.feature_contract_hash),
-        transform_hash: None,
-        failure_code: None,
-        failure_detail: None,
-        started_at: None,
-        pending_since: None,
-        containment_completed_at: None,
-        finished_at: None,
+impl QueuedFullRunArgs {
+    fn queued_full_run(self) -> NewFeatureParityRun {
+        NewFeatureParityRun {
+            run_id: self.run_id,
+            kind: FeatureParityRunKind::Full,
+            status: FeatureParityRunStatus::Queued,
+            window_start: self.window_start,
+            window_end: self.window_end,
+            report_id: None,
+            model_version_id: None,
+            training_dataset_id: None,
+            triggered_by: self.triggered_by,
+            requested_by: self.requested_by,
+            acting_role: RoleCode::new(self.acting_role),
+            reason: self.reason,
+            total_count: 0,
+            compared_count: 0,
+            matched_count: 0,
+            mismatched_count: 0,
+            pending_materialization_count: 0,
+            feature_contract_hash: Some(self.feature_contract_hash),
+            transform_hash: None,
+            failure_code: None,
+            failure_detail: None,
+            started_at: None,
+            pending_since: None,
+            containment_completed_at: None,
+            finished_at: None,
+        }
     }
 }
 
@@ -1357,7 +1361,7 @@ mod tests {
         window_end: DateTime<Utc>,
     ) -> FeatureParityRunInfo {
         run_info(
-            queued_full_run(QueuedFullRunArgs {
+            (QueuedFullRunArgs {
                 run_id: FeatureParityRunId::from_v7(),
                 window_start,
                 window_end,
@@ -1366,7 +1370,8 @@ mod tests {
                 acting_role: SYSTEM_ACTING_ROLE.to_owned(),
                 reason: "automatic".to_owned(),
                 feature_contract_hash: hash(),
-            }),
+            })
+            .queued_full_run(),
             now,
         )
     }
@@ -1440,7 +1445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_inference_report_still_gets_atomic_sampled_parity() {
+    async fn pre_inference_atomic_parity() {
         let now = Utc::now();
         let runtime = runtime_repo(now);
         let decision_policy_snapshot_id = runtime.current.decision_policy_snapshot_id;
@@ -1487,7 +1492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_full_freezes_exact_window_timeout_and_is_idempotent() {
+    async fn automatic_full_freezes_idempotent() {
         let now = DateTime::parse_from_rfc3339("2026-07-11T12:34:56Z")
             .expect("timestamp")
             .with_timezone(&Utc);
@@ -1529,7 +1534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_full_reuses_exact_window_before_loading_runtime_config() {
+    async fn automatic_reuses_before_config() {
         let now = DateTime::parse_from_rfc3339("2026-07-11T12:34:56Z")
             .expect("timestamp")
             .with_timezone(&Utc);
@@ -1554,7 +1559,7 @@ mod tests {
     }
 
     #[test]
-    fn sampled_timeout_uses_exact_report_schedule_and_ad_hoc_uses_fixed_grace() {
+    fn sampled_uses_uses_grace() {
         let trigger_time = DateTime::parse_from_rfc3339("2026-07-11T12:34:56Z")
             .expect("timestamp")
             .with_timezone(&Utc);
@@ -1593,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    fn sampled_timeout_rejects_missing_or_unknown_schedule_binding() {
+    fn sampled_rejects_missing_unknown() {
         let trigger_time = Utc::now();
         let report_id = RecommendationReportId::from_v7();
         let config = DecisionPolicySnapshot::default();
@@ -1621,7 +1626,7 @@ mod tests {
     }
 
     #[test]
-    fn full_replay_timeout_never_borrows_report_schedule_cadence() {
+    fn full_replay_never_cadence() {
         let mut config = DecisionPolicySnapshot::default();
         config.report_schedule.schedules[0].cadence = ScheduleCadence::Interval {
             interval_secs: 86_400,

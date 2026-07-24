@@ -75,17 +75,13 @@ mod tests {
         ModelRouting, generic_model_version_id, resolve_model_route, version_id_for_category,
     };
 
-    fn version_ref(id: ModelVersionId) -> ModelVersionRef {
-        ModelVersionRef::new(id)
-    }
-
     #[test]
-    fn category_pointer_selects_category_specific_route() {
+    fn category_pointer_selects_route() {
         let version = ModelVersionId::from_v7();
         let mut model = ModelConfig::default();
         model
             .category_model_pointers
-            .insert(MarketCategory::Crypto, version_ref(version));
+            .insert(MarketCategory::Crypto, ModelVersionRef::new(version));
 
         assert_eq!(
             resolve_model_route(MarketCategory::Crypto, &model),
@@ -105,10 +101,10 @@ mod tests {
     }
 
     #[test]
-    fn absent_category_pointer_uses_generic_route() {
+    fn absent_category_uses_route() {
         let generic = ModelVersionId::from_v7();
         let model = ModelConfig {
-            active_model_version_id: Some(version_ref(generic)),
+            active_model_version_id: Some(ModelVersionRef::new(generic)),
             category_model_pointers: iter::empty().collect(),
             ..ModelConfig::default()
         };
@@ -121,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_pointers_use_generic_only() {
+    fn empty_pointers_use_only() {
         let model = ModelConfig::default();
         assert_eq!(
             resolve_model_route(MarketCategory::Politics, &model),

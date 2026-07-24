@@ -141,9 +141,7 @@ use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
 
 use super::{
     catalog_fixtures::{make_event, make_market},
-    execution_pg_seed::{
-        fixture_profile_ref, seed_model_score_calibration_fixture, seed_report_trade_policy_fixture,
-    },
+    execution_pg_seed::{fixture_profile_ref, seed_report_policy, seed_score_calibration},
     fact_sink::DiscardFactWriter,
     factor_governance::publish_all_factor_definitions,
     model_spec_fixtures::new_model_spec_fixture,
@@ -151,7 +149,7 @@ use super::{
     policy_fixtures::bootstrap_policy_bundle,
     report_fixtures,
     report_lifecycle_seed::{persist_and_publish_report, persist_prepared_report},
-    trade_tape_fixtures::live_trade_tape_block_cursor_repo,
+    trade_tape_fixtures::live_tape_cursor_repo,
 };
 
 /// Seeded catalog ids shared across report pipeline E2E tests.
@@ -537,7 +535,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn trade_tape_window_by_market(
+    async fn market_tape_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
@@ -661,7 +659,7 @@ impl ReportPipelineHarness {
 
         let runtime_config = runtime_config_for_pipeline(
             &model_version_id,
-            selection_config(options.selection),
+            (options.selection).selection_config(),
             &factors,
             &features,
         );
@@ -756,7 +754,7 @@ pub async fn seed_fixture_published_report(
     report_id: RecommendationReportId,
     ctx: &FixtureReportSeedContext,
 ) -> RecommendationReportInfo {
-    seed_fixture_published_report_with_profile(db, report_id, ctx, fixture_profile_ref()).await
+    seed_scoped_report(db, report_id, ctx, fixture_profile_ref()).await
 }
 
 /// Seed a published fixture report in an explicit authority scope.
@@ -764,7 +762,7 @@ pub async fn seed_fixture_published_report(
 /// All report-owned recommendations receive the same immutable profile
 /// reference so same-scope API validation is exercised without corrupting
 /// lineage.
-pub async fn seed_fixture_published_report_with_profile(
+pub async fn seed_scoped_report(
     db: &DatabaseConnection,
     report_id: RecommendationReportId,
     ctx: &FixtureReportSeedContext,
@@ -834,7 +832,7 @@ async fn seed_fixture_report(
         rec.evidence_refs.market_selection_id = market_selection_id;
     }
 
-    let feature_parity_state_id = seed_clear_feature_parity_state(db).await;
+    let feature_parity_state_id = clear_feature_parity(db).await;
     let txn = fixture_report_transaction(&report, recommendations, feature_parity_state_id);
     if publish {
         seed_published_report(db, txn).await
@@ -1235,10 +1233,7 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
         calibration_loader,
     } = input;
     let pit_source: Arc<dyn PointInTimeSnapshotSource> = Arc::new(
-        InMemoryDecisionSnapshotSource::freeze_with_zero_fee_schedule(
-            registry.as_ref(),
-            book_store.as_ref(),
-        ),
+        InMemoryDecisionSnapshotSource::freeze_zero_fee(registry.as_ref(), book_store.as_ref()),
     );
     Arc::new(DefaultReportBuilder::new(ReportBuilderDeps {
         runtime_config_repo,
@@ -1259,7 +1254,7 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
             feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
             event_writer: noop_feature_writer(),
             market_registry: Arc::clone(registry),
-            block_cursor_repo: live_trade_tape_block_cursor_repo(),
+            block_cursor_repo: live_tape_cursor_repo(),
             linkage_repo: Arc::new(EmptyLinkageRepo),
             basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
             calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
@@ -1307,7 +1302,7 @@ async fn build_lifecycle_service(
             metrics: Arc::clone(&metrics),
         })),
         feature_parity_gate: Arc::new(ClearFeatureParityGate {
-            state_id: seed_clear_feature_parity_state(db).await,
+            state_id: clear_feature_parity(db).await,
         }),
         feature_parity_runs,
         artifact_store,
@@ -1316,7 +1311,7 @@ async fn build_lifecycle_service(
     })
 }
 
-async fn seed_clear_feature_parity_state(db: &DatabaseConnection) -> FeatureParityStateId {
+async fn clear_feature_parity(db: &DatabaseConnection) -> FeatureParityStateId {
     if let Some(state) = PgFeatureParityRepository::new(db.clone())
         .current_state()
         .await
@@ -1512,16 +1507,18 @@ fn factors_config() -> FactorsConfig {
     }
 }
 
-fn selection_config(preset: SelectionPreset) -> SelectionConfig {
-    match preset {
-        SelectionPreset::Standard => SelectionConfig {
-            enabled_categories: vec![MarketCategory::Sports],
-            ..SelectionConfig::default()
-        },
-        SelectionPreset::Empty => SelectionConfig {
-            enabled_categories: vec![MarketCategory::Politics],
-            ..SelectionConfig::default()
-        },
+impl SelectionPreset {
+    fn selection_config(self) -> SelectionConfig {
+        match self {
+            Self::Standard => SelectionConfig {
+                enabled_categories: vec![MarketCategory::Sports],
+                ..SelectionConfig::default()
+            },
+            Self::Empty => SelectionConfig {
+                enabled_categories: vec![MarketCategory::Politics],
+                ..SelectionConfig::default()
+            },
+        }
     }
 }
 
@@ -1615,7 +1612,7 @@ async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
 
     let trade_policy = if input.bind_trade_policy {
         Some(
-            seed_report_trade_policy_fixture(
+            seed_report_policy(
                 input.db,
                 input.decision_policy_snapshot_id,
                 MarketCategory::Sports,
@@ -1625,8 +1622,7 @@ async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
     } else {
         None
     };
-    let calibration_id =
-        seed_model_score_calibration_fixture(input.db, input.model_version_id).await;
+    let calibration_id = seed_score_calibration(input.db, input.model_version_id).await;
     let feature_schema_hash = ResearchHasher::feature_schema(
         &FeatureSchema::build(input.features).expect("feature schema"),
     )

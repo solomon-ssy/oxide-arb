@@ -359,7 +359,7 @@ mod tests {
     use super::{VenueOutcome, VenueSubmitResult};
 
     #[test]
-    fn fok_partial_normalizes_to_ambiguous() {
+    fn fok_partial_normalizes_ambiguous() {
         assert_eq!(
             VenueOutcome::PartiallyFilled.normalize_for_order_type(&OrderType::Fok),
             VenueOutcome::Ambiguous
@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn gtc_partial_stays_partially_filled() {
+    fn gtc_partial_stays_filled() {
         assert_eq!(
             VenueOutcome::PartiallyFilled.normalize_for_order_type(&OrderType::Gtc),
             VenueOutcome::PartiallyFilled
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn post_timeout_is_always_ambiguous() {
+    fn post_timeout_always_ambiguous() {
         let error = OrderSubmissionError {
             stage: OrderSubmissionStage::Post,
             source: ApiError::Timeout {
@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_result_applies_order_type_semantics() {
+    fn submit_applies_order_semantics() {
         let result = VenueSubmitResult {
             outcome: VenueOutcome::PartiallyFilled,
             venue_order_id: None,
@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_async_trade_identity_holds_money_until_reconciliation() {
+    fn accepted_async_trade_reconciliation() {
         let now = Utc::now();
         let response = OrderResponse {
             order_id: OrderId::new("async-order"),

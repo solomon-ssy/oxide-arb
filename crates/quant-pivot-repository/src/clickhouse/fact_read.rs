@@ -142,7 +142,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .map_err(Into::into)
     }
 
-    async fn latest_applied_entry_condition_evaluation(
+    async fn latest_entry_evaluation(
         &self,
         instance_id: &EntryConditionInstanceId,
     ) -> Result<Option<EntryConditionEvaluationEventRow>, StorageError> {
@@ -238,7 +238,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .map_err(StorageError::from)
     }
 
-    async fn crypto_price_reports_available_between(
+    async fn crypto_reports_between(
         &self,
         instrument_keys: Vec<DomainInstrumentKey>,
         available_from_ms: i64,
@@ -449,7 +449,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         Ok(rows)
     }
 
-    async fn trade_tape_window_by_market(
+    async fn market_tape_window(
         &self,
         market_ids: Vec<MarketId>,
         from_ms: i64,

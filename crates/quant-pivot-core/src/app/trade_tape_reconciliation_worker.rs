@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn unique_exact_pair_is_reconciled_both_ways() {
+    fn unique_exact_pair_ways() {
         let rows = vec![
             row(ChTradeTapeSource::MarketWs, "ws", 10_000),
             row(ChTradeTapeSource::OnChainOrderFilled, "chain", 11_000),
@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_candidate_is_ambiguous_not_optimistically_matched() {
+    fn duplicate_candidate_not_matched() {
         let rows = vec![
             row(ChTradeTapeSource::MarketWs, "ws", 10_000),
             row(ChTradeTapeSource::OnChainOrderFilled, "chain-1", 10_500),
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn old_unmatched_ws_print_becomes_unavailable() {
+    fn old_unmatched_ws_unavailable() {
         let rows = vec![row(ChTradeTapeSource::MarketWs, "ws", 10_000)];
         let revisions = reconcile_rows(&rows, 20_000, 2_000, 5_000).expect("reconcile");
         assert_eq!(revisions.len(), 1);

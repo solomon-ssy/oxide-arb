@@ -116,7 +116,7 @@ mod tests {
     };
 
     #[test]
-    fn market_info_requires_exact_payload_identity() {
+    fn market_info_requires_identity() {
         let raw_payload =
             serde_json::json!({"c": "0xmarket", "fd": {"r": "0.03", "e": 1, "to": true}});
         let payload_hash = CanonicalDigest::content_hash_json(&raw_payload).expect("hash");
@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn market_info_accepts_constant_fee_curve_exponent() {
+    fn market_info_accepts_exponent() {
         let raw_payload =
             serde_json::json!({"c": "0xmarket", "fd": {"r": "0.03", "e": 0, "to": true}});
         let payload_hash = CanonicalDigest::content_hash_json(&raw_payload).expect("hash");

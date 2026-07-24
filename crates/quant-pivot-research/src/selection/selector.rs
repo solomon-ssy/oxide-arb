@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selector_keeps_only_open_markets() {
+    async fn selector_keeps_only_markets() {
         let mut paused = healthy_candidate("0xpaused");
         paused.status = MarketStatus::Paused;
         let snapshot = build(
@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn category_filter_respects_enabled_categories() {
+    async fn category_filter_respects_categories() {
         let mut politics = healthy_candidate("0xpolitics");
         politics.category = MarketCategory::Politics;
 
@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn liquidity_filter_excludes_below_thresholds() {
+    async fn liquidity_filter_excludes_thresholds() {
         let mut thin = healthy_candidate("0xthin");
         thin.liquidity_usd = Some(Usd::new(Decimal::from(10)));
         let mut wide = healthy_candidate("0xwide");
@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn data_quality_filter_is_connection_aware_for_book_age() {
+    async fn quality_filter_connection_age() {
         // Aged book while the connection is UNHEALTHY → stale (may be missing
         // updates).
         let mut stale = healthy_candidate("0xstale");
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manually_blocked_status_excludes_market() {
+    async fn manually_blocked_excludes_market() {
         let mut blocked = healthy_candidate("0xblocked");
         blocked.status = MarketStatus::ManuallyBlocked;
         let snapshot = build(
@@ -340,7 +340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_eligibility_keeps_market_with_available_required_feature() {
+    async fn model_keeps_required_feature() {
         // A healthy candidate has a two-sided book, so a book-derived feature is
         // available — the market is kept (no blanket fail-closed).
         let model_requirements =
@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_eligibility_excludes_unavailable_feature() {
+    async fn model_eligibility_excludes_feature() {
         // A model requiring a feature the schema does not define makes the market
         // ineligible — and only that feature is reported missing (the oracle never
         // claims to provide a feature it does not declare).
@@ -381,7 +381,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn category_specific_requirement_never_gates_a_different_category() {
+    async fn category_specific_never_category() {
         // a crypto-only domain requirement (from the
         // category-specific model routed for Crypto) must gate ONLY crypto
         // candidates — a Sports candidate lacking that feature is unaffected,
@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selector_hash_changes_when_data_quality_changes() {
+    async fn selector_hash_changes_changes() {
         let candidates = vec![healthy_candidate("0xa"), healthy_candidate("0xb")];
         let mut request_a = request_with(selection_config());
         request_a.data_quality.max_book_age_ms = 1_000;
@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selector_hash_commits_candidate_world_and_model_contract() {
+    async fn selector_hash_commits_contract() {
         let request = request_with(selection_config());
         let candidate = healthy_candidate("0xa");
         let baseline = ConfiguredMarketSelector::new()
@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_selection_persists_with_reason() {
+    async fn empty_selection_persists_reason() {
         let mut closed = healthy_candidate("0xclosed");
         closed.status = MarketStatus::Settled;
         let snapshot = build(request_with(selection_config()), vec![closed]).await;
@@ -532,7 +532,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_candidate_set_is_retained_in_canonical_order() {
+    async fn complete_candidate_set_order() {
         let mut high = healthy_candidate("0xhigh");
         high.liquidity_usd = Some(Usd::new(Decimal::from(90_000)));
         let mut mid = healthy_candidate("0xmid");
@@ -554,7 +554,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn liquidity_filter_excludes_missing_volume() {
+    async fn liquidity_excludes_missing_volume() {
         let mut missing = healthy_candidate("0xmissing");
         missing.volume_24h_usd = None;
 

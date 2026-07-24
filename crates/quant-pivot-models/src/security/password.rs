@@ -60,7 +60,7 @@ mod tests {
     use super::{hash_password, verify_password};
 
     #[test]
-    fn hash_then_verify_round_trips() {
+    fn hash_verify_round_trips() {
         let phc = hash_password("correct horse battery staple").expect("hash");
         assert!(verify_password("correct horse battery staple", &phc));
     }
@@ -72,7 +72,7 @@ mod tests {
     }
 
     #[test]
-    fn each_hash_uses_a_fresh_salt() {
+    fn each_hash_uses_salt() {
         let a = hash_password("same").expect("hash");
         let b = hash_password("same").expect("hash");
         assert_ne!(
@@ -84,7 +84,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_is_fail_closed_on_garbage() {
+    fn verify_rejects_garbage() {
         assert!(!verify_password("anything", ""));
         assert!(!verify_password("anything", "not-a-phc-string"));
         assert!(!verify_password("anything", "$argon2id$broken"));

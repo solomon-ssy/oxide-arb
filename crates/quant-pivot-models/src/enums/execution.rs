@@ -1,5 +1,7 @@
 //! Execution-layer Postgres enums (`quant_order_intent`, `quant_execution_order`).
 
+use crate::enums::common::OrderType;
+
 pg_enum! {
     type_name = "qp_order_intent_kind",
     pub enum OrderIntentKind {
@@ -22,6 +24,17 @@ pg_enum! {
         Fak => "fak",
         Gtc => "gtc",
         Gtd => "gtd",
+    }
+}
+
+impl From<OrderType> for OrderTypeKind {
+    fn from(order_type: OrderType) -> Self {
+        match order_type {
+            OrderType::Fok => Self::Fok,
+            OrderType::Fak => Self::Fak,
+            OrderType::Gtc => Self::Gtc,
+            OrderType::Gtd { .. } => Self::Gtd,
+        }
     }
 }
 
@@ -301,7 +314,7 @@ mod tests {
     ];
 
     #[test]
-    fn kill_switch_behavior_table_matches_spec() {
+    fn kill_switch_matches_spec() {
         for &(state, new_entry, auto_exit, emergency) in BEHAVIOR_TABLE {
             assert_eq!(
                 state.allows_new_entry(),
@@ -322,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn only_closed_admits_new_entries() {
+    fn only_closed_admits_entries() {
         assert!(KillSwitchState::Closed.allows_new_entry());
         for &(state, ..) in &BEHAVIOR_TABLE[1..] {
             assert!(!state.allows_new_entry(), "{state:?} must block new entry");

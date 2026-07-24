@@ -78,7 +78,7 @@ where
     async fn write_batch(&self, rows: Vec<T>) -> Result<(), StorageError> {
         if self.async_insert {
             self.write_manager
-                .write_async_insert_batch_borrowed(self.pool.client(), self.table, &rows)
+                .write_borrowed_batch(self.pool.client(), self.table, &rows)
                 .await
         } else {
             self.write_manager
@@ -93,7 +93,7 @@ where
     {
         if self.async_insert {
             self.write_manager
-                .write_async_insert_batch_borrowed(self.pool.client(), self.table, rows)
+                .write_borrowed_batch(self.pool.client(), self.table, rows)
                 .await
         } else {
             self.write_manager
@@ -235,7 +235,7 @@ impl QuantFactRepository for ChQuantFactRepository {
             .await
     }
 
-    async fn insert_exit_signal_evaluation_events(
+    async fn insert_exit_signal_events(
         &self,
         rows: Vec<QuantExitSignalEvaluationEventRow>,
     ) -> Result<(), StorageError> {

@@ -122,7 +122,7 @@ mod tests {
     use crate::{domain::governance::OperationalDegradeReason, enums::execution::KillSwitchState};
 
     #[test]
-    fn operational_phase_allows_submission_only_when_operational() {
+    fn operational_phase_allows_operational() {
         assert!(!OperationalPhase::CatalogWarming.allows_order_submission());
         assert!(!OperationalPhase::MarketDataConnecting.allows_order_submission());
         assert!(OperationalPhase::Operational.allows_order_submission());
@@ -131,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn market_data_ready_when_message_fresh() {
+    fn market_ready_message_fresh() {
         let fresh = MarketDataConnectivity::from_parts(
             Some(WS_MARKET_DATA_STALE_THRESHOLD_MS - 1),
             WsShardConnectivity {
@@ -167,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn kill_switch_tightened_degraded_still_allows_reports() {
+    fn kill_switch_allows_reports() {
         let phase = OperationalPhase::Degraded {
             reasons: vec![OperationalDegradeReason::KillSwitchTightened {
                 state: KillSwitchState::ExitOnly,
@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn operational_phase_serde_round_trip() {
+    fn operational_phase_serde_trip() {
         let phase = OperationalPhase::Degraded {
             reasons: vec![OperationalDegradeReason::MarketDataStale],
         };

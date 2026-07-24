@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loads_weighted_runtime_when_consistent() {
+    async fn loads_weighted_runtime_consistent() {
         let store = temp_store();
         let version = ModelVersionId::from_v7();
         let feature_hash = hash("feat");
@@ -466,7 +466,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_factory_rejects_artifact_hash_mismatch() {
+    async fn runtime_factory_rejects_mismatch() {
         let store = temp_store();
         let version = ModelVersionId::from_v7();
         let feature_hash = hash("feat");
@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_rejects_feature_schema_hash_mismatch() {
+    async fn runtime_rejects_feature_mismatch() {
         let store = temp_store();
         let version = ModelVersionId::from_v7();
         let artifact = artifact(&version, hash("trained_feat"));

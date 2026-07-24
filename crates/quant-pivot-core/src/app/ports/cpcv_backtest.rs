@@ -37,7 +37,7 @@ use quant_pivot_research::{
     artifact::ArtifactStore,
     model::{
         LabelSelector, SellSignalPolicy, load_hash_verified_artifact,
-        objective::training_objective_from_runtime_config,
+        objective::runtime_training_objective,
     },
     training::LabelName,
     validation::{
@@ -326,7 +326,7 @@ impl CoreCpcvBacktestPort {
     ) -> QuantResult<ResolvedCpcvContract> {
         let version = self
             .model_registry_repo
-            .find_model_version_by_id(model_version_id)
+            .find_model_version(model_version_id)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| StorageError::NotFound {
@@ -337,7 +337,7 @@ impl CoreCpcvBacktestPort {
         validate_cpcv_dataset_binding(&version, &dataset, &request.training_dataset_id)?;
         let model_spec = self
             .model_registry_repo
-            .find_model_spec_by_id(&version.model_spec_id)
+            .find_model_spec(&version.model_spec_id)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| StorageError::NotFound {
@@ -451,7 +451,7 @@ impl CoreCpcvBacktestPort {
             .await;
     }
 
-    async fn find_path_set_for_version(
+    async fn find_version_path_set(
         &self,
         path_set_id: &BacktestPathSetId,
         model_version_id: &ModelVersionId,
@@ -546,7 +546,7 @@ fn cpcv_config_from_runtime(
 
     Ok(CpcvBacktestConfig {
         factors: runtime.profile_artifacts.scoring.definition.clone(),
-        objective: training_objective_from_runtime_config(
+        objective: runtime_training_objective(
             &runtime.profile_artifacts.research_method.research.training,
         )?,
         cpcv: CpcvConfig {
@@ -689,7 +689,7 @@ impl CpcvBacktestPort for CoreCpcvBacktestPort {
     ) -> QuantResult<BacktestPathSetView> {
         if let Some(path_set_id) = &request.path_set_id
             && let Some(view) = self
-                .find_path_set_for_version(path_set_id, &model_version_id, &request)
+                .find_version_path_set(path_set_id, &model_version_id, &request)
                 .await?
         {
             return Ok(view);

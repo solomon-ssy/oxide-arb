@@ -146,9 +146,7 @@ pub use portfolio_plan::{
 };
 pub use recommendation_identity::RecommendationIdentity;
 pub use reconciliation_payload::{ReconciliationEvidence, ReconciliationEvidenceChain};
-pub use report_data_quality::{
-    ReportDataQualityTokens, TokenDataQualityRecord, data_quality_score,
-};
+pub use report_data_quality::{ReportDataQualityTokens, TokenDataQualityRecord};
 pub use report_fact_bundle::{
     REPORT_FACT_BUNDLE_FORMAT_VERSION, ReportFactBundleV1, ReportFactNotificationRecommendationV1,
     ReportFactNotificationV1, ReportFactTableCommitment,
@@ -174,7 +172,7 @@ pub use research_profile::{
     ResearchProfileArtifact, ResearchProfileArtifactId, ResearchProfileArtifactIdParseError,
     ResearchProfileDataSource, ResearchProfileRef, ResearchProfileSpec,
     WEATHER_FORECAST_24H_HORIZON_SECS, WEATHER_FORECAST_24H_PROFILE_ID, builtin_research_profiles,
-    minimum_raw_retention_days, resolve_builtin_research_profile,
+    minimum_raw_retention_days,
 };
 pub use research_readiness::{
     HistoryCoverage, RETENTION_RUNWAY_EVIDENCE_FORMAT_VERSION, ResearchReadinessEvidencePayload,

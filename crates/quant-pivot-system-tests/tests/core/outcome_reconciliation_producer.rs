@@ -71,13 +71,13 @@ use sea_orm::DatabaseConnection;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn outcome_reconciliation_producer_contracts() {
     Box::pin(postgres::with_postgres_suite(async {
-        crash_after_fact_insert_recovers_and_late_recommendation_reuses_fact().await;
-        missing_resolution_fact_fails_closed().await;
-        out_of_order_source_scan_does_not_advance_cursor().await;
-        duplicate_market_and_tail_hash_mismatch_do_not_advance_cursor().await;
-        execution_backlog_is_reconciled_by_the_same_pass_owner().await;
-        execution_failure_does_not_block_resolution_lane().await;
-        resolution_failure_does_not_block_execution_lane().await;
+        crash_after_recovers_fact().await;
+        missing_resolution_fact_rejects().await;
+        disorder_never_advances_cursor().await;
+        mismatch_never_advances_cursor().await;
+        execution_backlog_reconciled_owner().await;
+        execution_never_blocks_resolution().await;
+        resolution_never_blocks_execution().await;
     }))
     .await
     .expect("start outcome-reconciliation producer PostgreSQL suite");
@@ -191,7 +191,7 @@ impl QuantFactReadRepository for MemoryResolutionFacts {
         Ok(Vec::new())
     }
 
-    async fn trade_tape_window_by_market(
+    async fn market_tape_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
@@ -417,7 +417,7 @@ impl ResolutionSourceReader for ScriptedResolutionSource {
     }
 }
 
-async fn crash_after_fact_insert_recovers_and_late_recommendation_reuses_fact() {
+async fn crash_after_recovers_fact() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_settlement_report_fixture(&db).await;
@@ -523,7 +523,7 @@ async fn crash_after_fact_insert_recovers_and_late_recommendation_reuses_fact() 
     );
 }
 
-async fn missing_resolution_fact_fails_closed() {
+async fn missing_resolution_fact_rejects() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_settlement_report_fixture(&db).await;
@@ -556,7 +556,7 @@ async fn missing_resolution_fact_fails_closed() {
     );
 }
 
-async fn out_of_order_source_scan_does_not_advance_cursor() {
+async fn disorder_never_advances_cursor() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let block_time = fixed_time();
@@ -601,7 +601,7 @@ async fn out_of_order_source_scan_does_not_advance_cursor() {
     assert_eq!(facts.row_count(), 0);
 }
 
-async fn execution_backlog_is_reconciled_by_the_same_pass_owner() {
+async fn execution_backlog_reconciled_owner() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -640,7 +640,7 @@ async fn execution_backlog_is_reconciled_by_the_same_pass_owner() {
     );
 }
 
-async fn duplicate_market_and_tail_hash_mismatch_do_not_advance_cursor() {
+async fn mismatch_never_advances_cursor() {
     let block_time = fixed_time();
     let duplicate_market = invalid_scan_outcome(
         FinalizedResolutionScan {
@@ -757,7 +757,7 @@ async fn invalid_scan_outcome(
     (rejected, cursor_block(&db).await, facts.row_count())
 }
 
-async fn resolution_failure_does_not_block_execution_lane() {
+async fn resolution_never_blocks_execution() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let resolution_ids = seed_settlement_report_fixture(&db).await;
@@ -806,7 +806,7 @@ async fn resolution_failure_does_not_block_execution_lane() {
     );
 }
 
-async fn execution_failure_does_not_block_resolution_lane() {
+async fn execution_never_blocks_resolution() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_settlement_report_fixture(&db).await;

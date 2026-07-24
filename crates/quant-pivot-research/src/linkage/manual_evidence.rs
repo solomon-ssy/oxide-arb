@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn real_citations_ground_the_override() {
+    fn real_citations_ground_override() {
         let evidence = vec![
             ManualEvidenceInput {
                 subject_field: "asset".to_owned(),
@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_citation_for_a_required_field_is_rejected() {
+    fn missing_citation_required_rejected() {
         let evidence = vec![ManualEvidenceInput {
             subject_field: "asset".to_owned(),
             source: GroundingField::Slug,
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn strike_is_required_only_when_present() {
+    fn strike_required_only_present() {
         let mut with_strike = subject();
         with_strike.comparator = PriceComparator::GreaterThanOrEqual;
         with_strike.strike = Some(Usd::new(Decimal::from(100_000)));

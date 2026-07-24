@@ -34,7 +34,7 @@ pub async fn shutdown_signal(token: CancellationToken) {
 }
 
 /// Watch for a second termination signal during the drain window.
-pub async fn force_exit_on_second_signal() {
+pub async fn second_signal_forces_exit() {
     let ctrl_c = tokio::signal::ctrl_c();
 
     #[cfg(unix)]

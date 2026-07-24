@@ -131,7 +131,7 @@ impl EntryConditionArtifactV1 {
             &self.binding.source_bindings,
             EntryConditionValidationError::DuplicateSourceBinding,
         )?;
-        validate_confirmation(self.confirmation)?;
+        (self.confirmation).validate_confirmation()?;
         let mut node_count = 0;
         self.root = self.root.canonicalize(1, &mut node_count)?;
         if node_count > ENTRY_CONDITION_MAX_NODES {
@@ -150,20 +150,17 @@ impl EntryConditionArtifactV1 {
     }
 }
 
-const fn validate_confirmation(
-    confirmation: ConfirmationPolicy,
-) -> Result<(), EntryConditionValidationError> {
-    let valid = match confirmation.required_continuous_ms {
-        0 => confirmation.max_observation_gap_ms == 0,
-        required => {
-            confirmation.max_observation_gap_ms > 0
-                && confirmation.max_observation_gap_ms <= required
+impl ConfirmationPolicy {
+    const fn validate_confirmation(self) -> Result<(), EntryConditionValidationError> {
+        let valid = match self.required_continuous_ms {
+            0 => self.max_observation_gap_ms == 0,
+            required => self.max_observation_gap_ms > 0 && self.max_observation_gap_ms <= required,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(EntryConditionValidationError::InvalidConfirmation)
         }
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(EntryConditionValidationError::InvalidConfirmation)
     }
 }
 
@@ -785,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn permutations_have_identical_canonical_tree_and_hash() {
+    fn permutations_identical_canonical_hash() {
         let left = EntryConditionV1::All {
             children: vec![price("1", dec!(0.55)), clock(1_000)],
         }
@@ -800,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn same_kind_groups_flatten_and_duplicates_are_rejected() {
+    fn kind_groups_flatten_rejected() {
         let tree = EntryConditionV1::All {
             children: vec![
                 price("1", dec!(0.55)),

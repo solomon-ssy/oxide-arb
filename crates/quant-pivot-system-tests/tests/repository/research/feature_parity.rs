@@ -131,7 +131,7 @@ fn actor() -> FeatureParityLatchActor {
     }
 }
 
-pub async fn cold_window_is_not_eligible_and_writes_no_run_or_job() {
+pub async fn cold_not_no_job() {
     let (pool, _container) = setup_pg().await;
     let repo = PgFeatureParityRepository::new(pool.connection().clone());
     let window_end = Utc::now();
@@ -178,7 +178,7 @@ pub async fn cold_window_is_not_eligible_and_writes_no_run_or_job() {
     );
 }
 
-pub async fn full_window_is_unique_only_while_a_run_is_active() {
+pub async fn full_window_unique_active() {
     let (pool, _container) = setup_pg().await;
     let repo = PgFeatureParityRepository::new(pool.connection().clone());
     let window_end = Utc::now();
@@ -230,7 +230,7 @@ pub async fn full_window_is_unique_only_while_a_run_is_active() {
     );
 }
 
-pub async fn recovery_must_cover_every_open_incident_since_latest_clear() {
+pub async fn recovery_cover_open_clear() {
     let (pool, _container) = setup_pg().await;
     let repo = PgFeatureParityRepository::new(pool.connection().clone());
     let now = Utc::now();

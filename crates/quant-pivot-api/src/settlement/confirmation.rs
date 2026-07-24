@@ -42,9 +42,15 @@ use reqwest::{Client, Url};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-use super::relayer::{
-    FrozenDepositWalletRequest, FrozenSafeProxyRequest,
-    deposit_wallet_wire::Factory::proxyCall as DepositWalletProxyCall,
+use super::{
+    relayer::{
+        FrozenDepositWalletRequest, FrozenSafeProxyRequest,
+        deposit_wallet_wire::Factory::proxyCall as DepositWalletProxyCall,
+    },
+    typed::{
+        IntoEvmAddress, IntoEvmBlockHash, IntoEvmCodeHash, IntoEvmTransactionHash, IntoEvmUint,
+        SettlementValueError, SettlementValueKind,
+    },
 };
 use crate::wallet::WalletTopology;
 
@@ -206,6 +212,14 @@ pub enum SettlementConfirmationReadError {
     TransferLog(#[from] SettlementConfirmationError),
 }
 
+impl From<SettlementValueError> for SettlementConfirmationReadError {
+    fn from(error: SettlementValueError) -> Self {
+        Self::InvalidEvidence {
+            detail: error.detail().to_owned(),
+        }
+    }
+}
+
 /// Alloy-backed, signer-free Polygon confirmation reader.
 pub struct AlloySettlementConfirmationReader {
     provider: DynProvider,
@@ -337,7 +351,7 @@ impl AlloySettlementConfirmationReader {
             .await
             .map_err(|error| read_error("eth_getBlockByNumber(canonical recheck)", &error))?;
         let canonical_receipt_block_hash = canonical
-            .map(|block| typed_block_hash(block.hash))
+            .map(|block| (block.hash).into_evm_block_hash())
             .transpose()?;
         let target = Address::from_str(submission.target_adapter.as_str()).map_err(|error| {
             SettlementConfirmationReadError::InvalidEvidence {
@@ -373,19 +387,19 @@ impl AlloySettlementConfirmationReader {
                 .await
                 .map_err(|error| read_error("eth_chainId", &error))?,
             transaction: SettlementTransactionObservation {
-                transaction_hash: typed_transaction_hash(transaction.hash)?,
-                outer_sender: typed_address_read(transaction.from)?,
-                outer_target: typed_address_read(outer_target)?,
+                transaction_hash: (transaction.hash).into_evm_transaction_hash()?,
+                outer_sender: (transaction.from).into_evm_address()?,
+                outer_target: (outer_target).into_evm_address()?,
                 input: transaction.input.to_vec(),
             },
-            receipt_transaction_hash: typed_transaction_hash(receipt.transaction_hash)?,
+            receipt_transaction_hash: (receipt.transaction_hash).into_evm_transaction_hash()?,
             receipt_success: receipt.status == 1,
             receipt_block_number: receipt.block_number,
-            receipt_block_hash: typed_block_hash(receipt.block_hash)?,
+            receipt_block_hash: (receipt.block_hash).into_evm_block_hash()?,
             canonical_receipt_block_hash,
             finalized_block_number: finalized.number,
-            finalized_block_hash: typed_block_hash(finalized.hash)?,
-            target_code_hash: typed_code_hash(keccak256(&target_code))?,
+            finalized_block_hash: (finalized.hash).into_evm_block_hash()?,
+            target_code_hash: (keccak256(&target_code)).into_evm_code_hash()?,
             operator_approved,
             observed_at: Utc::now(),
         }))
@@ -454,7 +468,7 @@ impl SettlementConfirmationReader for AlloySettlementConfirmationReader {
             .block_id(BlockId::hash_canonical(receipt_block_hash))
             .await
             .map_err(|error| read_error("eth_getCode(target@receiptHash)", &error))?;
-        let target_code_hash = typed_code_hash(keccak256(&target_code))?;
+        let target_code_hash = (keccak256(&target_code)).into_evm_code_hash()?;
         let balances_after = self
             .balances_at_receipt_hash(redeem, submission, receipt_block_hash)
             .await?;
@@ -467,7 +481,7 @@ impl SettlementConfirmationReader for AlloySettlementConfirmationReader {
             .await
             .map_err(|error| read_error("eth_getBlockByNumber(canonical recheck)", &error))?;
         let canonical_receipt_block_hash = canonical
-            .map(|block| typed_block_hash(block.hash))
+            .map(|block| (block.hash).into_evm_block_hash())
             .transpose()?;
         let pusd = Address::from_str(submission.collateral_token.as_str()).map_err(|error| {
             SettlementConfirmationReadError::InvalidEvidence {
@@ -499,18 +513,18 @@ impl SettlementConfirmationReader for AlloySettlementConfirmationReader {
                 .await
                 .map_err(|error| read_error("eth_chainId", &error))?,
             transaction: SettlementTransactionObservation {
-                transaction_hash: typed_transaction_hash(transaction.hash)?,
-                outer_sender: typed_address_read(transaction.from)?,
-                outer_target: typed_address_read(outer_target)?,
+                transaction_hash: (transaction.hash).into_evm_transaction_hash()?,
+                outer_sender: (transaction.from).into_evm_address()?,
+                outer_target: (outer_target).into_evm_address()?,
                 input: transaction.input.to_vec(),
             },
-            receipt_transaction_hash: typed_transaction_hash(receipt.transaction_hash)?,
+            receipt_transaction_hash: (receipt.transaction_hash).into_evm_transaction_hash()?,
             receipt_success: receipt.status == 1,
             receipt_block_number,
-            receipt_block_hash: typed_block_hash(receipt_block_hash)?,
+            receipt_block_hash: (receipt_block_hash).into_evm_block_hash()?,
             canonical_receipt_block_hash,
             finalized_block_number: finalized.number,
-            finalized_block_hash: typed_block_hash(finalized.hash)?,
+            finalized_block_hash: (finalized.hash).into_evm_block_hash()?,
             target_code_hash,
             transfers,
             wrapped_payouts,
@@ -640,8 +654,9 @@ pub async fn poll_operator_approval_confirmation(
     action: &SettlementGovernedActionInfo,
     submission: &SettlementChainSubmissionInfo,
 ) -> Result<SettlementOperatorApprovalPollOutcome, SettlementConfirmationReadError> {
-    let funder =
-        typed_address(topology.funder).map_err(SettlementConfirmationReadError::TransferLog)?;
+    let funder = (topology.funder)
+        .into_evm_address()
+        .map_err(|error| SettlementConfirmationReadError::TransferLog(error.into()))?;
     let Some(observation) = reader
         .observe_operator_approval(&funder, submission)
         .await?
@@ -676,7 +691,7 @@ pub fn verify_operator_approval_confirmation(
     submission: &SettlementChainSubmissionInfo,
     observation: SettlementOperatorApprovalObservation,
 ) -> Result<SettlementOperatorApprovalConfirmationStatus, SettlementConfirmationError> {
-    let funder = typed_address(topology.funder)?;
+    let funder = (topology.funder).into_evm_address()?;
     let desired_approval = action
         .desired_approval
         .ok_or(SettlementConfirmationError::GovernedActionScopeMismatch)?;
@@ -740,7 +755,7 @@ pub fn verify_operator_approval_confirmation(
     if observation.target_code_hash != submission.target_code_hash {
         return Err(SettlementConfirmationError::TargetCodeHashMismatch);
     }
-    let call = verify_call_identity_for_scope(
+    let call = verify_scope_identity(
         topology,
         topology.kind,
         &funder,
@@ -812,6 +827,20 @@ pub enum SettlementConfirmationError {
     InvalidPayoutLog { detail: String },
 }
 
+impl From<SettlementValueError> for SettlementConfirmationError {
+    fn from(error: SettlementValueError) -> Self {
+        if error.kind() == SettlementValueKind::Uint {
+            Self::InvalidNumericEvidence {
+                detail: error.detail().to_owned(),
+            }
+        } else {
+            Self::InvalidPayoutLog {
+                detail: error.detail().to_owned(),
+            }
+        }
+    }
+}
+
 impl SettlementConfirmationError {
     #[must_use]
     pub const fn failure_code(&self) -> SettlementFailureCode {
@@ -847,7 +876,7 @@ pub fn verify_settlement_confirmation(
     observation: SettlementChainObservation,
 ) -> Result<SettlementConfirmationStatus, SettlementConfirmationError> {
     if topology.kind != redeem.wallet_kind
-        || typed_address(topology.funder)? != redeem.funder_address
+        || (topology.funder).into_evm_address()? != redeem.funder_address
     {
         return Err(SettlementConfirmationError::CaseScopeMismatch);
     }
@@ -880,7 +909,7 @@ pub fn verify_settlement_confirmation(
     if observation.target_code_hash != submission.target_code_hash {
         return Err(SettlementConfirmationError::TargetCodeHashMismatch);
     }
-    let call = verify_call_identity_for_scope(
+    let call = verify_scope_identity(
         topology,
         redeem.wallet_kind,
         &redeem.funder_address,
@@ -915,7 +944,7 @@ pub fn verify_settlement_confirmation(
             token: mint.token,
             from: mint.from,
             to: mint.to,
-            raw_amount: typed_uint(mint.raw_amount)?,
+            raw_amount: (mint.raw_amount).into_evm_uint()?,
             amount_usd: actual_payout_usd,
             log_index: mint.log_index,
         },
@@ -924,7 +953,7 @@ pub fn verify_settlement_confirmation(
             caller: wrapped.caller,
             asset: wrapped.asset,
             to: wrapped.to,
-            raw_amount: typed_uint(wrapped.raw_amount)?,
+            raw_amount: (wrapped.raw_amount).into_evm_uint()?,
             amount_usd: actual_payout_usd,
             log_index: wrapped.log_index,
         },
@@ -960,9 +989,9 @@ pub fn decode_erc20_transfer(
     let from = Address::from_slice(&topics[1].as_slice()[12..]);
     let to = Address::from_slice(&topics[2].as_slice()[12..]);
     Ok(Some(ObservedErc20Transfer {
-        token: typed_address(token)?,
-        from: typed_address(from)?,
-        to: typed_address(to)?,
+        token: (token).into_evm_address()?,
+        from: (from).into_evm_address()?,
+        to: (to).into_evm_address()?,
         raw_amount: U256::from_be_slice(data.as_ref()),
         log_index,
     }))
@@ -988,16 +1017,16 @@ pub fn decode_wrapped_payout(
     let asset = Address::from_slice(&topics[2].as_slice()[12..]);
     let to = Address::from_slice(&topics[3].as_slice()[12..]);
     Ok(Some(ObservedWrappedPayout {
-        collateral_token: typed_address(collateral_token)?,
-        caller: typed_address(caller)?,
-        asset: typed_address(asset)?,
-        to: typed_address(to)?,
+        collateral_token: (collateral_token).into_evm_address()?,
+        caller: (caller).into_evm_address()?,
+        asset: (asset).into_evm_address()?,
+        to: (to).into_evm_address()?,
         raw_amount: U256::from_be_slice(data.as_ref()),
         log_index,
     }))
 }
 
-fn verify_call_identity_for_scope(
+fn verify_scope_identity(
     topology: &WalletTopology,
     wallet_kind: ExecutionWalletKind,
     funder: &EvmAddress,
@@ -1051,7 +1080,7 @@ fn verify_externally_observed_call(
             verify_external_proxy_call(topology, submission, transaction)?;
         }
         ExecutionWalletKind::DepositWallet => {
-            verify_external_deposit_wallet_call(funder, submission, transaction)?;
+            verify_deposit_call(funder, submission, transaction)?;
         }
     }
     Ok(SettlementMinedCallEvidence {
@@ -1088,7 +1117,7 @@ fn verify_external_safe_call(
     }
     let mined = execTransactionCall::abi_decode(&transaction.input)
         .map_err(|_| SettlementConfirmationError::CallEvidenceMismatch)?;
-    if typed_address(mined.to)? != submission.call_target
+    if (mined.to).into_evm_address()? != submission.call_target
         || !mined.value.is_zero()
         || mined.data.as_ref() != submission.calldata.as_slice()
         || mined.operation != 0
@@ -1112,8 +1141,8 @@ fn verify_external_proxy_call(
     }
     let mined = relayCallCall::abi_decode(&transaction.input)
         .map_err(|_| SettlementConfirmationError::CallEvidenceMismatch)?;
-    if typed_address(mined.from)? != typed_address(topology.signer)?
-        || typed_address(mined.recipient)? != relayer_address(PROXY_FACTORY)?
+    if (mined.from).into_evm_address()? != (topology.signer).into_evm_address()?
+        || (mined.recipient).into_evm_address()? != relayer_address(PROXY_FACTORY)?
         || !mined.transactionFee.is_zero()
         || !mined.gasPrice.is_zero()
         || mined.signature.is_empty()
@@ -1128,7 +1157,7 @@ fn verify_external_proxy_call(
     };
     if inner.typeCode != PROXY_CALL_TYPE
         || !inner.value.is_zero()
-        || typed_address(inner.to)? != submission.call_target
+        || (inner.to).into_evm_address()? != submission.call_target
         || inner.data.as_ref() != submission.calldata.as_slice()
     {
         return Err(SettlementConfirmationError::CallEvidenceMismatch);
@@ -1136,7 +1165,7 @@ fn verify_external_proxy_call(
     Ok(())
 }
 
-fn verify_external_deposit_wallet_call(
+fn verify_deposit_call(
     funder: &EvmAddress,
     submission: &SettlementChainSubmissionInfo,
     transaction: &SettlementTransactionObservation,
@@ -1155,9 +1184,9 @@ fn verify_external_deposit_wallet_call(
     let [call] = batch.calls.as_slice() else {
         return Err(SettlementConfirmationError::CallEvidenceMismatch);
     };
-    if typed_address(batch.wallet)? != *funder
+    if (batch.wallet).into_evm_address()? != *funder
         || signature.is_empty()
-        || typed_address(call.target)? != submission.call_target
+        || (call.target).into_evm_address()? != submission.call_target
         || !call.value.is_zero()
         || call.data.as_ref() != submission.calldata.as_slice()
     {
@@ -1184,13 +1213,7 @@ fn verify_relayer_envelope(
     }
     match wallet_kind {
         ExecutionWalletKind::GnosisSafe | ExecutionWalletKind::Proxy => {
-            verify_safe_proxy_relayer_envelope(
-                wallet_kind,
-                funder,
-                submission,
-                transaction,
-                envelope,
-            )?;
+            verify_safe_relay(wallet_kind, funder, submission, transaction, envelope)?;
         }
         ExecutionWalletKind::DepositWallet => {
             verify_deposit_wallet_envelope(funder, submission, transaction, envelope)?;
@@ -1209,7 +1232,7 @@ fn verify_relayer_envelope(
     })
 }
 
-fn verify_safe_proxy_relayer_envelope(
+fn verify_safe_relay(
     wallet_kind: ExecutionWalletKind,
     funder: &EvmAddress,
     submission: &SettlementChainSubmissionInfo,
@@ -1276,10 +1299,10 @@ fn verify_deposit_wallet_envelope(
     let [mined_call] = batch.calls.as_slice() else {
         return Err(SettlementConfirmationError::CallEvidenceMismatch);
     };
-    if typed_address(batch.wallet)? != *funder
+    if (batch.wallet).into_evm_address()? != *funder
         || batch.nonce != nonce
         || batch.deadline != deadline
-        || typed_address(mined_call.target)? != submission.call_target
+        || (mined_call.target).into_evm_address()? != submission.call_target
         || !mined_call.value.is_zero()
         || mined_call.data.as_ref() != submission.calldata.as_slice()
         || mined_signature.as_ref() != signature.as_slice()
@@ -1320,7 +1343,7 @@ fn verify_safe_mined_call(
     let mined = execTransactionCall::abi_decode(&transaction.input)
         .map_err(|_| SettlementConfirmationError::CallEvidenceMismatch)?;
     let signature = decode_hex(&body.signature)?;
-    if typed_address(mined.to)? != submission.call_target
+    if (mined.to).into_evm_address()? != submission.call_target
         || !mined.value.is_zero()
         || mined.data.as_ref() != submission.calldata.as_slice()
         || mined.operation != 0
@@ -1378,7 +1401,7 @@ fn verify_proxy_mined_call(
     };
     if inner.typeCode != PROXY_CALL_TYPE
         || !inner.value.is_zero()
-        || typed_address(inner.to)? != submission.call_target
+        || (inner.to).into_evm_address()? != submission.call_target
         || inner.data.as_ref() != submission.calldata.as_slice()
     {
         return Err(SettlementConfirmationError::RelayerEnvelopeMismatch);
@@ -1393,8 +1416,8 @@ fn verify_proxy_mined_call(
         .and_then(parse_canonical_uint)?;
     let nonce = parse_canonical_uint(&body.nonce)?;
     let signature = decode_hex(&body.signature)?;
-    if typed_address(mined.from)? != relayer_address(&body.from)?
-        || typed_address(mined.recipient)? != relayer_address(&body.to)?
+    if (mined.from).into_evm_address()? != relayer_address(&body.from)?
+        || (mined.recipient).into_evm_address()? != relayer_address(&body.to)?
         || mined.encodedFunction.as_ref() != data
         || !mined.transactionFee.is_zero()
         || !mined.gasPrice.is_zero()
@@ -1566,52 +1589,6 @@ fn parse_uint(value: &str) -> Result<U256, SettlementConfirmationError> {
     U256::from_str(value).map_err(|error| invalid_numeric(&error.to_string()))
 }
 
-fn typed_uint(value: U256) -> Result<EvmUint256, SettlementConfirmationError> {
-    EvmUint256::parse(value.to_string()).map_err(|error| invalid_numeric(&error.to_string()))
-}
-
-fn typed_address(value: Address) -> Result<EvmAddress, SettlementConfirmationError> {
-    EvmAddress::parse(format!("{value:#x}")).map_err(|error| {
-        SettlementConfirmationError::InvalidPayoutLog {
-            detail: error.to_string(),
-        }
-    })
-}
-
-fn typed_address_read(value: Address) -> Result<EvmAddress, SettlementConfirmationReadError> {
-    EvmAddress::parse(format!("{value:#x}")).map_err(|error| {
-        SettlementConfirmationReadError::InvalidEvidence {
-            detail: error.to_string(),
-        }
-    })
-}
-
-fn typed_block_hash(value: B256) -> Result<EvmBlockHash, SettlementConfirmationReadError> {
-    EvmBlockHash::parse(format!("{value:#x}")).map_err(|error| {
-        SettlementConfirmationReadError::InvalidEvidence {
-            detail: error.to_string(),
-        }
-    })
-}
-
-fn typed_code_hash(value: B256) -> Result<EvmCodeHash, SettlementConfirmationReadError> {
-    EvmCodeHash::parse(format!("{value:#x}")).map_err(|error| {
-        SettlementConfirmationReadError::InvalidEvidence {
-            detail: error.to_string(),
-        }
-    })
-}
-
-fn typed_transaction_hash(
-    value: B256,
-) -> Result<EvmTransactionHash, SettlementConfirmationReadError> {
-    EvmTransactionHash::parse(format!("{value:#x}")).map_err(|error| {
-        SettlementConfirmationReadError::InvalidEvidence {
-            detail: error.to_string(),
-        }
-    })
-}
-
 fn observed_token_balance(
     token_id: TokenId,
     raw: U256,
@@ -1743,7 +1720,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn alloy_reader_pins_balance_reads_to_receipt_hash_and_rechecks_canonical_block() {
+    async fn alloy_reader_reads_block() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(rpc_response)
@@ -1780,7 +1757,7 @@ mod tests {
     }
 
     #[test]
-    fn finalized_receipt_requires_exact_payout_and_consumed_balances() {
+    fn finalized_receipt_requires_balances() {
         let redeem = redeem_case();
         let submission = submission(
             SettlementSubmissionKind::DirectEoa,
@@ -1850,7 +1827,7 @@ mod tests {
     }
 
     #[test]
-    fn finality_reorg_revert_and_payout_mismatch_are_distinct() {
+    fn finality_reorg_mismatch_distinct() {
         let redeem = redeem_case();
         let submission = submission(
             SettlementSubmissionKind::DirectEoa,
@@ -1887,7 +1864,7 @@ mod tests {
     }
 
     #[test]
-    fn operator_approval_confirmation_requires_exact_scope_call_canonicality_and_post_state() {
+    fn operator_approval_requires_state() {
         let redeem = redeem_case();
         let action = governed_approval_action(&redeem);
         let submission = operator_approval_submission(&redeem, &action);
@@ -1948,7 +1925,7 @@ mod tests {
     }
 
     #[test]
-    fn safe_relayer_path_proves_the_actual_mined_wrapper() {
+    fn safe_relayer_proves_wrapper() {
         let mut redeem = redeem_case();
         redeem.wallet_kind = ExecutionWalletKind::GnosisSafe;
         let mut relayer = submission(
@@ -2028,7 +2005,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_relayer_path_proves_relay_hub_and_frozen_meta_transaction() {
+    fn proxy_relayer_proves_transaction() {
         let mut redeem = redeem_case();
         redeem.wallet_kind = ExecutionWalletKind::Proxy;
         let mut relayer = submission(
@@ -2109,7 +2086,7 @@ mod tests {
     }
 
     #[test]
-    fn deposit_wallet_path_proves_factory_batch_nonce_deadline_signature_and_call() {
+    fn deposit_wallet_proves_call() {
         let mut redeem = redeem_case();
         redeem.wallet_kind = ExecutionWalletKind::DepositWallet;
         let mut relayer = submission(
@@ -2192,7 +2169,7 @@ mod tests {
     }
 
     #[test]
-    fn erc20_transfer_decoder_rejects_malformed_matching_event() {
+    fn erc20_rejects_malformed_event() {
         let signature = keccak256("Transfer(address,address,uint256)");
         assert_eq!(
             decode_erc20_transfer(Address::ZERO, &[signature, B256::ZERO], &Bytes::new(), 0,),

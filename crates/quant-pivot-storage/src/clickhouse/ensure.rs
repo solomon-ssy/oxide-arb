@@ -206,7 +206,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_accepts_default_database_name() {
+    fn validate_accepts_default_name() {
         assert!(validate_ch_identifier("quant_pivot", "database").is_ok());
     }
 
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_invalid_first_char() {
+    fn validate_rejects_invalid_char() {
         assert!(validate_ch_identifier("1bad", "database").is_err());
     }
 

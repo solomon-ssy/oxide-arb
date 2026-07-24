@@ -145,7 +145,7 @@ fn compute_one(
 // ── #1 default factor set ─────────────────────────────────────────────────────
 
 #[test]
-fn default_factor_config_enables_all_generic_and_structural_families() {
+fn default_factor_config_families() {
     let config = FactorsConfig::default();
     // The default enables every generic family plus the platform-internal
     // structural plane.
@@ -177,7 +177,7 @@ fn default_factor_config_enables_all_generic_and_structural_families() {
 // ── #3 no silent neutral ──────────────────────────────────────────────────────
 
 #[test]
-fn small_cross_section_yields_indeterminate_not_half() {
+fn small_cross_not_half() {
     // A single-market batch cannot form a cross-section for a Rank factor;
     // the outcome is Indeterminate, never a fabricated neutral 0.5.
     let config = factors_config(
@@ -264,7 +264,7 @@ fn zero_variance_yields_indeterminate() {
 // ── Cross-sectional gating / determinism ──────────────────────────────────────
 
 #[test]
-fn compute_all_batch_rejects_mixed_as_of() {
+fn compute_batch_rejects_mixed() {
     let config = factors_config(
         &[FactorFamily::Liquidity],
         MissingFactorPolicy::ZeroWeight,
@@ -300,7 +300,7 @@ fn compute_all_batch_rejects_mixed_as_of() {
 // ── Explanation drivers ───────────────────────────────────────────────────────
 
 #[test]
-fn factor_explanation_lists_positive_and_negative_drivers() {
+fn factor_explanation_lists_drivers() {
     let config = factors_config(
         &[FactorFamily::DataQuality],
         MissingFactorPolicy::ZeroWeight,
@@ -341,7 +341,7 @@ fn factor_explanation_lists_positive_and_negative_drivers() {
 // ── Confidence floor + missing policy ─────────────────────────────────────────
 
 #[test]
-fn factor_confidence_floor_zero_weights_low_confidence() {
+fn factor_confidence_zero_confidence() {
     // Stale data → confidence 0.40 < floor 0.50; under ZeroWeight the factor is
     // scored but does not contribute, and the market still proceeds.
     let config = factors_config(
@@ -386,7 +386,7 @@ fn factor_confidence_floor_zero_weights_low_confidence() {
 }
 
 #[test]
-fn factor_missing_reject_candidate_policy() {
+fn factor_missing_reject_policy() {
     // `spread_efficiency` is required; a market missing it under RejectCandidate
     // is excluded, while complete markets (present cross-section) proceed.
     let config = factors_config(
@@ -447,7 +447,7 @@ fn factor_missing_reject_candidate_policy() {
 // ── Schema hash ───────────────────────────────────────────────────────────────
 
 #[test]
-fn factor_set_change_changes_schema_hash() {
+fn factor_set_changes_hash() {
     let features = FeaturesConfig::default();
     let one = FactorEngine::new(
         &factors_config(
@@ -477,7 +477,7 @@ fn factor_set_change_changes_schema_hash() {
 }
 
 #[test]
-fn factor_schema_hash_is_order_independent_for_same_set() {
+fn factor_schema_hash_set() {
     let features = FeaturesConfig::default();
     let forward = FactorEngine::new(
         &factors_config(
@@ -508,7 +508,7 @@ fn factor_schema_hash_is_order_independent_for_same_set() {
 // ── Generic factors: basic compute ────────────────────────────────────────────
 
 #[test]
-fn liquidity_depth_factor_basic_compute() {
+fn liquidity_depth_factor_compute() {
     let factor = compute_one(
         FactorFamily::Liquidity,
         "liquidity_depth",
@@ -520,7 +520,7 @@ fn liquidity_depth_factor_basic_compute() {
 }
 
 #[test]
-fn spread_efficiency_factor_basic_compute() {
+fn spread_efficiency_factor_compute() {
     let factor = compute_one(
         FactorFamily::Liquidity,
         "spread_efficiency",
@@ -532,7 +532,7 @@ fn spread_efficiency_factor_basic_compute() {
 }
 
 #[test]
-fn book_imbalance_factor_basic_compute() {
+fn book_imbalance_factor_compute() {
     let factor = compute_one(
         FactorFamily::Microstructure,
         "book_imbalance",
@@ -544,7 +544,7 @@ fn book_imbalance_factor_basic_compute() {
 }
 
 #[test]
-fn momentum_roc_factor_basic_compute() {
+fn momentum_roc_factor_compute() {
     let factor = compute_one(
         FactorFamily::Momentum,
         "momentum_roc",
@@ -556,7 +556,7 @@ fn momentum_roc_factor_basic_compute() {
 }
 
 #[test]
-fn data_quality_factor_basic_compute() {
+fn quality_factor_basic_compute() {
     let factor = compute_one(FactorFamily::DataQuality, "data_quality", &[], &[]);
     assert!(factor.value.raw_value.is_some());
     // data_quality uses per-market MinMax, so it is always scored.
@@ -585,7 +585,7 @@ fn varied_batch(count: usize) -> Vec<FeatureVector> {
 }
 
 #[test]
-fn compute_all_batch_is_deterministic() {
+fn compute_all_batch_deterministic() {
     let config = factors_config(
         &[FactorFamily::Liquidity],
         MissingFactorPolicy::ZeroWeight,
@@ -607,7 +607,7 @@ fn compute_all_batch_is_deterministic() {
 }
 
 #[test]
-fn compute_all_batch_preserves_input_order() {
+fn compute_batch_preserves_order() {
     let config = factors_config(
         &[FactorFamily::Liquidity],
         MissingFactorPolicy::ZeroWeight,
@@ -626,7 +626,7 @@ fn compute_all_batch_preserves_input_order() {
 }
 
 #[test]
-fn serial_and_parallel_normalizer_paths_are_bit_identical() {
+fn serial_parallel_normalizer_identical() {
     // The serial and rayon paths share one `CrossSectionalNormalizer`, so they
     // must be bit-identical. (Online-vs-replay parity — both driving the same
     // engine entrypoint — is asserted at the core pipeline level.)
@@ -649,9 +649,9 @@ fn serial_and_parallel_normalizer_paths_are_bit_identical() {
 }
 
 #[test]
-fn online_and_replay_entrypoints_agree_default_policy() {
+fn online_replay_entrypoints_policy() {
     // The replay path calls `compute_all_batch` and the online path calls
-    // `compute_all_batch_with_references`; under the default (`Indeterminate`) policy
+    // `compute_batch_with_refs`; under the default (`Indeterminate`) policy
     // they must produce identical outcomes — the same normalizer serves both.
     let config = factors_config(
         &[FactorFamily::Liquidity, FactorFamily::Momentum],
@@ -665,7 +665,7 @@ fn online_and_replay_entrypoints_agree_default_policy() {
         .compute_all_batch(&vectors, &config)
         .expect("replay path");
     let online = engine
-        .compute_all_batch_with_references(&vectors, &config, &FrozenReferenceQuantiles::empty())
+        .compute_batch_with_refs(&vectors, &config, &FrozenReferenceQuantiles::empty())
         .expect("online path");
     assert_eq!(
         replay, online,
@@ -674,7 +674,7 @@ fn online_and_replay_entrypoints_agree_default_policy() {
 }
 
 #[test]
-fn cross_sectional_zscore_mean_zero_std_one_per_as_of() {
+fn cross_sectional_zero_per() {
     // The winsorized z-score maps a standardized value `z = (x - μ) / σ` into
     // `[0, 1]` via `(z + k) / 2k` (k = clamp_sigma). With no winsorizing/clamping,
     // recovering `z = score·2k − k` across the cross-section must have population
@@ -720,7 +720,7 @@ fn cross_sectional_zscore_mean_zero_std_one_per_as_of() {
 }
 
 #[test]
-fn frozen_reference_quantile_scores_small_cross_section() {
+fn frozen_reference_quantile_section() {
     // A single-market batch is below `min_size`, but the model artifact's frozen
     // training CDF normalizes it without reading mutable online history.
     let mut config = factors_config(
@@ -754,7 +754,7 @@ fn frozen_reference_quantile_scores_small_cross_section() {
         Utc::now(),
     );
     let outcomes = engine
-        .compute_all_batch_with_references(slice::from_ref(&vector), &config, &references)
+        .compute_batch_with_refs(slice::from_ref(&vector), &config, &references)
         .expect("frozen-reference compute");
     let factor = scored(&outcomes[0], "liquidity_depth");
     assert!(
@@ -777,7 +777,7 @@ fn frozen_reference_quantile_scores_small_cross_section() {
 // ── #2 collinearity analysis ──────────────────────────────────────────────────
 
 #[test]
-fn collinearity_analyzer_flags_rho_over_threshold() {
+fn collinearity_analyzer_flags_threshold() {
     let alpha = FactorName::from_static("alpha");
     let beta = FactorName::from_static("beta");
     let gamma = FactorName::from_static("gamma");
@@ -837,7 +837,7 @@ fn momentum_path(shape: [i64; 4], vol: i64) -> Vec<(i64, Decimal)> {
 }
 
 #[test]
-fn default_momentum_estimators_not_mutually_collinear() {
+fn default_momentum_not_collinear() {
     // Closes audit #2 at the falsifiability level: on a heterogeneous panel the
     // four default momentum estimators AND the simple return must all stay below
     // the configured collinearity tolerance. A panel that only varied trend
@@ -950,7 +950,7 @@ fn default_momentum_estimators_not_mutually_collinear() {
 // ── structural acceptance ─────────────────────────────────────
 
 #[test]
-fn reversal_after_shock_orthogonal_to_mean_reversion() {
+fn reversal_after_shock_reversion() {
     let factors_config = FactorsConfig::default();
     let features_config = FeaturesConfig::default();
     let threshold = factors_config.orthogonalize.max_correlation.value;
@@ -1011,7 +1011,7 @@ fn reversal_after_shock_orthogonal_to_mean_reversion() {
 }
 
 #[test]
-fn favorite_longshot_uses_bias_table_not_constant() {
+fn favorite_uses_not_constant() {
     let window = TimeWindow {
         from: Utc.timestamp_opt(0, 0).unwrap(),
         to: Utc.timestamp_opt(1_000, 0).unwrap(),
@@ -1109,7 +1109,7 @@ fn favorite_longshot_uses_bias_table_not_constant() {
 }
 
 #[test]
-fn structural_factor_ic_gate_disables_insignificant_category() {
+fn structural_factor_ic_category() {
     // A retained price bin carrying a bias, but the curve's IC is NOT
     // significant — an insignificant category must be gated off when the IC
     // gate is on (never served as a real edge), yet readable with the gate off.

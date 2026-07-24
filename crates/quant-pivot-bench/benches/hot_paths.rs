@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use support::registered_data_plane;
 
-fn bench_book_store_publish_snapshot(c: &mut Criterion) {
+fn bench_book_store_snapshot(c: &mut Criterion) {
     let metrics = Arc::new(MetricsHub::new());
     let (data_plane, token) = registered_data_plane("12345");
     let store = BookStore::new(data_plane, metrics);
@@ -50,5 +50,5 @@ fn bench_book_store_publish_snapshot(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_book_store_publish_snapshot);
+criterion_group!(benches, bench_book_store_snapshot);
 criterion_main!(benches);

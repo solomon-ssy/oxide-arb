@@ -303,7 +303,7 @@ mod tests {
     use super::normalize_roles;
 
     #[test]
-    fn normalizes_only_schema_owner_and_public_grantees() {
+    fn normalizes_only_schema_grantees() {
         let mut manifest = json!({
             "tables": [{ "owner": "quant_pivot" }],
             "functions": [],

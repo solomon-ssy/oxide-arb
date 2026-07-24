@@ -77,7 +77,7 @@ impl DomainCatalogClassificationArtifact {
         classifications.sort();
         classifications.dedup();
         let catalog_hash = catalog_hash(&classifications)?;
-        let artifact_hash = artifact_hash(
+        let artifact_hash = Self::compute_hash(
             resolver_version,
             &capability_registry_hash,
             &catalog_hash,
@@ -115,7 +115,7 @@ impl DomainCatalogClassificationArtifact {
         }
         if self.classifications.iter().any(|row| {
             row.contract_family
-                .is_some_and(|contract_family| family_for(contract_family) != row.family)
+                .is_some_and(|contract_family| (contract_family).family_for() != row.family)
         }) {
             return Err("domain catalog classification family mismatch".to_owned());
         }
@@ -123,7 +123,7 @@ impl DomainCatalogClassificationArtifact {
         if self.catalog_hash != expected_catalog {
             return Err("domain catalog classification catalog hash mismatch".to_owned());
         }
-        let expected_artifact = artifact_hash(
+        let expected_artifact = Self::compute_hash(
             self.resolver_version,
             &self.capability_registry_hash,
             &self.catalog_hash,
@@ -149,21 +149,39 @@ impl DomainCatalogClassificationArtifact {
             })
             .count()
     }
+
+    fn compute_hash(
+        resolver_version: ResolverVersion,
+        capability_registry_hash: &ContentHash,
+        catalog_hash: &ContentHash,
+        classifications: &[DomainMarketClassification],
+    ) -> Result<ContentHash, CanonicalDigestError> {
+        CanonicalDigest::content_hash_json(&(
+            "domain_catalog_classification_v1",
+            DOMAIN_CATALOG_CLASSIFICATION_FORMAT_VERSION,
+            resolver_version,
+            capability_registry_hash,
+            catalog_hash,
+            classifications,
+        ))
+    }
 }
 
-const fn family_for(contract_family: DomainContractFamily) -> DomainFamily {
-    match contract_family {
-        DomainContractFamily::CryptoDirection
-        | DomainContractFamily::CryptoThreshold
-        | DomainContractFamily::CryptoBand => DomainFamily::Crypto,
-        DomainContractFamily::WeatherDailyTemperature
-        | DomainContractFamily::WeatherPrecipitation
-        | DomainContractFamily::WeatherAqi
-        | DomainContractFamily::WeatherTornado
-        | DomainContractFamily::WeatherTropicalCyclone
-        | DomainContractFamily::WeatherGlobalTemperature
-        | DomainContractFamily::WeatherSeaIce
-        | DomainContractFamily::WeatherWindExtreme => DomainFamily::Weather,
+impl DomainContractFamily {
+    const fn family_for(self) -> DomainFamily {
+        match self {
+            Self::CryptoDirection | Self::CryptoThreshold | Self::CryptoBand => {
+                DomainFamily::Crypto
+            }
+            Self::WeatherDailyTemperature
+            | Self::WeatherPrecipitation
+            | Self::WeatherAqi
+            | Self::WeatherTornado
+            | Self::WeatherTropicalCyclone
+            | Self::WeatherGlobalTemperature
+            | Self::WeatherSeaIce
+            | Self::WeatherWindExtreme => DomainFamily::Weather,
+        }
     }
 }
 
@@ -175,22 +193,6 @@ fn catalog_hash(
         .map(|row| (&row.market_id, &row.metadata_hash))
         .collect();
     CanonicalDigest::content_hash_json(&("domain_catalog_input_v1", inputs))
-}
-
-fn artifact_hash(
-    resolver_version: ResolverVersion,
-    capability_registry_hash: &ContentHash,
-    catalog_hash: &ContentHash,
-    classifications: &[DomainMarketClassification],
-) -> Result<ContentHash, CanonicalDigestError> {
-    CanonicalDigest::content_hash_json(&(
-        "domain_catalog_classification_v1",
-        DOMAIN_CATALOG_CLASSIFICATION_FORMAT_VERSION,
-        resolver_version,
-        capability_registry_hash,
-        catalog_hash,
-        classifications,
-    ))
 }
 
 #[cfg(test)]
@@ -224,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_is_order_independent_and_rejects_tampering() {
+    fn artifact_order_rejects_tampering() {
         let left = DomainCatalogClassificationArtifact::new(
             ResolverVersion::new(4),
             hash('c'),

@@ -77,7 +77,7 @@ impl AccountReadPort for CoreAccountReadPort {
         self.equity_snapshots.latest().await.map_err(Into::into)
     }
 
-    async fn find_equity_snapshot_by_id(
+    async fn find_equity_snapshot(
         &self,
         id: &EquitySnapshotId,
     ) -> QuantResult<Option<EquitySnapshotInfo>> {

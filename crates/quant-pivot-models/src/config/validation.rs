@@ -19,146 +19,140 @@ use crate::{
     types::{HkoStation, IcaoStation},
 };
 
-/// Mode-agnostic deploy validation: structural and platform invariants that
-/// must hold regardless of quant runtime mode.
-#[must_use]
-pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
-    let mut report = ConfigValidationReport::default();
+impl DeployConfig {
+    /// Mode-agnostic deploy validation: structural and platform invariants that
+    /// must hold regardless of quant runtime mode.
+    #[must_use]
+    pub fn validate_deploy_common(&self) -> ConfigValidationReport {
+        let mut report = ConfigValidationReport::default();
 
-    if deploy.polymarket.chain_id != POLYGON_CHAIN_ID {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.chain_id",
-            detail: format!("must be Polygon chain id {POLYGON_CHAIN_ID}"),
-        });
-    }
-    if deploy.polymarket.order_post_timeout_ms < 35_000 {
-        report.errors.push(ConfigValidationError::InvalidValue {
+        if self.polymarket.chain_id != POLYGON_CHAIN_ID {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "polymarket.chain_id",
+                detail: format!("must be Polygon chain id {POLYGON_CHAIN_ID}"),
+            });
+        }
+        if self.polymarket.order_post_timeout_ms < 35_000 {
+            report.errors.push(ConfigValidationError::InvalidValue {
             field: "polymarket.order_post_timeout_ms",
             detail: "must be at least 35000 ms to contain the SDK's 30-second async-commit identity enrichment budget".into(),
         });
-    }
-    if deploy.polymarket.clob_market_info_refresh_secs < 60 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.clob_market_info_refresh_secs",
-            detail: "must be at least 60 seconds".to_owned(),
-        });
-    }
-    let settlement = &deploy.polymarket.settlement;
-    if !(5..=300).contains(&settlement.claim_lease_secs) {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.settlement.claim_lease_secs",
-            detail: "must be between 5 and 300 seconds inclusive".to_owned(),
-        });
-    }
-    if !(30..=3_600).contains(&settlement.semi_auto_authorization_ttl_secs) {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.settlement.semi_auto_authorization_ttl_secs",
-            detail: "must be between 30 and 3600 seconds inclusive".to_owned(),
-        });
-    }
-    if settlement.discovery_poll_secs == 0 || settlement.submission_poll_secs == 0 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.settlement.worker_poll_secs",
-            detail: "discovery and submission polls must both be > 0".to_owned(),
-        });
-    }
-    if !(1..=1_024).contains(&settlement.max_claims_per_tick) {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.settlement.max_claims_per_tick",
-            detail: "must be between 1 and 1024 inclusive".to_owned(),
-        });
-    }
-    if !(1..=32).contains(&settlement.rpc_concurrency) {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.settlement.rpc_concurrency",
-            detail: "must be between 1 and 32 inclusive".to_owned(),
-        });
-    }
-    if !(1..=60).contains(&settlement.readiness_ui_cache_secs) {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.settlement.readiness_ui_cache_secs",
-            detail: "must be between 1 and 60 seconds inclusive".to_owned(),
-        });
-    }
-    if !(1..=10_000).contains(&settlement.external_scan_block_span) {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.settlement.external_scan_block_span",
-            detail: "must be between 1 and 10000 inclusive".to_owned(),
-        });
-    }
-    if settlement.retry_initial_secs == 0
-        || settlement.retry_initial_secs > settlement.retry_max_secs
-        || settlement.retry_max_secs > 3_600
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.settlement.retry",
-            detail: "initial must be > 0, not exceed max, and max must be <= 3600 seconds"
-                .to_owned(),
-        });
-    }
-    validate_polygon_rpc(deploy, &mut report);
+        }
+        if self.polymarket.clob_market_info_refresh_secs < 60 {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "polymarket.clob_market_info_refresh_secs",
+                detail: "must be at least 60 seconds".to_owned(),
+            });
+        }
+        let settlement = &self.polymarket.settlement;
+        if !(5..=300).contains(&settlement.claim_lease_secs) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "polymarket.settlement.claim_lease_secs",
+                detail: "must be between 5 and 300 seconds inclusive".to_owned(),
+            });
+        }
+        if !(30..=3_600).contains(&settlement.semi_auto_authorization_ttl_secs) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "polymarket.settlement.semi_auto_authorization_ttl_secs",
+                detail: "must be between 30 and 3600 seconds inclusive".to_owned(),
+            });
+        }
+        if settlement.discovery_poll_secs == 0 || settlement.submission_poll_secs == 0 {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "polymarket.settlement.worker_poll_secs",
+                detail: "discovery and submission polls must both be > 0".to_owned(),
+            });
+        }
+        if !(1..=1_024).contains(&settlement.max_claims_per_tick) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "polymarket.settlement.max_claims_per_tick",
+                detail: "must be between 1 and 1024 inclusive".to_owned(),
+            });
+        }
+        if !(1..=32).contains(&settlement.rpc_concurrency) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "polymarket.settlement.rpc_concurrency",
+                detail: "must be between 1 and 32 inclusive".to_owned(),
+            });
+        }
+        if !(1..=60).contains(&settlement.readiness_ui_cache_secs) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "polymarket.settlement.readiness_ui_cache_secs",
+                detail: "must be between 1 and 60 seconds inclusive".to_owned(),
+            });
+        }
+        if !(1..=10_000).contains(&settlement.external_scan_block_span) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "polymarket.settlement.external_scan_block_span",
+                detail: "must be between 1 and 10000 inclusive".to_owned(),
+            });
+        }
+        if settlement.retry_initial_secs == 0
+            || settlement.retry_initial_secs > settlement.retry_max_secs
+            || settlement.retry_max_secs > 3_600
+        {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "polymarket.settlement.retry",
+                detail: "initial must be > 0, not exceed max, and max must be <= 3600 seconds"
+                    .to_owned(),
+            });
+        }
+        validate_polygon_rpc(self, &mut report);
 
-    if deploy.quant.workers.report_expire_sweep_secs == 0 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "quant.workers.report_expire_sweep_secs",
-            detail: "must be > 0".into(),
-        });
-    }
-    let workers = &deploy.quant.workers;
-    if workers.report_schedule_poll_secs == 0
-        || workers.report_run_lease_secs == 0
-        || workers.report_run_heartbeat_secs == 0
-        || workers.report_ad_hoc_queue_ttl_secs == 0
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "quant.workers.report_lifecycle",
-            detail: "poll, lease, heartbeat, and ad-hoc TTL must all be > 0".into(),
-        });
-    }
-    if workers.report_run_heartbeat_secs > workers.report_run_lease_secs / 3 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "quant.workers.report_run_heartbeat_secs",
-            detail: "must be <= report_run_lease_secs / 3".into(),
-        });
-    }
-    if workers.report_ad_hoc_queue_ttl_secs <= workers.report_schedule_poll_secs {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "quant.workers.report_ad_hoc_queue_ttl_secs",
-            detail: "must be greater than report_schedule_poll_secs".into(),
-        });
-    }
-    if !(1..=1_024).contains(&workers.report_ad_hoc_queue_capacity) {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "quant.workers.report_ad_hoc_queue_capacity",
-            detail: "must be between 1 and 1024 inclusive".into(),
-        });
-    }
+        if self.quant.workers.report_expire_sweep_secs == 0 {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "quant.workers.report_expire_sweep_secs",
+                detail: "must be > 0".into(),
+            });
+        }
+        let workers = &self.quant.workers;
+        if workers.report_schedule_poll_secs == 0
+            || workers.report_run_lease_secs == 0
+            || workers.report_run_heartbeat_secs == 0
+            || workers.report_ad_hoc_queue_ttl_secs == 0
+        {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "quant.workers.report_lifecycle",
+                detail: "poll, lease, heartbeat, and ad-hoc TTL must all be > 0".into(),
+            });
+        }
+        if workers.report_run_heartbeat_secs > workers.report_run_lease_secs / 3 {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "quant.workers.report_run_heartbeat_secs",
+                detail: "must be <= report_run_lease_secs / 3".into(),
+            });
+        }
+        if workers.report_ad_hoc_queue_ttl_secs <= workers.report_schedule_poll_secs {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "quant.workers.report_ad_hoc_queue_ttl_secs",
+                detail: "must be greater than report_schedule_poll_secs".into(),
+            });
+        }
+        if !(1..=1_024).contains(&workers.report_ad_hoc_queue_capacity) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "quant.workers.report_ad_hoc_queue_capacity",
+                detail: "must be between 1 and 1024 inclusive".into(),
+            });
+        }
 
-    validate_databases(deploy, &mut report);
-    validate_cache_redis(deploy, &mut report);
-    validate_web(deploy, &mut report);
+        validate_databases(self, &mut report);
+        validate_cache_redis(self, &mut report);
+        validate_web(self, &mut report);
 
-    if deploy
-        .market_data
-        .websocket
-        .max_subscriptions_per_connection
-        == 0
-        || deploy.market_data.websocket.engine_max_subscription_tokens == 0
-        || deploy
-            .market_data
-            .websocket
-            .engine_subscription_window_hours
-            == 0
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
+        if self.market_data.websocket.max_subscriptions_per_connection == 0
+            || self.market_data.websocket.engine_max_subscription_tokens == 0
+            || self.market_data.websocket.engine_subscription_window_hours == 0
+        {
+            report.errors.push(ConfigValidationError::InvalidValue {
             field: "market_data.websocket",
             detail: "max_subscriptions_per_connection, engine_max_subscription_tokens, engine_subscription_window_hours must be > 0".into(),
         });
-    }
-    validate_market_data(deploy, &mut report);
-    validate_domain_sources(deploy, &mut report);
+        }
+        validate_market_data(self, &mut report);
+        validate_domain_sources(self, &mut report);
 
-    report
+        report
+    }
 }
 
 fn validate_polygon_rpc(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
@@ -714,7 +708,7 @@ fn validate_cache_redis(deploy: &DeployConfig, report: &mut ConfigValidationRepo
 
 /// Quant-mode-aware deploy validation: enforces credential and JWT policies.
 #[must_use]
-pub fn validate_deploy_for_quant_mode(
+pub fn validate_deploy_mode(
     deploy: &DeployConfig,
     mode: QuantRuntimeMode,
 ) -> ConfigValidationReport {
@@ -792,7 +786,7 @@ fn validate_web_quant_mode(
     _mode: QuantRuntimeMode,
     report: &mut ConfigValidationReport,
 ) {
-    if deploy.web.jwt_signing_key_is_configured() {
+    if deploy.web.has_jwt_signing_key() {
         return;
     }
     report.errors.push(ConfigValidationError::InvalidValue {
@@ -807,14 +801,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn common_validation_passes_for_defaults() {
+    fn common_validation_passes_defaults() {
         let deploy = DeployConfig::default();
-        let report = validate_deploy_common(&deploy);
+        let report = deploy.validate_deploy_common();
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
     }
 
     #[test]
-    fn weather_vertical_bindings_reject_ambiguous_or_invalid_source_identity() {
+    fn weather_bindings_reject_identity() {
         let mut deploy = DeployConfig::default();
         let duplicate = deploy
             .domain_sources
@@ -827,7 +821,7 @@ mod tests {
             .airnow_pm25_reporting_areas
             .push(duplicate);
         deploy.domain_sources.nasa_gistemp.csv_url = "file:///tmp/gistemp.csv".to_owned();
-        let report = validate_deploy_common(&deploy);
+        let report = deploy.validate_deploy_common();
         assert!(report.has_errors());
         assert!(report.errors.iter().any(|error| {
             error
@@ -843,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn airnow_pm25_site_binding_requires_exact_source_identity() {
+    fn airnow_pm25_requires_identity() {
         let mut deploy = DeployConfig::default();
         let duplicate = deploy
             .domain_sources
@@ -855,7 +849,7 @@ mod tests {
             .weather_vertical_bindings
             .airnow_pm25_sites
             .push(duplicate);
-        let report = validate_deploy_common(&deploy);
+        let report = deploy.validate_deploy_common();
         assert!(report.has_errors());
         assert!(report.errors.iter().any(|error| {
             error
@@ -865,10 +859,10 @@ mod tests {
     }
 
     #[test]
-    fn ghcnh_concurrency_is_bounded_by_memory_contract() {
+    fn ghcnh_concurrency_bounded_contract() {
         let mut deploy = DeployConfig::default();
         deploy.domain_sources.ghcnh.max_concurrency = 9;
-        let report = validate_deploy_common(&deploy);
+        let report = deploy.validate_deploy_common();
         assert!(report.has_errors());
         assert!(report.errors.iter().any(|error| {
             error.to_string().contains("domain_sources.ghcnh")
@@ -877,24 +871,24 @@ mod tests {
     }
 
     #[test]
-    fn wrong_chain_id_is_fatal() {
+    fn wrong_chain_id_fatal() {
         let mut deploy = DeployConfig::default();
         deploy.polymarket.chain_id = 1;
-        assert!(validate_deploy_common(&deploy).has_errors());
+        assert!(deploy.validate_deploy_common().has_errors());
     }
 
     #[test]
-    fn order_post_timeout_below_sdk_identity_budget_is_fatal() {
+    fn order_post_timeout_fatal() {
         let mut deploy = DeployConfig::default();
         deploy.polymarket.order_post_timeout_ms = 34_999;
-        assert!(validate_deploy_common(&deploy).has_errors());
+        assert!(deploy.validate_deploy_common().has_errors());
     }
 
     #[test]
-    fn order_post_timeout_accepts_sdk_identity_budget_floor() {
+    fn order_post_accepts_floor() {
         let mut deploy = DeployConfig::default();
         deploy.polymarket.order_post_timeout_ms = 35_000;
-        let report = validate_deploy_common(&deploy);
+        let report = deploy.validate_deploy_common();
         assert!(!report.errors.iter().any(|error| {
             error
                 .to_string()
@@ -903,14 +897,14 @@ mod tests {
     }
 
     #[test]
-    fn settlement_lease_and_authorization_ttl_are_bounded() {
+    fn settlement_lease_authorization_bounded() {
         let mut deploy = DeployConfig::default();
         deploy.polymarket.settlement.claim_lease_secs = 4;
         deploy
             .polymarket
             .settlement
             .semi_auto_authorization_ttl_secs = 3_601;
-        let report = validate_deploy_common(&deploy);
+        let report = deploy.validate_deploy_common();
         assert!(report.has_errors());
         assert!(report.errors.iter().any(|error| {
             error
@@ -925,11 +919,11 @@ mod tests {
     }
 
     #[test]
-    fn settlement_ui_readiness_cache_is_bounded() {
+    fn settlement_ui_readiness_bounded() {
         for invalid_ttl in [0, 61] {
             let mut deploy = DeployConfig::default();
             deploy.polymarket.settlement.readiness_ui_cache_secs = invalid_ttl;
-            let report = validate_deploy_common(&deploy);
+            let report = deploy.validate_deploy_common();
             assert!(report.has_errors());
             assert!(report.errors.iter().any(|error| {
                 error
@@ -940,23 +934,23 @@ mod tests {
     }
 
     #[test]
-    fn zero_trade_tape_block_range_is_fatal() {
+    fn zero_trade_tape_fatal() {
         let mut deploy = DeployConfig::default();
         deploy
             .market_data
             .trade_tape_on_chain
             .max_blocks_per_request = 0;
-        assert!(validate_deploy_common(&deploy).has_errors());
+        assert!(deploy.validate_deploy_common().has_errors());
     }
 
     #[test]
-    fn trade_tape_reconciliation_respects_native_sql_row_budget() {
+    fn trade_tape_reconciliation_budget() {
         let mut deploy = DeployConfig::default();
         deploy
             .market_data
             .trade_tape_on_chain
             .reconciliation_max_rows = MAX_TRADE_TAPE_RECONCILIATION_ROWS + 1;
-        let report = validate_deploy_common(&deploy);
+        let report = deploy.validate_deploy_common();
         assert!(
             report
                 .errors
@@ -968,7 +962,7 @@ mod tests {
     #[test]
     fn auto_execution_requires_credentials() {
         let deploy = DeployConfig::default();
-        let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::AutoExecution);
+        let report = validate_deploy_mode(&deploy, QuantRuntimeMode::AutoExecution);
         assert!(report.has_errors());
     }
 
@@ -977,25 +971,25 @@ mod tests {
         // report_only is not dry-run: it needs a private key + funder to read
         // the real venue account, so missing credentials fail closed.
         let deploy = DeployConfig::default();
-        let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::ReportOnly);
+        let report = validate_deploy_mode(&deploy, QuantRuntimeMode::ReportOnly);
         assert!(report.has_errors());
     }
 
     #[test]
-    fn auto_execution_rejects_invalid_jwt_signing_key() {
+    fn auto_rejects_invalid_key() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.web.jwt.signing_key = "human-password".into();
-        let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::AutoExecution);
+        let report = validate_deploy_mode(&deploy, QuantRuntimeMode::AutoExecution);
         assert!(report.has_errors(), "incomplete jwt keyring must be fatal");
     }
 
     #[test]
-    fn jwt_and_evidence_signing_keys_must_not_reuse_the_same_bytes() {
+    fn keys_never_reuse_bytes() {
         let mut deploy = DeployConfig::default();
         deploy.web.jwt.signing_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into();
         deploy.research.evidence_attestation.signing_key = "00".repeat(32).into();
-        let report = validate_deploy_common(&deploy);
+        let report = deploy.validate_deploy_common();
         assert!(report.has_errors());
         assert!(report.errors.iter().any(|error| {
             error.to_string().contains("cryptographically independent")
@@ -1004,22 +998,22 @@ mod tests {
     }
 
     #[test]
-    fn auto_execution_accepts_configured_jwt_signing_key_and_credentials() {
+    fn auto_execution_accepts_credentials() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.quant.account.funder = Some("0xfunder".into());
         deploy.web.jwt.signing_key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into();
-        let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::AutoExecution);
+        let report = validate_deploy_mode(&deploy, QuantRuntimeMode::AutoExecution);
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
     }
 
     #[test]
-    fn report_only_with_credentials_accepts_configured_jwt_signing_key() {
+    fn report_only_accepts_key() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.quant.account.funder = Some("0xfunder".into());
         deploy.web.jwt.signing_key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into();
-        let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::ReportOnly);
+        let report = validate_deploy_mode(&deploy, QuantRuntimeMode::ReportOnly);
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
         assert!(report.warnings.is_empty());
     }

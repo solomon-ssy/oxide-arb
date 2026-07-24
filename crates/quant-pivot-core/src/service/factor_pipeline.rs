@@ -180,8 +180,7 @@ impl FactorPipelineService {
         let (_engine, outcomes) = self
             .compute
             .run_serving(move || {
-                let outcomes =
-                    engine.compute_all_batch_with_references(&vectors, &config, &references)?;
+                let outcomes = engine.compute_batch_with_refs(&vectors, &config, &references)?;
                 Ok((engine, outcomes))
             })
             .await?;

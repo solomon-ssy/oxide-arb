@@ -43,7 +43,7 @@ fn expect_advanced(outcome: DomainSourceCursorCasOutcome) -> DomainSourceCursorI
     }
 }
 
-pub async fn compare_and_set_validates_hash_and_has_one_concurrent_winner() {
+pub async fn compare_validates_concurrent_winner() {
     let (pool, _container) = setup_pg().await;
     let first = PgDomainSourceCursorRepository::new(pool.connection().clone());
     let second = PgDomainSourceCursorRepository::new(pool.connection().clone());

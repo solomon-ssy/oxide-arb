@@ -219,7 +219,7 @@ pub struct WeatherSubject {
 impl WeatherSubject {
     /// Verify the persisted group id against the canonical group key.
     #[must_use]
-    pub fn has_valid_decision_group_id(&self) -> bool {
+    pub fn has_valid_decision_group(&self) -> bool {
         self.decision_group
             .decision_group_id()
             .is_ok_and(|expected| expected == self.decision_group_id)
@@ -830,6 +830,25 @@ impl NewMarketLinkage {
     }
 }
 
+impl From<MarketLinkageInfo> for MarketLinkage {
+    fn from(info: MarketLinkageInfo) -> Self {
+        Self {
+            linkage_id: info.linkage_id,
+            market_id: info.market_id,
+            domain_family: info.domain_family,
+            outcome: info.outcome,
+            confidence: info.confidence,
+            resolver_tier: info.resolver_tier,
+            resolver_version: info.resolver_version,
+            metadata_hash: info.metadata_hash,
+            capability_registry_hash: info.capability_registry_hash,
+            content_hash: info.content_hash,
+            effective_at: info.derived_at,
+            available_at: info.created_at,
+        }
+    }
+}
+
 impl MarketLinkageInfo {
     /// Source-effective clock used by PIT visibility checks.
     #[must_use]
@@ -841,25 +860,6 @@ impl MarketLinkageInfo {
     #[must_use]
     pub const fn available_at(&self) -> DateTime<Utc> {
         self.created_at
-    }
-
-    /// Convert the already-decoded ledger row into the domain record.
-    #[must_use]
-    pub fn into_domain(self) -> MarketLinkage {
-        MarketLinkage {
-            linkage_id: self.linkage_id,
-            market_id: self.market_id,
-            domain_family: self.domain_family,
-            outcome: self.outcome,
-            confidence: self.confidence,
-            resolver_tier: self.resolver_tier,
-            resolver_version: self.resolver_version,
-            metadata_hash: self.metadata_hash,
-            capability_registry_hash: self.capability_registry_hash,
-            content_hash: self.content_hash,
-            effective_at: self.derived_at,
-            available_at: self.created_at,
-        }
     }
 }
 
@@ -885,44 +885,46 @@ mod tests {
         },
     };
 
-    fn sample_binding() -> ResolvedBinding {
-        let symbol = BinanceSymbol::parse("BTCUSDT").expect("symbol");
-        ResolvedBinding {
-            subject: MarketSubject::Crypto(CryptoSubject {
-                asset: CryptoAsset::parse("BTC").expect("asset"),
-                quote: CryptoQuote::parse("USD").expect("quote"),
-                comparator: PriceComparator::UpVsReference,
-                strike: None,
-                reference_at: Some(Utc::now()),
-                observation_at: Utc::now(),
-                resolution_oracle: ResolutionOracle::BinanceKline {
-                    market: BinanceMarketSegment::Spot,
-                    symbol: symbol.clone(),
-                    interval: KlineInterval::OneMinute,
-                },
-            }),
-            source_bindings: vec![ResolvedSourceBinding {
-                role: LinkageSourceRole::Feature,
-                source_id: DomainSourceId::binance(),
-                instrument_key: DomainInstrumentKey::binance_kline(
-                    &symbol,
-                    KlineInterval::OneMinute,
-                ),
-                available_at: Utc::now(),
-                binding_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64)))
-                    .expect("binding hash"),
-            }],
-            grounding: GroundingProof {
-                spans: vec![GroundingSpan {
-                    subject_field: "asset".to_owned(),
-                    source: GroundingField::Slug,
-                    start: 0,
-                    end: 3,
-                    text: "btc".to_owned(),
-                    kind: GroundingKind::LiteralSpan,
+    impl ResolvedBinding {
+        fn test_fixture() -> Self {
+            let symbol = BinanceSymbol::parse("BTCUSDT").expect("symbol");
+            Self {
+                subject: MarketSubject::Crypto(CryptoSubject {
+                    asset: CryptoAsset::parse("BTC").expect("asset"),
+                    quote: CryptoQuote::parse("USD").expect("quote"),
+                    comparator: PriceComparator::UpVsReference,
+                    strike: None,
+                    reference_at: Some(Utc::now()),
+                    observation_at: Utc::now(),
+                    resolution_oracle: ResolutionOracle::BinanceKline {
+                        market: BinanceMarketSegment::Spot,
+                        symbol: symbol.clone(),
+                        interval: KlineInterval::OneMinute,
+                    },
+                }),
+                source_bindings: vec![ResolvedSourceBinding {
+                    role: LinkageSourceRole::Feature,
+                    source_id: DomainSourceId::binance(),
+                    instrument_key: DomainInstrumentKey::binance_kline(
+                        &symbol,
+                        KlineInterval::OneMinute,
+                    ),
+                    available_at: Utc::now(),
+                    binding_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64)))
+                        .expect("binding hash"),
                 }],
-            },
-            override_context: None,
+                grounding: GroundingProof {
+                    spans: vec![GroundingSpan {
+                        subject_field: "asset".to_owned(),
+                        source: GroundingField::Slug,
+                        start: 0,
+                        end: 3,
+                        text: "btc".to_owned(),
+                        kind: GroundingKind::LiteralSpan,
+                    }],
+                },
+                override_context: None,
+            }
         }
     }
 
@@ -959,16 +961,16 @@ mod tests {
     }
 
     #[test]
-    fn status_derives_from_outcome_and_tier() {
+    fn status_derives_outcome_tier() {
         let resolved = sample_linkage(
-            LinkageOutcome::Resolved(Box::new(sample_binding())),
+            LinkageOutcome::Resolved(Box::new(ResolvedBinding::test_fixture())),
             ResolverTier::Tier0Slug,
         );
         assert_eq!(resolved.status(), LinkageStatus::Resolved);
         assert!(resolved.binding().is_some());
 
         let overridden = sample_linkage(
-            LinkageOutcome::Resolved(Box::new(sample_binding())),
+            LinkageOutcome::Resolved(Box::new(ResolvedBinding::test_fixture())),
             ResolverTier::Override,
         );
         assert_eq!(overridden.status(), LinkageStatus::Overridden);
@@ -984,12 +986,12 @@ mod tests {
     }
 
     #[test]
-    fn append_derivation_cannot_fabricate_system_availability() {
+    fn append_derivation_cannot_availability() {
         let effective_at = Utc::now();
         let pending = NewMarketLinkage::from_derivation(MarketLinkageDerivation {
             market_id: MarketId::new("0xpending"),
             domain_family: DomainFamily::Crypto,
-            outcome: LinkageOutcome::Resolved(Box::new(sample_binding())),
+            outcome: LinkageOutcome::Resolved(Box::new(ResolvedBinding::test_fixture())),
             confidence: Probability::ONE,
             resolver_tier: ResolverTier::Tier0Slug,
             resolver_version: ResolverVersion::FIRST,
@@ -1010,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn append_derivation_requires_explicit_consistent_domain_family() {
+    fn append_derivation_requires_family() {
         let unresolved = NewMarketLinkage::from_derivation(MarketLinkageDerivation {
             market_id: MarketId::new("weather-unresolved"),
             domain_family: DomainFamily::Weather,
@@ -1031,7 +1033,7 @@ mod tests {
         let mismatch = NewMarketLinkage::from_derivation(MarketLinkageDerivation {
             market_id: MarketId::new("mismatched-resolved"),
             domain_family: DomainFamily::Weather,
-            outcome: LinkageOutcome::Resolved(Box::new(sample_binding())),
+            outcome: LinkageOutcome::Resolved(Box::new(ResolvedBinding::test_fixture())),
             confidence: Probability::ONE,
             resolver_tier: ResolverTier::Tier0Slug,
             resolver_version: ResolverVersion::FIRST,
@@ -1044,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_hash_binds_decision_group_membership() {
+    fn metadata_hash_binds_membership() {
         let metadata = LinkageSourceMetadata {
             market_id: MarketId::new("weather-middle"),
             slug: "weather-middle".to_owned(),
@@ -1071,13 +1073,13 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_is_idempotent_and_outcome_sensitive() {
+    fn content_hash_idempotent_sensitive() {
         let market_id = MarketId::new("0xmarket");
         let metadata_hash =
             ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash");
         let capability_registry_hash =
             ContentHash::parse(&format!("blake3:{}", "f".repeat(64))).expect("hash");
-        let resolved = LinkageOutcome::Resolved(Box::new(sample_binding()));
+        let resolved = LinkageOutcome::Resolved(Box::new(ResolvedBinding::test_fixture()));
         let a = MarketLinkage::compute_content_hash(
             &market_id,
             DomainFamily::Crypto,
@@ -1131,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_linkage_outcome_rejects_unknown_fields_and_tags() {
+    fn persisted_rejects_unknown_tags() {
         let typed = LinkageOutcome::Unresolved {
             reason: LinkageUnresolvedReason::CandidateRejected {
                 tier: ResolverTier::Tier1Template,

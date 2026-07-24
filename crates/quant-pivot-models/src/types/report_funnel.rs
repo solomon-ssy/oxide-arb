@@ -259,7 +259,7 @@ mod tests {
     use super::{ReportFunnelDiagnostics, ReportFunnelReason};
 
     #[test]
-    fn diagnostics_are_bound_to_the_primary_reason() {
+    fn diagnostics_bound_primary_reason() {
         let diagnostics = ReportFunnelDiagnostics::PlannerRejection {
             detail: "portfolio cap reached".to_owned(),
         };

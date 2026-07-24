@@ -79,10 +79,7 @@ pub trait QuantReportPort: Send + Sync {
         query: ReportRunListQuery,
     ) -> QuantResult<Paginated<ReportRunInfo>>;
 
-    async fn find_report_run_by_id(
-        &self,
-        run_id: &ReportRunId,
-    ) -> QuantResult<Option<ReportRunInfo>>;
+    async fn find_run_by_id(&self, run_id: &ReportRunId) -> QuantResult<Option<ReportRunInfo>>;
 
     async fn retry_report_run(
         &self,

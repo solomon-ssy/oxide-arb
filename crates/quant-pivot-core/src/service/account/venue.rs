@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capital_base_tracks_uncapped_venue_net_liquidation_when_below_cap() {
+    async fn capital_base_tracks_cap() {
         let provider = provider(
             Usd::new(dec!(1000)),
             vec![venue_position(dec!(200)), venue_position(dec!(50))],
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn separates_venue_net_liquidation_from_budget_capped_capital_base() {
+    async fn separates_venue_net_base() {
         let provider = provider(
             Usd::new(dec!(1000)),
             vec![venue_position(dec!(500))],
@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fail_closed_on_venue_error() {
+    async fn fail_closed_venue_error() {
         let provider = provider(
             Usd::new(dec!(1000)),
             Vec::new(),

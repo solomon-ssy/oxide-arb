@@ -29,14 +29,14 @@ mod tests {
     use super::combinations;
 
     #[test]
-    fn combinations_count_matches_binomial_coefficient() {
+    fn combinations_count_matches_coefficient() {
         assert_eq!(combinations(6, 3).len(), 20);
         assert_eq!(combinations(8, 4).len(), 70);
         assert_eq!(combinations(8, 2).len(), 28);
     }
 
     #[test]
-    fn combinations_are_distinct_k_subsets() {
+    fn combinations_distinct_k_subsets() {
         let combos = combinations(5, 2);
         let mut seen = HashSet::new();
         for combo in &combos {

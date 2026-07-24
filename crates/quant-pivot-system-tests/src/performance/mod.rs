@@ -335,7 +335,7 @@ struct PerformanceRuntime {
 }
 
 pub async fn run_profile(profile: PerformanceProfile, output_dir: &Path) -> Result<Vec<PathBuf>> {
-    validate_runner(profile)?;
+    (profile).validate_runner()?;
     let mut evidence_paths = Vec::with_capacity(usize::from(profile.run_count()));
     let mut measurements = Vec::with_capacity(usize::from(profile.run_count()));
     for run_index in 1..=profile.run_count() {
@@ -356,24 +356,26 @@ pub async fn run_profile(profile: PerformanceProfile, output_dir: &Path) -> Resu
     Ok(evidence_paths)
 }
 
-fn validate_runner(profile: PerformanceProfile) -> Result<()> {
-    if profile == PerformanceProfile::Smoke {
-        return Ok(());
+impl PerformanceProfile {
+    fn validate_runner(self) -> Result<()> {
+        if self == Self::Smoke {
+            return Ok(());
+        }
+        if !cfg!(target_os = "linux") {
+            bail!(
+                "{} performance profile requires the fixed Linux runner",
+                self.name()
+            );
+        }
+        let attested = env::var(RUNNER_ATTESTATION_ENV).unwrap_or_default();
+        if attested != REQUIRED_RUNNER {
+            bail!(
+                "{} performance profile requires {RUNNER_ATTESTATION_ENV}={REQUIRED_RUNNER}",
+                self.name()
+            );
+        }
+        Ok(())
     }
-    if !cfg!(target_os = "linux") {
-        bail!(
-            "{} performance profile requires the fixed Linux runner",
-            profile.name()
-        );
-    }
-    let attested = env::var(RUNNER_ATTESTATION_ENV).unwrap_or_default();
-    if attested != REQUIRED_RUNNER {
-        bail!(
-            "{} performance profile requires {RUNNER_ATTESTATION_ENV}={REQUIRED_RUNNER}",
-            profile.name()
-        );
-    }
-    Ok(())
 }
 
 async fn run_once(
@@ -593,7 +595,7 @@ async fn execute_workload(
     let allocated_before = jemalloc_allocated_bytes()?;
     recorder.enable(workload.sustained_rate);
     let sustained = if let Some(churn_interval) = workload.churn_interval {
-        run_open_loop_with_churn(
+        run_churn_load(
             &runtime.manager,
             &runtime.clob,
             &runtime.book_store,
@@ -681,9 +683,9 @@ async fn write_run_evidence(
         &load.durable_histogram,
         expected_interval_us,
     )?;
-    let environment = collect_runtime_environment(runtime).await?;
+    let environment = (runtime).collect_runtime_environment().await?;
     let correctness = collect_correctness(runtime, load)?;
-    let measurements = collect_measurements(load)?;
+    let measurements = (load).collect_measurements()?;
     let hard_slo_passed = measurements.enqueue_latency.p99_us <= MAX_ENQUEUE_P99_US
         && measurements.ingress_to_durable_publish_latency.p99_us <= MAX_DURABLE_PUBLISH_P99_US
         && measurements
@@ -720,31 +722,31 @@ async fn write_run_evidence(
     Ok((evidence, evidence_path))
 }
 
-async fn collect_runtime_environment(
-    runtime: &PerformanceRuntime,
-) -> Result<PerformanceEnvironmentV1> {
-    let clickhouse_version = runtime
-        .infra
-        .ch
-        .client()
-        .query("SELECT version()")
-        .fetch_one::<String>()
-        .await
-        .context("read ClickHouse performance version")?;
-    let clickhouse_settings = runtime
-        .infra
-        .ch
-        .client()
-        .query(
-            "SELECT concat(name, '=', value) FROM system.settings \
+impl PerformanceRuntime {
+    async fn collect_runtime_environment(&self) -> Result<PerformanceEnvironmentV1> {
+        let clickhouse_version = self
+            .infra
+            .ch
+            .client()
+            .query("SELECT version()")
+            .fetch_one::<String>()
+            .await
+            .context("read ClickHouse performance version")?;
+        let clickhouse_settings = self
+            .infra
+            .ch
+            .client()
+            .query(
+                "SELECT concat(name, '=', value) FROM system.settings \
              WHERE name IN ('async_insert', 'wait_for_async_insert', \
              'async_insert_deduplicate', 'max_threads') ORDER BY name",
-        )
-        .fetch_all::<String>()
-        .await
-        .context("read ClickHouse performance settings")?;
-    let network_rtt_p50_us = measure_http_rtt(&runtime.stack.clickhouse_config.url, 20).await?;
-    collect_environment(clickhouse_version, clickhouse_settings, network_rtt_p50_us)
+            )
+            .fetch_all::<String>()
+            .await
+            .context("read ClickHouse performance settings")?;
+        let network_rtt_p50_us = measure_http_rtt(&self.stack.clickhouse_config.url, 20).await?;
+        collect_environment(clickhouse_version, clickhouse_settings, network_rtt_p50_us)
+    }
 }
 
 fn collect_correctness(
@@ -782,31 +784,33 @@ fn collect_correctness(
     })
 }
 
-fn collect_measurements(load: &CompletedLoad) -> Result<PerformanceMeasurementsV1> {
-    let event_count = load.source_events.max(1);
-    Ok(PerformanceMeasurementsV1 {
-        enqueue_latency: HistogramSummaryV1::from_histogram(&load.enqueue_histogram),
-        ingress_to_durable_publish_latency: HistogramSummaryV1::from_histogram(
-            &load.durable_histogram,
-        ),
-        throughput_events_per_second: u64_to_f64(load.source_events, "source events")?
-            / load.measured_elapsed.as_secs_f64(),
-        cpu_ns_per_event: optional_delta(load.cpu_before, load.cpu_after)
-            .map(|delta| ratio_u64(delta, event_count, "CPU nanoseconds per event"))
-            .transpose()?,
-        encoded_bytes_per_event: ratio_u64(
-            load.encoded_bytes,
-            event_count,
-            "encoded bytes per event",
-        )?,
-        net_allocated_bytes_per_event: Some(ratio_usize_u64(
-            load.allocated_after.saturating_sub(load.allocated_before),
-            event_count,
-            "allocated bytes per event",
-        )?),
-        online_rss_bytes: resident_memory_bytes()?,
-        peak_rss_bytes: peak_resident_memory_bytes()?,
-    })
+impl CompletedLoad {
+    fn collect_measurements(&self) -> Result<PerformanceMeasurementsV1> {
+        let event_count = self.source_events.max(1);
+        Ok(PerformanceMeasurementsV1 {
+            enqueue_latency: HistogramSummaryV1::from_histogram(&self.enqueue_histogram),
+            ingress_to_durable_publish_latency: HistogramSummaryV1::from_histogram(
+                &self.durable_histogram,
+            ),
+            throughput_events_per_second: u64_to_f64(self.source_events, "source events")?
+                / self.measured_elapsed.as_secs_f64(),
+            cpu_ns_per_event: optional_delta(self.cpu_before, self.cpu_after)
+                .map(|delta| ratio_u64(delta, event_count, "CPU nanoseconds per event"))
+                .transpose()?,
+            encoded_bytes_per_event: ratio_u64(
+                self.encoded_bytes,
+                event_count,
+                "encoded bytes per event",
+            )?,
+            net_allocated_bytes_per_event: Some(ratio_usize_u64(
+                self.allocated_after.saturating_sub(self.allocated_before),
+                event_count,
+                "allocated bytes per event",
+            )?),
+            online_rss_bytes: resident_memory_bytes()?,
+            peak_rss_bytes: peak_resident_memory_bytes()?,
+        })
+    }
 }
 
 async fn run_open_loop(
@@ -863,7 +867,7 @@ async fn run_open_loop(
     Ok(result)
 }
 
-async fn run_open_loop_with_churn(
+async fn run_churn_load(
     manager: &ClobWsManager,
     upstream: &DeterministicClobServer,
     books: &BookStore,

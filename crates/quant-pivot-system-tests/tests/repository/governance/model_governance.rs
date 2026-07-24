@@ -83,7 +83,7 @@ async fn seed_two_versions(db: &DatabaseConnection) -> (ModelVersionId, ModelVer
     (ids[0], ids[1])
 }
 
-pub async fn quant_shadow_comparison_migration_and_crud() {
+pub async fn quant_shadow_comparison_crud() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let (active, shadow) = seed_two_versions(&db).await;
@@ -137,7 +137,7 @@ pub async fn quant_shadow_comparison_migration_and_crud() {
     assert!(summary.window_start.is_some() && summary.window_end.is_some());
 }
 
-pub async fn quant_model_governance_audit_migration_and_crud() {
+pub async fn quant_model_governance_crud() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let (active, _predecessor) = seed_two_versions(&db).await;

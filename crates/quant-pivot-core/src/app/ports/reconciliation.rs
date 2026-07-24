@@ -144,7 +144,7 @@ mod validate_operator_result_tests {
     }
 
     #[test]
-    fn resolve_rejects_non_terminal_result() {
+    fn resolve_rejects_non_result() {
         for result in [
             ReconciliationResult::Pending,
             ReconciliationResult::Unresolvable,
@@ -158,7 +158,7 @@ mod validate_operator_result_tests {
     }
 
     #[test]
-    fn resolve_requires_fill_fields_for_filled() {
+    fn resolve_requires_fill_filled() {
         let mut cmd = command(ReconciliationResult::Filled);
         cmd.filled_shares = None;
         let err = validate_operator_result(&cmd).unwrap_err();

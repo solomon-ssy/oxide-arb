@@ -599,8 +599,10 @@ mod tests {
         }
     }
 
-    fn kelly_safety() -> KellySafetyParams {
-        KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.9))
+    impl KellySafetyParams {
+        fn test_fixture() -> Self {
+            Self::new(dec!(1), dec!(0.5), dec!(0.9))
+        }
     }
 
     fn sizing_input(candidate: &SignalCandidate, capital: Usd) -> SizingInput<'_> {
@@ -651,36 +653,39 @@ mod tests {
             .collect()
     }
 
-    fn kelly() -> KellySizingModel {
-        // Half Kelly, 10% position cap, linear confidence shrink, fixed drawdown.
-        KellySizingModel::new(
-            dec!(0.5),
-            dec!(0.1),
-            ConfidenceSizeCurve::Linear,
-            DrawdownMultiplierPolicy::Fixed,
-            kelly_safety(),
-        )
+    impl KellySizingModel {
+        fn test_fixture() -> Self {
+            // Half Kelly, 10% position cap, linear confidence shrink, fixed drawdown.
+            Self::new(
+                dec!(0.5),
+                dec!(0.1),
+                ConfidenceSizeCurve::Linear,
+                DrawdownMultiplierPolicy::Fixed,
+                KellySafetyParams::test_fixture(),
+            )
+        }
     }
 
-    fn sized(outcome: SizingOutcome) -> SizingSuggestion {
-        match outcome {
-            SizingOutcome::Sized(s) => *s,
-            SizingOutcome::Rejected(r) => panic!("expected sized, got {r:?}"),
+    impl SizingOutcome {
+        fn sized(self) -> SizingSuggestion {
+            match self {
+                Self::Sized(s) => *s,
+                Self::Rejected(r) => panic!("expected sized, got {r:?}"),
+            }
         }
     }
 
     #[test]
-    fn kelly_uses_calibrated_win_probability_directly() {
+    fn kelly_uses_calibrated_directly() {
         // Resolution structure: f* = (q - p) / (1 - p), q=0.99, p=0.01 -> f*≈0.9899.
-        let model = kelly();
-        let s = sized(
-            model
-                .suggest(&sizing_input(
-                    &resolution_candidate(dec!(200), dec!(100), dec!(1), dec!(0.99), dec!(0.01)),
-                    Usd::new(dec!(10000)),
-                ))
-                .expect("suggest"),
-        );
+        let model = KellySizingModel::test_fixture();
+        let s = (model
+            .suggest(&sizing_input(
+                &resolution_candidate(dec!(200), dec!(100), dec!(1), dec!(0.99), dec!(0.01)),
+                Usd::new(dec!(10000)),
+            ))
+            .expect("suggest"))
+        .sized();
         // multiplier = 0.5 (kelly_fraction) * f* ≈ 0.495 > max_position_pct (0.1) -> capped.
         assert_eq!(s.desired_usd, Usd::new(dec!(1000)));
         assert!(s.binding_kelly_cap, "max_position_pct must bind");
@@ -691,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn kelly_fraction_matches_p_minus_market_price_over_one_minus_market_price() {
+    fn kelly_fraction_matches_price() {
         // q=0.7, p=0.4 -> f* = (0.7-0.4)/(1-0.4) = 0.5.
         let model = KellySizingModel::new(
             dec!(1),
@@ -700,21 +705,20 @@ mod tests {
             DrawdownMultiplierPolicy::Fixed,
             KellySafetyParams::new(dec!(0), dec!(1), dec!(0.9)),
         );
-        let s = sized(
-            model
-                .suggest(&sizing_input(
-                    &resolution_candidate(dec!(300), dec!(100), dec!(1), dec!(0.7), dec!(0.4)),
-                    Usd::new(dec!(10000)),
-                ))
-                .expect("suggest"),
-        );
+        let s = (model
+            .suggest(&sizing_input(
+                &resolution_candidate(dec!(300), dec!(100), dec!(1), dec!(0.7), dec!(0.4)),
+                Usd::new(dec!(10000)),
+            ))
+            .expect("suggest"))
+        .sized();
         assert_eq!(s.provenance.expect("provenance").f_star, dec!(0.5));
     }
 
     #[test]
-    fn kelly_win_probability_at_or_below_market_price_rejects() {
+    fn kelly_win_probability_rejects() {
         // q == p: no edge over the market -> reject, never funded.
-        let model = kelly();
+        let model = KellySizingModel::test_fixture();
         let outcome = model
             .suggest(&sizing_input(
                 &resolution_candidate(dec!(0), dec!(100), dec!(1), dec!(0.5), dec!(0.5)),
@@ -740,8 +744,8 @@ mod tests {
     }
 
     #[test]
-    fn kelly_invalid_market_price_rejects() {
-        let model = kelly();
+    fn kelly_invalid_market_rejects() {
+        let model = KellySizingModel::test_fixture();
         let zero = model
             .suggest(&sizing_input(
                 &resolution_candidate(dec!(200), dec!(100), dec!(1), dec!(0.9), dec!(0)),
@@ -766,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn kelly_rejects_quote_edge_consumed_by_pit_fee() {
+    fn kelly_rejects_quote_fee() {
         let candidate = resolution_candidate(dec!(600), dec!(100), dec!(1), dec!(0.53), dec!(0.5));
         let schedule = PitFeeSchedule {
             schedule_hash: CanonicalDigest::content_hash_json(&"fee-aware").expect("hash"),
@@ -792,7 +796,7 @@ mod tests {
             candidate.decision_at,
         )
         .expect("walk");
-        let outcome = kelly()
+        let outcome = KellySizingModel::test_fixture()
             .suggest(&SizingInput {
                 candidate: &candidate,
                 capital_base_usd: Usd::new(dec!(10000)),
@@ -812,7 +816,7 @@ mod tests {
 
     #[test]
     fn uncalibrated_return_model_rejects() {
-        let outcome = kelly()
+        let outcome = KellySizingModel::test_fixture()
             .suggest(&SizingInput {
                 candidate: &heuristic_candidate(dec!(50), dec!(100), dec!(1)),
                 capital_base_usd: Usd::new(dec!(10000)),
@@ -829,10 +833,10 @@ mod tests {
     }
 
     #[test]
-    fn heuristic_kelly_non_positive_edge_rejects() {
+    fn heuristic_kelly_non_rejects() {
         // E[r] = −0.01 → edge negative → reject, never funded. Only reachable
         // via the Heuristic (win_probability=None) cold-start path.
-        let model = kelly();
+        let model = KellySizingModel::test_fixture();
         let outcome = model
             .suggest(&SizingInput {
                 candidate: &heuristic_candidate(dec!(-100), dec!(100), dec!(1)),
@@ -850,8 +854,8 @@ mod tests {
     }
 
     #[test]
-    fn heuristic_kelly_invalid_downside_rejects() {
-        let model = kelly();
+    fn heuristic_kelly_invalid_rejects() {
+        let model = KellySizingModel::test_fixture();
         let outcome = model
             .suggest(&SizingInput {
                 candidate: &heuristic_candidate(dec!(200), dec!(0), dec!(1)),
@@ -878,38 +882,36 @@ mod tests {
             dec!(0.9),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
-            kelly_safety(),
+            KellySafetyParams::test_fixture(),
         );
-        let high = sized(
-            model
-                .suggest(&SizingInput {
-                    candidate: &candidate(dec!(10), dec!(200), dec!(1)),
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState::neutral(),
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                    executable_tiers: executable_tiers(
-                        &candidate(dec!(10), dec!(200), dec!(1)),
-                        Usd::new(dec!(10000)),
-                    ),
-                })
-                .expect("suggest"),
-        );
-        let low = sized(
-            model
-                .suggest(&SizingInput {
-                    candidate: &candidate(dec!(10), dec!(200), dec!(0.4)),
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState::neutral(),
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                    executable_tiers: executable_tiers(
-                        &candidate(dec!(10), dec!(200), dec!(0.4)),
-                        Usd::new(dec!(10000)),
-                    ),
-                })
-                .expect("suggest"),
-        );
+        let high = (model
+            .suggest(&SizingInput {
+                candidate: &candidate(dec!(10), dec!(200), dec!(1)),
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState::neutral(),
+                edge_uncertainty_half_width: None,
+                correlation: None,
+                executable_tiers: executable_tiers(
+                    &candidate(dec!(10), dec!(200), dec!(1)),
+                    Usd::new(dec!(10000)),
+                ),
+            })
+            .expect("suggest"))
+        .sized();
+        let low = (model
+            .suggest(&SizingInput {
+                candidate: &candidate(dec!(10), dec!(200), dec!(0.4)),
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState::neutral(),
+                edge_uncertainty_half_width: None,
+                correlation: None,
+                executable_tiers: executable_tiers(
+                    &candidate(dec!(10), dec!(200), dec!(0.4)),
+                    Usd::new(dec!(10000)),
+                ),
+            })
+            .expect("suggest"))
+        .sized();
         assert!(
             low.desired_usd.inner() < high.desired_usd.inner(),
             "lower confidence must shrink the bet: {low:?} vs {high:?}"
@@ -919,95 +921,91 @@ mod tests {
     }
 
     #[test]
-    fn kelly_step_confidence_weighting_buckets() {
+    fn kelly_step_confidence_buckets() {
         // Step curve: confidence 0.4 → 0.25 shrink; uncapped small bet shows it.
         let model = KellySizingModel::new(
             dec!(1),
             dec!(0.9),
             ConfidenceSizeCurve::Step,
             DrawdownMultiplierPolicy::Fixed,
-            kelly_safety(),
+            KellySafetyParams::test_fixture(),
         );
-        let low = sized(
-            model
-                .suggest(&SizingInput {
-                    candidate: &candidate(dec!(10), dec!(200), dec!(0.4)),
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState::neutral(),
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                    executable_tiers: executable_tiers(
-                        &candidate(dec!(10), dec!(200), dec!(0.4)),
-                        Usd::new(dec!(10000)),
-                    ),
-                })
-                .expect("suggest"),
-        );
-        let mid = sized(
-            model
-                .suggest(&SizingInput {
-                    candidate: &candidate(dec!(10), dec!(200), dec!(0.6)),
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState::neutral(),
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                    executable_tiers: executable_tiers(
-                        &candidate(dec!(10), dec!(200), dec!(0.6)),
-                        Usd::new(dec!(10000)),
-                    ),
-                })
-                .expect("suggest"),
-        );
+        let low = (model
+            .suggest(&SizingInput {
+                candidate: &candidate(dec!(10), dec!(200), dec!(0.4)),
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState::neutral(),
+                edge_uncertainty_half_width: None,
+                correlation: None,
+                executable_tiers: executable_tiers(
+                    &candidate(dec!(10), dec!(200), dec!(0.4)),
+                    Usd::new(dec!(10000)),
+                ),
+            })
+            .expect("suggest"))
+        .sized();
+        let mid = (model
+            .suggest(&SizingInput {
+                candidate: &candidate(dec!(10), dec!(200), dec!(0.6)),
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState::neutral(),
+                edge_uncertainty_half_width: None,
+                correlation: None,
+                executable_tiers: executable_tiers(
+                    &candidate(dec!(10), dec!(200), dec!(0.6)),
+                    Usd::new(dec!(10000)),
+                ),
+            })
+            .expect("suggest"))
+        .sized();
         // 0.6 → 0.5 bucket is double the 0.4 → 0.25 bucket.
         assert_eq!(mid.desired_usd, low.desired_usd * dec!(2));
         assert_eq!(model.kind(), SizingModelKind::Kelly);
     }
 
     #[test]
-    fn conservative_drawdown_scales_kelly_fraction() {
+    fn conservative_drawdown_scales_fraction() {
         let fixed = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
-            kelly_safety(),
+            KellySafetyParams::test_fixture(),
         );
         let conservative = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Conservative,
-            kelly_safety(),
+            KellySafetyParams::test_fixture(),
         );
         let input_candidate = candidate(dec!(10), dec!(200), dec!(1));
-        let fixed_size = sized(
-            fixed
-                .suggest(&SizingInput {
-                    candidate: &input_candidate,
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState {
-                        current_drawdown: dec!(0.2),
-                    },
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                    executable_tiers: executable_tiers(&input_candidate, Usd::new(dec!(10000))),
-                })
-                .expect("fixed suggest"),
-        );
-        let conservative_size = sized(
-            conservative
-                .suggest(&SizingInput {
-                    candidate: &input_candidate,
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState {
-                        current_drawdown: dec!(0.2),
-                    },
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                    executable_tiers: executable_tiers(&input_candidate, Usd::new(dec!(10000))),
-                })
-                .expect("conservative suggest"),
-        );
+        let fixed_size = (fixed
+            .suggest(&SizingInput {
+                candidate: &input_candidate,
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState {
+                    current_drawdown: dec!(0.2),
+                },
+                edge_uncertainty_half_width: None,
+                correlation: None,
+                executable_tiers: executable_tiers(&input_candidate, Usd::new(dec!(10000))),
+            })
+            .expect("fixed suggest"))
+        .sized();
+        let conservative_size = (conservative
+            .suggest(&SizingInput {
+                candidate: &input_candidate,
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState {
+                    current_drawdown: dec!(0.2),
+                },
+                edge_uncertainty_half_width: None,
+                correlation: None,
+                executable_tiers: executable_tiers(&input_candidate, Usd::new(dec!(10000))),
+            })
+            .expect("conservative suggest"))
+        .sized();
 
         assert_eq!(
             conservative_size.desired_usd,
@@ -1016,41 +1014,39 @@ mod tests {
     }
 
     #[test]
-    fn kelly_fixed_policy_ignores_drawdown() {
+    fn kelly_fixed_ignores_drawdown() {
         let fixed = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
-            kelly_safety(),
+            KellySafetyParams::test_fixture(),
         );
         let input_candidate = candidate(dec!(10), dec!(200), dec!(1));
-        let neutral = sized(
-            fixed
-                .suggest(&SizingInput {
-                    candidate: &input_candidate,
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState::neutral(),
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                    executable_tiers: executable_tiers(&input_candidate, Usd::new(dec!(10000))),
-                })
-                .expect("neutral suggest"),
-        );
-        let in_drawdown = sized(
-            fixed
-                .suggest(&SizingInput {
-                    candidate: &input_candidate,
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState {
-                        current_drawdown: dec!(0.2),
-                    },
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                    executable_tiers: executable_tiers(&input_candidate, Usd::new(dec!(10000))),
-                })
-                .expect("drawdown suggest"),
-        );
+        let neutral = (fixed
+            .suggest(&SizingInput {
+                candidate: &input_candidate,
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState::neutral(),
+                edge_uncertainty_half_width: None,
+                correlation: None,
+                executable_tiers: executable_tiers(&input_candidate, Usd::new(dec!(10000))),
+            })
+            .expect("neutral suggest"))
+        .sized();
+        let in_drawdown = (fixed
+            .suggest(&SizingInput {
+                candidate: &input_candidate,
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState {
+                    current_drawdown: dec!(0.2),
+                },
+                edge_uncertainty_half_width: None,
+                correlation: None,
+                executable_tiers: executable_tiers(&input_candidate, Usd::new(dec!(10000))),
+            })
+            .expect("drawdown suggest"))
+        .sized();
         assert_eq!(in_drawdown.desired_usd, neutral.desired_usd);
         assert_eq!(
             in_drawdown.kelly_stage_binding, None,
@@ -1059,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn kelly_stage_binding_is_none_when_every_shrink_is_immaterial() {
+    fn kelly_stage_binding_immaterial() {
         // confidence=1 (shrink=1), Fixed drawdown (shrink=1), no correlation
         // input (shrink=1): every multiplier is exactly 1, which is not
         // "materially low" under any threshold < 1, so no soft binding fires.
@@ -1070,26 +1066,25 @@ mod tests {
             DrawdownMultiplierPolicy::Fixed,
             KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.95)),
         );
-        let suggestion = sized(
-            model
-                .suggest(&SizingInput {
-                    candidate: &candidate(dec!(10), dec!(200), dec!(1)),
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState::neutral(),
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                    executable_tiers: executable_tiers(
-                        &candidate(dec!(10), dec!(200), dec!(1)),
-                        Usd::new(dec!(10000)),
-                    ),
-                })
-                .expect("suggest"),
-        );
+        let suggestion = (model
+            .suggest(&SizingInput {
+                candidate: &candidate(dec!(10), dec!(200), dec!(1)),
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState::neutral(),
+                edge_uncertainty_half_width: None,
+                correlation: None,
+                executable_tiers: executable_tiers(
+                    &candidate(dec!(10), dec!(200), dec!(1)),
+                    Usd::new(dec!(10000)),
+                ),
+            })
+            .expect("suggest"))
+        .sized();
         assert_eq!(suggestion.kelly_stage_binding, None);
     }
 
     #[test]
-    fn confidence_cap_binding_not_emitted_when_drawdown_is_the_tighter_shrink() {
+    fn confidence_cap_not_shrink() {
         // Confidence is only mildly low (0.7 -> shrink=0.7, above the 0.6
         // floor materiality would need); drawdown is severe (0.5 current
         // drawdown -> shrink=0.5, the strictly smaller multiplier) so
@@ -1101,23 +1096,22 @@ mod tests {
             DrawdownMultiplierPolicy::Conservative,
             KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.95)),
         );
-        let suggestion = sized(
-            model
-                .suggest(&SizingInput {
-                    candidate: &candidate(dec!(10), dec!(200), dec!(0.7)),
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState {
-                        current_drawdown: dec!(0.5),
-                    },
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                    executable_tiers: executable_tiers(
-                        &candidate(dec!(10), dec!(200), dec!(0.7)),
-                        Usd::new(dec!(10000)),
-                    ),
-                })
-                .expect("suggest"),
-        );
+        let suggestion = (model
+            .suggest(&SizingInput {
+                candidate: &candidate(dec!(10), dec!(200), dec!(0.7)),
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState {
+                    current_drawdown: dec!(0.5),
+                },
+                edge_uncertainty_half_width: None,
+                correlation: None,
+                executable_tiers: executable_tiers(
+                    &candidate(dec!(10), dec!(200), dec!(0.7)),
+                    Usd::new(dec!(10000)),
+                ),
+            })
+            .expect("suggest"))
+        .sized();
         assert_eq!(
             suggestion.kelly_stage_binding,
             Some(BindingConstraint::DrawdownCap),
@@ -1127,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn kelly_edge_uncertainty_shrink_reduces_size_monotonically() {
+    fn kelly_edge_uncertainty_monotonically() {
         // Half-Kelly, uncapped (max_position_pct=0.9) so the sweep is
         // observable across every half-width rather than clipped flat by the
         // per-position cap.
@@ -1136,7 +1130,7 @@ mod tests {
             dec!(0.9),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
-            kelly_safety(),
+            KellySafetyParams::test_fixture(),
         );
         let candidate = candidate(dec!(10), dec!(200), dec!(1));
         let capital = Usd::new(dec!(10000));
@@ -1149,18 +1143,17 @@ mod tests {
         ];
         let mut sizes = Vec::with_capacity(half_widths.len());
         for half_width in half_widths {
-            let suggestion = sized(
-                model
-                    .suggest(&SizingInput {
-                        candidate: &candidate,
-                        capital_base_usd: capital,
-                        drawdown_state: DrawdownState::neutral(),
-                        edge_uncertainty_half_width: half_width,
-                        correlation: None,
-                        executable_tiers: executable_tiers(&candidate, capital),
-                    })
-                    .expect("sized"),
-            );
+            let suggestion = (model
+                .suggest(&SizingInput {
+                    candidate: &candidate,
+                    capital_base_usd: capital,
+                    drawdown_state: DrawdownState::neutral(),
+                    edge_uncertainty_half_width: half_width,
+                    correlation: None,
+                    executable_tiers: executable_tiers(&candidate, capital),
+                })
+                .expect("sized"))
+            .sized();
             sizes.push((half_width, suggestion));
         }
         for window in sizes.windows(2) {
@@ -1192,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn correlation_shrink_reduces_size_for_correlated_cluster() {
+    fn correlation_shrink_reduces_cluster() {
         // Half-Kelly, uncapped (max_position_pct=0.9) so the sweep is
         // observable across every cluster size rather than clipped flat by
         // the per-position cap.
@@ -1201,28 +1194,27 @@ mod tests {
             dec!(0.9),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
-            kelly_safety(),
+            KellySafetyParams::test_fixture(),
         );
         let candidate = candidate(dec!(10), dec!(200), dec!(1));
         let capital = Usd::new(dec!(10000));
         let cluster_sizes = [1_u32, 2, 3, 5, 10];
         let mut sizes = Vec::with_capacity(cluster_sizes.len());
         for cluster_size in cluster_sizes {
-            let suggestion = sized(
-                model
-                    .suggest(&SizingInput {
-                        candidate: &candidate,
-                        capital_base_usd: capital,
-                        drawdown_state: DrawdownState::neutral(),
-                        edge_uncertainty_half_width: None,
-                        correlation: Some(CorrelationShrinkInput {
-                            cluster_size,
-                            mean_rho: dec!(0.5),
-                        }),
-                        executable_tiers: executable_tiers(&candidate, capital),
-                    })
-                    .expect("sized"),
-            );
+            let suggestion = (model
+                .suggest(&SizingInput {
+                    candidate: &candidate,
+                    capital_base_usd: capital,
+                    drawdown_state: DrawdownState::neutral(),
+                    edge_uncertainty_half_width: None,
+                    correlation: Some(CorrelationShrinkInput {
+                        cluster_size,
+                        mean_rho: dec!(0.5),
+                    }),
+                    executable_tiers: executable_tiers(&candidate, capital),
+                })
+                .expect("sized"))
+            .sized();
             sizes.push((cluster_size, suggestion));
         }
         for window in sizes.windows(2) {
@@ -1254,34 +1246,33 @@ mod tests {
     }
 
     #[test]
-    fn sizing_provenance_waterfall_reproduces_kelly_fraction_applied() {
+    fn sizing_provenance_waterfall_applied() {
         let model = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Conservative,
-            kelly_safety(),
+            KellySafetyParams::test_fixture(),
         );
-        let suggestion = sized(
-            model
-                .suggest(&SizingInput {
-                    candidate: &candidate(dec!(10), dec!(200), dec!(0.8)),
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState {
-                        current_drawdown: dec!(0.1),
-                    },
-                    edge_uncertainty_half_width: Some(dec!(0.05)),
-                    correlation: Some(CorrelationShrinkInput {
-                        cluster_size: 3,
-                        mean_rho: dec!(0.3),
-                    }),
-                    executable_tiers: executable_tiers(
-                        &candidate(dec!(10), dec!(200), dec!(0.8)),
-                        Usd::new(dec!(10000)),
-                    ),
-                })
-                .expect("suggest"),
-        );
+        let suggestion = (model
+            .suggest(&SizingInput {
+                candidate: &candidate(dec!(10), dec!(200), dec!(0.8)),
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState {
+                    current_drawdown: dec!(0.1),
+                },
+                edge_uncertainty_half_width: Some(dec!(0.05)),
+                correlation: Some(CorrelationShrinkInput {
+                    cluster_size: 3,
+                    mean_rho: dec!(0.3),
+                }),
+                executable_tiers: executable_tiers(
+                    &candidate(dec!(10), dec!(200), dec!(0.8)),
+                    Usd::new(dec!(10000)),
+                ),
+            })
+            .expect("suggest"))
+        .sized();
         let provenance = suggestion.provenance.expect("provenance recorded");
         let reproduced = (provenance.f_star
             * provenance.kelly_fraction_config
@@ -1303,7 +1294,7 @@ mod tests {
     }
 
     #[test]
-    fn drawdown_cap_binding_emitted_when_active() {
+    fn drawdown_cap_binding_active() {
         let model = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
@@ -1312,20 +1303,19 @@ mod tests {
             KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.95)),
         );
         let candidate = candidate(dec!(10), dec!(200), dec!(1));
-        let suggestion = sized(
-            model
-                .suggest(&SizingInput {
-                    candidate: &candidate,
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState {
-                        current_drawdown: dec!(0.25),
-                    },
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                    executable_tiers: executable_tiers(&candidate, Usd::new(dec!(10000))),
-                })
-                .expect("suggest"),
-        );
+        let suggestion = (model
+            .suggest(&SizingInput {
+                candidate: &candidate,
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState {
+                    current_drawdown: dec!(0.25),
+                },
+                edge_uncertainty_half_width: None,
+                correlation: None,
+                executable_tiers: executable_tiers(&candidate, Usd::new(dec!(10000))),
+            })
+            .expect("suggest"))
+        .sized();
         assert_eq!(
             suggestion.kelly_stage_binding,
             Some(BindingConstraint::DrawdownCap)
@@ -1333,20 +1323,19 @@ mod tests {
     }
 
     #[test]
-    fn calibrated_return_model_uses_probability_and_market_price() {
+    fn calibrated_return_uses_price() {
         let candidate = resolution_candidate(dec!(200), dec!(500), dec!(1), dec!(0.7), dec!(0.4));
         let capital = Usd::new(dec!(10000));
-        let suggestion = sized(
-            KellySizingModel::new(
-                dec!(1),
-                dec!(1),
-                ConfidenceSizeCurve::Linear,
-                DrawdownMultiplierPolicy::Fixed,
-                KellySafetyParams::new(dec!(0), dec!(1), dec!(0.9)),
-            )
-            .suggest(&sizing_input(&candidate, capital))
-            .expect("suggest"),
-        );
+        let suggestion = (KellySizingModel::new(
+            dec!(1),
+            dec!(1),
+            ConfidenceSizeCurve::Linear,
+            DrawdownMultiplierPolicy::Fixed,
+            KellySafetyParams::new(dec!(0), dec!(1), dec!(0.9)),
+        )
+        .suggest(&sizing_input(&candidate, capital))
+        .expect("suggest"))
+        .sized();
         assert_eq!(suggestion.provenance.expect("provenance").f_star, dec!(0.5));
     }
 }

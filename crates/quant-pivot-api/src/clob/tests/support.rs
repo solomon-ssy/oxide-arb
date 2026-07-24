@@ -128,10 +128,10 @@ pub async fn test_sdk_client(server: &MockServer) -> Arc<SdkClient<Authenticated
 }
 
 pub async fn test_clob_client(server: &MockServer) -> ClobClient {
-    test_clob_client_with_order_timeout(server, Duration::from_secs(15)).await
+    clob_client_order_timeout(server, Duration::from_secs(15)).await
 }
 
-pub async fn test_deposit_wallet_clob_client(
+pub async fn deposit_wallet_clob_client(
     server: &MockServer,
     deposit_wallet: Address,
 ) -> ClobClient {
@@ -161,7 +161,7 @@ pub async fn test_deposit_wallet_clob_client(
     }
 }
 
-pub async fn test_clob_client_with_order_timeout(
+pub async fn clob_client_order_timeout(
     server: &MockServer,
     order_post_timeout: Duration,
 ) -> ClobClient {

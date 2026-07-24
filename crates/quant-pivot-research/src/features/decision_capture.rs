@@ -213,36 +213,38 @@ pub fn recommendation_identity_from_resolved(
     })
 }
 
-/// Build a live [`BookSnapshotRef`] with a blake3 digest over bid/ask levels.
-///
-/// # Errors
-///
-/// Propagates canonical JSON serialization failures for the level digest.
-pub fn book_snapshot_ref_from_resolved(book: &ResolvedBook) -> QuantResult<BookSnapshotRef> {
-    let source_event = book
-        .source_event
-        .as_ref()
-        .ok_or_else(|| ResearchError::PitResolution {
-            detail: format!("book {} has no canonical L2 event identity", book.token_id),
-        })?;
-    Ok(BookSnapshotRef {
-        token_id: book.token_id.clone(),
-        source: BookSnapshotSource::CanonicalL2 {
-            stream_session_id: source_event.stream_session_id,
-            token_sequence: source_event.token_sequence,
-            source_event_hash: source_event.source_event_hash,
-            event_time_ms: i64::try_from(book.timestamp_ms).map_err(|error| {
-                ResearchError::PitResolution {
-                    detail: format!(
-                        "book {} event time does not fit i64: {error}",
-                        book.token_id
-                    ),
-                }
-            })?,
-            ingestion_time_ms: book.available_at.timestamp_millis(),
-        },
-        content_hash: book_levels_content_hash(book)?,
-    })
+impl ResolvedBook {
+    /// Build a live [`BookSnapshotRef`] with a blake3 digest over bid/ask levels.
+    ///
+    /// # Errors
+    ///
+    /// Propagates canonical JSON serialization failures for the level digest.
+    pub fn snapshot_ref(&self) -> QuantResult<BookSnapshotRef> {
+        let source_event =
+            self.source_event
+                .as_ref()
+                .ok_or_else(|| ResearchError::PitResolution {
+                    detail: format!("book {} has no canonical L2 event identity", self.token_id),
+                })?;
+        Ok(BookSnapshotRef {
+            token_id: self.token_id.clone(),
+            source: BookSnapshotSource::CanonicalL2 {
+                stream_session_id: source_event.stream_session_id,
+                token_sequence: source_event.token_sequence,
+                source_event_hash: source_event.source_event_hash,
+                event_time_ms: i64::try_from(self.timestamp_ms).map_err(|error| {
+                    ResearchError::PitResolution {
+                        detail: format!(
+                            "book {} event time does not fit i64: {error}",
+                            self.token_id
+                        ),
+                    }
+                })?,
+                ingestion_time_ms: self.available_at.timestamp_millis(),
+            },
+            content_hash: (self).book_levels_content_hash()?,
+        })
+    }
 }
 
 /// Map visible book liquidity to a normalized score in `[0, 1]`.
@@ -288,7 +290,7 @@ pub struct MarketDecisionCaptureInput<'a> {
     pub liquidity_cap_usd: Usd,
 }
 
-pub fn market_decision_capture_from_resolved(
+pub fn capture_market_decision(
     input: MarketDecisionCaptureInput<'_>,
 ) -> QuantResult<MarketDecisionCapture> {
     let MarketDecisionCaptureInput {
@@ -302,7 +304,7 @@ pub fn market_decision_capture_from_resolved(
         liquidity_cap_usd,
     } = input;
     let as_of = boundary.decision_at();
-    let book_snapshot_ref = book_snapshot_ref_from_resolved(&book)?;
+    let book_snapshot_ref = book.snapshot_ref()?;
     let identity = recommendation_identity_from_resolved(selected, registry)?;
     let market_context = market_context_from_resolved(as_of, &book, &market, selected, registry)?;
     let liquidity_score = liquidity_score_from_resolved(&book, liquidity_cap_usd);
@@ -424,12 +426,14 @@ struct BookLevelsDigest<'a> {
     asks: &'a [BookLevel],
 }
 
-fn book_levels_content_hash(book: &ResolvedBook) -> QuantResult<ContentHash> {
-    CanonicalDigest::content_hash_json(&BookLevelsDigest {
-        bids: &book.bids,
-        asks: &book.asks,
-    })
-    .map_err(Into::into)
+impl ResolvedBook {
+    fn book_levels_content_hash(&self) -> QuantResult<ContentHash> {
+        CanonicalDigest::content_hash_json(&BookLevelsDigest {
+            bids: &self.bids,
+            asks: &self.asks,
+        })
+        .map_err(Into::into)
+    }
 }
 
 fn book_age_ms(as_of: DateTime<Utc>, book: &ResolvedBook) -> QuantResult<u64> {
@@ -476,8 +480,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        book_snapshot_ref_from_resolved, liquidity_score_from_resolved,
-        market_context_from_resolved, recommendation_identity_from_resolved,
+        liquidity_score_from_resolved, market_context_from_resolved,
+        recommendation_identity_from_resolved,
     };
     use crate::{
         features::{ResolvedBook, resolved::ResolvedMarketContext},
@@ -485,31 +489,33 @@ mod tests {
         selection::SelectedMarket,
     };
 
-    fn sample_book() -> ResolvedBook {
-        let token = TokenId::new("123");
-        ResolvedBook {
-            token_id: token,
-            bids: Arc::new([BookLevel::from_decimal(
-                Price::new(dec!(0.48)),
-                Shares::new(dec!(100)),
-            )
-            .expect("level")]),
-            asks: Arc::new([BookLevel::from_decimal(
-                Price::new(dec!(0.52)),
-                Shares::new(dec!(100)),
-            )
-            .expect("level")]),
-            timestamp_ms: 1_700_000_000_000,
-            version: 42,
-            sequence: 42,
-            source_event: Some(CanonicalBookEventRef {
-                stream_session_id: Uuid::from_u128(1),
-                token_sequence: 42,
-                source_event_hash: ContentHash::parse(&format!("blake3:{}", "d".repeat(64)))
-                    .expect("canonical event hash"),
-            }),
-            effective_at: Utc::now(),
-            available_at: Utc::now(),
+    impl ResolvedBook {
+        fn test_fixture() -> Self {
+            let token = TokenId::new("123");
+            Self {
+                token_id: token,
+                bids: Arc::new([BookLevel::from_decimal(
+                    Price::new(dec!(0.48)),
+                    Shares::new(dec!(100)),
+                )
+                .expect("level")]),
+                asks: Arc::new([BookLevel::from_decimal(
+                    Price::new(dec!(0.52)),
+                    Shares::new(dec!(100)),
+                )
+                .expect("level")]),
+                timestamp_ms: 1_700_000_000_000,
+                version: 42,
+                sequence: 42,
+                source_event: Some(CanonicalBookEventRef {
+                    stream_session_id: Uuid::from_u128(1),
+                    token_sequence: 42,
+                    source_event_hash: ContentHash::parse(&format!("blake3:{}", "d".repeat(64)))
+                        .expect("canonical event hash"),
+                }),
+                effective_at: Utc::now(),
+                available_at: Utc::now(),
+            }
         }
     }
 
@@ -555,18 +561,18 @@ mod tests {
     }
 
     #[test]
-    fn book_snapshot_ref_hash_is_stable() {
-        let book = sample_book();
-        let first = book_snapshot_ref_from_resolved(&book).expect("hash");
-        let second = book_snapshot_ref_from_resolved(&book).expect("hash");
+    fn book_snapshot_ref_stable() {
+        let book = ResolvedBook::test_fixture();
+        let first = book.snapshot_ref().expect("hash");
+        let second = book.snapshot_ref().expect("hash");
         assert_eq!(first, second);
         assert!(first.canonical_string().starts_with("book:l2|"));
     }
 
     #[test]
-    fn market_context_materializes_core_fields() {
+    fn market_context_materializes_fields() {
         let as_of = Utc::now();
-        let book = sample_book();
+        let book = ResolvedBook::test_fixture();
         let market = ResolvedMarketContext {
             market_id: MarketId::new("0xm"),
             effective_at: as_of,
@@ -618,8 +624,8 @@ mod tests {
     }
 
     #[test]
-    fn liquidity_score_clamps_to_unit_interval() {
-        let book = sample_book();
+    fn liquidity_score_clamps_interval() {
+        let book = ResolvedBook::test_fixture();
         let score = liquidity_score_from_resolved(&book, Usd::new(dec!(10)));
         assert!(score.inner() <= dec!(1));
         assert!(score.inner() > dec!(0));

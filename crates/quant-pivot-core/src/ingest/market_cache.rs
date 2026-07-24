@@ -113,10 +113,10 @@ mod tests {
     use crate::ingest::{data_plane_index::DataPlane, market_registry::MarketRegistry};
 
     fn sample_entry(id: &str, categories: CategorySet) -> MarketRegistryInfo {
-        sample_entry_with_end_date(id, categories, Some(Utc::now() + Duration::hours(2)))
+        sample_entry_end_date(id, categories, Some(Utc::now() + Duration::hours(2)))
     }
 
-    fn sample_entry_with_end_date(
+    fn sample_entry_end_date(
         id: &str,
         categories: CategorySet,
         end_date: Option<DateTime<Utc>>,
@@ -166,9 +166,9 @@ mod tests {
     }
 
     #[test]
-    fn past_deadline_markets_are_excluded_from_cache() {
+    fn past_deadline_markets_cache() {
         let reg = Arc::new(MarketRegistry::new(Arc::new(DataPlane::new())));
-        reg.register_market(sample_entry_with_end_date(
+        reg.register_market(sample_entry_end_date(
             "past",
             CategorySet::EMPTY,
             Some(Utc::now() - Duration::hours(1)),
@@ -182,13 +182,9 @@ mod tests {
     }
 
     #[test]
-    fn no_end_date_markets_are_excluded_from_cache() {
+    fn no_end_date_cache() {
         let reg = Arc::new(MarketRegistry::new(Arc::new(DataPlane::new())));
-        reg.register_market(sample_entry_with_end_date(
-            "no-date",
-            CategorySet::EMPTY,
-            None,
-        ));
+        reg.register_market(sample_entry_end_date("no-date", CategorySet::EMPTY, None));
 
         let cache = MarketCache::new(reg, admit_all());
         assert!(cache.entries().is_empty());
@@ -206,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn get_returns_entry_by_market_id() {
+    fn get_returns_entry_id() {
         let reg = Arc::new(MarketRegistry::new(Arc::new(DataPlane::new())));
         reg.register_market(sample_entry("m1", CategorySet::EMPTY));
 
@@ -217,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_registry_yields_empty_cache() {
+    fn empty_registry_empty_cache() {
         let reg = Arc::new(MarketRegistry::new(Arc::new(DataPlane::new())));
         let cache = MarketCache::new(reg, admit_all());
         assert!(cache.entries().is_empty());

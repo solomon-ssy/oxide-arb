@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn only_hold_to_resolution_auto_requires_system_recovery() {
+    fn only_hold_requires_recovery() {
         assert!(requires_automatic_settlement_recovery(&exit(
             ExitSettlementMode::HoldToResolution,
             RedeemPolicy::Auto,

@@ -57,11 +57,6 @@ pub fn normalize_ws_message(
     }
 }
 
-#[inline]
-fn ingress_trace(ws_ingress: Instant, ws_timestamp_ms: u64) -> IngressTrace {
-    IngressTrace::new(ws_ingress, ws_timestamp_ms)
-}
-
 fn push_level(
     levels: &mut Vec<BookLevel>,
     price: Price,
@@ -116,7 +111,7 @@ fn book_update_to_event(
         bids: BookSideData::from_levels(Arc::from(bids)),
         asks: BookSideData::from_levels(Arc::from(asks)),
         timestamp_ms,
-        trace: ingress_trace(ws_ingress, timestamp_ms),
+        trace: IngressTrace::new(ws_ingress, timestamp_ms),
     }))
 }
 
@@ -127,7 +122,7 @@ fn price_change_events(
     tokens: &dyn TokenKeyResolver,
 ) -> Result<Vec<PipelineEvent>, UnregisteredToken> {
     let timestamp_ms = ToPrimitive::to_u64(&pc.timestamp.max(0)).unwrap_or(0);
-    let trace = ingress_trace(ws_ingress, timestamp_ms);
+    let trace = IngressTrace::new(ws_ingress, timestamp_ms);
 
     DELTA_GROUP.with(|group| {
         let mut grouped = group.borrow_mut();
@@ -209,7 +204,7 @@ fn tick_size_events(
             .ok_or(UnregisteredToken(tsc.asset_id))?,
         old_tick,
         new_tick,
-        trace: ingress_trace(ws_ingress, 0),
+        trace: IngressTrace::new(ws_ingress, 0),
     }])
 }
 
@@ -232,7 +227,7 @@ fn last_trade_event(
         size: ltp.size.map(Shares::new),
         fee_rate_bps: ltp.fee_rate_bps,
         timestamp_ms,
-        trace: ingress_trace(ws_ingress, timestamp_ms),
+        trace: IngressTrace::new(ws_ingress, timestamp_ms),
     })
 }
 
@@ -256,7 +251,7 @@ fn market_resolved_event(
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         timestamp_ms,
-        trace: ingress_trace(ws_ingress, timestamp_ms),
+        trace: IngressTrace::new(ws_ingress, timestamp_ms),
     })
 }
 
@@ -281,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_tick_size_change_for_half_and_quarter_cent() {
+    fn maps_tick_size_cent() {
         let tsc = TickSizeChange::builder()
             .asset_id(U256::from(7_u64))
             .market(B256::ZERO)
@@ -336,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn drops_tick_size_change_with_unsupported_tick_without_hundredth_fallback() {
+    fn drops_tick_without_fallback() {
         let tsc = TickSizeChange::builder()
             .asset_id(U256::from(7_u64))
             .market(B256::ZERO)
@@ -388,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_book_snapshot_with_arc_levels() {
+    fn maps_book_snapshot_levels() {
         let book = BookUpdate::builder()
             .asset_id(U256::from(42_u64))
             .market(B256::ZERO)
@@ -461,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_valid_levels_when_invalid_present() {
+    fn keeps_valid_invalid_present() {
         let book = BookUpdate::builder()
             .asset_id(U256::from(42_u64))
             .market(B256::ZERO)
@@ -496,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn price_change_reuses_thread_local_buffer() {
+    fn price_change_reuses_buffer() {
         let pc = PriceChange::builder()
             .market(B256::ZERO)
             .timestamp(1000)
@@ -528,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_token_fails_the_whole_normalized_message() {
+    fn unregistered_token_fails_message() {
         let book = BookUpdate::builder()
             .asset_id(U256::from(42_u64))
             .market(B256::ZERO)

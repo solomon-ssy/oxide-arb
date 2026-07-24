@@ -95,7 +95,7 @@ mod tests {
     use super::{FactorDefinitionDocument, FactorExplanation};
 
     #[test]
-    fn factor_documents_reject_unknown_fields() {
+    fn factor_documents_reject_unknown() {
         let explanation = serde_json::json!({
             "headline": "depth is strong",
             "drivers": [],

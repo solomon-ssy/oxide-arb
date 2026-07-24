@@ -65,9 +65,7 @@ impl AppContext {
                         metrics.set_data_quality_tokens("degraded", snapshot.degraded);
                         metrics.set_data_quality_tokens("stale", snapshot.stale);
                         metrics.set_data_quality_tokens("insufficient", snapshot.insufficient);
-                        metrics.set_ingest_pipeline_lag_worst_ms(
-                            data_quality.take_worst_ingest_lag_ms(),
-                        );
+                        metrics.set_worst_ingest_lag(data_quality.take_worst_lag_ms());
                         QuantResult::Ok(())
                     }
                 },
@@ -132,7 +130,7 @@ impl AppContext {
             }
             let _ = PeriodicTask::run(
                 "feature-parity-scheduler",
-                || duration_until_next_utc_hour(Utc::now()),
+                || next_utc_hour_delay(Utc::now()),
                 0.0,
                 true,
                 token,
@@ -168,7 +166,7 @@ impl AppContext {
     }
 }
 
-const fn duration_until_next_utc_hour(now: DateTime<Utc>) -> Duration {
+const fn next_utc_hour_delay(now: DateTime<Utc>) -> Duration {
     let elapsed = now.timestamp().rem_euclid(60 * 60) as u64;
     let nanos = now.timestamp_subsec_nanos();
     let seconds = 60 * 60 - elapsed;

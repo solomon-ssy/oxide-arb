@@ -205,6 +205,20 @@ pub struct AdmissionInput {
 }
 
 impl AdmissionInput {
+    const fn prepared_fee_schedule(&self) -> PreparedFeeSchedule {
+        PreparedFeeSchedule {
+            schedule_hash: self.fee_schedule.schedule_hash,
+            effective_at: self.fee_schedule.effective_at,
+            available_at: self.fee_schedule.available_at,
+            platform_rate: self.fee_schedule.platform_rate,
+            exponent: self.fee_schedule.exponent,
+            taker_only: self.fee_schedule.taker_only,
+            builder_maker_fee_bps: self.fee_schedule.builder_maker_fee_bps,
+            builder_taker_fee_bps: self.fee_schedule.builder_taker_fee_bps,
+            builder_attribution: self.fee_schedule.builder_attribution,
+        }
+    }
+
     /// Notional of the (possibly downscaled) frozen entry order.
     #[must_use]
     pub fn order_notional(&self) -> Usd {
@@ -324,35 +338,44 @@ pub trait ExecutionAdmissionEngine: Send + Sync {
     async fn evaluate_full(&self, input: AdmissionInput) -> QuantResult<AdmissionDecision>;
 }
 
-/// Freeze the exact venue amount and all execution-semantic hashes consumed by
-/// the dispatcher. The dispatcher must submit this object verbatim.
-pub fn prepare_entry_order(input: &AdmissionInput) -> QuantResult<PreparedVenueOrder> {
-    let spec = &input.intent.entry_order_json;
-    if spec.side != Side::Buy {
-        return Err(ExecutionError::IntentDenied {
-            reason: "opening entry must be a BUY".to_owned(),
+impl AdmissionInput {
+    /// Freeze the exact venue amount and all execution-semantic hashes consumed by
+    /// the dispatcher. The dispatcher must submit this object verbatim.
+    pub fn prepare_entry_order(&self) -> QuantResult<PreparedVenueOrder> {
+        let spec = &self.intent.entry_order_json;
+        if spec.side != Side::Buy {
+            return Err(ExecutionError::IntentDenied {
+                reason: "opening entry must be a BUY".to_owned(),
+            }
+            .into());
         }
-        .into());
-    }
-    let book = input
-        .book
-        .as_ref()
-        .ok_or_else(|| ExecutionError::IntentDenied {
-            reason: "cannot prepare venue order without a PIT L2 book".to_owned(),
-        })?;
-    let book_hash = CanonicalDigest::content_hash_json(&(
-        book.timestamp_ms,
-        book.version,
-        book.bids.as_ref(),
-        book.asks.as_ref(),
-    ))?;
-    let requirement = match spec.order_type {
-        OrderType::Fak => FillRequirement::AllowPartial,
-        OrderType::Fok | OrderType::Gtc | OrderType::Gtd { .. } => FillRequirement::AllOrNothing,
-    };
+        let book = self
+            .book
+            .as_ref()
+            .ok_or_else(|| ExecutionError::IntentDenied {
+                reason: "cannot prepare venue order without a PIT L2 book".to_owned(),
+            })?;
+        let book_hash = CanonicalDigest::content_hash_json(&(
+            book.timestamp_ms,
+            book.version,
+            book.bids.as_ref(),
+            book.asks.as_ref(),
+        ))?;
+        let requirement = match spec.order_type {
+            OrderType::Fak => FillRequirement::AllowPartial,
+            OrderType::Fok | OrderType::Gtc | OrderType::Gtd { .. } => {
+                FillRequirement::AllOrNothing
+            }
+        };
 
-    let (cash_budget, venue_amount, expected_fee, total_cash_delta, expected_filled_shares, worst) =
-        match spec.amount {
+        let (
+            cash_budget,
+            venue_amount,
+            expected_fee,
+            total_cash_delta,
+            expected_filled_shares,
+            worst,
+        ) = match spec.amount {
             OrderAmount::CashBudget(budget) => {
                 if !matches!(spec.order_type, OrderType::Fok | OrderType::Fak) {
                     return Err(ExecutionError::IntentDenied {
@@ -365,9 +388,9 @@ pub fn prepare_entry_order(input: &AdmissionInput) -> QuantResult<PreparedVenueO
                     budget,
                     spec.limit_price,
                     requirement,
-                    &input.fee_schedule,
+                    &self.fee_schedule,
                     LiquidityRole::Taker,
-                    input.now,
+                    self.now,
                 )
                 .map_err(|error| ExecutionError::IntentDenied {
                     reason: format!("cash-budget execution preparation failed: {error:?}"),
@@ -402,13 +425,13 @@ pub fn prepare_entry_order(input: &AdmissionInput) -> QuantResult<PreparedVenueO
                     shares,
                     spec.limit_price,
                     requirement,
-                    &input.fee_schedule,
+                    &self.fee_schedule,
                     if spec.post_only {
                         LiquidityRole::Maker
                     } else {
                         LiquidityRole::Taker
                     },
-                    input.now,
+                    self.now,
                 )
                 .map_err(|error| ExecutionError::IntentDenied {
                     reason: format!("share execution preparation failed: {error:?}"),
@@ -446,32 +469,23 @@ pub fn prepare_entry_order(input: &AdmissionInput) -> QuantResult<PreparedVenueO
             }
         };
 
-    Ok(PreparedVenueOrder {
-        profile_ref: input.profile_ref.clone(),
-        token_id: spec.token_id.clone(),
-        side: spec.side,
-        order_type: spec.order_type,
-        post_only: spec.post_only,
-        worst_price: worst,
-        cash_budget,
-        venue_amount,
-        expected_fee,
-        total_cash_delta,
-        expected_filled_shares,
-        book_hash,
-        clob_market_info_hash: input.venue_metadata.clob_market_info_hash,
-        fee_schedule: PreparedFeeSchedule {
-            schedule_hash: input.fee_schedule.schedule_hash,
-            effective_at: input.fee_schedule.effective_at,
-            available_at: input.fee_schedule.available_at,
-            platform_rate: input.fee_schedule.platform_rate,
-            exponent: input.fee_schedule.exponent,
-            taker_only: input.fee_schedule.taker_only,
-            builder_maker_fee_bps: input.fee_schedule.builder_maker_fee_bps,
-            builder_taker_fee_bps: input.fee_schedule.builder_taker_fee_bps,
-            builder_attribution: input.fee_schedule.builder_attribution,
-        },
-        prepared_at: input.now,
-        valid_until: spec.valid_until,
-    })
+        Ok(PreparedVenueOrder {
+            profile_ref: self.profile_ref.clone(),
+            token_id: spec.token_id.clone(),
+            side: spec.side,
+            order_type: spec.order_type,
+            post_only: spec.post_only,
+            worst_price: worst,
+            cash_budget,
+            venue_amount,
+            expected_fee,
+            total_cash_delta,
+            expected_filled_shares,
+            book_hash,
+            clob_market_info_hash: self.venue_metadata.clob_market_info_hash,
+            fee_schedule: self.prepared_fee_schedule(),
+            prepared_at: self.now,
+            valid_until: spec.valid_until,
+        })
+    }
 }

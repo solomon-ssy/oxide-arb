@@ -50,7 +50,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::execution_semantics::{LiquidityRole, PitFeeSchedule};
 
-use super::{CollectedReconciliation, EvidenceCollector, VenuePresence, decide};
+use super::{CollectedReconciliation, EvidenceCollector, VenuePresence};
 use crate::{
     execution::{ExecutionBreaker, IntentLifecyclePublisher, PolymarketOrderClient},
     observability::{
@@ -296,7 +296,7 @@ impl ReconciliationService {
                 .await?;
         }
 
-        let decision = decide(&collected.facts);
+        let decision = collected.facts.decide();
         if decision.result == ReconciliationResult::Pending {
             // No terminal decision yet — leave for the next sweep.
             return Ok(());
@@ -1121,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn exit_realized_pnl_is_net_fee() {
+    fn exit_realized_pnl_fee() {
         let order = exit_order();
         let position = lot(dec!(0.60));
         let matched_at = Utc::now();
@@ -1139,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn exit_reconcile_write_only_realizes_pnl_on_fill() {
+    fn exit_reconcile_write_fill() {
         let order = exit_order();
         let position = lot(dec!(0.60));
         let filled = exit_reconcile_write(ExitReconcileWriteInput {
@@ -1177,7 +1177,7 @@ mod tests {
     }
 
     #[test]
-    fn exit_reconcile_write_preserves_trigger_exit_reason() {
+    fn exit_reconcile_preserves_reason() {
         let order = exit_order();
         let position = lot(dec!(0.60));
         let write = exit_reconcile_write(ExitReconcileWriteInput {

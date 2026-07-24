@@ -4,10 +4,11 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
+use serde_json::Error as SerdeJsonError;
 
 use crate::{
     clickhouse::{
-        ChDecimal64, ChSchemaVersion, CryptoPriceReportRow, WeatherForecastFactRow,
+        ChDecimal64, ChSchemaVersion, CryptoPriceReportRow, DomainEventRow, WeatherForecastFactRow,
         WeatherObservationFactRow,
     },
     enums::{quant::ExecutionWalletKind, settlement::SettlementRoute},
@@ -40,31 +41,32 @@ pub struct CryptoPriceReport {
     pub raw_report: String,
 }
 
-impl CryptoPriceReport {
-    #[must_use]
-    pub fn to_clickhouse_row(&self) -> CryptoPriceReportRow {
-        CryptoPriceReportRow {
-            source_id: self.source_id.clone(),
-            instrument_key: self.instrument_key.clone(),
-            source_sequence: self.source_sequence,
-            price: ChDecimal64::from(self.price.inner()),
-            quantity: self
+impl From<&CryptoPriceReport> for CryptoPriceReportRow {
+    fn from(value: &CryptoPriceReport) -> Self {
+        Self {
+            source_id: value.source_id.clone(),
+            instrument_key: value.instrument_key.clone(),
+            source_sequence: value.source_sequence,
+            price: ChDecimal64::from(value.price.inner()),
+            quantity: value
                 .quantity
                 .map(|quantity| ChDecimal64::from(quantity.inner())),
-            event_time: self.event_time.timestamp_millis(),
-            published_at: self.published_at.timestamp_millis(),
-            available_at: self.available_at.timestamp_millis(),
-            valid_from: self.valid_from.map(|value| value.timestamp_millis()),
-            observations_timestamp: self
+            event_time: value.event_time.timestamp_millis(),
+            published_at: value.published_at.timestamp_millis(),
+            available_at: value.available_at.timestamp_millis(),
+            valid_from: value.valid_from.map(|time| time.timestamp_millis()),
+            observations_timestamp: value
                 .observations_timestamp
-                .map(|value| value.timestamp_millis()),
-            expires_at: self.expires_at.map(|value| value.timestamp_millis()),
-            report_hash: self.report_hash,
-            raw_report: self.raw_report.clone(),
+                .map(|time| time.timestamp_millis()),
+            expires_at: value.expires_at.map(|time| time.timestamp_millis()),
+            report_hash: value.report_hash,
+            raw_report: value.raw_report.clone(),
             schema_version: ChSchemaVersion::FIRST,
         }
     }
+}
 
+impl CryptoPriceReport {
     /// Decode one persisted source fact without inventing missing timestamps.
     #[must_use]
     pub fn from_clickhouse_row(row: CryptoPriceReportRow) -> Option<Self> {
@@ -72,10 +74,10 @@ impl CryptoPriceReport {
             source_id: row.source_id,
             instrument_key: row.instrument_key,
             source_sequence: row.source_sequence,
-            price: Usd::new(row.price.to_decimal()),
+            price: Usd::new(Decimal::from(row.price)),
             quantity: row
                 .quantity
-                .map(|quantity| Shares::new(quantity.to_decimal())),
+                .map(|quantity| Shares::new(Decimal::from(quantity))),
             event_time: Utc.timestamp_millis_opt(row.event_time).single()?,
             published_at: Utc.timestamp_millis_opt(row.published_at).single()?,
             available_at: Utc.timestamp_millis_opt(row.available_at).single()?,
@@ -270,9 +272,9 @@ impl WeatherObservationFact {
             local_date: row.local_date.to_naive_date()?,
             report_kind: WeatherObservationReportKind::parse(&row.report_kind)?,
             variable: WeatherVariable::parse(&row.variable)?,
-            value: row.value.to_decimal(),
+            value: Decimal::from(row.value),
             unit: DomainMeasurementUnit::parse(&row.unit)?,
-            precision: row.precision.to_decimal(),
+            precision: Decimal::from(row.precision),
             observed_at: Utc.timestamp_millis_opt(row.observed_at).single()?,
             valid_from: decode_optional_millis(row.valid_from).ok()?,
             valid_to: decode_optional_millis(row.valid_to).ok()?,
@@ -320,31 +322,32 @@ pub struct WeatherForecastPoint {
     pub report_hash: ContentHash,
 }
 
-impl WeatherForecastPoint {
-    #[must_use]
-    pub fn to_clickhouse_row(&self) -> WeatherForecastFactRow {
-        WeatherForecastFactRow {
-            source_id: self.source_id.clone(),
-            instrument_key: self.instrument_key.clone(),
-            subject_key: self.subject_key.clone(),
-            variable: self.variable.as_str().to_owned(),
-            value: ChDecimal64::from(self.value),
-            unit: self.unit.as_str().to_owned(),
-            precision: ChDecimal64::from(self.precision),
-            reference_time: self.reference_time.timestamp_millis(),
-            valid_time: self.valid_time.timestamp_millis(),
-            published_at: self.published_at.timestamp_millis(),
-            available_at: self.available_at.timestamp_millis(),
-            lead_hours: self.lead_hours,
-            member: self.member,
-            revision: self.revision,
-            grid_binding_hash: self.grid_binding_hash,
-            run_manifest_hash: self.run_manifest_hash,
-            report_hash: self.report_hash,
+impl From<&WeatherForecastPoint> for WeatherForecastFactRow {
+    fn from(value: &WeatherForecastPoint) -> Self {
+        Self {
+            source_id: value.source_id.clone(),
+            instrument_key: value.instrument_key.clone(),
+            subject_key: value.subject_key.clone(),
+            variable: value.variable.as_str().to_owned(),
+            value: ChDecimal64::from(value.value),
+            unit: value.unit.as_str().to_owned(),
+            precision: ChDecimal64::from(value.precision),
+            reference_time: value.reference_time.timestamp_millis(),
+            valid_time: value.valid_time.timestamp_millis(),
+            published_at: value.published_at.timestamp_millis(),
+            available_at: value.available_at.timestamp_millis(),
+            lead_hours: value.lead_hours,
+            member: value.member,
+            revision: value.revision,
+            grid_binding_hash: value.grid_binding_hash,
+            run_manifest_hash: value.run_manifest_hash,
+            report_hash: value.report_hash,
             schema_version: ChSchemaVersion::FIRST,
         }
     }
+}
 
+impl WeatherForecastPoint {
     #[must_use]
     pub fn from_clickhouse_row(row: WeatherForecastFactRow) -> Option<Self> {
         Some(Self {
@@ -352,9 +355,9 @@ impl WeatherForecastPoint {
             instrument_key: row.instrument_key,
             subject_key: row.subject_key,
             variable: WeatherVariable::parse(&row.variable)?,
-            value: row.value.to_decimal(),
+            value: Decimal::from(row.value),
             unit: DomainMeasurementUnit::parse(&row.unit)?,
-            precision: row.precision.to_decimal(),
+            precision: Decimal::from(row.precision),
             reference_time: Utc.timestamp_millis_opt(row.reference_time).single()?,
             valid_time: Utc.timestamp_millis_opt(row.valid_time).single()?,
             published_at: Utc.timestamp_millis_opt(row.published_at).single()?,
@@ -440,6 +443,45 @@ pub enum DomainEventType {
     WeatherDailyTemperatureExtremeAdvanced,
     WeatherDailyTemperatureExtremeCorrected,
     WeatherObservationDayClosed,
+}
+
+impl DomainEventType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CryptoPriceTransition => "crypto.price_transition",
+            Self::SettlementRedeemConfirmed => "settlement.redeem_confirmed",
+            Self::WeatherDailyTemperatureExtremeAdvanced => {
+                "weather.daily_temperature_extreme_advanced"
+            }
+            Self::WeatherDailyTemperatureExtremeCorrected => {
+                "weather.daily_temperature_extreme_corrected"
+            }
+            Self::WeatherObservationDayClosed => "weather.observation_day_closed",
+        }
+    }
+}
+
+impl TryFrom<&DomainEventEnvelope> for DomainEventRow {
+    type Error = SerdeJsonError;
+
+    fn try_from(event: &DomainEventEnvelope) -> Result<Self, Self::Error> {
+        Ok(Self {
+            event_id: event.id.as_uuid(),
+            source: event.source.to_string(),
+            event_type: event.event_type.as_str().to_owned(),
+            subject: event.subject.clone(),
+            event_time: event.time.timestamp_millis(),
+            published_at: event.published_at.timestamp_millis(),
+            available_at: event.available_at.timestamp_millis(),
+            schema_version: ChSchemaVersion(event.schema_version),
+            revision: event.revision,
+            supersedes_event_id: event.supersedes_event_id.map(DomainEventId::as_uuid),
+            payload_hash: event.payload_hash,
+            source_checkpoint_hash: event.source_checkpoint_hash,
+            payload_json: serde_json::to_string(&event.payload)?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

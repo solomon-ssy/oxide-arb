@@ -140,60 +140,63 @@ fn psr_denominator(
     Ok((radicand > 0.0).then(|| radicand.sqrt()))
 }
 
-/// Evaluate the Deflated Sharpe Ratio for `input`.
-///
-/// Fails closed to `deflated_sharpe = 0` (never significant) when the
-/// moment-based variance correction is degenerate (see `psr_denominator`)
-/// or when fewer than two return periods are available (a Sharpe ratio is
-/// not estimable from a single observation).
-///
-/// # Errors
-///
-/// Returns [`ResearchError::ValidationMethodology`] when a numeric input or
-/// derived statistic cannot be represented without a non-finite/saturated
-/// value, or when the trial Sharpe variance is negative.
-pub fn deflated_sharpe_ratio(input: &DsrInput) -> QuantResult<DsrReport> {
-    let benchmark = expected_max_sharpe(input.trial_count, input.trial_sharpe_variance)?;
-    let benchmark_sharpe =
-        decimal_from_f64(benchmark, "benchmark_sharpe")?.round_dp(RESEARCH_DECIMAL_SCALE);
+impl DsrInput {
+    /// Evaluate the Deflated Sharpe Ratio for `input`.
+    ///
+    /// Fails closed to `deflated_sharpe = 0` (never significant) when the
+    /// moment-based variance correction is degenerate (see `psr_denominator`)
+    /// or when fewer than two return periods are available (a Sharpe ratio is
+    /// not estimable from a single observation).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResearchError::ValidationMethodology`] when a numeric input or
+    /// derived statistic cannot be represented without a non-finite/saturated
+    /// value, or when the trial Sharpe variance is negative.
+    pub fn deflated_sharpe_ratio(&self) -> QuantResult<DsrReport> {
+        let benchmark = expected_max_sharpe(self.trial_count, self.trial_sharpe_variance)?;
+        let benchmark_sharpe =
+            decimal_from_f64(benchmark, "benchmark_sharpe")?.round_dp(RESEARCH_DECIMAL_SCALE);
 
-    if input.returns_period_count < 2 {
-        return Ok(DsrReport {
-            observed_sharpe: input.observed_sharpe,
-            benchmark_sharpe,
-            deflated_sharpe: Decimal::ZERO,
-        });
-    }
-    let Some(denominator) = psr_denominator(input.skewness, input.kurtosis, input.observed_sharpe)?
-    else {
-        return Ok(DsrReport {
-            observed_sharpe: input.observed_sharpe,
-            benchmark_sharpe,
-            deflated_sharpe: Decimal::ZERO,
-        });
-    };
-    let sr_hat = decimal_to_f64(input.observed_sharpe, "observed_sharpe")?;
-    let t_minus_one = exact_u64_to_f64(
-        input.returns_period_count.checked_sub(1).ok_or_else(|| {
-            methodology("returns_period_count underflowed while computing DSR".to_owned())
-        })?,
-        "returns_period_count - 1",
-    )?;
-    let z = (sr_hat - benchmark) * t_minus_one.sqrt() / denominator;
-    if !z.is_finite() {
-        return Err(methodology(
-            "deflated Sharpe z-score is non-finite".to_owned(),
-        ));
-    }
-    let deflated = decimal_from_f64(stats::normal_cdf(z), "deflated_sharpe")?
-        .clamp(Decimal::ZERO, Decimal::ONE)
-        .round_dp(RESEARCH_DECIMAL_SCALE);
+        if self.returns_period_count < 2 {
+            return Ok(DsrReport {
+                observed_sharpe: self.observed_sharpe,
+                benchmark_sharpe,
+                deflated_sharpe: Decimal::ZERO,
+            });
+        }
+        let Some(denominator) =
+            psr_denominator(self.skewness, self.kurtosis, self.observed_sharpe)?
+        else {
+            return Ok(DsrReport {
+                observed_sharpe: self.observed_sharpe,
+                benchmark_sharpe,
+                deflated_sharpe: Decimal::ZERO,
+            });
+        };
+        let sr_hat = decimal_to_f64(self.observed_sharpe, "observed_sharpe")?;
+        let t_minus_one = exact_u64_to_f64(
+            self.returns_period_count.checked_sub(1).ok_or_else(|| {
+                methodology("returns_period_count underflowed while computing DSR".to_owned())
+            })?,
+            "returns_period_count - 1",
+        )?;
+        let z = (sr_hat - benchmark) * t_minus_one.sqrt() / denominator;
+        if !z.is_finite() {
+            return Err(methodology(
+                "deflated Sharpe z-score is non-finite".to_owned(),
+            ));
+        }
+        let deflated = decimal_from_f64(stats::normal_cdf(z), "deflated_sharpe")?
+            .clamp(Decimal::ZERO, Decimal::ONE)
+            .round_dp(RESEARCH_DECIMAL_SCALE);
 
-    Ok(DsrReport {
-        observed_sharpe: input.observed_sharpe,
-        benchmark_sharpe,
-        deflated_sharpe: deflated,
-    })
+        Ok(DsrReport {
+            observed_sharpe: self.observed_sharpe,
+            benchmark_sharpe,
+            deflated_sharpe: deflated,
+        })
+    }
 }
 
 /// The minimum number of return periods needed for `input.observed_sharpe` to
@@ -310,7 +313,7 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use super::{DsrInput, deflated_sharpe_ratio, min_track_record_length};
+    use super::{DsrInput, min_track_record_length};
 
     fn normal_input(observed_sharpe: Decimal, trial_count: u32) -> DsrInput {
         DsrInput {
@@ -325,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn deflated_sharpe_below_naive_sharpe_under_multiple_trials() {
+    fn deflated_sharpe_below_trials() {
         // A short, modest-Sharpe track record (20 periods, SR_hat=0.3) keeps
         // both z-scores away from the CDF's saturated tail, so the
         // multiple-testing correction's effect is actually observable (a
@@ -338,8 +341,8 @@ mod tests {
             trial_count,
             ..normal_input(dec!(0.3), trial_count)
         };
-        let one_trial = deflated_sharpe_ratio(&short_track_record(1)).expect("DSR");
-        let many_trials = deflated_sharpe_ratio(&short_track_record(50)).expect("DSR");
+        let one_trial = short_track_record(1).deflated_sharpe_ratio().expect("DSR");
+        let many_trials = short_track_record(50).deflated_sharpe_ratio().expect("DSR");
         assert_eq!(one_trial.benchmark_sharpe, rust_decimal::Decimal::ZERO);
         assert!(
             many_trials.benchmark_sharpe > one_trial.benchmark_sharpe,
@@ -353,22 +356,28 @@ mod tests {
     }
 
     #[test]
-    fn deflated_sharpe_increases_with_trial_count_pushed_further() {
-        let fifty = deflated_sharpe_ratio(&normal_input(dec!(2.0), 50)).expect("DSR");
-        let five_hundred = deflated_sharpe_ratio(&normal_input(dec!(2.0), 500)).expect("DSR");
+    fn deflated_sharpe_increases_further() {
+        let fifty = normal_input(dec!(2.0), 50)
+            .deflated_sharpe_ratio()
+            .expect("DSR");
+        let five_hundred = normal_input(dec!(2.0), 500)
+            .deflated_sharpe_ratio()
+            .expect("DSR");
         assert!(five_hundred.benchmark_sharpe > fifty.benchmark_sharpe);
         assert!(five_hundred.deflated_sharpe <= fifty.deflated_sharpe);
     }
 
     #[test]
-    fn deflated_sharpe_is_bounded_probability() {
-        let report = deflated_sharpe_ratio(&normal_input(dec!(3.0), 1)).expect("DSR");
+    fn deflated_sharpe_bounded_probability() {
+        let report = normal_input(dec!(3.0), 1)
+            .deflated_sharpe_ratio()
+            .expect("DSR");
         assert!(report.deflated_sharpe >= rust_decimal::Decimal::ZERO);
         assert!(report.deflated_sharpe <= rust_decimal::Decimal::ONE);
     }
 
     #[test]
-    fn non_positive_sharpe_has_no_min_track_record_length() {
+    fn non_positive_no_length() {
         assert!(
             min_track_record_length(&normal_input(dec!(-0.5), 1), dec!(0.05))
                 .expect("MinTRL")
@@ -382,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn higher_sharpe_needs_shorter_min_track_record_length() {
+    fn higher_sharpe_needs_length() {
         let low = min_track_record_length(&normal_input(dec!(0.5), 1), dec!(0.05))
             .expect("MinTRL")
             .expect("some");
@@ -396,25 +405,25 @@ mod tests {
     }
 
     #[test]
-    fn negative_trial_variance_is_rejected_instead_of_floored() {
+    fn negative_trial_rejected_floored() {
         let input = DsrInput {
             trial_sharpe_variance: dec!(-0.01),
             ..normal_input(dec!(1), 10)
         };
-        assert!(deflated_sharpe_ratio(&input).is_err());
+        assert!(input.deflated_sharpe_ratio().is_err());
     }
 
     #[test]
-    fn period_count_beyond_exact_f64_integer_range_is_rejected() {
+    fn period_count_beyond_rejected() {
         let input = DsrInput {
             returns_period_count: (1_u64 << f64::MANTISSA_DIGITS) + 2,
             ..normal_input(dec!(1), 1)
         };
-        assert!(deflated_sharpe_ratio(&input).is_err());
+        assert!(input.deflated_sharpe_ratio().is_err());
     }
 
     #[test]
-    fn invalid_significance_is_rejected_instead_of_clamped() {
+    fn invalid_significance_rejected_clamped() {
         assert!(min_track_record_length(&normal_input(dec!(1), 1), dec!(0)).is_err());
         assert!(min_track_record_length(&normal_input(dec!(1), 1), dec!(0.6)).is_err());
     }

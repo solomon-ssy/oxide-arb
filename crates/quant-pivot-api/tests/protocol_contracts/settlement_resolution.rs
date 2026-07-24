@@ -5,7 +5,7 @@ use quant_pivot_models::types::PayoutRatio;
 use rust_decimal_macros::dec;
 
 #[test]
-fn finalized_resolution_vector_preserves_exact_binary_payouts() {
+fn finalized_resolution_preserves_payouts() {
     let winner = FinalizedResolutionVector::try_from_decimal_parts("1", ["1", "0"])
         .expect("winner-take-all payout");
     assert_eq!(
@@ -20,7 +20,7 @@ fn finalized_resolution_vector_preserves_exact_binary_payouts() {
 }
 
 #[test]
-fn finalized_resolution_vector_rejects_unresolved_inexact_and_unbalanced_sources() {
+fn finalized_resolution_rejects_sources() {
     assert!(matches!(
         FinalizedResolutionVector::try_from_decimal_parts("0", ["0", "0"]),
         Err(ResolutionSourceReadError::ConditionNotResolved)

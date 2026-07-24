@@ -29,7 +29,7 @@ use quant_pivot_research::{
     portfolio::{
         AllocationInput, CandidateMeta, CorrelationConstraint, LinearProgrammingPortfolioAllocator,
         OptimizerConfig, PortfolioAllocator,
-        debug_test_hooks::{self, Guard, MilpBehavior, RelaxBehavior},
+        debug_test_hooks::{Guard, MilpBehavior, RelaxBehavior},
     },
 };
 use rust_decimal::Decimal;
@@ -109,7 +109,7 @@ const fn allocator(
 }
 
 #[test]
-fn lp_milp_respects_all_caps() {
+fn lp_milp_respects_caps() {
     let c1 = candidate("0xa", dec!(0.9), dec!(100));
     let c2 = candidate("0xb", dec!(0.8), dec!(100));
     let c3 = candidate("0xc", dec!(0.7), dec!(100));
@@ -157,7 +157,7 @@ fn lp_milp_respects_all_caps() {
 }
 
 #[test]
-fn lp_only_consumes_budget_on_published_names() {
+fn lp_only_consumes_names() {
     // Budget funds both, but TopN = 1 must publish only the best name and leave
     // the rest of the budget unspent (the core upgrade over greedy pre-spend).
     let c1 = candidate("0xa", dec!(0.9), dec!(100));
@@ -197,7 +197,7 @@ fn lp_only_consumes_budget_on_published_names() {
 }
 
 #[test]
-fn correlation_cap_binds_clustered_markets() {
+fn correlation_cap_binds_markets() {
     let c1 = candidate("0xa", dec!(0.9), dec!(100));
     let c2 = candidate("0xb", dec!(0.8), dec!(100));
     let caps = caps(dec!(10000), dec!(1000), dec!(1000), dec!(10000));
@@ -242,7 +242,7 @@ fn correlation_cap_binds_clustered_markets() {
 }
 
 #[test]
-fn lp_output_is_deterministic_for_same_input() {
+fn lp_output_deterministic_input() {
     let c1 = candidate("0xa", dec!(0.9), dec!(120));
     let c2 = candidate("0xb", dec!(0.85), dec!(80));
     let caps = caps(dec!(1500), dec!(1000), dec!(1000), dec!(5000));
@@ -267,7 +267,7 @@ fn lp_output_is_deterministic_for_same_input() {
 }
 
 #[test]
-fn lp_money_is_rounded_no_f64_leak() {
+fn lp_money_no_leak() {
     let c1 = candidate("0xa", dec!(0.9), dec!(137));
     let caps = caps(dec!(333), dec!(1000), dec!(1000), dec!(5000));
     let empty = ExposureBreakdown::default();
@@ -289,7 +289,7 @@ fn lp_money_is_rounded_no_f64_leak() {
 }
 
 #[test]
-fn relaxation_mode_is_feasible_and_labeled() {
+fn relaxation_mode_feasible_labeled() {
     let c1 = candidate("0xa", dec!(0.9), dec!(100));
     let c2 = candidate("0xb", dec!(0.8), dec!(100));
     let caps = caps(dec!(700), dec!(400), dec!(1000), dec!(5000));
@@ -321,7 +321,7 @@ fn relaxation_mode_is_feasible_and_labeled() {
 }
 
 #[test]
-fn lambda_tilts_capital_toward_higher_expected_return() {
+fn lambda_tilts_capital_return() {
     // Two equal-conviction names; scarce budget. λ = 0 splits by canonical order;
     // λ > 0 tilts capital to the higher expected-return name.
     let high = candidate("0xa", dec!(0.8), dec!(400));
@@ -358,7 +358,7 @@ fn lambda_tilts_capital_toward_higher_expected_return() {
 }
 
 #[test]
-fn highs_request_downgrades_to_microlp_without_native_feature() {
+fn highs_request_without_feature() {
     // The default build must never link the native HiGHS backend: a HiGHS
     // request transparently resolves to the pure-Rust microlp solver.
     let config = OptimizerConfig {
@@ -373,10 +373,10 @@ fn highs_request_downgrades_to_microlp_without_native_feature() {
 }
 
 #[test]
-fn lp_milp_falls_back_to_relaxation() {
+fn lp_milp_falls_relaxation() {
     let _guard = Guard::new();
-    debug_test_hooks::set_milp(MilpBehavior::Panic);
-    debug_test_hooks::set_relax(RelaxBehavior::Normal);
+    MilpBehavior::Panic.set_milp();
+    RelaxBehavior::Normal.set_relax();
 
     let c1 = candidate("0xa", dec!(0.9), dec!(100));
     let c2 = candidate("0xb", dec!(0.8), dec!(100));
@@ -421,10 +421,10 @@ fn lp_milp_falls_back_to_relaxation() {
 }
 
 #[test]
-fn solver_failure_yields_empty_plan_not_panic() {
+fn solver_failure_empty_not() {
     let _guard = Guard::new();
-    debug_test_hooks::set_milp(MilpBehavior::FailInfeasible);
-    debug_test_hooks::set_relax(RelaxBehavior::Panic);
+    MilpBehavior::FailInfeasible.set_milp();
+    RelaxBehavior::Panic.set_relax();
 
     let c1 = candidate("0xa", dec!(0.9), dec!(100));
     let caps = caps(dec!(500), dec!(1000), dec!(1000), dec!(5000));
@@ -454,7 +454,7 @@ fn solver_failure_yields_empty_plan_not_panic() {
 }
 
 #[test]
-fn aggregate_exposure_never_exceeds_cap() {
+fn aggregate_exposure_never_cap() {
     let c1 = candidate("0xa", dec!(0.9), dec!(100));
     let c2 = candidate("0xb", dec!(0.85), dec!(100));
     let c3 = candidate("0xc", dec!(0.8), dec!(100));
@@ -498,7 +498,7 @@ fn aggregate_exposure_never_exceeds_cap() {
 }
 
 #[test]
-fn aggregate_exposure_with_existing_holdings_attributes_binding_correctly() {
+fn aggregate_exposure_holdings_correctly() {
     // The account already holds $800 net exposure; the aggregate cap is
     // $1,000 (25% of a $4,000 capital base). Only $200 of headroom remains,
     // so a $1,000 desired allocation must be capped down to (near) $200 and
@@ -546,7 +546,7 @@ fn aggregate_exposure_with_existing_holdings_attributes_binding_correctly() {
 }
 
 #[test]
-fn aggregate_exposure_denominator_is_capital_base_not_total_budget() {
+fn aggregate_exposure_not_budget() {
     // `total_budget_usd` (a raw, venue-unaware config value) is set far above
     // `capital_base_usd` (the governed, venue-net-liquidation-capped sizing
     // anchor) — the aggregate cap must track `capital_base_usd`, never the

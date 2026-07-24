@@ -29,7 +29,7 @@ use crate::{
         TradePolicyCandidateId, TradePolicyCandidateSpec, TradePolicyEvidenceObjectKind,
         TradePolicyGovernanceAuditId, TradePolicyPublicationBlocker, TradePolicyTrialAttemptId,
         TradePolicyTrialMetrics, TradePolicyValidationRunId, TrainingDatasetId, TrainingExampleId,
-        UserId, resolve_builtin_research_profile,
+        UserId,
     },
 };
 
@@ -44,7 +44,9 @@ pub struct TradePolicyFitSelection {
 
 impl TradePolicyFitSelection {
     pub fn validate(&self) -> Result<(), String> {
-        resolve_builtin_research_profile(&self.profile_ref).map(|_| ())
+        self.profile_ref
+            .resolve_builtin_research_profile()
+            .map(|_| ())
     }
 }
 

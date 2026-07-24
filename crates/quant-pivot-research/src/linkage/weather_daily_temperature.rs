@@ -509,7 +509,7 @@ pub fn validate_weather_decision_group(
     let Some(first) = members.first() else {
         return Err("weather decision group is empty".to_owned());
     };
-    if !first.subject.has_valid_decision_group_id() {
+    if !first.subject.has_valid_decision_group() {
         return Err("weather decision group id does not match its canonical key".to_owned());
     }
     let mut market_ids = BTreeSet::new();
@@ -529,7 +529,7 @@ pub fn validate_weather_decision_group(
         }
         if member.subject.decision_group_id != first.subject.decision_group_id
             || member.subject.decision_group != first.subject.decision_group
-            || !member.subject.has_valid_decision_group_id()
+            || !member.subject.has_valid_decision_group()
         {
             return Err(format!(
                 "weather sibling `{}` has a different decision-group identity",
@@ -633,14 +633,16 @@ mod tests {
         }
     }
 
-    fn extractor() -> WeatherDailyTemperatureExtractor {
-        WeatherDailyTemperatureExtractor::new(
-            WeatherStationRegistry::try_new(BTreeMap::from([(
-                "KLGA".to_owned(),
-                station_profile(),
-            )]))
-            .expect("station registry"),
-        )
+    impl WeatherDailyTemperatureExtractor {
+        fn test_fixture() -> Self {
+            Self::new(
+                WeatherStationRegistry::try_new(BTreeMap::from([(
+                    "KLGA".to_owned(),
+                    station_profile(),
+                )]))
+                .expect("station registry"),
+            )
+        }
     }
 
     fn metadata(question: &str, next_day_finalization: bool) -> LinkageSourceMetadata {
@@ -674,7 +676,7 @@ mod tests {
     }
 
     fn subject(question: &str, next_day_finalization: bool) -> WeatherSubject {
-        let candidate = extractor()
+        let candidate = WeatherDailyTemperatureExtractor::test_fixture()
             .extract(&metadata(question, next_day_finalization))
             .expect("extract")
             .expect("weather candidate");
@@ -685,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_maximum_minimum_exact_and_open_temperature_bands() {
+    fn resolves_maximum_minimum_bands() {
         for (question, lower, upper, statistic, finalization) in [
             (
                 "Will the highest temperature in New York City be between 82-83°F on July 11?",
@@ -725,7 +727,7 @@ mod tests {
             assert_eq!(subject.decision_group.station.as_str(), "KLGA");
             assert_eq!(subject.decision_group.temperature_statistic, statistic);
             assert_eq!(subject.decision_group.finalization_policy, finalization);
-            assert!(subject.has_valid_decision_group_id());
+            assert!(subject.has_valid_decision_group());
         }
     }
 
@@ -744,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_noaa_timeseries_station_from_source_native_site_parameter() {
+    fn resolves_noaa_timeseries_parameter() {
         let extractor = WeatherDailyTemperatureExtractor::new(
             WeatherStationRegistry::try_new(BTreeMap::from([(
                 "LTFM".to_owned(),
@@ -791,11 +793,11 @@ mod tests {
             subject.decision_group.settlement_rule_url,
             "https://www.weather.gov/wrh/timeseries?site=ltfm"
         );
-        assert!(subject.has_valid_decision_group_id());
+        assert!(subject.has_valid_decision_group());
     }
 
     #[test]
-    fn station_registry_rejects_invalid_or_ambiguous_profiles() {
+    fn station_rejects_invalid_profiles() {
         let mut invalid_timezone = station_profile();
         invalid_timezone.timezone = "New_York-ish".to_owned();
         assert!(
@@ -838,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_exhaustive_sibling_group_and_exactly_one_winner() {
+    fn validates_exhaustive_sibling_winner() {
         let questions = [
             "Will the highest temperature in New York City be 12°F or below on July 11?",
             "Will the highest temperature in New York City be 13°F on July 11?",

@@ -411,7 +411,7 @@ impl QuantModelRuntime for WeightedFactorRuntime {
 
     async fn infer_batch(&self, input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
         let started = Instant::now();
-        let table = expect_factor_table(input)?;
+        let table = (input).expect_factor_table()?;
         let markets_scored =
             u32::try_from(table.rows.len()).map_err(|error| ResearchError::Inference {
                 detail: format!("weighted market count does not fit u32: {error}"),
@@ -468,14 +468,16 @@ impl QuantModelRuntime for WeightedFactorRuntime {
     }
 }
 
-/// Extract the factor table, rejecting a feature-matrix input (classical only).
-fn expect_factor_table(input: ModelRuntimeInput) -> QuantResult<FactorInferenceTable> {
-    match input {
-        ModelRuntimeInput::FactorTable(table) => Ok(table),
-        ModelRuntimeInput::FeatureMatrix(_) => Err(ResearchError::Inference {
-            detail: "weighted runtime requires a factor table, got a feature matrix".to_owned(),
+impl ModelRuntimeInput {
+    /// Extract the factor table, rejecting a feature-matrix input (classical only).
+    fn expect_factor_table(self) -> QuantResult<FactorInferenceTable> {
+        match self {
+            Self::FactorTable(table) => Ok(table),
+            Self::FeatureMatrix(_) => Err(ResearchError::Inference {
+                detail: "weighted runtime requires a factor table, got a feature matrix".to_owned(),
+            }
+            .into()),
         }
-        .into()),
     }
 }
 
@@ -589,58 +591,62 @@ mod tests {
         }
     }
 
-    fn artifact() -> WeightedFactorModelArtifact {
-        let input_contract = ModelInputContract::single_required("book.mid");
-        let input_contract_hash =
-            model_input_contract_hash(&input_contract).expect("input contract hash");
-        WeightedFactorModelArtifact {
-            header: ModelArtifactHeader {
-                model_version_id: ModelVersionId::from_v7(),
-                model_spec_definition_hash: hash("spec"),
-                profile_ref: builtin_research_profiles()
-                    .expect("built-in profiles")
-                    .remove(0)
-                    .profile_ref,
-                model_family: ModelFamily::WeightedFactor,
-                feature_schema_hash: hash("aa"),
-                factor_schema_hash: hash("bb"),
-                trade_policy_artifact_id: None,
-                trade_policy_hash: None,
-            },
-            training_dataset_hash: hash("cc"),
-            training_input_hash: hash("dd"),
-            input_contract,
-            input_contract_hash,
-            weights: vec![
-                FactorWeight {
-                    factor: LIQUIDITY_DEPTH,
-                    weight: dec!(0.5),
+    impl WeightedFactorModelArtifact {
+        fn weighted_fixture() -> Self {
+            let input_contract = ModelInputContract::single_required("book.mid");
+            let input_contract_hash =
+                model_input_contract_hash(&input_contract).expect("input contract hash");
+            Self {
+                header: ModelArtifactHeader {
+                    model_version_id: ModelVersionId::from_v7(),
+                    model_spec_definition_hash: hash("spec"),
+                    profile_ref: builtin_research_profiles()
+                        .expect("built-in profiles")
+                        .remove(0)
+                        .profile_ref,
+                    model_family: ModelFamily::WeightedFactor,
+                    feature_schema_hash: hash("aa"),
+                    factor_schema_hash: hash("bb"),
+                    trade_policy_artifact_id: None,
+                    trade_policy_hash: None,
                 },
-                FactorWeight {
-                    factor: MOMENTUM_ROC,
-                    weight: dec!(0.5),
-                },
-            ],
-            prediction_horizon_secs: 86_400,
-            multipliers: ScoreMultiplierSpec::conservative(),
-            substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-            return_model: ReturnModelSpec::heuristic_default(),
-            factor_cross_section: FactorCrossSectionConfig::default(),
-            frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
-            objective_report: None,
-            category_scope: None,
+                training_dataset_hash: hash("cc"),
+                training_input_hash: hash("dd"),
+                input_contract,
+                input_contract_hash,
+                weights: vec![
+                    FactorWeight {
+                        factor: LIQUIDITY_DEPTH,
+                        weight: dec!(0.5),
+                    },
+                    FactorWeight {
+                        factor: MOMENTUM_ROC,
+                        weight: dec!(0.5),
+                    },
+                ],
+                prediction_horizon_secs: 86_400,
+                multipliers: ScoreMultiplierSpec::conservative(),
+                substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+                return_model: ReturnModelSpec::heuristic_default(),
+                factor_cross_section: FactorCrossSectionConfig::default(),
+                frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
+                objective_report: None,
+                category_scope: None,
+            }
         }
     }
 
-    fn context() -> MarketInferenceContext {
-        MarketInferenceContext {
-            secondary_token_id: Some(TokenId::new("no")),
-            yes_price: Price::new(dec!(0.5)),
-            no_price: Some(Price::new(dec!(0.52))),
-            liquidity_usd: Some(Usd::new(dec!(60000))),
-            data_quality: DataQualityStatus::Fresh,
-            time_to_resolution_secs: Some(86_400),
-            substitution_reasons: Vec::new(),
+    impl MarketInferenceContext {
+        fn weighted_fixture() -> Self {
+            Self {
+                secondary_token_id: Some(TokenId::new("no")),
+                yes_price: Price::new(dec!(0.5)),
+                no_price: Some(Price::new(dec!(0.52))),
+                liquidity_usd: Some(Usd::new(dec!(60000))),
+                data_quality: DataQualityStatus::Fresh,
+                time_to_resolution_secs: Some(86_400),
+                substitution_reasons: Vec::new(),
+            }
         }
     }
 
@@ -657,16 +663,18 @@ mod tests {
                 factor(LIQUIDITY_DEPTH, Probability::new(dec!(0.8)), direction),
                 factor(MOMENTUM_ROC, Probability::new(dec!(0.6)), direction),
             ],
-            context: context(),
+            context: MarketInferenceContext::weighted_fixture(),
         }
     }
 
     #[tokio::test]
-    async fn weighted_runtime_scores_candidates_from_factor_table() {
+    async fn weighted_runtime_scores_table() {
         let expected_contract_hash =
             model_input_contract_hash(&ModelInputContract::single_required("book.mid"))
                 .expect("contract hash");
-        let runtime = WeightedFactorRuntime::new(artifact(), None, None).expect("runtime");
+        let runtime =
+            WeightedFactorRuntime::new(WeightedFactorModelArtifact::weighted_fixture(), None, None)
+                .expect("runtime");
         let table = FactorInferenceTable {
             model_run_id: ModelRunId::from_v7(),
             decision_at: Utc::now(),
@@ -722,8 +730,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn weighted_runtime_never_fabricates_a_missing_no_quote() {
-        let runtime = WeightedFactorRuntime::new(artifact(), None, None).expect("runtime");
+    async fn weighted_never_missing_no() {
+        let runtime =
+            WeightedFactorRuntime::new(WeightedFactorModelArtifact::weighted_fixture(), None, None)
+                .expect("runtime");
         let mut bearish = row("0xmissing-no", false);
         bearish.context.no_price = None;
         let output = runtime
@@ -739,8 +749,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn weighted_audit_keeps_missing_factor_without_numeric_sentinel() {
-        let runtime = WeightedFactorRuntime::new(artifact(), None, None).expect("runtime");
+    async fn weighted_keeps_missing_without() {
+        let runtime =
+            WeightedFactorRuntime::new(WeightedFactorModelArtifact::weighted_fixture(), None, None)
+                .expect("runtime");
         let mut missing = factor(
             LIQUIDITY_DEPTH,
             Probability::new(dec!(0.8)),
@@ -762,7 +774,7 @@ mod tests {
                         FactorDirection::Positive,
                     ),
                 ],
-                context: context(),
+                context: MarketInferenceContext::weighted_fixture(),
             }],
         };
         let output = runtime
@@ -783,8 +795,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn neutral_factors_emit_no_candidate() {
-        let runtime = WeightedFactorRuntime::new(artifact(), None, None).expect("runtime");
+    async fn neutral_factors_no_candidate() {
+        let runtime =
+            WeightedFactorRuntime::new(WeightedFactorModelArtifact::weighted_fixture(), None, None)
+                .expect("runtime");
         let neutral_row = FactorInferenceRow {
             market_id: MarketId::new("0xflat"),
             token_id: TokenId::new("yes"),
@@ -800,7 +814,7 @@ mod tests {
                     FactorDirection::Neutral,
                 ),
             ],
-            context: context(),
+            context: MarketInferenceContext::weighted_fixture(),
         };
         let table = FactorInferenceTable {
             model_run_id: ModelRunId::from_v7(),
@@ -823,7 +837,9 @@ mod tests {
         // still scores off the remaining scored factor; the indeterminate factor
         // is surfaced in the breakdown with a zero contribution and no fabricated
         // normalized score — never a silent neutral.
-        let runtime = WeightedFactorRuntime::new(artifact(), None, None).expect("runtime");
+        let runtime =
+            WeightedFactorRuntime::new(WeightedFactorModelArtifact::weighted_fixture(), None, None)
+                .expect("runtime");
         let indeterminate = FactorValue {
             definition_id: FactorDefinitionId::from_v7(),
             name: MOMENTUM_ROC,
@@ -851,7 +867,7 @@ mod tests {
                 ),
                 indeterminate,
             ],
-            context: context(),
+            context: MarketInferenceContext::weighted_fixture(),
         };
         let table = FactorInferenceTable {
             model_run_id: ModelRunId::from_v7(),

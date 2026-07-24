@@ -6,123 +6,129 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         ResearchProfileArtifact, ResearchProfileArtifactId, ResearchProfileRef,
-        builtin_research_profiles, resolve_builtin_research_profile,
+        builtin_research_profiles,
     },
 };
 use sea_orm::{ActiveValue, ActiveValue::Set, ConnectionTrait, EntityTrait, TryInsertResult};
 
-fn validate_row(row: &Model) -> Result<ResearchProfileRef, StorageError> {
-    let version = u32::try_from(row.version).map_err(|error| {
-        StorageError::invariant_violation(
-            Some("research_profile_artifact"),
-            format!("profile version is not a positive u32: {error}"),
-        )
-    })?;
-    let profile_ref = ResearchProfileRef {
-        id: row.research_profile_id.clone(),
-        version,
-        content_hash: row.content_hash,
-    };
-    let computed_hash = CanonicalDigest::content_hash_json(&row.spec).map_err(|error| {
-        StorageError::invariant_violation(
-            Some("research_profile_artifact"),
-            format!("failed to hash typed profile spec: {error}"),
-        )
-    })?;
-    if computed_hash != row.content_hash
-        || profile_ref.artifact_id() != row.research_profile_artifact_id
-    {
-        return Err(StorageError::invariant_violation(
-            Some("research_profile_artifact"),
-            format!(
-                "research profile artifact {} has inconsistent id/hash/spec",
-                row.research_profile_artifact_id
-            ),
-        ));
-    }
-    Ok(profile_ref)
-}
+use super::model_registry::PgModelRegistryRepository;
 
-pub async fn ensure(
-    db: &impl ConnectionTrait,
-    profile_ref: &ResearchProfileRef,
-) -> Result<ResearchProfileArtifactId, StorageError> {
-    let profile = resolve_builtin_research_profile(profile_ref).map_err(|detail| {
-        StorageError::invariant_violation(Some("research_profile_artifact"), detail)
-    })?;
-    insert_or_verify(db, &profile).await
-}
-
-pub async fn ensure_builtins(
-    db: &impl ConnectionTrait,
-) -> Result<Vec<ResearchProfileArtifactId>, StorageError> {
-    let profiles = builtin_research_profiles().map_err(|detail| {
-        StorageError::invariant_violation(Some("research_profile_artifact"), detail)
-    })?;
-    let mut ids = Vec::with_capacity(profiles.len());
-    for profile in &profiles {
-        ids.push(insert_or_verify(db, profile).await?);
+impl PgModelRegistryRepository {
+    pub(super) async fn ensure_profile(
+        db: &impl ConnectionTrait,
+        profile_ref: &ResearchProfileRef,
+    ) -> Result<ResearchProfileArtifactId, StorageError> {
+        let profile = profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(|detail| {
+                StorageError::invariant_violation(Some("research_profile_artifact"), detail)
+            })?;
+        Self::insert_profile(db, &profile).await
     }
-    Ok(ids)
-}
 
-async fn insert_or_verify(
-    db: &impl ConnectionTrait,
-    profile: &ResearchProfileArtifact,
-) -> Result<ResearchProfileArtifactId, StorageError> {
-    let artifact_id = profile.profile_ref.artifact_id();
-    let version = i32::try_from(profile.profile_ref.version).map_err(|error| {
-        StorageError::invariant_violation(
-            Some("research_profile_artifact"),
-            format!("profile version exceeds i32: {error}"),
-        )
-    })?;
-    let outcome = Entity::insert(ActiveModel {
-        research_profile_artifact_id: Set(artifact_id.clone()),
-        research_profile_id: Set(profile.profile_ref.id.clone()),
-        version: Set(version),
-        content_hash: Set(profile.profile_ref.content_hash),
-        spec: Set(profile.spec.clone()),
-        published_by: Set(profile.published_by.clone()),
-        published_at: Set(profile.published_at),
-        governance_reason: Set(profile.governance_reason.clone()),
-        created_at: ActiveValue::NotSet,
-    })
-    .on_conflict_do_nothing_on([Column::ResearchProfileArtifactId])
-    .exec_without_returning(db)
-    .await
-    .map_err(StorageError::from)?;
-    if !matches!(
-        outcome,
-        TryInsertResult::Inserted(1 | 0) | TryInsertResult::Conflicted
-    ) {
-        return Err(StorageError::invariant_violation(
-            Some("research_profile_artifact"),
-            "single research profile insert returned an invalid row count",
-        ));
+    pub(super) async fn ensure_builtins(
+        db: &impl ConnectionTrait,
+    ) -> Result<Vec<ResearchProfileArtifactId>, StorageError> {
+        let profiles = builtin_research_profiles().map_err(|detail| {
+            StorageError::invariant_violation(Some("research_profile_artifact"), detail)
+        })?;
+        let mut ids = Vec::with_capacity(profiles.len());
+        for profile in &profiles {
+            ids.push(Self::insert_profile(db, profile).await?);
+        }
+        Ok(ids)
     }
-    let row = Entity::find_by_id(artifact_id.clone())
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| {
+
+    async fn insert_profile(
+        db: &impl ConnectionTrait,
+        profile: &ResearchProfileArtifact,
+    ) -> Result<ResearchProfileArtifactId, StorageError> {
+        let artifact_id = profile.profile_ref.artifact_id();
+        let version = i32::try_from(profile.profile_ref.version).map_err(|error| {
             StorageError::invariant_violation(
                 Some("research_profile_artifact"),
-                "research profile disappeared after insert",
+                format!("profile version exceeds i32: {error}"),
             )
         })?;
-    let stored_ref = validate_row(&row)?;
-    if stored_ref != profile.profile_ref
-        || row.spec != profile.spec
-        || row.published_by != profile.published_by
-        || row.published_at != profile.published_at
-        || row.governance_reason != profile.governance_reason
-    {
-        return Err(StorageError::state_conflict(
-            "research_profile_artifact",
-            Some(&artifact_id),
-            "immutable profile address exists with different content or governance metadata",
-        ));
+        let outcome = Entity::insert(ActiveModel {
+            research_profile_artifact_id: Set(artifact_id.clone()),
+            research_profile_id: Set(profile.profile_ref.id.clone()),
+            version: Set(version),
+            content_hash: Set(profile.profile_ref.content_hash),
+            spec: Set(profile.spec.clone()),
+            published_by: Set(profile.published_by.clone()),
+            published_at: Set(profile.published_at),
+            governance_reason: Set(profile.governance_reason.clone()),
+            created_at: ActiveValue::NotSet,
+        })
+        .on_conflict_do_nothing_on([Column::ResearchProfileArtifactId])
+        .exec_without_returning(db)
+        .await
+        .map_err(StorageError::from)?;
+        if !matches!(
+            outcome,
+            TryInsertResult::Inserted(1 | 0) | TryInsertResult::Conflicted
+        ) {
+            return Err(StorageError::invariant_violation(
+                Some("research_profile_artifact"),
+                "single research profile insert returned an invalid row count",
+            ));
+        }
+        let row = Entity::find_by_id(artifact_id.clone())
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some("research_profile_artifact"),
+                    "research profile disappeared after insert",
+                )
+            })?;
+        let stored_ref = Self::validate_profile_row(&row)?;
+        if stored_ref != profile.profile_ref
+            || row.spec != profile.spec
+            || row.published_by != profile.published_by
+            || row.published_at != profile.published_at
+            || row.governance_reason != profile.governance_reason
+        {
+            return Err(StorageError::state_conflict(
+                "research_profile_artifact",
+                Some(&artifact_id),
+                "immutable profile address exists with different content or governance metadata",
+            ));
+        }
+        Ok(artifact_id)
     }
-    Ok(artifact_id)
+
+    fn validate_profile_row(row: &Model) -> Result<ResearchProfileRef, StorageError> {
+        let version = u32::try_from(row.version).map_err(|error| {
+            StorageError::invariant_violation(
+                Some("research_profile_artifact"),
+                format!("profile version is not a positive u32: {error}"),
+            )
+        })?;
+        let profile_ref = ResearchProfileRef {
+            id: row.research_profile_id.clone(),
+            version,
+            content_hash: row.content_hash,
+        };
+        let computed_hash = CanonicalDigest::content_hash_json(&row.spec).map_err(|error| {
+            StorageError::invariant_violation(
+                Some("research_profile_artifact"),
+                format!("failed to hash typed profile spec: {error}"),
+            )
+        })?;
+        if computed_hash != row.content_hash
+            || profile_ref.artifact_id() != row.research_profile_artifact_id
+        {
+            return Err(StorageError::invariant_violation(
+                Some("research_profile_artifact"),
+                format!(
+                    "research profile artifact {} has inconsistent id/hash/spec",
+                    row.research_profile_artifact_id
+                ),
+            ));
+        }
+        Ok(profile_ref)
+    }
 }

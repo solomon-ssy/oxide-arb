@@ -260,7 +260,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inventory_digest_is_order_independent_and_policy_is_account_wide() {
+    fn inventory_digest_order_wide() {
         let automatic = lot(
             ExecutionAccountId::from_v7(),
             ExitSettlementMode::HoldToResolution,
@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_account_contributor_fails_closed() {
+    fn cross_account_contributor_rejects() {
         let account = ExecutionAccountId::from_v7();
         let foreign = lot(
             ExecutionAccountId::from_v7(),
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn only_hold_to_resolution_auto_inventory_is_automatic_eligible() {
+    fn only_hold_resolution_eligible() {
         let account = ExecutionAccountId::from_v7();
         let automatic = candidate(
             account,

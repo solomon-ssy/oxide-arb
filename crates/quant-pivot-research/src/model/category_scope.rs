@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn infers_from_single_by_category_requirement() {
+    fn infers_single_category_requirement() {
         let mut requirements = ModelFeatureRequirements::default();
         requirements.by_category.insert(
             MarketCategory::Crypto,
@@ -176,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn infers_from_unanimous_example_categories() {
+    fn infers_unanimous_example_categories() {
         let requirements = ModelFeatureRequirements::default();
         let examples = vec![
             example(MarketCategory::Crypto),
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn crypto_scope_requires_domain_factor_weight() {
+    fn crypto_scope_requires_weight() {
         validate_category_scope_weights(
             Some(MarketCategory::Crypto),
             &[FactorWeight {

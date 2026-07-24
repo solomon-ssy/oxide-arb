@@ -65,7 +65,7 @@ mod tests {
     use super::{PartitionBatchId, PartitionId, TokenKey};
 
     #[test]
-    fn data_plane_identifiers_are_compact_copy_values() {
+    fn plane_identifiers_compact_values() {
         assert_eq!(size_of::<TokenKey>(), 4);
         assert_eq!(size_of::<PartitionId>(), 1);
         assert_eq!(size_of::<PartitionBatchId>(), 8);

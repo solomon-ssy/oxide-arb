@@ -137,7 +137,7 @@ fn price_extremity_feature(ctx: &FeatureComputeCtx<'_>) -> RawFeature {
     RawFeature::present(
         PRICE_EXTREMITY,
         FeatureValue::Decimal(extremity),
-        book_evidence(book),
+        (book).book_evidence(),
     )
 }
 
@@ -445,13 +445,15 @@ fn negrisk_all_missing(reason: NullReason) -> Vec<RawFeature> {
     .collect()
 }
 
-/// Book-derived evidence anchored on the book's observation time.
-fn book_evidence(book: &ResolvedBook) -> EvidenceSourceRef {
-    EvidenceSourceRef {
-        source_kind: EvidenceSourceKind::Book,
-        reference: book.token_id.to_string(),
-        effective_at: book.effective_at,
-        available_at: Some(book.available_at),
+impl ResolvedBook {
+    /// Book-derived evidence anchored on the book's observation time.
+    fn book_evidence(&self) -> EvidenceSourceRef {
+        EvidenceSourceRef {
+            source_kind: EvidenceSourceKind::Book,
+            reference: self.token_id.to_string(),
+            effective_at: self.effective_at,
+            available_at: Some(self.available_at),
+        }
     }
 }
 
@@ -579,7 +581,7 @@ mod trade_tape_null_reason_tests {
     }
 
     #[test]
-    fn unavailable_source_marks_all_trade_tape_features_unavailable() {
+    fn unavailable_source_marks_unavailable() {
         let config = FeaturesConfig::default();
         let trade_tape = trade_tape_snapshot(false, Vec::new());
         let features = trade_tape_only(&trade_tape, &config);
@@ -590,7 +592,7 @@ mod trade_tape_null_reason_tests {
     }
 
     #[test]
-    fn empty_available_window_marks_all_trade_tape_features_insufficient() {
+    fn empty_window_marks_insufficient() {
         let config = FeaturesConfig::default();
         let trade_tape = trade_tape_snapshot(true, Vec::new());
         let features = trade_tape_only(&trade_tape, &config);
@@ -601,7 +603,7 @@ mod trade_tape_null_reason_tests {
     }
 
     #[test]
-    fn below_min_unique_participants_is_insufficient() {
+    fn below_min_unique_insufficient() {
         let mut config = FeaturesConfig::default();
         config.structural.trade_tape_min_unique_participants = 3;
         let prints = vec![

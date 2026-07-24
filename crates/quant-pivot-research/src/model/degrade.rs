@@ -59,17 +59,19 @@ pub enum DegradeAction {
     KeepActiveRecordShadow,
 }
 
-/// The governed action for a failure at `stage`.
-///
-/// Active-path failures fail the run with a critical alert (an empty report is
-/// never silently fabricated); shadow-path failures are isolated so a broken
-/// candidate model can never take down live reporting.
-#[must_use]
-pub const fn degrade_action(stage: InferenceStage) -> DegradeAction {
-    if stage.is_shadow() {
-        DegradeAction::KeepActiveRecordShadow
-    } else {
-        DegradeAction::FailRunCritical
+impl InferenceStage {
+    /// The governed action for a failure at `stage`.
+    ///
+    /// Active-path failures fail the run with a critical alert (an empty report is
+    /// never silently fabricated); shadow-path failures are isolated so a broken
+    /// candidate model can never take down live reporting.
+    #[must_use]
+    pub const fn degrade_action(self) -> DegradeAction {
+        if self.is_shadow() {
+            DegradeAction::KeepActiveRecordShadow
+        } else {
+            DegradeAction::FailRunCritical
+        }
     }
 }
 
@@ -77,30 +79,30 @@ pub const fn degrade_action(stage: InferenceStage) -> DegradeAction {
 mod tests {
     use quant_pivot_models::enums::quant::ModelRunErrorCode;
 
-    use super::{DegradeAction, InferenceStage, degrade_action};
+    use super::{DegradeAction, InferenceStage};
 
     #[test]
-    fn active_failures_are_critical_shadow_failures_isolated() {
+    fn active_failures_critical_isolated() {
         assert_eq!(
-            degrade_action(InferenceStage::ActiveLoad),
+            (InferenceStage::ActiveLoad).degrade_action(),
             DegradeAction::FailRunCritical
         );
         assert_eq!(
-            degrade_action(InferenceStage::ActiveInference),
+            (InferenceStage::ActiveInference).degrade_action(),
             DegradeAction::FailRunCritical
         );
         assert_eq!(
-            degrade_action(InferenceStage::ShadowLoad),
+            (InferenceStage::ShadowLoad).degrade_action(),
             DegradeAction::KeepActiveRecordShadow
         );
         assert_eq!(
-            degrade_action(InferenceStage::ShadowInference),
+            (InferenceStage::ShadowInference).degrade_action(),
             DegradeAction::KeepActiveRecordShadow
         );
     }
 
     #[test]
-    fn active_error_codes_map_active_stages() {
+    fn active_error_codes_stages() {
         assert_eq!(
             InferenceStage::ActiveLoad.active_error_code(),
             ModelRunErrorCode::ArtifactLoadFailed
@@ -112,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn shadow_error_codes_map_shadow_stages() {
+    fn shadow_error_codes_stages() {
         assert_eq!(
             InferenceStage::ShadowLoad.shadow_error_code(),
             ModelRunErrorCode::ArtifactLoadFailed

@@ -442,7 +442,7 @@ impl ModelRunner {
             .map(|reference| reference.id)?;
         let version = self
             .model_registry_repo
-            .find_model_version_by_id(&version_id)
+            .find_model_version(&version_id)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| {
@@ -477,7 +477,7 @@ impl ModelRunner {
         let runtime = factory
             .load(&version, self.resolve_overlay(&version))
             .await?;
-        ensure_production_buy_runtime_family(runtime.as_ref())?;
+        ensure_buy_runtime(runtime.as_ref())?;
 
         let mut by_category = HashMap::new();
         for (category, reference) in &request.model.category_model_pointers {
@@ -514,7 +514,7 @@ impl ModelRunner {
         let version_id = reference.id;
         let version = self
             .model_registry_repo
-            .find_model_version_by_id(&version_id)
+            .find_model_version(&version_id)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| ResearchError::InvalidModelArtifact {
@@ -532,7 +532,7 @@ impl ModelRunner {
         let runtime = factory
             .load(&version, self.resolve_overlay(&version))
             .await?;
-        ensure_production_buy_runtime_family(runtime.as_ref())?;
+        ensure_buy_runtime(runtime.as_ref())?;
         if runtime.category_scope() != Some(category) {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: format!(
@@ -786,7 +786,7 @@ impl ModelRunner {
     ) -> Result<Box<dyn QuantModelRuntime>, (InferenceStage, QuantError)> {
         let registry_entry = self
             .model_registry_repo
-            .find_model_version_by_id(shadow_version_id)
+            .find_model_version(shadow_version_id)
             .await
             .map_err(QuantError::from)
             .and_then(|row| {
@@ -930,7 +930,7 @@ impl ModelRunner {
                 .into(),
             ));
         }
-        ensure_production_buy_runtime_family(generic_runtime.as_ref())
+        ensure_buy_runtime(generic_runtime.as_ref())
             .map_err(|error| (InferenceStage::ActiveLoad, error))?;
 
         let mut category_routes = HashMap::new();
@@ -954,7 +954,7 @@ impl ModelRunner {
                     .into(),
                 ));
             }
-            ensure_production_buy_runtime_family(runtime.as_ref())
+            ensure_buy_runtime(runtime.as_ref())
                 .map_err(|error| (InferenceStage::ActiveLoad, error))?;
             if runtimes.insert(version_id, runtime).is_some() {
                 return Err((
@@ -1060,7 +1060,7 @@ impl ModelRunner {
     ) -> Result<ModelVersionInfo, (InferenceStage, QuantError)> {
         let version = self
             .model_registry_repo
-            .find_model_version_by_id(version_id)
+            .find_model_version(version_id)
             .await
             .map_err(QuantError::from)
             .and_then(|row| {
@@ -1149,7 +1149,7 @@ impl ModelRunner {
     async fn maybe_promote_shadow_status(&self, shadow_version_id: &ModelVersionId) {
         let Ok(Some(version)) = self
             .model_registry_repo
-            .find_model_version_by_id(shadow_version_id)
+            .find_model_version(shadow_version_id)
             .await
         else {
             return;
@@ -1637,7 +1637,7 @@ fn ensure_buy_runtime_family(runtime: &dyn QuantModelRuntime) -> QuantResult<()>
     .into())
 }
 
-fn ensure_production_buy_runtime_family(runtime: &dyn QuantModelRuntime) -> QuantResult<()> {
+fn ensure_buy_runtime(runtime: &dyn QuantModelRuntime) -> QuantResult<()> {
     let family = runtime.model_family();
     if family == ModelFamily::WeightedFactor {
         return Ok(());
@@ -1842,7 +1842,7 @@ mod tests {
     }
 
     #[test]
-    fn model_input_fingerprint_binds_exact_feature_vector() {
+    fn model_input_binds_vector() {
         let decision_at = Utc::now();
         let market_id = MarketId::new("0xaudit");
         let vector = FeatureVector {
@@ -1913,7 +1913,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_gate_report_is_accepted_for_candidate() {
+    fn fresh_gate_report_candidate() {
         let now = Utc::now();
         assert!(
             quality_gate_staleness_ok(
@@ -1926,7 +1926,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_quality_gate_report_is_denied_for_candidate() {
+    fn stale_quality_denied_candidate() {
         let now = Utc::now();
         let stale = now - Duration::seconds(90_000);
         assert!(
@@ -1940,7 +1940,7 @@ mod tests {
     }
 
     #[test]
-    fn published_active_is_exempt_from_staleness_deny() {
+    fn published_active_exempt_deny() {
         let now = Utc::now();
         let stale = now - Duration::seconds(90_000);
         assert!(
@@ -1954,7 +1954,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_budget_disables_the_check() {
+    fn zero_budget_disables_check() {
         let now = Utc::now();
         let stale = now - Duration::days(365);
         assert!(
@@ -1968,7 +1968,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_report_is_not_subject_to_staleness() {
+    fn absent_report_not_staleness() {
         let now = Utc::now();
         assert!(
             quality_gate_staleness_ok(&version(PublicationStatus::Candidate, None), 86_400, now,)

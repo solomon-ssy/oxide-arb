@@ -61,7 +61,7 @@ async fn insert_queued_report_run(
     .await
 }
 
-pub async fn typed_jsonb_rejects_postgres_corruption_without_fallback() {
+pub async fn typed_rejects_without_fallback() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection();
 
@@ -105,7 +105,7 @@ pub async fn typed_jsonb_rejects_postgres_corruption_without_fallback() {
     );
 }
 
-pub async fn semantic_text_revalidates_postgres_decode_and_database_checks() {
+pub async fn semantic_text_revalidates_checks() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection();
 

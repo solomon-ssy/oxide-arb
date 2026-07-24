@@ -240,7 +240,7 @@ impl TryFrom<WireMarket> for CatalogMarket {
         let start_date = wire.start_date();
         let end_date = wire.end_date();
         let closed = wire.closed.unwrap_or(false);
-        let filter_reasons = filter_reasons_from_wire(&wire);
+        let filter_reasons = wire.filter_reasons_from_wire();
         let status = market_status_from_wire(closed, filter_reasons);
         let settlement = derive_settlement(&wire, &tokens);
         let resolved_at = if status == MarketStatus::Settled {
@@ -338,21 +338,23 @@ const fn market_status_from_wire(
     }
 }
 
-fn filter_reasons_from_wire(wire: &WireMarket) -> CatalogFilterReasonSet {
-    let mut reasons = CatalogFilterReasonSet::EMPTY;
-    if wire.closed == Some(true) {
-        reasons.insert(CatalogFilterReason::Closed);
+impl WireMarket {
+    fn filter_reasons_from_wire(&self) -> CatalogFilterReasonSet {
+        let mut reasons = CatalogFilterReasonSet::EMPTY;
+        if self.closed == Some(true) {
+            reasons.insert(CatalogFilterReason::Closed);
+        }
+        if self.active == Some(false) {
+            reasons.insert(CatalogFilterReason::Inactive);
+        }
+        if self.enable_order_book == Some(false) {
+            reasons.insert(CatalogFilterReason::ClobDisabled);
+        }
+        if self.accepting_orders == Some(false) {
+            reasons.insert(CatalogFilterReason::OrdersNotAccepted);
+        }
+        reasons
     }
-    if wire.active == Some(false) {
-        reasons.insert(CatalogFilterReason::Inactive);
-    }
-    if wire.enable_order_book == Some(false) {
-        reasons.insert(CatalogFilterReason::ClobDisabled);
-    }
-    if wire.accepting_orders == Some(false) {
-        reasons.insert(CatalogFilterReason::OrdersNotAccepted);
-    }
-    reasons
 }
 
 /// Parse Gamma timestamps leniently.
@@ -384,7 +386,7 @@ mod tests {
     use crate::gamma::wire::{WireEvent, WireMarket};
 
     #[test]
-    fn filters_prelisting_market_with_source_id_and_empty_condition_id() {
+    fn filters_prelisting_empty_id() {
         let wire: WireEvent = serde_json::from_str(
             r#"{
                 "id": "1",
@@ -418,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_condition_id_without_source_identity() {
+    fn rejects_empty_without_identity() {
         let wire: WireEvent = serde_json::from_str(
             r#"{
                 "id": "1",
@@ -439,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_market_without_clob_token_ids() {
+    fn rejects_market_without_ids() {
         let wire: WireEvent = serde_json::from_str(
             r#"{
                 "id": "1",
@@ -459,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_condition_id_maps_to_reject_reason() {
+    fn empty_condition_maps_reason() {
         let wire: WireMarket = serde_json::from_str(
             r#"{"conditionId": "", "question": "?", "clobTokenIds": ["1"], "outcomes": ["Yes"]}"#,
         )
@@ -469,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn non_binary_token_count_is_rejected() {
+    fn non_binary_token_rejected() {
         let wire: WireMarket = serde_json::from_str(
             r#"{
                 "conditionId": "0xabc",
@@ -487,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn half_and_quarter_cent_tick_sizes_are_accepted() {
+    fn half_quarter_cent_accepted() {
         let half: WireMarket = serde_json::from_str(
             r#"{
                 "conditionId": "0xhalf",
@@ -516,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_tick_size_is_rejected_without_hundredth_fallback() {
+    fn unsupported_rejected_without_fallback() {
         let wire: WireMarket = serde_json::from_str(
             r#"{
                 "conditionId": "0xabc",
@@ -535,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_outcome_binary_market_is_accepted() {
+    fn custom_outcome_binary_accepted() {
         let wire: WireMarket = serde_json::from_str(
             r#"{
                 "conditionId": "0xabc",
@@ -551,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_trading_flags_produce_typed_filter_reasons() {
+    fn explicit_trading_flags_reasons() {
         let wire: WireMarket = serde_json::from_str(
             r#"{
                 "conditionId": "0xfiltered",
@@ -585,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_trading_flags_do_not_fabricate_filter_reasons() {
+    fn absent_flags_never_fabricate() {
         let wire: WireMarket = serde_json::from_str(
             r#"{
                 "conditionId": "0xactive",
@@ -602,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_derived_from_outcome_prices_when_resolved() {
+    fn settlement_derived_outcome_resolved() {
         let wire: WireMarket = serde_json::from_str(
             r#"{
                 "conditionId": "0xdone",
@@ -626,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_fails_closed_on_ambiguity() {
+    fn settlement_rejects_ambiguity() {
         // Not UMA-resolved.
         let unresolved: WireMarket = serde_json::from_str(
             r#"{
@@ -679,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn volume_24h_preserves_missing_vs_zero_semantics() {
+    fn volume_preserves_missing_zero() {
         let absent: WireMarket = serde_json::from_str(
             r#"{
                 "conditionId": "0xabsent",
@@ -707,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn event_category_and_status_derive_from_tags_and_closed() {
+    fn event_category_status_closed() {
         let wire: WireEvent = serde_json::from_str(
             r#"{
                 "id": "evt-1",

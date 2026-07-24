@@ -48,7 +48,7 @@ const EVENT_ID: &str = "evt-batch-catalog-ledger";
 const MARKET_A: &str = "0xbatch-catalog-a";
 const MARKET_B: &str = "0xbatch-catalog-b";
 
-pub async fn correction_is_invisible_until_its_availability_time() {
+pub async fn correction_invisible_until_time() {
     let (pool, _container) = setup_pg().await;
     let repo = PgCatalogLedgerRepository::new(pool.connection().clone());
     let t0 = Utc.with_ymd_and_hms(2026, 7, 10, 0, 0, 0).unwrap();
@@ -134,7 +134,7 @@ pub async fn correction_is_invisible_until_its_availability_time() {
     }));
 }
 
-pub async fn batch_snapshot_observes_one_exact_event_revision_and_membership() {
+pub async fn batch_snapshot_observes_membership() {
     let (pool, _container) = setup_pg().await;
     let repo = PgCatalogLedgerRepository::new(pool.connection().clone());
     let t0 = Utc.with_ymd_and_hms(2026, 7, 10, 1, 0, 0).unwrap();
@@ -202,7 +202,7 @@ pub async fn batch_snapshot_observes_one_exact_event_revision_and_membership() {
     assert_coherent_membership(&before_effective, &original_event_change_id, "original");
 }
 
-pub async fn batch_snapshot_rejects_decisions_before_catalog_coverage() {
+pub async fn batch_rejects_before_coverage() {
     let (pool, _container) = setup_pg().await;
     let repo = PgCatalogLedgerRepository::new(pool.connection().clone());
     let coverage_start = Utc.with_ymd_and_hms(2026, 7, 10, 2, 0, 0).unwrap();
@@ -244,7 +244,7 @@ pub async fn batch_snapshot_rejects_decisions_before_catalog_coverage() {
     assert_eq!(at_coverage_start.len(), 2);
 }
 
-pub async fn concurrent_batch_reads_never_observe_a_torn_catalog_commit() {
+pub async fn concurrent_reads_never_commit() {
     const READER_COUNT: usize = 24;
 
     let (pool, _container) = setup_pg().await;
@@ -302,7 +302,7 @@ pub async fn concurrent_batch_reads_never_observe_a_torn_catalog_commit() {
     );
 }
 
-pub async fn failed_attempt_is_audited_but_never_creates_catalog_coverage() {
+pub async fn failed_never_creates_coverage() {
     let (pool, _container) = setup_pg().await;
     let repo = PgCatalogLedgerRepository::new(pool.connection().clone());
     let started_at = Utc::now();
@@ -330,7 +330,7 @@ pub async fn failed_attempt_is_audited_but_never_creates_catalog_coverage() {
     assert_eq!(repo.watermark().await.expect("watermark"), None);
 }
 
-pub async fn identical_reconcile_only_appends_batch_audit() {
+pub async fn identical_reconcile_only_audit() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection();
     let repo = PgCatalogLedgerRepository::new(db.clone());
@@ -357,7 +357,7 @@ pub async fn identical_reconcile_only_appends_batch_audit() {
     assert_eq!(after.markets, before.markets);
 }
 
-pub async fn projection_upsert_updates_filter_reasons_atomically_with_status() {
+pub async fn projection_upsert_updates_status() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection();
     let repo = PgCatalogLedgerRepository::new(db.clone());
@@ -444,7 +444,7 @@ async fn catalog_row_counts(db: &DatabaseConnection) -> CatalogRowCounts {
     }
 }
 
-pub async fn object_payload_hash_drift_is_rejected_before_catalog_commit() {
+pub async fn object_rejected_before_commit() {
     let (pool, _container) = setup_pg().await;
     let repo = PgCatalogLedgerRepository::new(pool.connection().clone());
     let now = Utc::now();

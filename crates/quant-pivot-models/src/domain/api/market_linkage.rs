@@ -134,7 +134,7 @@ impl From<MarketLinkageInfo> for MarketLinkageSummaryView {
             resolver_tier: info.resolver_tier,
             resolver_version: info.resolver_version,
             confidence: info.confidence,
-            source_bindings: source_bindings_from_outcome(&info.outcome),
+            source_bindings: info.outcome.source_bindings_from_outcome(),
             content_hash: info.content_hash,
             derived_at: info.derived_at,
             override_reason: info.override_reason,
@@ -177,7 +177,7 @@ impl From<MarketLinkageInfo> for MarketLinkageDetailView {
             resolver_tier: info.resolver_tier,
             resolver_version: info.resolver_version,
             confidence: info.confidence,
-            source_bindings: source_bindings_from_outcome(&info.outcome),
+            source_bindings: info.outcome.source_bindings_from_outcome(),
             outcome: info.outcome,
             metadata_hash: info.metadata_hash,
             content_hash: info.content_hash,
@@ -221,7 +221,7 @@ impl From<MarketLinkageInfo> for MarketLinkageHistoryEntryView {
             resolver_tier: info.resolver_tier,
             resolver_version: info.resolver_version,
             confidence: info.confidence,
-            source_bindings: source_bindings_from_outcome(&info.outcome),
+            source_bindings: info.outcome.source_bindings_from_outcome(),
             outcome: info.outcome,
             content_hash: info.content_hash,
             derived_at: info.derived_at,
@@ -232,10 +232,12 @@ impl From<MarketLinkageInfo> for MarketLinkageHistoryEntryView {
     }
 }
 
-fn source_bindings_from_outcome(outcome: &LinkageOutcome) -> Vec<ResolvedSourceBinding> {
-    match outcome {
-        LinkageOutcome::Resolved(binding) => binding.source_bindings.clone(),
-        LinkageOutcome::Unresolved { .. } => Vec::new(),
+impl LinkageOutcome {
+    fn source_bindings_from_outcome(&self) -> Vec<ResolvedSourceBinding> {
+        match self {
+            Self::Resolved(binding) => binding.source_bindings.clone(),
+            Self::Unresolved { .. } => Vec::new(),
+        }
     }
 }
 
@@ -515,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_cursor_is_unknown_not_zero_lag() {
+    fn missing_unknown_not_zero() {
         let observed_at = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
         let view = DomainSourceExpectationView::from_expected_and_observed(
             expectation(DomainSourceExpectationStatus::NotStarted, None),
@@ -529,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn observed_freshness_and_declared_blockers_fail_closed() {
+    fn observed_freshness_declared_rejects() {
         let observed_at = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
         let stale = DomainSourceExpectationView::from_expected_and_observed(
             expectation(DomainSourceExpectationStatus::Live, None),
@@ -557,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_archive_health_uses_successful_refresh_not_old_event_time() {
+    fn archive_uses_refresh_time() {
         let observed_at = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
         let event_time = Utc.with_ymd_and_hms(2021, 8, 29, 18, 0, 0).unwrap();
         let mut archive_cursor = cursor(event_time);

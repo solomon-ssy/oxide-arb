@@ -45,13 +45,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clob_side_into_sdk_maps_both_variants() {
+    fn clob_side_maps_variants() {
         assert_eq!(SdkSide::from(ClobSide::from(Side::Buy)), SdkSide::Buy);
         assert_eq!(SdkSide::from(ClobSide::from(Side::Sell)), SdkSide::Sell);
     }
 
     #[test]
-    fn sdk_side_try_into_clob_side_rejects_unknown() {
+    fn sdk_side_rejects_unknown() {
         assert_eq!(ClobSide::try_from(SdkSide::Buy).unwrap().0, Side::Buy);
         assert_eq!(
             ClobSide::try_from(SdkSide::Unknown).unwrap_err(),

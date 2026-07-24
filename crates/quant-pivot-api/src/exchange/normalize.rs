@@ -194,7 +194,7 @@ fn build_legs(
         exact_order_evidence,
     } = fill;
     let market_id = market_for_token(&token_id).ok_or(DecodeRejectReason::UnknownToken)?;
-    let event_time = event_time_from_block_timestamp(fetched.block_timestamp)?;
+    let event_time = block_event_time(fetched.block_timestamp)?;
     let (notional, price, size_shares) = amounts_from_raw(collateral_raw, shares_raw)?;
     if notional <= Decimal::ZERO {
         return Err(DecodeRejectReason::ZeroNotional);
@@ -251,7 +251,7 @@ fn build_legs(
             available_at: None,
             participant_address: taker.to_checksum(None),
             participant_role: TradeParticipantRole::Taker,
-            side: Some(opposing_side(side)),
+            side: Some(side.opposite()),
             price,
             size_shares,
             notional_usd: Usd::new(notional),
@@ -298,14 +298,7 @@ fn build_legs(
     })
 }
 
-const fn opposing_side(side: Side) -> Side {
-    match side {
-        Side::Buy => Side::Sell,
-        Side::Sell => Side::Buy,
-    }
-}
-
-fn event_time_from_block_timestamp(timestamp: u64) -> Result<DateTime<Utc>, DecodeRejectReason> {
+fn block_event_time(timestamp: u64) -> Result<DateTime<Utc>, DecodeRejectReason> {
     i64::try_from(timestamp)
         .ok()
         .and_then(|secs| Utc.timestamp_opt(secs, 0).single())
@@ -371,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_buy_leg_normalizes_maker_primary() {
+    fn v1_buy_normalizes_primary() {
         let maker = Address::with_last_byte(0x11);
         let taker = Address::with_last_byte(0x22);
         let token_id = U256::from(123_u64);
@@ -410,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_sell_leg_normalizes_maker_primary_and_flips_taker_side() {
+    fn v2_sell_normalizes_side() {
         let maker = Address::with_last_byte(0x31);
         let taker = Address::with_last_byte(0x32);
         let token_id = U256::from(456_u64);

@@ -23,7 +23,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, info, warn};
 
 use super::{
-    lifecycle::{force_exit_on_second_signal, shutdown_signal},
+    lifecycle::{second_signal_forces_exit, shutdown_signal},
     task_id::TaskId,
 };
 use crate::observability::metrics_hub::MetricsHub;
@@ -649,7 +649,7 @@ impl AppRunner {
         root.cancelled().await;
         info!("Shutdown signal received — draining tasks");
 
-        let force_exit_guard = tokio::spawn(force_exit_on_second_signal());
+        let force_exit_guard = tokio::spawn(second_signal_forces_exit());
         let fatal_failure = self.registry.drain(self.budget).await;
         force_exit_guard.abort();
 
@@ -667,16 +667,18 @@ mod tests {
 
     use super::*;
 
-    fn tick_budget() -> ShutdownBudget {
-        let mut b = [Duration::from_secs(0); ShutdownStage::COUNT];
-        for slot in &mut b {
-            *slot = Duration::from_millis(500);
+    impl ShutdownBudget {
+        fn tick_fixture() -> Self {
+            let mut b = [Duration::from_secs(0); ShutdownStage::COUNT];
+            for slot in &mut b {
+                *slot = Duration::from_millis(500);
+            }
+            Self::new(b)
         }
-        ShutdownBudget::new(b)
     }
 
     #[test]
-    fn strum_labels_match_prometheus_names() {
+    fn strum_labels_match_names() {
         assert_eq!(ShutdownStage::Execution.as_str(), "execution");
         assert_eq!(TaskKind::AnalyticsWriter.as_str(), "analytics_writer");
     }
@@ -707,14 +709,14 @@ mod tests {
         root.cancel();
         tokio::task::yield_now().await;
         assert!(order.lock().await.is_empty());
-        let failure = registry.drain(tick_budget()).await;
+        let failure = registry.drain(ShutdownBudget::tick_fixture()).await;
 
         assert!(failure.is_none());
         assert_eq!(*order.lock().await, vec!["ws", "cache", "persist"]);
     }
 
     #[tokio::test]
-    async fn task_id_resolves_kind_and_name() {
+    async fn task_id_resolves_name() {
         assert_eq!(TaskId::RiskAuditBatch.kind(), TaskKind::Audit);
         assert_eq!(TaskId::RiskAuditBatch.static_name(), "risk-audit-batch");
         assert_eq!(
@@ -732,7 +734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_budget_scales_with_execution_mode() {
+    async fn shutdown_budget_scales_mode() {
         let report_only = ShutdownBudget::for_quant_mode(QuantRuntimeMode::ReportOnly);
         let auto = ShutdownBudget::for_quant_mode(QuantRuntimeMode::AutoExecution);
         assert_eq!(
@@ -769,7 +771,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn critical_task_failure_cancels_root_and_is_returned() {
+    async fn critical_failure_cancels_returned() {
         let root = CancellationToken::new();
         let mut registry = TaskRegistry::new(root.clone());
         registry.spawn_critical(TaskId::DataPipeline, |_token| async move {
@@ -781,7 +783,7 @@ mod tests {
 
         root.cancelled().await;
         let failure = registry
-            .drain(tick_budget())
+            .drain(ShutdownBudget::tick_fixture())
             .await
             .expect("critical failure must be returned");
 

@@ -19,10 +19,7 @@ use sea_orm::{
     IntoActiveModel, IntoActiveValue, PaginatorTrait, QueryFilter, QueryOrder,
 };
 
-use crate::{
-    postgres::{error, query::paginate_mapped},
-    traits::ReconciliationRepository,
-};
+use crate::{postgres::query::paginate_mapped, traits::ReconciliationRepository};
 
 /// Postgres-backed reconciliation repository.
 pub struct PgReconciliationRepository {
@@ -58,7 +55,10 @@ impl ReconciliationRepository for PgReconciliationRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(QUANT_RECONCILIATION, reconciliation_id));
+            return Err(StorageError::not_found(
+                QUANT_RECONCILIATION,
+                reconciliation_id,
+            ));
         };
 
         let mut chain = row.evidence_json.clone();
@@ -82,7 +82,10 @@ impl ReconciliationRepository for PgReconciliationRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(QUANT_RECONCILIATION, reconciliation_id));
+            return Err(StorageError::not_found(
+                QUANT_RECONCILIATION,
+                reconciliation_id,
+            ));
         };
 
         let mut active = row.into_active_model();

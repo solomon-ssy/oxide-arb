@@ -302,22 +302,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_pg_duration_ms_suffix() {
+    fn parse_pg_duration_suffix() {
         assert_eq!(parse_pg_duration_ms("500ms"), Some(500));
     }
 
     #[test]
-    fn parse_pg_duration_s_suffix() {
+    fn parse_pg_s_suffix() {
         assert_eq!(parse_pg_duration_ms("30s"), Some(30_000));
     }
 
     #[test]
-    fn parse_pg_duration_min_suffix() {
+    fn parse_pg_min_suffix() {
         assert_eq!(parse_pg_duration_ms("1min"), Some(60_000));
     }
 
     #[test]
-    fn parse_pg_duration_raw_number() {
+    fn parse_pg_duration_number() {
         assert_eq!(parse_pg_duration_ms("30000"), Some(30_000));
     }
 
@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn guc_pairs_empty_when_all_disabled() {
+    fn guc_pairs_empty_disabled() {
         let config = PostgresConfig {
             statement_timeout_ms: 0,
             lock_timeout_ms: 0,

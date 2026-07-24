@@ -67,18 +67,18 @@ mod tests {
     }
 
     #[test]
-    fn max_rows_large_column_count() {
+    fn max_rows_large_count() {
         assert_eq!(max_rows_per_insert(65_535), 1);
         assert_eq!(max_rows_per_insert(100_000), 1);
     }
 
     #[test]
-    fn max_rows_zero_columns_returns_one() {
+    fn max_zero_returns_one() {
         assert_eq!(max_rows_per_insert(0), 1);
     }
 
     #[test]
-    fn chunk_for_insert_splits_correctly() {
+    fn chunk_insert_splits_correctly() {
         let items: Vec<u32> = (0..10_000).collect();
         let chunks: Vec<_> = chunk_for_insert(&items, 10).collect();
         // 10 cols -> 6553 rows per batch -> need 2 batches for 10k items
@@ -88,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_for_in_clause_single_batch_when_small() {
+    fn chunk_clause_single_small() {
         let ids: Vec<u64> = (0..100).collect();
         let chunks: Vec<_> = chunk_for_in_clause(&ids).collect();
         assert_eq!(chunks.len(), 1);
@@ -96,7 +96,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_for_in_clause_splits_large() {
+    fn chunk_clause_splits_large() {
         let ids: Vec<u64> = (0..130_000).collect();
         let chunks: Vec<_> = chunk_for_in_clause(&ids).collect();
         assert_eq!(chunks.len(), 2);

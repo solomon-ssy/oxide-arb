@@ -46,7 +46,7 @@ pub fn apply_past_deadline_lifecycle(
 
 /// Apply the local past-deadline lifecycle to normalized registry rows.
 #[must_use]
-pub fn apply_past_deadline_to_catalog(
+pub fn apply_catalog_deadline(
     registry_markets: &mut [MarketRegistryInfo],
     now: DateTime<Utc>,
 ) -> u64 {
@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn past_deadline_active_becomes_paused() {
+    fn past_deadline_active_paused() {
         let now = Utc::now();
         let mut entry = sample_market(MarketStatus::Active, Some(now - Duration::hours(1)));
         assert_eq!(
@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn settled_and_paused_are_not_overwritten() {
+    fn settled_paused_not_overwritten() {
         let now = Utc::now();
         let past = Some(now - Duration::hours(1));
         let mut settled = sample_market(MarketStatus::Settled, past);
@@ -143,10 +143,10 @@ mod tests {
     }
 
     #[test]
-    fn catalog_batch_applies_status_once() {
+    fn catalog_batch_applies_once() {
         let now = Utc::now();
         let mut registry = sample_market(MarketStatus::Active, Some(now - Duration::hours(2)));
-        let paused = apply_past_deadline_to_catalog(slice::from_mut(&mut registry), now);
+        let paused = apply_catalog_deadline(slice::from_mut(&mut registry), now);
         assert_eq!(paused, 1);
         assert_eq!(registry.status, MarketStatus::Paused);
     }

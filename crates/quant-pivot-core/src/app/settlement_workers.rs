@@ -28,7 +28,7 @@ impl AppContext {
         self.register_settlement_discovery_worker(runner);
         self.register_settlement_preflight_worker(runner);
         self.register_settlement_execution_worker(runner);
-        self.register_settlement_governed_action_worker(runner);
+        self.register_settlement_worker(runner);
         self.register_settlement_external_worker(runner);
     }
 
@@ -51,8 +51,7 @@ impl AppContext {
                     Ok(summary) => {
                         metrics.record_settlement_worker_pass("discovery", "completed");
                         if summary.max_discovery_lag_ms > 0 {
-                            metrics
-                                .observe_settlement_discovery_lag_ms(summary.max_discovery_lag_ms);
+                            metrics.observe_discovery_lag_ms(summary.max_discovery_lag_ms);
                         }
                     }
                     Err(error) => {
@@ -130,7 +129,7 @@ impl AppContext {
         );
     }
 
-    fn register_settlement_governed_action_worker(&self, runner: &mut AppRunner) {
+    fn register_settlement_worker(&self, runner: &mut AppRunner) {
         let service = Arc::clone(&self.execution.settlement_governed_actions);
         let metrics = Arc::clone(&self.infra.metrics);
         let config = self.config.polymarket.settlement.clone();
@@ -208,7 +207,7 @@ async fn run_preflight_batch(
                 Ok(outcome) => {
                     metrics.record_settlement_worker_pass(
                         "preflight",
-                        preflight_outcome_label(outcome),
+                        (outcome).preflight_outcome_label(),
                     );
                     if outcome != SettlementPreflightOutcome::Idle {
                         work_observed = true;
@@ -251,7 +250,7 @@ async fn run_execution_batch(
                 Ok(outcome) => {
                     metrics.record_settlement_worker_pass(
                         "execution",
-                        settlement_outcome_label(&outcome),
+                        outcome.settlement_outcome_label(),
                     );
                     if !matches!(outcome, SettlementPassOutcome::Idle) {
                         work_observed = true;
@@ -294,7 +293,7 @@ async fn run_governed_action_batch(
                 Ok(outcome) => {
                     metrics.record_settlement_worker_pass(
                         "governed_action",
-                        governed_action_outcome_label(&outcome),
+                        outcome.governed_action_outcome_label(),
                     );
                     if !matches!(outcome, SettlementGovernedActionPassOutcome::Idle) {
                         work_observed = true;
@@ -313,42 +312,42 @@ async fn run_governed_action_batch(
     }
 }
 
-const fn preflight_outcome_label(outcome: SettlementPreflightOutcome) -> &'static str {
-    match outcome {
-        SettlementPreflightOutcome::Idle => "idle",
-        SettlementPreflightOutcome::Ready => "ready",
-        SettlementPreflightOutcome::Blocked => "blocked",
+impl SettlementPreflightOutcome {
+    const fn preflight_outcome_label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Ready => "ready",
+            Self::Blocked => "blocked",
+        }
     }
 }
 
-const fn settlement_outcome_label(outcome: &SettlementPassOutcome) -> &'static str {
-    match outcome {
-        SettlementPassOutcome::Idle => "idle",
-        SettlementPassOutcome::AuthorizationPending { .. } => "authorization_pending",
-        SettlementPassOutcome::NewSubmissionBlocked { .. } => "new_submission_blocked",
-        SettlementPassOutcome::DispatchAccepted { .. } => "dispatch_accepted",
-        SettlementPassOutcome::ExistingSubmissionTracked { .. } => "existing_submission_tracked",
-        SettlementPassOutcome::SettlementConfirmed { .. } => "confirmed",
-        SettlementPassOutcome::ReconciliationRequired { .. } => "reconciliation_required",
-        SettlementPassOutcome::RetryScheduled { .. } => "retry_scheduled",
+impl SettlementPassOutcome {
+    const fn settlement_outcome_label(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::AuthorizationPending { .. } => "authorization_pending",
+            Self::NewSubmissionBlocked { .. } => "new_submission_blocked",
+            Self::DispatchAccepted { .. } => "dispatch_accepted",
+            Self::ExistingSubmissionTracked { .. } => "existing_submission_tracked",
+            Self::SettlementConfirmed { .. } => "confirmed",
+            Self::ReconciliationRequired { .. } => "reconciliation_required",
+            Self::RetryScheduled { .. } => "retry_scheduled",
+        }
     }
 }
 
-const fn governed_action_outcome_label(
-    outcome: &SettlementGovernedActionPassOutcome,
-) -> &'static str {
-    match outcome {
-        SettlementGovernedActionPassOutcome::Idle => "idle",
-        SettlementGovernedActionPassOutcome::Deferred { .. } => "deferred",
-        SettlementGovernedActionPassOutcome::DispatchAccepted { .. } => "dispatch_accepted",
-        SettlementGovernedActionPassOutcome::ExistingSubmissionTracked { .. } => {
-            "existing_submission_tracked"
+impl SettlementGovernedActionPassOutcome {
+    const fn governed_action_outcome_label(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Deferred { .. } => "deferred",
+            Self::DispatchAccepted { .. } => "dispatch_accepted",
+            Self::ExistingSubmissionTracked { .. } => "existing_submission_tracked",
+            Self::Confirmed { .. } => "confirmed",
+            Self::ReconciliationRequired { .. } => "reconciliation_required",
+            Self::RetryScheduled { .. } => "retry_scheduled",
+            Self::Failed { .. } => "failed",
         }
-        SettlementGovernedActionPassOutcome::Confirmed { .. } => "confirmed",
-        SettlementGovernedActionPassOutcome::ReconciliationRequired { .. } => {
-            "reconciliation_required"
-        }
-        SettlementGovernedActionPassOutcome::RetryScheduled { .. } => "retry_scheduled",
-        SettlementGovernedActionPassOutcome::Failed { .. } => "failed",
     }
 }

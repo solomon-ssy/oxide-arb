@@ -488,7 +488,7 @@ fn evaluate_sell_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
         ledger,
     );
     if input.intent.requires_backtest() {
-        evaluate_sell_path_set_risk_gates(
+        evaluate_sell_risk_gates(
             input.path_set.as_ref(),
             &input.thresholds,
             &input.validation_thresholds,
@@ -498,7 +498,7 @@ fn evaluate_sell_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
 }
 
 /// Sell path-set risk/baseline gates over calendarized lot returns.
-fn evaluate_sell_path_set_risk_gates(
+fn evaluate_sell_risk_gates(
     path_set: Option<&CpcvPathSetGateInput>,
     thresholds: &QualityGateThresholds,
     validation: &ValidationGateThresholds,
@@ -632,7 +632,7 @@ fn evaluate_backtest_risk_gates(
         "0.5",
         "directional hit rate below 0.5",
     );
-    let concentration = max_category_concentration(report);
+    let concentration = (report).max_category_concentration();
     ledger.soft(
         GateId::CategoryConcentration,
         concentration <= t.max_category_concentration,
@@ -879,24 +879,26 @@ fn evaluate_shadow_stability_gate(input: &QualityGateInput, ledger: &mut GateLed
     }
 }
 
-/// The largest share of resolved samples held by any single category, in
-/// `[0, 1]`. Zero when there are no categorized samples.
-fn max_category_concentration(report: &BacktestReport) -> Decimal {
-    let total: u64 = report
-        .category_breakdown
-        .iter()
-        .map(|metric| metric.sample_count)
-        .sum();
-    if total == 0 {
-        return Decimal::ZERO;
+impl BacktestReport {
+    /// The largest share of resolved samples held by any single category, in
+    /// `[0, 1]`. Zero when there are no categorized samples.
+    fn max_category_concentration(&self) -> Decimal {
+        let total: u64 = self
+            .category_breakdown
+            .iter()
+            .map(|metric| metric.sample_count)
+            .sum();
+        if total == 0 {
+            return Decimal::ZERO;
+        }
+        let max = self
+            .category_breakdown
+            .iter()
+            .map(|metric| metric.sample_count)
+            .max()
+            .unwrap_or(0);
+        (Decimal::from(max) / Decimal::from(total)).round_dp(RESEARCH_DECIMAL_SCALE)
     }
-    let max = report
-        .category_breakdown
-        .iter()
-        .map(|metric| metric.sample_count)
-        .max()
-        .unwrap_or(0);
-    (Decimal::from(max) / Decimal::from(total)).round_dp(RESEARCH_DECIMAL_SCALE)
 }
 
 #[cfg(test)]
@@ -928,37 +930,39 @@ mod tests {
     }
 
     /// A healthy backtest report that clears every hard + soft gate.
-    fn healthy_backtest() -> BacktestReport {
-        BacktestReport {
-            backtest_report_id: BacktestReportId::from_v7(),
-            model_version_id: ModelVersionId::from_v7(),
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            window_start: Utc::now(),
-            window_end: Utc::now(),
-            coverage: dec!(0.99),
-            sample_count: 2_000,
-            missing_feature_count: 0,
-            rank_ic: dec!(0.15),
-            sharpe: dec!(1.2),
-            hit_rate: Probability::new(dec!(0.62)),
-            expected_vs_realized: ExpectedVsRealized {
-                mean_expected_bps: dec!(120),
-                mean_realized_bps: dec!(110),
-                correlation: dec!(0.4),
-                bias_bps: dec!(10),
-            },
-            max_drawdown: dec!(0.10),
-            turnover: dec!(0.2),
-            liquidity_feasibility: Probability::new(dec!(0.95)),
-            category_breakdown: Vec::new(),
-            tail_loss: dec!(-50),
-            report_pnl_simulation: PnlSimulation {
-                total_allocated_usd: dec!(10000),
-                realized_pnl_usd: dec!(500),
-                gross_return: dec!(0.05),
-                pnl_curve: Vec::new(),
-            },
-            report_hash: hash(),
+    impl BacktestReport {
+        fn healthy_fixture() -> Self {
+            Self {
+                backtest_report_id: BacktestReportId::from_v7(),
+                model_version_id: ModelVersionId::from_v7(),
+                decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+                window_start: Utc::now(),
+                window_end: Utc::now(),
+                coverage: dec!(0.99),
+                sample_count: 2_000,
+                missing_feature_count: 0,
+                rank_ic: dec!(0.15),
+                sharpe: dec!(1.2),
+                hit_rate: Probability::new(dec!(0.62)),
+                expected_vs_realized: ExpectedVsRealized {
+                    mean_expected_bps: dec!(120),
+                    mean_realized_bps: dec!(110),
+                    correlation: dec!(0.4),
+                    bias_bps: dec!(10),
+                },
+                max_drawdown: dec!(0.10),
+                turnover: dec!(0.2),
+                liquidity_feasibility: Probability::new(dec!(0.95)),
+                category_breakdown: Vec::new(),
+                tail_loss: dec!(-50),
+                report_pnl_simulation: PnlSimulation {
+                    total_allocated_usd: dec!(10000),
+                    realized_pnl_usd: dec!(500),
+                    gross_return: dec!(0.05),
+                    pnl_curve: Vec::new(),
+                },
+                report_hash: hash(),
+            }
         }
     }
 
@@ -978,17 +982,19 @@ mod tests {
         }
     }
 
-    fn passing_path_set() -> CpcvPathSetGateInput {
-        CpcvPathSetGateInput {
-            median_rank_ic: dec!(0.15),
-            deflated_sharpe: dec!(0.97),
-            pbo: dec!(0.20),
-            min_track_record_length_secs: Some(86_400),
-            median_max_drawdown: Some(dec!(0.10)),
-            median_tail_loss: Some(dec!(-0.005)),
-            baseline_uplift: Some(dec!(0.001)),
-            window_start: Some(Utc::now()),
-            window_end: Some(Utc::now() + Duration::hours(48)),
+    impl CpcvPathSetGateInput {
+        fn passing_fixture() -> Self {
+            Self {
+                median_rank_ic: dec!(0.15),
+                deflated_sharpe: dec!(0.97),
+                pbo: dec!(0.20),
+                min_track_record_length_secs: Some(86_400),
+                median_max_drawdown: Some(dec!(0.10)),
+                median_tail_loss: Some(dec!(-0.005)),
+                baseline_uplift: Some(dec!(0.001)),
+                window_start: Some(Utc::now()),
+                window_end: Some(Utc::now() + Duration::hours(48)),
+            }
         }
     }
 
@@ -996,13 +1002,13 @@ mod tests {
         QualityGateInput {
             subject: GateSubject::ModelVersion(ModelVersionId::from_v7()),
             intent,
-            backtest: Some(healthy_backtest()),
+            backtest: Some(BacktestReport::healthy_fixture()),
             dataset: healthy_coverage(),
             leakage: LeakageFindings::default(),
             shadow_stability: Some(Probability::new(dec!(0.80))),
             thresholds: QualityGateThresholds::conservative(),
             validation_thresholds: ValidationGateThresholds::conservative(),
-            path_set: Some(passing_path_set()),
+            path_set: Some(CpcvPathSetGateInput::passing_fixture()),
             sell_thresholds: SellQualityGateThresholds::default(),
             model_family: None,
             return_model_calibrated: true,
@@ -1010,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_requires_calibrated_return_model() {
+    fn publish_requires_calibrated_model() {
         let mut input = passing_input(GateIntent::Publish);
         input.return_model_calibrated = false;
         let decision = DefaultModelQualityGate::new()
@@ -1042,7 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn sell_family_records_calibration_required_as_not_applicable() {
+    fn sell_required_not_applicable() {
         // Sell / hold-vs-exit scorers never carry a return model, so the
         // gate report must record an explicit `NotApplicable` row for
         // `CalibrationRequired` (auditable end to end) rather than omitting
@@ -1064,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn sell_publish_requires_baseline_uplift() {
+    fn sell_publish_requires_uplift() {
         let mut input = QualityGateInput {
             model_family: Some(ModelFamily::HoldVsExitWeighted),
             ..passing_input(GateIntent::Publish)
@@ -1086,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn sell_publish_blocks_high_path_set_drawdown() {
+    fn sell_publish_blocks_drawdown() {
         let mut input = QualityGateInput {
             model_family: Some(ModelFamily::HoldVsExitWeighted),
             ..passing_input(GateIntent::Publish)
@@ -1108,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn sell_publish_blocks_bad_path_set_tail_loss() {
+    fn sell_publish_blocks_loss() {
         let mut input = QualityGateInput {
             model_family: Some(ModelFamily::HoldVsExitWeighted),
             ..passing_input(GateIntent::Publish)
@@ -1131,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn passes_when_every_hard_gate_is_clear() {
+    fn passes_hard_gate_clear() {
         let decision = DefaultModelQualityGate::new()
             .evaluate(passing_input(GateIntent::Publish))
             .expect("evaluate");
@@ -1143,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn quality_gate_blocks_low_coverage_model() {
+    fn quality_gate_blocks_model() {
         let mut input = passing_input(GateIntent::Publish);
         // Mostly immature / unavailable labels → low label coverage.
         input.dataset.labels_available = 100;
@@ -1164,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn quality_gate_hard_failure_lists_failures() {
+    fn quality_gate_failure_failures() {
         let mut input = passing_input(GateIntent::Publish);
         input.backtest.as_mut().unwrap().sample_count = 10; // below 500
         input.backtest.as_mut().unwrap().max_drawdown = dec!(0.90); // above budget
@@ -1183,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn quality_gate_blocks_pit_leakage() {
+    fn quality_gate_blocks_leakage() {
         let mut input = passing_input(GateIntent::Publish);
         input.leakage = LeakageFindings {
             scanned: 100,
@@ -1239,7 +1245,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_execution_requires_liquidity_feasibility() {
+    fn auto_execution_requires_feasibility() {
         let mut input = passing_input(GateIntent::AutoExecution);
         input.backtest.as_mut().unwrap().liquidity_feasibility = Probability::new(dec!(0.10));
         let decision = DefaultModelQualityGate::new()
@@ -1273,7 +1279,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_requires_cpcv_path_set() {
+    fn publish_requires_cpcv_set() {
         let mut input = passing_input(GateIntent::Publish);
         input.path_set = None;
         let decision = DefaultModelQualityGate::new()
@@ -1290,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn rank_ic_is_hard_gate_reads_path_set_median() {
+    fn rank_ic_reads_median() {
         let mut input = passing_input(GateIntent::Publish);
         input.path_set.as_mut().unwrap().median_rank_ic = dec!(0.001);
         let decision = DefaultModelQualityGate::new()
@@ -1307,7 +1313,7 @@ mod tests {
     }
 
     #[test]
-    fn pbo_gate_blocks_overfit_synthetic_strategy() {
+    fn pbo_gate_blocks_strategy() {
         let mut input = passing_input(GateIntent::Publish);
         input.path_set.as_mut().unwrap().pbo = dec!(0.95);
         let decision = DefaultModelQualityGate::new()
@@ -1324,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn deflated_sharpe_gate_blocks_insignificant_path_set() {
+    fn deflated_sharpe_blocks_set() {
         let mut input = passing_input(GateIntent::Publish);
         // Floor is 1 - dsr_significance (default 0.05) ⇒ 0.95.
         input.path_set.as_mut().unwrap().deflated_sharpe = dec!(0.50);

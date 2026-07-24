@@ -1,5 +1,6 @@
 mod account_read_smoke;
 mod architecture;
+mod function_design;
 mod performance;
 mod public_read_smoke;
 
@@ -18,9 +19,8 @@ use chrono::{DateTime, Duration, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use quant_pivot_allocator as _;
 use quant_pivot_migration::{
-    acquire_schema_mutation_lease, apply_under_schema_mutation_lease,
-    inspect_preproduction_postgres, plan as plan_postgres_migrations,
-    release_schema_mutation_lease, reset_preproduction_postgres,
+    acquire_schema_mutation_lease, apply_under_lease, inspect_preproduction_postgres,
+    plan as plan_postgres_migrations, reset_preproduction_postgres,
 };
 use quant_pivot_models::{
     config::{ClickHouseConfig, DeployConfig, PostgresConfig},
@@ -142,6 +142,9 @@ enum Commands {
 enum ArchitectureCommand {
     /// Validate the current Cargo metadata graph without changing the workspace.
     Check,
+    /// Audit function ownership, naming, forwarding, and conversion design.
+    #[command(name = "audit-functions")]
+    AuditFunctions,
 }
 
 #[derive(Subcommand)]
@@ -315,6 +318,7 @@ async fn run() -> Result<()> {
     match Cli::parse().command {
         Commands::Architecture { command } => match command {
             ArchitectureCommand::Check => architecture::run(),
+            ArchitectureCommand::AuditFunctions => function_design::run(),
         },
         Commands::ProductionStack { command } => match command {
             ProductionStackCommand::Serve(args) => {
@@ -354,8 +358,8 @@ async fn run() -> Result<()> {
         Commands::Performance { command } => match command {
             PerformanceCommand::Run(args) => performance::run(args.profile, &args.output),
         },
-        Commands::ClickHouseSchema { command } => clickhouse_schema(command).await,
-        Commands::PostgresSchema { command } => postgres_schema(command).await,
+        Commands::ClickHouseSchema { command } => (command).clickhouse_schema().await,
+        Commands::PostgresSchema { command } => (command).postgres_schema().await,
         Commands::ReportCapacityCeiling {
             catalog_visible_p99,
         } => {
@@ -371,8 +375,8 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Commands::ConfigApiSchema { output } => write_config_api_schema(&output),
-        Commands::ResearchModelApiSchema { output } => write_research_model_api_schema(&output),
-        Commands::PreproductionReset { command } => preproduction_reset(command).await,
+        Commands::ResearchModelApiSchema { output } => write_model_api_schema(&output),
+        Commands::PreproductionReset { command } => (command).preproduction_reset().await,
     }
 }
 
@@ -392,7 +396,7 @@ fn write_config_api_schema(output: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn write_research_model_api_schema(output: &PathBuf) -> Result<()> {
+fn write_model_api_schema(output: &PathBuf) -> Result<()> {
     let schema = schemars::schema_for!(ResearchModelApiContractSchema);
     let mut rendered = serde_json::to_string_pretty(&schema)
         .context("render research-model API contract schema")?;
@@ -496,246 +500,262 @@ struct ResetJournalDigest<'a> {
     failure: &'a Option<ResetFailure>,
 }
 
-async fn preproduction_reset(command: PreproductionResetCommand) -> Result<()> {
-    match command {
-        PreproductionResetCommand::Plan(args) => Box::pin(preproduction_reset_plan(args)).await,
-        PreproductionResetCommand::Apply(args) => Box::pin(preproduction_reset_apply(args)).await,
-        PreproductionResetCommand::Verify(args) => preproduction_reset_verify(args).await,
+impl PreproductionResetCommand {
+    async fn preproduction_reset(self) -> Result<()> {
+        match self {
+            Self::Plan(args) => Box::pin((args).preproduction_reset_plan()).await,
+            Self::Apply(args) => Box::pin((args).preproduction_reset_apply()).await,
+            Self::Verify(args) => (args).preproduction_reset_verify().await,
+        }
     }
 }
 
-async fn preproduction_reset_plan(args: PreproductionResetPlanArgs) -> Result<()> {
-    let deploy = load_reset_deploy(&args.config)?;
-    let inventory = reset_inventory(&deploy).await?;
-    if inventory.postgres_connection_count != 0 {
-        bail!(
-            "{} PostgreSQL target connections remain; stop project-owned processes before planning reset",
-            inventory.postgres_connection_count
-        );
-    }
-    if inventory.clickhouse_active_query_count != 0 {
-        bail!(
-            "{} active ClickHouse project queries or server-wide mutations remain; stop their owners before planning reset",
-            inventory.clickhouse_active_query_count
-        );
-    }
-    if args.journal_file.exists() {
-        let existing = read_reset_journal(&args.journal_file)?;
-        if existing.stage == ResetStage::Planned && existing.expires_at > Utc::now() {
+impl PreproductionResetPlanArgs {
+    async fn preproduction_reset_plan(self) -> Result<()> {
+        let deploy = self.config.load_reset_deploy()?;
+        let inventory = reset_inventory(&deploy).await?;
+        if inventory.postgres_connection_count != 0 {
             bail!(
-                "an unexpired reset operation already exists at {}; use its nonce or wait for expiry",
-                args.journal_file.display()
+                "{} PostgreSQL target connections remain; stop project-owned processes before planning reset",
+                inventory.postgres_connection_count
             );
         }
-        archive_reset_journal(&args.journal_file, &existing)?;
-    }
-    let now = Utc::now();
-    let mut journal = PreproductionResetJournal {
-        format_version: RESET_JOURNAL_FORMAT_VERSION,
-        operation_id: Uuid::now_v7(),
-        nonce: PreproductionResetNonce::from_v7(),
-        stage: ResetStage::Planned,
-        created_at: now,
-        updated_at: now,
-        expires_at: now + Duration::minutes(RESET_PLAN_TTL_MINUTES),
-        completed_at: None,
-        targets: reset_target_fingerprints(&deploy)?,
-        inventory,
-        failure: None,
-        journal_hash: CanonicalDigest::content_hash_json(&"pending")?,
-    };
-    journal.journal_hash = reset_journal_hash(&journal)?;
-    write_private_json_atomic(&args.journal_file, &journal)?;
-    println!("preproduction reset operation planned");
-    println!("operation_id={}", journal.operation_id);
-    println!("journal_file={}", args.journal_file.display());
-    println!("confirmation_nonce={}", journal.nonce);
-    println!("required_confirmation={CLEAN_BOOTSTRAP_CONFIRMATION}");
-    println!("expires_at={}", journal.expires_at.to_rfc3339());
-    println!("postgres_endpoint_fingerprint={}", journal.targets.postgres);
-    println!(
-        "clickhouse_endpoint_fingerprint={}",
-        journal.targets.clickhouse
-    );
-    println!("redis_endpoint_fingerprint={}", journal.targets.redis);
-    println!(
-        "postgres_objects={}",
-        journal.inventory.postgres_object_count
-    );
-    println!(
-        "clickhouse_objects={}",
-        journal.inventory.clickhouse_object_count
-    );
-    println!(
-        "clickhouse_active_queries={}",
-        journal.inventory.clickhouse_active_query_count
-    );
-    println!(
-        "redis_qp_namespace_keys={}",
-        journal.inventory.redis_namespace_key_count
-    );
-    Ok(())
-}
-
-async fn preproduction_reset_apply(args: PreproductionResetApplyArgs) -> Result<()> {
-    let deploy = load_reset_deploy(&args.config)?;
-    let mut journal = read_reset_journal(&args.journal_file)?;
-    validate_reset_journal_for_apply(&journal, &deploy, &args.confirm_nonce, &args.confirm)?;
-    let current_inventory = reset_inventory(&deploy).await?;
-    if current_inventory != journal.inventory {
-        bail!("reset target inventory changed after planning; create a new reset plan");
-    }
-    if current_inventory.postgres_connection_count != 0 {
-        bail!("PostgreSQL target still has active connections");
-    }
-
-    let lease = acquire_schema_mutation_lease(&deploy.db.postgres)
-        .await
-        .context("acquire reset schema mutation lease")?;
-    let locked_inventory = reset_inventory(&deploy).await?;
-    if locked_inventory != journal.inventory || locked_inventory.postgres_connection_count != 0 {
-        release_schema_mutation_lease(lease)
-            .await
-            .context("release reset schema mutation lease after stale plan")?;
-        bail!("reset target changed while acquiring the schema mutation lease; create a new plan");
-    }
-    transition_reset_journal(&args.journal_file, &mut journal, ResetStage::Applying)?;
-
-    let mutation_result = tokio::select! {
-      result = async {
-        reset_preproduction_postgres(&deploy.db.postgres, &lease)
-            .await
-            .context("recreate exact PostgreSQL quant_pivot database")?;
-        transition_reset_journal(
-            &args.journal_file,
-            &mut journal,
-            ResetStage::PostgresReset,
-        )?;
-        reset_clickhouse_preproduction_database(&deploy.db.clickhouse)
-            .await
-            .context("recreate exact ClickHouse quant_pivot database")?;
-        transition_reset_journal(
-            &args.journal_file,
-            &mut journal,
-            ResetStage::ClickhouseReset,
-        )?;
-        let deleted = unlink_preproduction_namespace(&deploy.cache.redis)
-            .await
-            .context("unlink exact Redis qp:* namespace")?;
-        transition_reset_journal(
-            &args.journal_file,
-            &mut journal,
-            ResetStage::RedisCleared,
-        )?;
-
-        let postgres = PostgresPool::connect_schema(&deploy.db.postgres)
-            .await
-            .context("connect recreated PostgreSQL database")?;
-        apply_under_schema_mutation_lease(postgres.connection(), &lease)
-            .await
-            .context("apply unique PostgreSQL boot migration")?;
-        let bootstrap_admin_password_hash = bootstrap_admin_password_hash()?;
-        finalize_schema_deployment(
-            postgres.connection(),
-            &bootstrap_admin_password_hash,
-        )
-        .await
-        .context("finalize recreated PostgreSQL schema")?;
-        let policy_bundle = ensure_postgres_boot_domain_facts(
-            postgres.connection(),
-            "guarded preproduction clean boot",
-        )
-        .await?;
-        let postgres_status = verify_postgres_schema(postgres.connection())
-            .await
-            .context("verify recreated PostgreSQL schema")?;
-        let clickhouse_status = apply_online_schema_migrations(&deploy.db.clickhouse)
-            .await
-            .context("apply unique ClickHouse boot migration")?;
-        transition_reset_journal(
-            &args.journal_file,
-            &mut journal,
-            ResetStage::SchemasApplied,
-        )?;
-        let redis_remaining = count_preproduction_namespace(&deploy.cache.redis)
-            .await
-            .context("verify Redis qp:* namespace")?;
-        if redis_remaining != 0 {
-            bail!("Redis qp:* namespace is not empty after reset");
+        if inventory.clickhouse_active_query_count != 0 {
+            bail!(
+                "{} active ClickHouse project queries or server-wide mutations remain; stop their owners before planning reset",
+                inventory.clickhouse_active_query_count
+            );
         }
-        verify_clean_bootstrap_facts(&postgres, &deploy.db.clickhouse).await?;
-        transition_reset_journal(
-            &args.journal_file,
-            &mut journal,
-            ResetStage::Verified,
-        )?;
-        postgres.close().await;
-        println!("redis_unlinked={deleted}");
+        if self.journal_file.exists() {
+            let existing = read_reset_journal(&self.journal_file)?;
+            if existing.stage == ResetStage::Planned && existing.expires_at > Utc::now() {
+                bail!(
+                    "an unexpired reset operation already exists at {}; use its nonce or wait for expiry",
+                    self.journal_file.display()
+                );
+            }
+            archive_reset_journal(&self.journal_file, &existing)?;
+        }
+        let now = Utc::now();
+        let mut journal = PreproductionResetJournal {
+            format_version: RESET_JOURNAL_FORMAT_VERSION,
+            operation_id: Uuid::now_v7(),
+            nonce: PreproductionResetNonce::from_v7(),
+            stage: ResetStage::Planned,
+            created_at: now,
+            updated_at: now,
+            expires_at: now + Duration::minutes(RESET_PLAN_TTL_MINUTES),
+            completed_at: None,
+            targets: reset_target_fingerprints(&deploy)?,
+            inventory,
+            failure: None,
+            journal_hash: CanonicalDigest::content_hash_json(&"pending")?,
+        };
+        journal.journal_hash = journal.reset_journal_hash()?;
+        write_private_json_atomic(&self.journal_file, &journal)?;
+        println!("preproduction reset operation planned");
+        println!("operation_id={}", journal.operation_id);
+        println!("journal_file={}", self.journal_file.display());
+        println!("confirmation_nonce={}", journal.nonce);
+        println!("required_confirmation={CLEAN_BOOTSTRAP_CONFIRMATION}");
+        println!("expires_at={}", journal.expires_at.to_rfc3339());
+        println!("postgres_endpoint_fingerprint={}", journal.targets.postgres);
         println!(
-            "postgres_boot_version={} postgres_migrations={}",
-            postgres_status.current_version, postgres_status.migration_count
+            "clickhouse_endpoint_fingerprint={}",
+            journal.targets.clickhouse
+        );
+        println!("redis_endpoint_fingerprint={}", journal.targets.redis);
+        println!(
+            "postgres_objects={}",
+            journal.inventory.postgres_object_count
         );
         println!(
-            "clickhouse_boot_version={} clickhouse_objects={}",
-            clickhouse_status.current_version, clickhouse_status.required_object_count
+            "clickhouse_objects={}",
+            journal.inventory.clickhouse_object_count
         );
         println!(
-            "policy_bundle_generation={} policy_snapshot_id={} policy_snapshot_hash={}",
-            policy_bundle.generation,
-            policy_bundle.decision_policy_snapshot_id,
-            policy_bundle.snapshot_hash
+            "clickhouse_active_queries={}",
+            journal.inventory.clickhouse_active_query_count
         );
-        Ok::<(), anyhow::Error>(())
-      } => result,
-      () = lease.cancelled() => Err(anyhow::anyhow!(
-          "canonical PostgreSQL schema mutation lease was lost during reset"
-      )),
-    };
-    let release_result = release_schema_mutation_lease(lease)
-        .await
-        .context("release reset schema mutation lease");
-    match (mutation_result, release_result) {
-        (Err(error), _) | (Ok(()), Err(error)) => {
-            mark_reset_journal_failed(&args.journal_file, &mut journal)?;
-            Err(error)
-        }
-        (Ok(()), Ok(())) => {
-            transition_reset_journal(&args.journal_file, &mut journal, ResetStage::Completed)?;
-            println!("preproduction reset completed and verified");
-            println!("operation_id={}", journal.operation_id);
-            println!("completed_journal={}", args.journal_file.display());
-            Ok(())
-        }
+        println!(
+            "redis_qp_namespace_keys={}",
+            journal.inventory.redis_namespace_key_count
+        );
+        Ok(())
     }
 }
 
-async fn preproduction_reset_verify(args: PreproductionResetVerifyArgs) -> Result<()> {
-    let deploy = load_reset_deploy(&args.config)?;
-    let journal = read_reset_journal(&args.journal_file)?;
-    validate_completed_reset_journal(&journal, &deploy, args.operation_id)?;
-    let lease = acquire_schema_mutation_lease(&deploy.db.postgres)
-        .await
-        .context("acquire reset verification schema mutation lease")?;
-    let verification_result = tokio::select! {
-        result = preproduction_reset_verify_under_lease(&deploy) => result,
-        () = lease.cancelled() => Err(anyhow::anyhow!(
-            "canonical PostgreSQL schema mutation lease was lost during reset verification"
-        )),
-    };
-    let active_result = lease.ensure_active().map_err(Error::from);
-    let release_result = release_schema_mutation_lease(lease)
-        .await
-        .context("release reset verification schema mutation lease");
-    match (verification_result, active_result, release_result) {
-        (Err(error), _, _) | (Ok(()), Err(error), _) | (Ok(()), Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(()), Ok(())) => {
-            println!("verified_operation_id={}", journal.operation_id);
-            Ok(())
+impl PreproductionResetApplyArgs {
+    async fn preproduction_reset_apply(self) -> Result<()> {
+        let deploy = self.config.load_reset_deploy()?;
+        let mut journal = read_reset_journal(&self.journal_file)?;
+        validate_reset_journal(&journal, &deploy, &self.confirm_nonce, &self.confirm)?;
+        let current_inventory = reset_inventory(&deploy).await?;
+        if current_inventory != journal.inventory {
+            bail!("reset target inventory changed after planning; create a new reset plan");
+        }
+        if current_inventory.postgres_connection_count != 0 {
+            bail!("PostgreSQL target still has active connections");
+        }
+
+        let lease = acquire_schema_mutation_lease(&deploy.db.postgres)
+            .await
+            .context("acquire reset schema mutation lease")?;
+        let locked_inventory = reset_inventory(&deploy).await?;
+        if locked_inventory != journal.inventory || locked_inventory.postgres_connection_count != 0
+        {
+            lease
+                .release_schema_mutation_lease()
+                .await
+                .context("release reset schema mutation lease after stale plan")?;
+            bail!(
+                "reset target changed while acquiring the schema mutation lease; create a new plan"
+            );
+        }
+        transition_reset_journal(&self.journal_file, &mut journal, ResetStage::Applying)?;
+
+        let mutation_result = tokio::select! {
+          result = async {
+            reset_preproduction_postgres(&deploy.db.postgres, &lease)
+                .await
+                .context("recreate exact PostgreSQL quant_pivot database")?;
+            transition_reset_journal(
+                &self.journal_file,
+                &mut journal,
+                ResetStage::PostgresReset,
+            )?;
+            reset_clickhouse_preproduction_database(&deploy.db.clickhouse)
+                .await
+                .context("recreate exact ClickHouse quant_pivot database")?;
+            transition_reset_journal(
+                &self.journal_file,
+                &mut journal,
+                ResetStage::ClickhouseReset,
+            )?;
+            let deleted = unlink_preproduction_namespace(&deploy.cache.redis)
+                .await
+                .context("unlink exact Redis qp:* namespace")?;
+            transition_reset_journal(
+                &self.journal_file,
+                &mut journal,
+                ResetStage::RedisCleared,
+            )?;
+
+            let postgres = PostgresPool::connect_schema(&deploy.db.postgres)
+                .await
+                .context("connect recreated PostgreSQL database")?;
+            apply_under_lease(postgres.connection(), &lease)
+                .await
+                .context("apply unique PostgreSQL boot migration")?;
+            let bootstrap_admin_password_hash = bootstrap_admin_password_hash()?;
+            finalize_schema_deployment(
+                postgres.connection(),
+                &bootstrap_admin_password_hash,
+            )
+            .await
+            .context("finalize recreated PostgreSQL schema")?;
+            let policy_bundle = ensure_boot_domain_facts(
+                postgres.connection(),
+                "guarded preproduction clean boot",
+            )
+            .await?;
+            let postgres_status = verify_postgres_schema(postgres.connection())
+                .await
+                .context("verify recreated PostgreSQL schema")?;
+            let clickhouse_status = apply_online_schema_migrations(&deploy.db.clickhouse)
+                .await
+                .context("apply unique ClickHouse boot migration")?;
+            transition_reset_journal(
+                &self.journal_file,
+                &mut journal,
+                ResetStage::SchemasApplied,
+            )?;
+            let redis_remaining = count_preproduction_namespace(&deploy.cache.redis)
+                .await
+                .context("verify Redis qp:* namespace")?;
+            if redis_remaining != 0 {
+                bail!("Redis qp:* namespace is not empty after reset");
+            }
+            verify_clean_bootstrap_facts(&postgres, &deploy.db.clickhouse).await?;
+            transition_reset_journal(
+                &self.journal_file,
+                &mut journal,
+                ResetStage::Verified,
+            )?;
+            postgres.close().await;
+            println!("redis_unlinked={deleted}");
+            println!(
+                "postgres_boot_version={} postgres_migrations={}",
+                postgres_status.current_version, postgres_status.migration_count
+            );
+            println!(
+                "clickhouse_boot_version={} clickhouse_objects={}",
+                clickhouse_status.current_version, clickhouse_status.required_object_count
+            );
+            println!(
+                "policy_bundle_generation={} policy_snapshot_id={} policy_snapshot_hash={}",
+                policy_bundle.generation,
+                policy_bundle.decision_policy_snapshot_id,
+                policy_bundle.snapshot_hash
+            );
+            Ok::<(), anyhow::Error>(())
+          } => result,
+          () = lease.cancelled() => Err(anyhow::anyhow!(
+              "canonical PostgreSQL schema mutation lease was lost during reset"
+          )),
+        };
+        let release_result = lease
+            .release_schema_mutation_lease()
+            .await
+            .context("release reset schema mutation lease");
+        match (mutation_result, release_result) {
+            (Err(error), _) | (Ok(()), Err(error)) => {
+                mark_reset_journal_failed(&self.journal_file, &mut journal)?;
+                Err(error)
+            }
+            (Ok(()), Ok(())) => {
+                transition_reset_journal(&self.journal_file, &mut journal, ResetStage::Completed)?;
+                println!("preproduction reset completed and verified");
+                println!("operation_id={}", journal.operation_id);
+                println!("completed_journal={}", self.journal_file.display());
+                Ok(())
+            }
         }
     }
 }
 
-async fn preproduction_reset_verify_under_lease(deploy: &DeployConfig) -> Result<()> {
+impl PreproductionResetVerifyArgs {
+    async fn preproduction_reset_verify(self) -> Result<()> {
+        let deploy = self.config.load_reset_deploy()?;
+        let journal = read_reset_journal(&self.journal_file)?;
+        validate_completed_reset_journal(&journal, &deploy, self.operation_id)?;
+        let lease = acquire_schema_mutation_lease(&deploy.db.postgres)
+            .await
+            .context("acquire reset verification schema mutation lease")?;
+        let verification_result = tokio::select! {
+            result = verify_reset_under_lease(&deploy) => result,
+            () = lease.cancelled() => Err(anyhow::anyhow!(
+                "canonical PostgreSQL schema mutation lease was lost during reset verification"
+            )),
+        };
+        let active_result = lease.ensure_active().map_err(Error::from);
+        let release_result = lease
+            .release_schema_mutation_lease()
+            .await
+            .context("release reset verification schema mutation lease");
+        match (verification_result, active_result, release_result) {
+            (Err(error), _, _) | (Ok(()), Err(error), _) | (Ok(()), Ok(()), Err(error)) => {
+                Err(error)
+            }
+            (Ok(()), Ok(()), Ok(())) => {
+                println!("verified_operation_id={}", journal.operation_id);
+                Ok(())
+            }
+        }
+    }
+}
+
+async fn verify_reset_under_lease(deploy: &DeployConfig) -> Result<()> {
     let postgres = PostgresPool::connect_existing(&deploy.db.postgres)
         .await
         .context("connect configured PostgreSQL identity")?;
@@ -806,17 +826,19 @@ async fn verify_clean_bootstrap_facts(
     Ok(())
 }
 
-fn load_reset_deploy(args: &ConfigDirArgs) -> Result<DeployConfig> {
-    let config_dir = args
-        .config_dir
-        .to_str()
-        .context("preproduction reset config directory is not valid UTF-8")?;
-    let deploy =
-        DeployConfig::load_for_migration(config_dir).context("load reset deploy config")?;
-    if !deploy.deployment.permits_destructive_reset() {
-        bail!("destructive fresh-boot reset is forbidden in the production environment");
+impl ConfigDirArgs {
+    fn load_reset_deploy(&self) -> Result<DeployConfig> {
+        let config_dir = self
+            .config_dir
+            .to_str()
+            .context("preproduction reset config directory is not valid UTF-8")?;
+        let deploy =
+            DeployConfig::load_for_migration(config_dir).context("load reset deploy config")?;
+        if !deploy.deployment.permits_destructive_reset() {
+            bail!("destructive fresh-boot reset is forbidden in the production environment");
+        }
+        Ok(deploy)
     }
-    Ok(deploy)
 }
 
 async fn reset_inventory(deploy: &DeployConfig) -> Result<ResetObjectInventory> {
@@ -882,21 +904,23 @@ fn reset_target_fingerprints(deploy: &DeployConfig) -> Result<ResetTargetFingerp
     })
 }
 
-fn reset_journal_hash(journal: &PreproductionResetJournal) -> Result<ContentHash> {
-    CanonicalDigest::content_hash_json(&ResetJournalDigest {
-        format_version: journal.format_version,
-        operation_id: journal.operation_id,
-        nonce: &journal.nonce,
-        stage: journal.stage,
-        created_at: journal.created_at,
-        updated_at: journal.updated_at,
-        expires_at: journal.expires_at,
-        completed_at: journal.completed_at,
-        targets: &journal.targets,
-        inventory: &journal.inventory,
-        failure: &journal.failure,
-    })
-    .context("hash preproduction reset journal")
+impl PreproductionResetJournal {
+    fn reset_journal_hash(&self) -> Result<ContentHash> {
+        CanonicalDigest::content_hash_json(&ResetJournalDigest {
+            format_version: self.format_version,
+            operation_id: self.operation_id,
+            nonce: &self.nonce,
+            stage: self.stage,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            expires_at: self.expires_at,
+            completed_at: self.completed_at,
+            targets: &self.targets,
+            inventory: &self.inventory,
+            failure: &self.failure,
+        })
+        .context("hash preproduction reset journal")
+    }
 }
 
 fn validate_reset_journal_integrity(
@@ -905,14 +929,14 @@ fn validate_reset_journal_integrity(
 ) -> Result<()> {
     if journal.format_version != RESET_JOURNAL_FORMAT_VERSION
         || journal.targets != reset_target_fingerprints(deploy)?
-        || journal.journal_hash != reset_journal_hash(journal)?
+        || journal.journal_hash != (journal).reset_journal_hash()?
     {
         bail!("reset journal is tampered or targets another endpoint");
     }
     Ok(())
 }
 
-fn validate_reset_journal_for_apply(
+fn validate_reset_journal(
     journal: &PreproductionResetJournal,
     deploy: &DeployConfig,
     confirm_nonce: &PreproductionResetNonce,
@@ -975,7 +999,7 @@ fn transition_reset_journal(
     if stage == ResetStage::Completed {
         journal.completed_at = Some(journal.updated_at);
     }
-    journal.journal_hash = reset_journal_hash(journal)?;
+    journal.journal_hash = (journal).reset_journal_hash()?;
     write_private_json_atomic(path, journal)
 }
 
@@ -990,7 +1014,7 @@ fn mark_reset_journal_failed(path: &Path, journal: &mut PreproductionResetJourna
         summary: "reset operation failed; inspect the command diagnostics before planning a new operation"
             .to_owned(),
     });
-    journal.journal_hash = reset_journal_hash(journal)?;
+    journal.journal_hash = (journal).reset_journal_hash()?;
     write_private_json_atomic(path, journal)
 }
 
@@ -1071,107 +1095,109 @@ fn sync_parent_directory(path: &Path) -> Result<()> {
         .with_context(|| format!("fsync reset journal directory {}", parent.display()))
 }
 
-async fn postgres_schema(command: PostgresSchemaCommand) -> Result<()> {
-    let args = match &command {
-        PostgresSchemaCommand::Plan(args)
-        | PostgresSchemaCommand::Apply(args)
-        | PostgresSchemaCommand::Verify(args)
-        | PostgresSchemaCommand::Manifest(args) => Some(args),
-        PostgresSchemaCommand::ManifestClean | PostgresSchemaCommand::MigrationManifest => None,
-    };
-    let Some(args) = args else {
-        return match command {
-            PostgresSchemaCommand::ManifestClean => generate_clean_postgres_manifest().await,
-            PostgresSchemaCommand::MigrationManifest => {
-                write_postgres_migration_manifest()?;
+impl PostgresSchemaCommand {
+    async fn postgres_schema(self) -> Result<()> {
+        let args = match &self {
+            Self::Plan(args) | Self::Apply(args) | Self::Verify(args) | Self::Manifest(args) => {
+                Some(args)
+            }
+            Self::ManifestClean | Self::MigrationManifest => None,
+        };
+        let Some(args) = args else {
+            return match self {
+                Self::ManifestClean => generate_clean_postgres_manifest().await,
+                Self::MigrationManifest => {
+                    write_postgres_migration_manifest()?;
+                    Ok(())
+                }
+                _ => unreachable!("commands carrying config arguments were handled above"),
+            };
+        };
+        let config_dir = args
+            .config_dir
+            .to_str()
+            .context("PostgreSQL schema config directory is not valid UTF-8")?;
+        let deploy = DeployConfig::load_for_migration(config_dir).context("load deploy config")?;
+        match self {
+            Self::Plan(_) => {
+                let pool = PostgresPool::connect_existing(&deploy.db.postgres)
+                    .await
+                    .context("connect PostgreSQL for migration plan")?;
+                let plan = plan_postgres_migrations(pool.connection())
+                    .await
+                    .context("plan PostgreSQL schema")?;
+                println!("migration_ledger_exists={}", plan.migration_ledger_exists);
+                println!("applied_versions={:?}", plan.applied_versions);
+                for migration in plan.pending_migrations {
+                    println!(
+                        "pending_migration version={} checksum={}",
+                        migration.version, migration.checksum
+                    );
+                }
+                pool.close().await;
                 Ok(())
             }
-            _ => unreachable!("commands carrying config arguments were handled above"),
-        };
-    };
-    let config_dir = args
-        .config_dir
-        .to_str()
-        .context("PostgreSQL schema config directory is not valid UTF-8")?;
-    let deploy = DeployConfig::load_for_migration(config_dir).context("load deploy config")?;
-    match command {
-        PostgresSchemaCommand::Plan(_) => {
-            let pool = PostgresPool::connect_existing(&deploy.db.postgres)
-                .await
-                .context("connect PostgreSQL for migration plan")?;
-            let plan = plan_postgres_migrations(pool.connection())
-                .await
-                .context("plan PostgreSQL schema")?;
-            println!("migration_ledger_exists={}", plan.migration_ledger_exists);
-            println!("applied_versions={:?}", plan.applied_versions);
-            for migration in plan.pending_migrations {
+            Self::Apply(_) => apply_postgres_schema(&deploy).await,
+            Self::Verify(_) => {
+                let pool = PostgresPool::connect_existing(&deploy.db.postgres)
+                    .await
+                    .context("connect configured PostgreSQL identity")?;
+                let lease = acquire_schema_mutation_lease(&deploy.db.postgres)
+                    .await
+                    .context("acquire PostgreSQL verification schema mutation lease")?;
+                let verification_result = tokio::select! {
+                    result = verify_postgres_schema(pool.connection()) => {
+                        result.context("verify PostgreSQL schema")
+                    }
+                    () = lease.cancelled() => Err(anyhow::anyhow!(
+                        "canonical PostgreSQL schema mutation lease was lost during schema verification"
+                    )),
+                };
+                let active_result = lease.ensure_active().map_err(Error::from);
+                let release_result = lease
+                    .release_schema_mutation_lease()
+                    .await
+                    .context("release PostgreSQL verification schema mutation lease");
+                let status = match (verification_result, active_result, release_result) {
+                    (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => {
+                        return Err(error);
+                    }
+                    (Ok(status), Ok(()), Ok(())) => status,
+                };
                 println!(
-                    "pending_migration version={} checksum={}",
-                    migration.version, migration.checksum
+                    "PostgreSQL schema verified: version={}, migrations={}, tables={}, indexes={}",
+                    status.current_version,
+                    status.migration_count,
+                    status.required_table_count,
+                    status.required_index_count
                 );
+                pool.close().await;
+                Ok(())
             }
-            pool.close().await;
-            Ok(())
+            Self::Manifest(_) => {
+                let pool = PostgresPool::connect_existing(&deploy.db.postgres)
+                    .await
+                    .context("connect configured PostgreSQL identity")?;
+                let manifest = inspect_schema_manifest(pool.connection())
+                    .await
+                    .context("inspect PostgreSQL semantic manifest")?;
+                let rendered = render_schema_manifest(&manifest)
+                    .context("render PostgreSQL semantic manifest")?;
+                let path = workspace_root()?
+                    .join("schema")
+                    .join("postgres")
+                    .join("manifest.json");
+                fs::create_dir_all(path.parent().context("manifest path has no parent")?)
+                    .context("create PostgreSQL manifest directory")?;
+                fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
+                let migration_path = write_postgres_migration_manifest()?;
+                println!("generated {}", path.display());
+                println!("generated {}", migration_path.display());
+                pool.close().await;
+                Ok(())
+            }
+            Self::ManifestClean | Self::MigrationManifest => Ok(()),
         }
-        PostgresSchemaCommand::Apply(_) => apply_postgres_schema(&deploy).await,
-        PostgresSchemaCommand::Verify(_) => {
-            let pool = PostgresPool::connect_existing(&deploy.db.postgres)
-                .await
-                .context("connect configured PostgreSQL identity")?;
-            let lease = acquire_schema_mutation_lease(&deploy.db.postgres)
-                .await
-                .context("acquire PostgreSQL verification schema mutation lease")?;
-            let verification_result = tokio::select! {
-                result = verify_postgres_schema(pool.connection()) => {
-                    result.context("verify PostgreSQL schema")
-                }
-                () = lease.cancelled() => Err(anyhow::anyhow!(
-                    "canonical PostgreSQL schema mutation lease was lost during schema verification"
-                )),
-            };
-            let active_result = lease.ensure_active().map_err(Error::from);
-            let release_result = release_schema_mutation_lease(lease)
-                .await
-                .context("release PostgreSQL verification schema mutation lease");
-            let status = match (verification_result, active_result, release_result) {
-                (Err(error), _, _) | (Ok(_), Err(error), _) | (Ok(_), Ok(()), Err(error)) => {
-                    return Err(error);
-                }
-                (Ok(status), Ok(()), Ok(())) => status,
-            };
-            println!(
-                "PostgreSQL schema verified: version={}, migrations={}, tables={}, indexes={}",
-                status.current_version,
-                status.migration_count,
-                status.required_table_count,
-                status.required_index_count
-            );
-            pool.close().await;
-            Ok(())
-        }
-        PostgresSchemaCommand::Manifest(_) => {
-            let pool = PostgresPool::connect_existing(&deploy.db.postgres)
-                .await
-                .context("connect configured PostgreSQL identity")?;
-            let manifest = inspect_schema_manifest(pool.connection())
-                .await
-                .context("inspect PostgreSQL semantic manifest")?;
-            let rendered =
-                render_schema_manifest(&manifest).context("render PostgreSQL semantic manifest")?;
-            let path = workspace_root()?
-                .join("schema")
-                .join("postgres")
-                .join("manifest.json");
-            fs::create_dir_all(path.parent().context("manifest path has no parent")?)
-                .context("create PostgreSQL manifest directory")?;
-            fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
-            let migration_path = write_postgres_migration_manifest()?;
-            println!("generated {}", path.display());
-            println!("generated {}", migration_path.display());
-            pool.close().await;
-            Ok(())
-        }
-        PostgresSchemaCommand::ManifestClean | PostgresSchemaCommand::MigrationManifest => Ok(()),
     }
 }
 
@@ -1185,14 +1211,14 @@ async fn apply_postgres_schema(deploy: &DeployConfig) -> Result<()> {
         .context("acquire PostgreSQL deployment schema mutation lease")?;
     let deployment_result = tokio::select! {
         result = async {
-            apply_under_schema_mutation_lease(pool.connection(), &lease)
+            apply_under_lease(pool.connection(), &lease)
                 .await
                 .context("apply audited SeaORM PostgreSQL migrations")?;
             let status =
                 finalize_schema_deployment(pool.connection(), &bootstrap_admin_password_hash)
                     .await
                     .context("finalize PostgreSQL schema deployment")?;
-            let policy_bundle = ensure_postgres_boot_domain_facts(
+            let policy_bundle = ensure_boot_domain_facts(
                 pool.connection(),
                 "canonical fresh PostgreSQL deployment",
             )
@@ -1204,7 +1230,8 @@ async fn apply_postgres_schema(deploy: &DeployConfig) -> Result<()> {
         )),
     };
     let active_result = lease.ensure_active().map_err(Error::from);
-    let release_result = release_schema_mutation_lease(lease)
+    let release_result = lease
+        .release_schema_mutation_lease()
         .await
         .context("release PostgreSQL deployment schema mutation lease");
     let (status, policy_bundle) = match (deployment_result, active_result, release_result) {
@@ -1230,7 +1257,7 @@ async fn apply_postgres_schema(deploy: &DeployConfig) -> Result<()> {
     Ok(())
 }
 
-async fn ensure_postgres_boot_domain_facts(
+async fn ensure_boot_domain_facts(
     db: &DatabaseConnection,
     reason: &str,
 ) -> Result<ActivePolicyBundle> {
@@ -1286,7 +1313,7 @@ async fn generate_clean_postgres_manifest() -> Result<()> {
         .context("acquire disposable manifest schema mutation lease")?;
     let manifest_result = tokio::select! {
         result = async {
-            apply_under_schema_mutation_lease(pool.connection(), &lease)
+            apply_under_lease(pool.connection(), &lease)
                 .await
                 .context("apply migrations to disposable PostgreSQL manifest database")?;
             generate_disposable_schema_manifest(pool.connection(), &bootstrap_password_hash)
@@ -1298,7 +1325,8 @@ async fn generate_clean_postgres_manifest() -> Result<()> {
         )),
     };
     let active_result = lease.ensure_active().map_err(Error::from);
-    let release_result = release_schema_mutation_lease(lease)
+    let release_result = lease
+        .release_schema_mutation_lease()
         .await
         .context("release disposable manifest schema mutation lease");
     let manifest = match (manifest_result, active_result, release_result) {
@@ -1338,25 +1366,22 @@ fn write_postgres_migration_manifest() -> Result<PathBuf> {
     Ok(path)
 }
 
-async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
-    let config_dir = match &command {
-        ClickHouseSchemaCommand::Plan(args)
-        | ClickHouseSchemaCommand::ApplyOnline(args)
-        | ClickHouseSchemaCommand::ApplyOffline(args)
-        | ClickHouseSchemaCommand::Verify(args)
-        | ClickHouseSchemaCommand::Manifest(args) => &args.config_dir,
-    };
-    let config_dir = config_dir
-        .to_str()
-        .context("ClickHouse schema config directory is not valid UTF-8")?;
-    let deploy = DeployConfig::load_for_migration(config_dir).context("load deploy config")?;
-    let config = &deploy.db.clickhouse;
-    let mutates_schema = matches!(
-        &command,
-        ClickHouseSchemaCommand::ApplyOnline(_) | ClickHouseSchemaCommand::ApplyOffline(_)
-    );
-    let schema_mutation_lease =
-        if mutates_schema || matches!(&command, ClickHouseSchemaCommand::Verify(_)) {
+impl ClickHouseSchemaCommand {
+    async fn clickhouse_schema(self) -> Result<()> {
+        let config_dir = match &self {
+            Self::Plan(args)
+            | Self::ApplyOnline(args)
+            | Self::ApplyOffline(args)
+            | Self::Verify(args)
+            | Self::Manifest(args) => &args.config_dir,
+        };
+        let config_dir = config_dir
+            .to_str()
+            .context("ClickHouse schema config directory is not valid UTF-8")?;
+        let deploy = DeployConfig::load_for_migration(config_dir).context("load deploy config")?;
+        let config = &deploy.db.clickhouse;
+        let mutates_schema = matches!(&self, Self::ApplyOnline(_) | Self::ApplyOffline(_));
+        let schema_mutation_lease = if mutates_schema || matches!(&self, Self::Verify(_)) {
             Some(
                 acquire_schema_mutation_lease(&deploy.db.postgres)
                     .await
@@ -1365,117 +1390,121 @@ async fn clickhouse_schema(command: ClickHouseSchemaCommand) -> Result<()> {
         } else {
             None
         };
-    let result = match command {
-        ClickHouseSchemaCommand::Plan(_) => {
-            let plan = plan_schema(config)
-                .await
-                .context("plan ClickHouse schema")?;
-            println!("database_exists={}", plan.database_exists);
-            println!("migration_ledger_exists={}", plan.migration_ledger_exists);
-            println!("applied_versions={:?}", plan.applied_versions);
-            if plan.pending_migrations.is_empty() {
-                println!("pending_migrations=[]");
-            } else {
-                for migration in plan.pending_migrations {
-                    println!(
-                        "pending_migration version={} name={} safety={:?} checksum={}",
-                        migration.version, migration.name, migration.safety, migration.checksum
-                    );
+        let result = match self {
+            Self::Plan(_) => {
+                let plan = plan_schema(config)
+                    .await
+                    .context("plan ClickHouse schema")?;
+                println!("database_exists={}", plan.database_exists);
+                println!("migration_ledger_exists={}", plan.migration_ledger_exists);
+                println!("applied_versions={:?}", plan.applied_versions);
+                if plan.pending_migrations.is_empty() {
+                    println!("pending_migrations=[]");
+                } else {
+                    for migration in plan.pending_migrations {
+                        println!(
+                            "pending_migration version={} name={} safety={:?} checksum={}",
+                            migration.version, migration.name, migration.safety, migration.checksum
+                        );
+                    }
                 }
+                Ok(())
             }
-            Ok(())
-        }
-        ClickHouseSchemaCommand::ApplyOnline(_) => {
-            let status_result = if let Some(lease) = schema_mutation_lease.as_ref() {
-                tokio::select! {
-                result = apply_online_schema_migrations(config) => {
-                    result.context("deploy ClickHouse schema")
-                }
-                () = lease.cancelled() => Err(anyhow::anyhow!(
-                    "canonical PostgreSQL schema mutation lease was lost during ClickHouse migration"
-                )),
-                }
-            } else {
-                Err(anyhow::anyhow!(
-                    "ClickHouse schema mutation lease is absent"
-                ))
-            };
-            status_result.map(|status| {
-                println!(
-                    "ClickHouse schema deployed: version={}, required_objects={}",
-                    status.current_version, status.required_object_count
-                );
-            })
-        }
-        ClickHouseSchemaCommand::ApplyOffline(_) => {
-            let status_result = if let Some(lease) = schema_mutation_lease.as_ref() {
-                tokio::select! {
-                result = apply_offline_schema_migrations(config) => {
-                    result.context("deploy offline ClickHouse schema")
-                }
-                () = lease.cancelled() => Err(anyhow::anyhow!(
-                    "canonical PostgreSQL schema mutation lease was lost during offline ClickHouse migration"
-                )),
-                }
-            } else {
-                Err(anyhow::anyhow!(
-                    "ClickHouse schema mutation lease is absent"
-                ))
-            };
-            status_result.map(|status| {
-                println!(
-                    "ClickHouse offline schema deployed: version={}, required_objects={}",
-                    status.current_version, status.required_object_count
-                );
-            })
-        }
-        ClickHouseSchemaCommand::Verify(_) => {
-            let status_result = if let Some(lease) = schema_mutation_lease.as_ref() {
-                tokio::select! {
-                    result = verify_schema(config) => result.context("verify ClickHouse schema"),
+            Self::ApplyOnline(_) => {
+                let status_result = if let Some(lease) = schema_mutation_lease.as_ref() {
+                    tokio::select! {
+                    result = apply_online_schema_migrations(config) => {
+                        result.context("deploy ClickHouse schema")
+                    }
                     () = lease.cancelled() => Err(anyhow::anyhow!(
-                        "canonical PostgreSQL schema mutation lease was lost during ClickHouse verification"
+                        "canonical PostgreSQL schema mutation lease was lost during ClickHouse migration"
                     )),
-                }
-            } else {
-                Err(anyhow::anyhow!(
-                    "ClickHouse verification schema mutation lease is absent"
-                ))
-            };
-            status_result.map(|status| {
-                println!(
-                    "ClickHouse schema verified: version={}, required_objects={}",
-                    status.current_version, status.required_object_count
-                );
-            })
-        }
-        ClickHouseSchemaCommand::Manifest(_) => {
-            let rendered = render_clickhouse_schema_manifest(config)
+                    }
+                } else {
+                    Err(anyhow::anyhow!(
+                        "ClickHouse schema mutation lease is absent"
+                    ))
+                };
+                status_result.map(|status| {
+                    println!(
+                        "ClickHouse schema deployed: version={}, required_objects={}",
+                        status.current_version, status.required_object_count
+                    );
+                })
+            }
+            Self::ApplyOffline(_) => {
+                let status_result = if let Some(lease) = schema_mutation_lease.as_ref() {
+                    tokio::select! {
+                    result = apply_offline_schema_migrations(config) => {
+                        result.context("deploy offline ClickHouse schema")
+                    }
+                    () = lease.cancelled() => Err(anyhow::anyhow!(
+                        "canonical PostgreSQL schema mutation lease was lost during offline ClickHouse migration"
+                    )),
+                    }
+                } else {
+                    Err(anyhow::anyhow!(
+                        "ClickHouse schema mutation lease is absent"
+                    ))
+                };
+                status_result.map(|status| {
+                    println!(
+                        "ClickHouse offline schema deployed: version={}, required_objects={}",
+                        status.current_version, status.required_object_count
+                    );
+                })
+            }
+            Self::Verify(_) => {
+                let status_result = if let Some(lease) = schema_mutation_lease.as_ref() {
+                    tokio::select! {
+                        result = verify_schema(config) => result.context("verify ClickHouse schema"),
+                        () = lease.cancelled() => Err(anyhow::anyhow!(
+                            "canonical PostgreSQL schema mutation lease was lost during ClickHouse verification"
+                        )),
+                    }
+                } else {
+                    Err(anyhow::anyhow!(
+                        "ClickHouse verification schema mutation lease is absent"
+                    ))
+                };
+                status_result.map(|status| {
+                    println!(
+                        "ClickHouse schema verified: version={}, required_objects={}",
+                        status.current_version, status.required_object_count
+                    );
+                })
+            }
+            Self::Manifest(_) => {
+                let rendered = render_clickhouse_schema_manifest(config)
+                    .await
+                    .context("render ClickHouse semantic schema manifest")?;
+                let path = workspace_root()?
+                    .join("schema")
+                    .join("clickhouse")
+                    .join("manifest.json");
+                fs::create_dir_all(path.parent().context("manifest path has no parent")?)
+                    .context("create ClickHouse manifest directory")?;
+                fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
+                println!("generated {}", path.display());
+                Ok(())
+            }
+        };
+        let active_result = schema_mutation_lease
+            .as_ref()
+            .map_or(Ok(()), |lease| lease.ensure_active().map_err(Error::from));
+        let release_result = match schema_mutation_lease {
+            Some(lease) => lease
+                .release_schema_mutation_lease()
                 .await
-                .context("render ClickHouse semantic schema manifest")?;
-            let path = workspace_root()?
-                .join("schema")
-                .join("clickhouse")
-                .join("manifest.json");
-            fs::create_dir_all(path.parent().context("manifest path has no parent")?)
-                .context("create ClickHouse manifest directory")?;
-            fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
-            println!("generated {}", path.display());
-            Ok(())
+                .context("release cross-system schema mutation lease"),
+            None => Ok(()),
+        };
+        match (result, active_result, release_result) {
+            (Err(error), _, _) | (Ok(()), Err(error), _) | (Ok(()), Ok(()), Err(error)) => {
+                Err(error)
+            }
+            (Ok(()), Ok(()), Ok(())) => Ok(()),
         }
-    };
-    let active_result = schema_mutation_lease
-        .as_ref()
-        .map_or(Ok(()), |lease| lease.ensure_active().map_err(Error::from));
-    let release_result = match schema_mutation_lease {
-        Some(lease) => release_schema_mutation_lease(lease)
-            .await
-            .context("release cross-system schema mutation lease"),
-        None => Ok(()),
-    };
-    match (result, active_result, release_result) {
-        (Err(error), _, _) | (Ok(()), Err(error), _) | (Ok(()), Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(()), Ok(())) => Ok(()),
     }
 }
 
@@ -1554,20 +1583,20 @@ mod tests {
     use super::{
         CLEAN_BOOTSTRAP_CONFIRMATION, PreproductionResetJournal, RESET_JOURNAL_FORMAT_VERSION,
         RESET_PLAN_TTL_MINUTES, ResetObjectInventory, ResetStage, archive_reset_journal,
-        mark_reset_journal_failed, read_reset_journal, report_capacity_ceiling, reset_journal_hash,
+        mark_reset_journal_failed, read_reset_journal, report_capacity_ceiling,
         reset_target_fingerprints, transition_reset_journal, validate_completed_reset_journal,
-        validate_reset_journal_for_apply, write_private_json_atomic,
+        validate_reset_journal, write_private_json_atomic,
     };
 
     #[test]
-    fn report_capacity_ceiling_enforces_floor_double_runway_and_rounding() {
+    fn report_capacity_enforces_rounding() {
         assert_eq!(report_capacity_ceiling(1).expect("ceiling"), 100_000);
         assert_eq!(report_capacity_ceiling(50_001).expect("ceiling"), 101_000);
         assert_eq!(report_capacity_ceiling(120_000).expect("ceiling"), 240_000);
     }
 
     #[test]
-    fn reset_journal_is_private_atomic_and_operation_bound() {
+    fn reset_journal_atomic_bound() {
         let directory = env::temp_dir().join(format!("quant-pivot-journal-{}", Uuid::now_v7()));
         let path = directory.join("active-operation.json");
         let deploy = DeployConfig::default();
@@ -1595,7 +1624,7 @@ mod tests {
             journal
         );
         assert!(
-            validate_reset_journal_for_apply(
+            validate_reset_journal(
                 &journal,
                 &deploy,
                 &PreproductionResetNonce::from_v7(),
@@ -1607,7 +1636,7 @@ mod tests {
         let mut tampered = journal.clone();
         tampered.operation_id = Uuid::now_v7();
         assert!(
-            validate_reset_journal_for_apply(
+            validate_reset_journal(
                 &tampered,
                 &deploy,
                 &tampered.nonce,
@@ -1617,8 +1646,7 @@ mod tests {
             "immutable journal tampering must fail closed"
         );
         assert!(
-            validate_reset_journal_for_apply(&journal, &deploy, &journal.nonce, "DELETE_ONLY_L2",)
-                .is_err(),
+            validate_reset_journal(&journal, &deploy, &journal.nonce, "DELETE_ONLY_L2",).is_err(),
             "an acknowledgement that understates the full reset scope must fail closed"
         );
         let mut stage_tampered = journal.clone();
@@ -1651,7 +1679,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_journal_records_interrupted_stage_without_resuming() {
+    fn reset_journal_without_resuming() {
         let directory = env::temp_dir().join(format!("quant-pivot-journal-{}", Uuid::now_v7()));
         let path = directory.join("active-operation.json");
         let deploy = DeployConfig::default();
@@ -1695,7 +1723,7 @@ mod tests {
             failure: None,
             journal_hash: CanonicalDigest::content_hash_json(&"pending").expect("placeholder hash"),
         };
-        journal.journal_hash = reset_journal_hash(&journal).expect("reset journal hash");
+        journal.journal_hash = journal.reset_journal_hash().expect("reset journal hash");
         journal
     }
 }

@@ -362,7 +362,7 @@ mod tests {
     use super::decimal_price;
 
     #[test]
-    fn benchmark_price_uses_frozen_feed_scale() {
+    fn benchmark_price_uses_scale() {
         assert_eq!(
             decimal_price("123456789", 8).expect("valid price"),
             dec!(1.23456789)
@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn non_positive_benchmark_price_is_rejected() {
+    fn non_positive_benchmark_rejected() {
         assert!(decimal_price("0", 8).is_err());
         assert!(decimal_price("-1", 8).is_err());
     }

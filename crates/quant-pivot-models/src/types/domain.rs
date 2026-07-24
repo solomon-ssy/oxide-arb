@@ -387,6 +387,48 @@ validated_token! {
     ChainlinkFeedKey, kind = "chainlink feed key", max_len = 20, allow_dash = true
 }
 
+impl BinanceMarketSegment {
+    /// Canonical kline source for this Binance product.
+    #[must_use]
+    pub fn kline_source(self) -> DomainSourceId {
+        match self {
+            Self::Spot => DomainSourceId::binance(),
+            Self::UsdmFutures => DomainSourceId::binance_usdm_futures(),
+        }
+    }
+
+    /// Canonical aggregate-trade source for this Binance product.
+    #[must_use]
+    pub fn trade_source(self) -> DomainSourceId {
+        match self {
+            Self::Spot => DomainSourceId::binance_agg_trade(),
+            Self::UsdmFutures => DomainSourceId::binance_futures_trade(),
+        }
+    }
+
+    /// Canonical kline instrument for this Binance product.
+    #[must_use]
+    pub fn kline_instrument(
+        self,
+        symbol: &BinanceSymbol,
+        interval: KlineInterval,
+    ) -> DomainInstrumentKey {
+        match self {
+            Self::Spot => DomainInstrumentKey::binance_kline(symbol, interval),
+            Self::UsdmFutures => DomainInstrumentKey::binance_usdm_futures_kline(symbol, interval),
+        }
+    }
+
+    /// Canonical aggregate-trade instrument for this Binance product.
+    #[must_use]
+    pub fn trade_instrument(self, symbol: &BinanceSymbol) -> DomainInstrumentKey {
+        match self {
+            Self::Spot => DomainInstrumentKey::binance_agg_trade(symbol),
+            Self::UsdmFutures => DomainInstrumentKey::binance_futures_trade(symbol),
+        }
+    }
+}
+
 // ── DomainInstrumentKey canonical constructors ──────────────────────────────
 
 impl DomainInstrumentKey {
@@ -419,7 +461,7 @@ impl DomainInstrumentKey {
 
     /// Canonical key for a Binance USD-M Futures aggregate-trade stream.
     #[must_use]
-    pub fn binance_usdm_futures_agg_trade(symbol: &BinanceSymbol) -> Self {
+    pub fn binance_futures_trade(symbol: &BinanceSymbol) -> Self {
         Self::new(format!("BINANCE_USDM_FUTURES_AGG_TRADE:{symbol}"))
     }
 
@@ -558,9 +600,7 @@ impl DomainInstrumentKey {
             "BINANCE" => Some(DomainSourceId::binance()),
             "BINANCE_AGG_TRADE" => Some(DomainSourceId::binance_agg_trade()),
             "BINANCE_USDM_FUTURES" => Some(DomainSourceId::binance_usdm_futures()),
-            "BINANCE_USDM_FUTURES_AGG_TRADE" => {
-                Some(DomainSourceId::binance_usdm_futures_agg_trade())
-            }
+            "BINANCE_USDM_FUTURES_AGG_TRADE" => Some(DomainSourceId::binance_futures_trade()),
             "RTDS" => match self.as_str().split(':').nth(1)? {
                 "BINANCE" => Some(DomainSourceId::polymarket_rtds_binance()),
                 "CHAINLINK" => Some(DomainSourceId::polymarket_rtds_chainlink()),
@@ -585,13 +625,13 @@ impl DomainInstrumentKey {
 
     /// Decode a canonical aggregate-trade instrument without accepting aliases.
     #[must_use]
-    pub fn as_binance_agg_trade_symbol(&self) -> Option<BinanceSymbol> {
+    pub fn binance_agg_symbol(&self) -> Option<BinanceSymbol> {
         BinanceSymbol::parse(self.as_str().strip_prefix("BINANCE_AGG_TRADE:")?).ok()
     }
 
     /// Decode a canonical USD-M Futures aggregate-trade instrument.
     #[must_use]
-    pub fn as_binance_usdm_futures_agg_trade_symbol(&self) -> Option<BinanceSymbol> {
+    pub fn binance_futures_symbol(&self) -> Option<BinanceSymbol> {
         BinanceSymbol::parse(
             self.as_str()
                 .strip_prefix("BINANCE_USDM_FUTURES_AGG_TRADE:")?,
@@ -629,13 +669,13 @@ impl DomainInstrumentKey {
 
     /// Decode a canonical RTDS Binance instrument.
     #[must_use]
-    pub fn as_polymarket_rtds_binance_symbol(&self) -> Option<BinanceSymbol> {
+    pub fn polymarket_binance_symbol(&self) -> Option<BinanceSymbol> {
         BinanceSymbol::parse(self.as_str().strip_prefix("RTDS:BINANCE:")?).ok()
     }
 
     /// Decode a canonical RTDS Chainlink instrument.
     #[must_use]
-    pub fn as_polymarket_rtds_chainlink_feed(&self) -> Option<ChainlinkFeedKey> {
+    pub fn polymarket_chainlink_feed(&self) -> Option<ChainlinkFeedKey> {
         ChainlinkFeedKey::parse(self.as_str().strip_prefix("RTDS:CHAINLINK:")?).ok()
     }
 
@@ -701,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn binance_usdm_futures_keys_preserve_product_provenance() {
+    fn binance_usdm_preserve_provenance() {
         let symbol = BinanceSymbol::parse("HYPEUSDT").expect("symbol");
         let kline =
             DomainInstrumentKey::binance_usdm_futures_kline(&symbol, KlineInterval::OneHour);
@@ -720,20 +760,17 @@ mod tests {
         );
         assert!(kline.as_binance_kline().is_none());
 
-        let aggregate_trade = DomainInstrumentKey::binance_usdm_futures_agg_trade(&symbol);
+        let aggregate_trade = DomainInstrumentKey::binance_futures_trade(&symbol);
         assert_eq!(
             aggregate_trade.source_id(),
-            Some(DomainSourceId::binance_usdm_futures_agg_trade())
+            Some(DomainSourceId::binance_futures_trade())
         );
-        assert_eq!(
-            aggregate_trade.as_binance_usdm_futures_agg_trade_symbol(),
-            Some(symbol)
-        );
-        assert!(aggregate_trade.as_binance_agg_trade_symbol().is_none());
+        assert_eq!(aggregate_trade.binance_futures_symbol(), Some(symbol));
+        assert!(aggregate_trade.binance_agg_symbol().is_none());
     }
 
     #[test]
-    fn resolver_version_rejects_non_positive() {
+    fn resolver_rejects_non_positive() {
         assert!(ResolverVersion::try_new(0).is_err());
         assert_eq!(ResolverVersion::FIRST.get(), 1);
         assert!(serde_json::from_str::<ResolverVersion>("0").is_err());

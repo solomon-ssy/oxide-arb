@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blacklist_key_uses_the_configured_namespace() {
+    async fn blacklist_key_uses_namespace() {
         // The pool is lazy — no connection is attempted until `get`.
         let pool = Config::from_url("redis://127.0.0.1:1")
             .create_pool(Some(Runtime::Tokio1))
@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_pins_algorithm_media_type_audience_and_token_use() {
+    fn decode_pins_algorithm_use() {
         let jwt = service("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc");
         let access = claims("quant-pivot-web-test", TokenUse::Access);
         let valid = signed(&access, Algorithm::HS256, "at+jwt");
@@ -863,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn key_rotation_invalidates_old_tokens_and_absolute_session_clips_access() {
+    fn key_rotation_invalidates_access() {
         let original = service("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc");
         let rotated = service("CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg");
         let token = original.encode_access(&user()).expect("access token");

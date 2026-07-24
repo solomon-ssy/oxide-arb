@@ -16,10 +16,7 @@ use quant_pivot_repository::{
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
-    support::execution_pg_seed::{
-        ReportSeedConfig, seed_report_only_conditional_price_report_on_infra,
-        seed_shared_demo_infra,
-    },
+    support::execution_pg_seed::{ReportSeedConfig, seed_report_price, seed_shared_demo_infra},
 };
 use sea_orm::{DatabaseConnection, EntityTrait, PaginatorTrait};
 
@@ -27,11 +24,11 @@ fn hash(seed: char) -> ContentHash {
     ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
 }
 
-pub async fn semantic_revision_and_outbox_claims_are_atomic_and_deduplicated() {
+pub async fn semantic_revision_atomic_deduplicated() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let infra = seed_shared_demo_infra(&db).await;
-    let ids = seed_report_only_conditional_price_report_on_infra(
+    let ids = seed_report_price(
         &db,
         &infra,
         ReportSeedConfig {
@@ -58,7 +55,7 @@ pub async fn semantic_revision_and_outbox_claims_are_atomic_and_deduplicated() {
     assert_unchanged_evaluation_race(&db, &repo, &ids.condition_instance, worker, second_time)
         .await;
     assert_outbox_claim_race(&db, &repo, second_time + Duration::seconds(1)).await;
-    assert_report_only_has_no_execution_rows(&db).await;
+    assert_report_no_rows(&db).await;
 }
 
 async fn assert_initial_transition(
@@ -196,7 +193,7 @@ async fn assert_outbox_claim_race(
     );
 }
 
-async fn assert_report_only_has_no_execution_rows(db: &DatabaseConnection) {
+async fn assert_report_no_rows(db: &DatabaseConnection) {
     // ReportOnly still owns the complete condition evidence ledger, but no row
     // can reach the signing/submission boundary because no intent is created.
     assert_eq!(

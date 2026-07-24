@@ -29,7 +29,7 @@ use crate::{postgres::query::paginate_mapped, traits::MarketLinkageRepository};
 
 /// Reduce rows already ordered `(market_id ASC, derived_at DESC, created_at
 /// DESC, linkage_id DESC)` to the first (highest-ranked) row per market.
-fn reduce_to_first_per_market(rows: Vec<Model>) -> Vec<MarketLinkageInfo> {
+fn first_per_market(rows: Vec<Model>) -> Vec<MarketLinkageInfo> {
     let mut kept: Vec<MarketLinkageInfo> = Vec::new();
     for row in rows {
         if kept
@@ -78,61 +78,61 @@ impl PgMarketLinkageRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
-}
 
-async fn append_in_transaction(
-    txn: &DatabaseTransaction,
-    linkage: NewMarketLinkage,
-) -> Result<MarketLinkageInfo, StorageError> {
-    let content_hash = linkage.content_hash;
-    let source_bindings = match linkage.outcome.clone() {
-        LinkageOutcome::Resolved(binding) => binding.source_bindings,
-        LinkageOutcome::Unresolved { .. } => Vec::new(),
-    };
-    // Idempotent append: a duplicate content hash is a resolver no-op, not
-    // an error — the ledger row for that outcome already exists.
-    Entity::insert(linkage.into_active_model())
-        .on_conflict_do_nothing_on([Column::ContentHash])
-        .exec(txn)
-        .await
-        .map_err(StorageError::from)?;
-    let row = Entity::find()
-        .filter(Column::ContentHash.eq(content_hash))
-        .one(txn)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or(StorageError::NotFound {
-            entity: "quant_market_linkage",
-            id: content_hash.to_string(),
-        })?;
-    for binding in source_bindings {
-        QuantMarketLinkageSourceEntity::insert(ActiveModel {
-            linkage_id: ActiveValue::Set(row.linkage_id),
-            role: ActiveValue::Set(binding.role),
-            source_id: ActiveValue::Set(binding.source_id),
-            instrument_key: ActiveValue::Set(binding.instrument_key),
-            binding_hash: ActiveValue::Set(binding.binding_hash),
-            available_at: ActiveValue::Set(binding.available_at),
-            created_at: ActiveValue::NotSet,
-        })
-        .on_conflict_do_nothing_on([
-            QuantMarketLinkageSourceColumn::LinkageId,
-            QuantMarketLinkageSourceColumn::Role,
-            QuantMarketLinkageSourceColumn::SourceId,
-            QuantMarketLinkageSourceColumn::InstrumentKey,
-        ])
-        .exec(txn)
-        .await
-        .map_err(StorageError::from)?;
+    async fn append_to(
+        txn: &DatabaseTransaction,
+        linkage: NewMarketLinkage,
+    ) -> Result<MarketLinkageInfo, StorageError> {
+        let content_hash = linkage.content_hash;
+        let source_bindings = match linkage.outcome.clone() {
+            LinkageOutcome::Resolved(binding) => binding.source_bindings,
+            LinkageOutcome::Unresolved { .. } => Vec::new(),
+        };
+        // Idempotent append: a duplicate content hash is a resolver no-op, not
+        // an error — the ledger row for that outcome already exists.
+        Entity::insert(linkage.into_active_model())
+            .on_conflict_do_nothing_on([Column::ContentHash])
+            .exec(txn)
+            .await
+            .map_err(StorageError::from)?;
+        let row = Entity::find()
+            .filter(Column::ContentHash.eq(content_hash))
+            .one(txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or(StorageError::NotFound {
+                entity: "quant_market_linkage",
+                id: content_hash.to_string(),
+            })?;
+        for binding in source_bindings {
+            QuantMarketLinkageSourceEntity::insert(ActiveModel {
+                linkage_id: ActiveValue::Set(row.linkage_id),
+                role: ActiveValue::Set(binding.role),
+                source_id: ActiveValue::Set(binding.source_id),
+                instrument_key: ActiveValue::Set(binding.instrument_key),
+                binding_hash: ActiveValue::Set(binding.binding_hash),
+                available_at: ActiveValue::Set(binding.available_at),
+                created_at: ActiveValue::NotSet,
+            })
+            .on_conflict_do_nothing_on([
+                QuantMarketLinkageSourceColumn::LinkageId,
+                QuantMarketLinkageSourceColumn::Role,
+                QuantMarketLinkageSourceColumn::SourceId,
+                QuantMarketLinkageSourceColumn::InstrumentKey,
+            ])
+            .exec(txn)
+            .await
+            .map_err(StorageError::from)?;
+        }
+        Ok(row.into())
     }
-    Ok(row.into())
 }
 
 #[async_trait::async_trait]
 impl MarketLinkageRepository for PgMarketLinkageRepository {
     async fn append(&self, linkage: NewMarketLinkage) -> Result<MarketLinkageInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = append_in_transaction(&txn, linkage).await?;
+        let row = Self::append_to(&txn, linkage).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(row)
     }
@@ -144,7 +144,7 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let mut rows = Vec::with_capacity(linkages.len());
         for linkage in linkages {
-            rows.push(append_in_transaction(&txn, linkage).await?);
+            rows.push(Self::append_to(&txn, linkage).await?);
         }
         txn.commit().await.map_err(StorageError::from)?;
         Ok(rows)
@@ -190,7 +190,7 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
             .all(&self.db)
             .await
             .map_err(StorageError::from)?;
-        Ok(reduce_to_first_per_market(rows))
+        Ok(first_per_market(rows))
     }
 
     async fn latest_for_markets(
@@ -212,7 +212,7 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
             .all(&self.db)
             .await
             .map_err(StorageError::from)?;
-        Ok(reduce_to_first_per_market(rows))
+        Ok(first_per_market(rows))
     }
 
     async fn latest_for_active_markets(&self) -> Result<Vec<MarketLinkageInfo>, StorageError> {

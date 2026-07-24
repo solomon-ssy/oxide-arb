@@ -28,10 +28,7 @@ use crate::{
     features::{
         CatalogDecisionRef, FeatureBuildInput, FeatureBuilder, FeatureVector,
         MarketDecisionCaptureInput,
-        decision_capture::{
-            ResolvedMarketBundle, book_snapshot_ref_from_resolved,
-            market_decision_capture_from_resolved,
-        },
+        decision_capture::{ResolvedMarketBundle, capture_market_decision},
         domain::{
             CryptoDomainFeatureBuilder, DomainComputeCtx, DomainFeatureBuilder, DomainSliceInputs,
             WeatherDomainFeatureBuilder,
@@ -281,10 +278,7 @@ async fn resolve_secondary_book(
             .transpose()?,
         None => None,
     };
-    let snapshot_ref = book
-        .as_ref()
-        .map(book_snapshot_ref_from_resolved)
-        .transpose()?;
+    let snapshot_ref = book.as_ref().map(ResolvedBook::snapshot_ref).transpose()?;
     Ok((book, snapshot_ref))
 }
 
@@ -421,7 +415,7 @@ impl ConfiguredFeatureBuilder {
         let capture_market = ResolvedMarketContext::from(snapshot.context);
         let registry = snapshot.market;
         let snapshot_sibling = snapshot.neg_risk_leg_set;
-        let capture = market_decision_capture_from_resolved(MarketDecisionCaptureInput {
+        let capture = capture_market_decision(MarketDecisionCaptureInput {
             boundary,
             selected: market,
             book: capture_book,

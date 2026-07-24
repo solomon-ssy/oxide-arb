@@ -167,7 +167,7 @@ mod tests {
     use super::{BOOTSTRAP_SOURCES, extract_table_ttl, split_statements};
 
     #[test]
-    fn microstructure_rollup_preserves_latest_availability() {
+    fn microstructure_rollup_preserves_availability() {
         let ddl = BOOTSTRAP_SOURCES
             .iter()
             .flat_map(|source| split_statements(source))
@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn market_resolution_uses_aligned_decimal_payout_vectors() {
+    fn market_resolution_uses_vectors() {
         let ddl = BOOTSTRAP_SOURCES
             .iter()
             .flat_map(|source| split_statements(source))
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn last_trade_projection_is_single_ledger_materialized_view() {
+    fn last_trade_projection_view() {
         let ddl = BOOTSTRAP_SOURCES
             .iter()
             .flat_map(|source| split_statements(source))
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn statement_splitter_never_executes_line_comments() {
+    fn statement_splitter_never_comments() {
         let statements = split_statements(
             "-- an operator note; punctuation is not SQL\n\
              SELECT '-- remains string data'; -- trailing note; also not SQL\n",
@@ -219,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn table_ttl_extraction_ignores_column_ttl_and_quoted_keywords() {
+    fn table_ttl_ignores_keywords() {
         let ddl = "CREATE TABLE events (`TTL` String DEFAULT 'SETTINGS', \
                    event_time DateTime TTL event_time + toIntervalDay(1)) \
                    ENGINE = MergeTree ORDER BY event_time \

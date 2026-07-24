@@ -68,41 +68,44 @@ fn menu_granted(kind: MenuKind, permission_code: Option<&str>, policies: &HashSe
     }
 }
 
-/// Assign menu nodes to every built-in role (`super_admin` receives the full tree).
-fn expected_grants(ctx: &SeedContext) -> Result<Vec<(RoleId, MenuId)>, DbErr> {
-    let roles = ctx
-        .require::<RoleIdMap>(ROLES_ARTIFACT)
-        .map_err(|error| DbErr::Custom(error.to_string()))?;
-    let menu_grants = ctx
-        .require::<Vec<MenuGrantSpec>>(MENU_GRANTS_ARTIFACT)
-        .map_err(|error| DbErr::Custom(error.to_string()))?
-        .clone();
+impl SeedContext {
+    /// Assign menu nodes to every built-in role (`super_admin` receives the full tree).
+    fn expected_grants(&self) -> Result<Vec<(RoleId, MenuId)>, DbErr> {
+        let roles = self
+            .require::<RoleIdMap>(ROLES_ARTIFACT)
+            .map_err(|error| DbErr::Custom(error.to_string()))?;
+        let menu_grants = self
+            .require::<Vec<MenuGrantSpec>>(MENU_GRANTS_ARTIFACT)
+            .map_err(|error| DbErr::Custom(error.to_string()))?
+            .clone();
 
-    let policies_by_role = policy_sets();
-    let mut grants = Vec::new();
+        let policies_by_role = policy_sets();
+        let mut grants = Vec::new();
 
-    for row in &menu_grants {
-        for (role_code, role_id) in roles {
-            let grant = if *role_code == ROLE_SUPER_ADMIN {
-                true
-            } else {
-                let Some(policies) = policies_by_role.get(role_code) else {
-                    continue;
+        for row in &menu_grants {
+            for (role_code, role_id) in roles {
+                let grant = if *role_code == ROLE_SUPER_ADMIN {
+                    true
+                } else {
+                    let Some(policies) = policies_by_role.get(role_code) else {
+                        continue;
+                    };
+                    menu_granted(row.kind, row.permission_code.as_deref(), policies)
                 };
-                menu_granted(row.kind, row.permission_code.as_deref(), policies)
-            };
 
-            if grant {
-                grants.push((*role_id, row.id));
+                if grant {
+                    grants.push((*role_id, row.id));
+                }
             }
         }
-    }
 
-    Ok(grants)
+        Ok(grants)
+    }
 }
 
 pub async fn load(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64, DbErr> {
-    let models = expected_grants(ctx)?
+    let models = (ctx)
+        .expected_grants()?
         .into_iter()
         .map(|(role_id, menu_id)| ActiveModel {
             role_id: Set(role_id),
@@ -121,7 +124,7 @@ pub async fn load(db: &DatabaseTransaction, ctx: &mut SeedContext) -> Result<u64
 }
 
 async fn hydrate(db: &DatabaseTransaction, ctx: &SeedContext) -> Result<(), DbErr> {
-    let expected = expected_grants(ctx)?.into_iter().collect::<HashSet<_>>();
+    let expected = (ctx).expected_grants()?.into_iter().collect::<HashSet<_>>();
     let role_ids = ctx
         .require::<RoleIdMap>(ROLES_ARTIFACT)
         .map_err(|error| DbErr::Custom(error.to_string()))?
@@ -165,7 +168,7 @@ mod tests {
     use crate::enums::rbac::MenuKind;
 
     #[test]
-    fn viewer_policy_excludes_mutating_button_codes() {
+    fn viewer_policy_excludes_codes() {
         let sets = policy_sets();
         let policies = sets.get("viewer").expect("viewer policies");
         assert!(!menu_granted(
@@ -177,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_integrity_menu_and_governance_button_follow_role_policy() {
+    fn feature_integrity_menu_policy() {
         let sets = policy_sets();
         let viewer = sets.get("viewer").expect("viewer policies");
         let risk_owner = sets.get("risk_owner").expect("risk-owner policies");

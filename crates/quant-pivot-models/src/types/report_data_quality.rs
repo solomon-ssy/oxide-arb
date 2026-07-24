@@ -54,15 +54,17 @@ impl ReportDataQualityTokens {
     }
 }
 
-/// Map feature DQ classification to a normalized score in `[0, 1]`.
-#[must_use]
-pub fn data_quality_score(status: DataQualityStatus) -> Probability {
-    let value = match status {
-        DataQualityStatus::Fresh => Decimal::ONE,
-        DataQualityStatus::Acceptable => Decimal::new(85, 2),
-        DataQualityStatus::Degraded => Decimal::new(6, 1),
-        DataQualityStatus::Stale => Decimal::new(3, 1),
-        DataQualityStatus::Insufficient => Decimal::ZERO,
-    };
-    Probability::new(value)
+impl DataQualityStatus {
+    /// Map feature DQ classification to a normalized score in `[0, 1]`.
+    #[must_use]
+    pub fn data_quality_score(self) -> Probability {
+        let value = match self {
+            Self::Fresh => Decimal::ONE,
+            Self::Acceptable => Decimal::new(85, 2),
+            Self::Degraded => Decimal::new(6, 1),
+            Self::Stale => Decimal::new(3, 1),
+            Self::Insufficient => Decimal::ZERO,
+        };
+        Probability::new(value)
+    }
 }

@@ -13,7 +13,7 @@ use quant_pivot_models::{
     clickhouse::CryptoPriceReportRow,
     domain::{
         data_plane::{CryptoPriceReport, DomainSourceCheckpoint},
-        quant::LinkageOutcome,
+        quant::{LinkageOutcome, MarketLinkage},
     },
     enums::domain::LinkageSourceRole,
     types::{ContentHash, DomainInstrumentKey},
@@ -127,7 +127,7 @@ impl CryptoRtdsIngestWorker {
     ) -> QuantResult<BTreeSet<DomainInstrumentKey>> {
         let mut desired = static_rtds_instruments(source_kind);
         for row in self.linkages.latest_for_active_markets().await? {
-            let linkage = row.into_domain();
+            let linkage = MarketLinkage::from(row);
             let LinkageOutcome::Resolved(resolved) = linkage.outcome else {
                 continue;
             };
@@ -251,7 +251,7 @@ impl CryptoRtdsIngestWorker {
         let source_id = report.source_id.clone();
         let instrument_key = report.instrument_key.clone();
         self.writer
-            .write_batch(vec![report.to_clickhouse_row()])
+            .write_batch(vec![CryptoPriceReportRow::from(&report)])
             .await?;
         let checkpoint = DomainSourceCheckpoint::PolymarketRtds {
             source_timestamp: report.event_time,
@@ -363,7 +363,7 @@ mod tests {
     use super::static_rtds_instruments;
 
     #[test]
-    fn public_rtds_sources_start_without_market_linkages() {
+    fn public_rtds_without_linkages() {
         let binance = static_rtds_instruments(RtdsCryptoSource::Binance);
         let chainlink = static_rtds_instruments(RtdsCryptoSource::Chainlink);
         assert_eq!(binance.len(), 4);

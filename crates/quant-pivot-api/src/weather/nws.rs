@@ -242,7 +242,7 @@ mod tests {
     use super::NwsObservationSource;
 
     #[tokio::test]
-    async fn converts_nws_kilometers_per_hour_to_knots() {
+    async fn converts_nws_kilometers_knots() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn null_gust_is_absent_not_zero() {
+    async fn null_gust_not_zero() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use quant_pivot_migration::{
     acquire_schema_mutation_lease, apply, expected_migrations, inspect_preproduction_postgres,
-    plan, release_schema_mutation_lease, reset_preproduction_postgres, verify,
+    plan, reset_preproduction_postgres, verify,
 };
 use quant_pivot_models::config::PostgresConfig;
 use quant_pivot_storage::postgres::PostgresPool;
@@ -22,7 +22,7 @@ async fn create_empty_postgres(scope: &str) -> PostgresConfig {
     config
 }
 
-pub async fn empty_postgres_bootstraps_once_and_verifies() {
+pub async fn empty_postgres_bootstraps_verifies() {
     let config = PostgresConfig {
         min_connections: 1,
         max_connections: 2,
@@ -60,7 +60,7 @@ pub async fn empty_postgres_bootstraps_once_and_verifies() {
     assert!(complete.pending_migrations.is_empty());
 }
 
-pub async fn schema_mutation_lease_is_exclusive_and_cancels_after_session_loss() {
+pub async fn schema_cancels_after_loss() {
     let config = PostgresConfig {
         min_connections: 1,
         max_connections: 2,
@@ -73,7 +73,8 @@ pub async fn schema_mutation_lease_is_exclusive_and_cancels_after_session_loss()
         .expect("acquire first schema mutation lease");
     let competing = match acquire_schema_mutation_lease(&config).await {
         Ok(lease) => {
-            release_schema_mutation_lease(lease)
+            lease
+                .release_schema_mutation_lease()
                 .await
                 .expect("release unexpected competing lease");
             panic!("second schema mutation lease must fail closed");
@@ -83,7 +84,7 @@ pub async fn schema_mutation_lease_is_exclusive_and_cancels_after_session_loss()
     assert!(competing.to_string().contains("already holds"));
 
     let maintenance_url = config
-        .try_connection_url_with_database("postgres")
+        .try_database_url("postgres")
         .expect("build maintenance URL");
     let admin = PgPool::connect(&maintenance_url)
         .await
@@ -98,14 +99,14 @@ pub async fn schema_mutation_lease_is_exclusive_and_cancels_after_session_loss()
         .await
         .expect("heartbeat must signal lease loss");
     assert!(lease.ensure_active().is_err());
-    assert!(release_schema_mutation_lease(lease).await.is_err());
+    assert!(lease.release_schema_mutation_lease().await.is_err());
     admin.close().await;
 }
 
-pub async fn reset_rejects_unknown_sessions_and_never_forces_them_closed() {
+pub async fn reset_rejects_unknown_never() {
     let base_config = fresh_postgres_config("schema_mutation_reset");
     let maintenance_url = base_config
-        .try_connection_url_with_database("postgres")
+        .try_database_url("postgres")
         .expect("build PostgreSQL maintenance URL");
     let maintenance = PgPool::connect(&maintenance_url)
         .await
@@ -156,7 +157,8 @@ pub async fn reset_rejects_unknown_sessions_and_never_forces_them_closed() {
         .expect("inspect recreated disposable database");
     assert!(inventory.database_exists);
     assert_eq!(inventory.object_count, 0);
-    release_schema_mutation_lease(lease)
+    lease
+        .release_schema_mutation_lease()
         .await
         .expect("release reset schema mutation lease");
 }

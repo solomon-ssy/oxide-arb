@@ -79,7 +79,7 @@ impl MarketResolutionRow {
             resolution_fact_hash: ContentHash::from_bytes([0; 32]),
             schema_version: ChSchemaVersion::FIRST,
         };
-        validate_source_fields(&row)?;
+        row.validate_source_fields()?;
         row.resolution_fact_hash = row.expected_resolution_fact_hash()?;
         row.validate()?;
         Ok(row)
@@ -99,7 +99,7 @@ impl MarketResolutionRow {
 
     /// Validate the complete persisted vector before a write or after a read.
     pub fn validate(&self) -> Result<(), MarketResolutionContractError> {
-        validate_source_fields(self)?;
+        (self).validate_source_fields()?;
         if self.token_ids.len() != Self::TOKEN_COUNT {
             return Err(MarketResolutionContractError::UnsupportedTokenCount {
                 actual: self.token_ids.len(),
@@ -129,8 +129,7 @@ impl MarketResolutionRow {
 
         let mut total = Decimal::ZERO;
         for (index, payout) in self.payout_ratios.iter().copied().enumerate() {
-            let payout = payout
-                .try_to_payout_ratio()
+            let payout = PayoutRatio::try_from(payout)
                 .map_err(|_| MarketResolutionContractError::InvalidPayoutRatio { index })?;
             total += payout.inner();
         }
@@ -176,8 +175,7 @@ impl MarketResolutionRow {
             .iter()
             .position(|candidate| candidate == token_id)
             .ok_or(MarketResolutionContractError::TokenNotPresent)?;
-        self.payout_ratios[index]
-            .try_to_payout_ratio()
+        PayoutRatio::try_from(self.payout_ratios[index])
             .map_err(|_| MarketResolutionContractError::InvalidPayoutRatio { index })
     }
 }
@@ -217,33 +215,37 @@ impl<'a> From<&'a MarketResolutionRow> for MarketResolutionFactHashInput<'a> {
     }
 }
 
-fn validate_source_fields(row: &MarketResolutionRow) -> Result<(), MarketResolutionContractError> {
-    if row.source != ChFactSource::ResolutionReconciliation {
-        return Err(MarketResolutionContractError::InvalidSource { actual: row.source });
+impl MarketResolutionRow {
+    fn validate_source_fields(&self) -> Result<(), MarketResolutionContractError> {
+        if self.source != ChFactSource::ResolutionReconciliation {
+            return Err(MarketResolutionContractError::InvalidSource {
+                actual: self.source,
+            });
+        }
+        if self.schema_version != ChSchemaVersion::FIRST {
+            return Err(MarketResolutionContractError::UnsupportedSchemaVersion {
+                actual: self.schema_version.0,
+            });
+        }
+        if self.resolved_at <= 0 || self.observed_at <= 0 || self.resolved_at > self.observed_at {
+            return Err(MarketResolutionContractError::InvalidTimeline {
+                resolved_at: self.resolved_at,
+                observed_at: self.observed_at,
+            });
+        }
+        if self.source_block_number == 0 {
+            return Err(MarketResolutionContractError::InvalidSourceBlock);
+        }
+        if self
+            .source_checkpoint_hash
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            return Err(MarketResolutionContractError::EmptySourceCheckpointHash);
+        }
+        Ok(())
     }
-    if row.schema_version != ChSchemaVersion::FIRST {
-        return Err(MarketResolutionContractError::UnsupportedSchemaVersion {
-            actual: row.schema_version.0,
-        });
-    }
-    if row.resolved_at <= 0 || row.observed_at <= 0 || row.resolved_at > row.observed_at {
-        return Err(MarketResolutionContractError::InvalidTimeline {
-            resolved_at: row.resolved_at,
-            observed_at: row.observed_at,
-        });
-    }
-    if row.source_block_number == 0 {
-        return Err(MarketResolutionContractError::InvalidSourceBlock);
-    }
-    if row
-        .source_checkpoint_hash
-        .as_bytes()
-        .iter()
-        .all(|byte| *byte == 0)
-    {
-        return Err(MarketResolutionContractError::EmptySourceCheckpointHash);
-    }
-    Ok(())
 }
 
 const U256_MAX_DECIMAL: &str =
@@ -334,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn winner_take_all_and_split_vectors_preserve_token_payouts() {
+    fn winner_take_preserve_payouts() {
         let winner = row(["101", "202"], [PayoutRatio::ONE, PayoutRatio::ZERO]);
         winner.validate().expect("valid winner-take-all vector");
         assert_eq!(
@@ -364,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn vector_contract_rejects_cardinality_total_and_token_corruption() {
+    fn vector_contract_rejects_corruption() {
         let half = PayoutRatio::try_new(dec!(0.5)).expect("half payout");
 
         let mut mismatched = row(["101", "202"], [half, half]);
@@ -404,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn finalized_source_lineage_and_fact_hash_are_tamper_evident() {
+    fn finalized_source_lineage_evident() {
         let sealed = MarketResolutionRow::seal(MarketResolutionFactInput {
             market_id: MarketId::new("0xresolution"),
             token_ids: [TokenId::new("101"), TokenId::new("202")],

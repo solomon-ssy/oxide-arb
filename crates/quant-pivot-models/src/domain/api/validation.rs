@@ -74,7 +74,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn half_open_window_rejects_inverted_and_empty() {
+    fn half_open_rejects_empty() {
         let start = Utc.timestamp_opt(100, 0).unwrap();
         let end = Utc.timestamp_opt(50, 0).unwrap();
         assert!(validate_half_open_window(start, end).is_err());
@@ -84,13 +84,13 @@ mod tests {
     }
 
     #[test]
-    fn optional_inclusive_range_allows_zero_width() {
+    fn optional_allows_zero_width() {
         let t = Utc.timestamp_opt(100, 0).unwrap();
         assert!(validate_optional_inclusive_range(Some(t), Some(t)).is_ok());
     }
 
     #[test]
-    fn optional_inclusive_range_rejects_inverted() {
+    fn optional_inclusive_rejects_inverted() {
         let from = Utc.timestamp_opt(200, 0).unwrap();
         let to = Utc.timestamp_opt(100, 0).unwrap();
         assert!(validate_optional_inclusive_range(Some(from), Some(to)).is_err());

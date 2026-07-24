@@ -58,7 +58,7 @@ use quant_pivot_research::{
 use crate::{
     ingest::{
         market_registry::MarketRegistry,
-        trade_tape_health::{cursors_by_contract_address, trade_tape_market_ingest_available},
+        trade_tape_health::{cursors_by_contract_address, market_tape_available},
     },
     observability::{
         feature_fact_writer::FeatureEventWriter, serving_evidence::FeatureEvidenceCommitment,
@@ -449,11 +449,8 @@ impl FeaturePipelineService {
                     .market_registry
                     .get_market(&market.market_id)
                     .is_some_and(|info| info.neg_risk);
-                let available = trade_tape_market_ingest_available(
-                    &self.trade_tape_on_chain,
-                    &cursors_by_address,
-                    neg_risk,
-                );
+                let available =
+                    market_tape_available(&self.trade_tape_on_chain, &cursors_by_address, neg_risk);
                 if let Some(window) = windows.get_mut(&market.market_id)
                     && !available
                 {
@@ -643,7 +640,7 @@ fn collect_live_domain_linkages(
     };
     for info in rows {
         let market_id = info.market_id.clone();
-        let linkage = info.into_domain();
+        let linkage = MarketLinkage::from(info);
         if let Some(binding) = linkage.binding() {
             collected.instruments.extend(
                 binding

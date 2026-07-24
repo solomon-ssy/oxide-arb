@@ -110,7 +110,7 @@ use quant_pivot_system_tests::{
         publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
         trade_tape_fixtures::{
-            ConfigurableFactRead, live_trade_tape_block_cursor_repo, whale_concentration_by_market,
+            ConfigurableFactRead, live_tape_cursor_repo, whale_concentration_by_market,
         },
     },
 };
@@ -180,7 +180,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn trade_tape_window_by_market(
+    async fn market_tape_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
@@ -280,44 +280,46 @@ impl QuantFactReadRepository for EmptyFactRead {
     }
 }
 
-fn registry_market(catalog: &Catalog) -> MarketRegistryInfo {
-    MarketRegistryInfo {
-        market_id: MarketId::new(catalog.market_id),
-        event_id: EventId::new(catalog.event_id),
-        token_yes: TokenId::new(catalog.yes_token),
-        token_no: TokenId::new(catalog.no_token),
-        question: "Trade tape concentration E2E?".into(),
-        slug: "tape-conc-e2e".into(),
-        description: None,
-        categories: CategorySet::from(MarketCategory::Sports),
-        status: MarketStatus::Active,
-        filter_reasons: CatalogFilterReasonSet::default(),
-        outcome: None,
-        neg_risk: false,
-        tick_size: TickSize::Hundredth,
-        tokens: vec![
-            TokenInfo {
-                token_id: TokenId::new(catalog.yes_token),
-                outcome: "Yes".into(),
-                neg_risk: false,
-            },
-            TokenInfo {
-                token_id: TokenId::new(catalog.no_token),
-                outcome: "No".into(),
-                neg_risk: false,
-            },
-        ],
-        best_bid: None,
-        best_ask: None,
-        depth_usd: None,
-        min_order_size: Decimal::ONE,
-        liquidity_usd: Some(Usd::new(Decimal::from(25_000))),
-        volume_24h: Some(Usd::new(Decimal::from(9_000))),
-        start_date: Some(Utc::now() - ChronoDuration::days(2)),
-        end_date: Some(Utc::now() + ChronoDuration::days(5)),
-        resolved_at: None,
-        created_at: Some(Utc::now() - ChronoDuration::days(2)),
-        updated_at: Utc::now(),
+impl Catalog {
+    fn registry_market(&self) -> MarketRegistryInfo {
+        MarketRegistryInfo {
+            market_id: MarketId::new(self.market_id),
+            event_id: EventId::new(self.event_id),
+            token_yes: TokenId::new(self.yes_token),
+            token_no: TokenId::new(self.no_token),
+            question: "Trade tape concentration E2E?".into(),
+            slug: "tape-conc-e2e".into(),
+            description: None,
+            categories: CategorySet::from(MarketCategory::Sports),
+            status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
+            outcome: None,
+            neg_risk: false,
+            tick_size: TickSize::Hundredth,
+            tokens: vec![
+                TokenInfo {
+                    token_id: TokenId::new(self.yes_token),
+                    outcome: "Yes".into(),
+                    neg_risk: false,
+                },
+                TokenInfo {
+                    token_id: TokenId::new(self.no_token),
+                    outcome: "No".into(),
+                    neg_risk: false,
+                },
+            ],
+            best_bid: None,
+            best_ask: None,
+            depth_usd: None,
+            min_order_size: Decimal::ONE,
+            liquidity_usd: Some(Usd::new(Decimal::from(25_000))),
+            volume_24h: Some(Usd::new(Decimal::from(9_000))),
+            start_date: Some(Utc::now() - ChronoDuration::days(2)),
+            end_date: Some(Utc::now() + ChronoDuration::days(5)),
+            resolved_at: None,
+            created_at: Some(Utc::now() - ChronoDuration::days(2)),
+            updated_at: Utc::now(),
+        }
     }
 }
 
@@ -347,7 +349,7 @@ async fn seed_catalog(db: &DatabaseConnection, catalog: &Catalog) {
 }
 
 fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &Catalog) {
-    let market = registry_market(catalog);
+    let market = (catalog).registry_market();
     registry.register_event(EventRegistryInfo {
         event_id: market.event_id.clone(),
         title: "Tape Conc E2E".to_owned(),
@@ -399,16 +401,18 @@ fn noop_factor_writer() -> Arc<FactorEventWriter> {
     Arc::new(FactorEventWriter::new(Arc::new(writer)))
 }
 
-fn selected_market(catalog: &Catalog) -> SelectedMarket {
-    SelectedMarket {
-        market_id: MarketId::new(catalog.market_id),
-        event_id: EventId::new(catalog.event_id),
-        category: MarketCategory::Sports,
-        primary_token_id: TokenId::new(catalog.yes_token),
-        secondary_token_id: Some(TokenId::new(catalog.no_token)),
-        liquidity_usd: Some(Usd::new(Decimal::from(25_000))),
-        volume_24h_usd: Some(Usd::new(Decimal::from(9_000))),
-        source_refs: Vec::new(),
+impl Catalog {
+    fn selected_market(&self) -> SelectedMarket {
+        SelectedMarket {
+            market_id: MarketId::new(self.market_id),
+            event_id: EventId::new(self.event_id),
+            category: MarketCategory::Sports,
+            primary_token_id: TokenId::new(self.yes_token),
+            secondary_token_id: Some(TokenId::new(self.no_token)),
+            liquidity_usd: Some(Usd::new(Decimal::from(25_000))),
+            volume_24h_usd: Some(Usd::new(Decimal::from(9_000))),
+            source_refs: Vec::new(),
+        }
     }
 }
 
@@ -442,73 +446,78 @@ struct WhaleTapeConcHarness {
     as_of: DateTime<Utc>,
 }
 
-async fn whale_tape_conc_harness() -> WhaleTapeConcHarness {
-    let (pool, database) = setup_pg().await;
-    let db = pool.connection().clone();
-    seed_catalog(&db, &CATALOG).await;
+impl WhaleTapeConcHarness {
+    async fn fixture() -> Self {
+        let (pool, database) = setup_pg().await;
+        let db = pool.connection().clone();
+        seed_catalog(&db, &CATALOG).await;
 
-    let data_plane = Arc::new(DataPlane::new());
-    let registry = Arc::new(MarketRegistry::new(Arc::clone(&data_plane)));
-    let book_store = Arc::new(BookStore::new(data_plane, Arc::new(MetricsHub::new())));
-    wire_live_book(&registry, &book_store, &CATALOG);
-    let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
+        let data_plane = Arc::new(DataPlane::new());
+        let registry = Arc::new(MarketRegistry::new(Arc::clone(&data_plane)));
+        let book_store = Arc::new(BookStore::new(data_plane, Arc::new(MetricsHub::new())));
+        wire_live_book(&registry, &book_store, &CATALOG);
+        let live_pit =
+            InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
-    let as_of = Utc::now();
-    let event_time_ms = (as_of - ChronoDuration::seconds(60)).timestamp_millis();
-    let market_id = MarketId::new(CATALOG.market_id);
-    let token_id = TokenId::new(CATALOG.yes_token);
-    let fact_read = Arc::new(ConfigurableFactRead::new(
-        Arc::new(EmptyFactRead),
-        whale_concentration_by_market(&market_id, &token_id, event_time_ms),
-    )) as Arc<dyn QuantFactReadRepository>;
+        let as_of = Utc::now();
+        let event_time_ms = (as_of - ChronoDuration::seconds(60)).timestamp_millis();
+        let market_id = MarketId::new(CATALOG.market_id);
+        let token_id = TokenId::new(CATALOG.yes_token);
+        let fact_read = Arc::new(ConfigurableFactRead::new(
+            Arc::new(EmptyFactRead),
+            whale_concentration_by_market(&market_id, &token_id, event_time_ms),
+        )) as Arc<dyn QuantFactReadRepository>;
 
-    WhaleTapeConcHarness {
-        _database: database,
-        db,
-        registry,
-        book_store,
-        live_pit,
-        fact_read,
-        market_id,
-        as_of,
+        Self {
+            _database: database,
+            db,
+            registry,
+            book_store,
+            live_pit,
+            fact_read,
+            market_id,
+            as_of,
+        }
     }
 }
 
-async fn run_whale_feature_pipeline(harness: &WhaleTapeConcHarness) -> FeaturePipelineResult {
-    let features = structural_features_only_config();
-    let feature_repo =
-        Arc::new(PgFeatureRepository::new(harness.db.clone())) as Arc<dyn FeatureRepository>;
-    let feature_pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
-        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
-        window_provider: FeatureWindowProvider::new(Arc::clone(&harness.fact_read)),
-        feature_repo: Arc::clone(&feature_repo),
-        event_writer: noop_feature_writer(),
-        market_registry: Arc::clone(&harness.registry),
-        block_cursor_repo: live_trade_tape_block_cursor_repo(),
-        linkage_repo: Arc::new(EmptyLinkageRepo),
-        basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
-        calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(harness.db.clone())),
-        trade_tape_on_chain: TradeTapeOnChainConfig::default(),
-    });
+impl WhaleTapeConcHarness {
+    async fn run_whale_feature_pipeline(&self) -> FeaturePipelineResult {
+        let features = structural_features_only_config();
+        let feature_repo =
+            Arc::new(PgFeatureRepository::new(self.db.clone())) as Arc<dyn FeatureRepository>;
+        let feature_pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
+            compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
+            window_provider: FeatureWindowProvider::new(Arc::clone(&self.fact_read)),
+            feature_repo: Arc::clone(&feature_repo),
+            event_writer: noop_feature_writer(),
+            market_registry: Arc::clone(&self.registry),
+            block_cursor_repo: live_tape_cursor_repo(),
+            linkage_repo: Arc::new(EmptyLinkageRepo),
+            basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
+            calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(self.db.clone())),
+            trade_tape_on_chain: TradeTapeOnChainConfig::default(),
+        });
 
-    let domain = DomainConfig::disabled();
-    let included = vec![selected_market(&CATALOG)];
-    feature_pipeline
-        .run(FeaturePipelineRequest {
-            included: &included,
-            boundary: DecisionClock::new(0)
-                .boundary(harness.as_of)
-                .expect("decision boundary"),
-            features: &features,
-            domain: &domain,
-            data_quality: &DataQualityConfig::default(),
-            model_requirements: &ModelFeatureRequirements::default(),
-            pit: &harness.live_pit,
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
-        })
-        .await
-        .expect("feature pipeline")
+        let domain = DomainConfig::disabled();
+        let included = vec![CATALOG.selected_market()];
+        feature_pipeline
+            .run(FeaturePipelineRequest {
+                included: &included,
+                boundary: DecisionClock::new(0)
+                    .boundary(self.as_of)
+                    .expect("decision boundary"),
+                features: &features,
+                domain: &domain,
+                data_quality: &DataQualityConfig::default(),
+                model_requirements: &ModelFeatureRequirements::default(),
+                pit: &self.live_pit,
+                decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+                liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
+            })
+            .await
+            .expect("feature pipeline")
+    }
 }
 
 fn concentration_feature_decimals(vector: &FeatureVector) -> (Decimal, Decimal, Decimal) {
@@ -543,7 +552,7 @@ fn assert_whale_concentration_features(vector: &FeatureVector) -> Decimal {
     composite_concentration(gini, cr1, hhi, &composite_weights()).expect("composite from features")
 }
 
-async fn run_factor_round_and_assert_concentration(
+async fn run_factor_round_concentration(
     harness: &WhaleTapeConcHarness,
     feature_result: &FeaturePipelineResult,
     expected_composite: Decimal,
@@ -645,7 +654,7 @@ async fn run_factor_round_and_assert_concentration(
     );
 }
 
-async fn assert_monitor_concentration_matches_canonical(
+async fn assert_monitor_matches_canonical(
     harness: &WhaleTapeConcHarness,
     expected_composite: Decimal,
 ) {
@@ -654,7 +663,7 @@ async fn assert_monitor_concentration_matches_canonical(
         Arc::clone(&harness.registry),
         Arc::clone(&harness.book_store),
         Arc::new(FeatureWindowProvider::new(Arc::clone(&harness.fact_read))),
-        live_trade_tape_block_cursor_repo(),
+        live_tape_cursor_repo(),
         Arc::new(FixedRuntimeConfig(runtime)),
         TradeTapeOnChainConfig::default(),
     );
@@ -695,9 +704,9 @@ async fn assert_monitor_concentration_matches_canonical(
     );
 }
 
-pub async fn whale_trade_tape_scores_feature_factor_and_monitor() {
-    let harness = whale_tape_conc_harness().await;
-    let feature_result = run_whale_feature_pipeline(&harness).await;
+pub async fn whale_trade_tape_monitor() {
+    let harness = WhaleTapeConcHarness::fixture().await;
+    let feature_result = harness.run_whale_feature_pipeline().await;
 
     assert_eq!(feature_result.accepted.len(), 1, "vector must be accepted");
     assert_eq!(
@@ -707,7 +716,7 @@ pub async fn whale_trade_tape_scores_feature_factor_and_monitor() {
     );
     let expected_composite = assert_whale_concentration_features(&feature_result.accepted[0]);
 
-    run_factor_round_and_assert_concentration(&harness, &feature_result, expected_composite).await;
-    assert_monitor_concentration_matches_canonical(&harness, expected_composite).await;
+    run_factor_round_concentration(&harness, &feature_result, expected_composite).await;
+    assert_monitor_matches_canonical(&harness, expected_composite).await;
     drop(harness);
 }

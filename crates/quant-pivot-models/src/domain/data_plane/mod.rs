@@ -39,5 +39,5 @@ pub use trade_tape::{
     TradeTapeBlockCursorStatusVariantIter, TradeTapePrint, TradeTapeSourceKind,
     TradeTapeSourceKindEnum, TradeTapeSourceKindIter, TradeTapeSourceKindParseError,
     TradeTapeSourceKindVariant, TradeTapeSourceKindVariantIter, UpsertTradeTapeBlockCursor,
-    ch_trade_side, ch_trade_side_to_domain, trade_tape_coverage,
+    ch_trade_side, trade_tape_coverage,
 };

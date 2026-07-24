@@ -104,7 +104,7 @@ async fn insert_microstructure_rows(client: &Client, rows: &[BookMicrostructureR
 ///
 /// Fresh `MergeTree` parts can lag briefly behind HTTP insert ack on a cold
 /// testcontainer; PIT reads that race this window return `None`.
-async fn wait_for_book_snapshot_rows(client: &Client, token: &TokenId, expected: u64) {
+async fn wait_book_snapshot_rows(client: &Client, token: &TokenId, expected: u64) {
     const ATTEMPTS: usize = 40;
     const PAUSE: Duration = Duration::from_millis(50);
     for attempt in 1..=ATTEMPTS {
@@ -461,7 +461,7 @@ async fn assert_latest_logical_revisions(
         1
     );
     let evaluation = fact_read
-        .latest_applied_entry_condition_evaluation(condition_instance_id)
+        .latest_entry_evaluation(condition_instance_id)
         .await
         .expect("read entry evaluation logical row")
         .expect("entry evaluation exists");
@@ -484,7 +484,7 @@ async fn assert_latest_logical_revisions(
     );
 }
 
-pub async fn replacing_merge_tree_readers_return_one_latest_logical_row() {
+pub async fn replacing_merge_tree_row() {
     let (pool, client, _container) = setup_clickhouse().await;
     let now = fresh_event_time_ms();
     let report_id = RecommendationReportId::from_v7();
@@ -596,7 +596,7 @@ fn microstructure_row(
     }
 }
 
-pub async fn ch_read_orders_by_event_time_with_tiebreaker() {
+pub async fn ch_read_orders_tiebreaker() {
     let (pool, client, _container) = setup_clickhouse().await;
     let read = ChQuantFactReadRepository::new(pool);
     let token = TokenId::new("ch-pit-yes");
@@ -622,7 +622,7 @@ pub async fn ch_read_orders_by_event_time_with_tiebreaker() {
         ],
     )
     .await;
-    wait_for_book_snapshot_rows(&client, &token, 2).await;
+    wait_book_snapshot_rows(&client, &token, 2).await;
 
     let before_late_arrival = read
         .book_ledger_snapshot_at(&token, event_time + 5, event_time + 1)
@@ -630,7 +630,7 @@ pub async fn ch_read_orders_by_event_time_with_tiebreaker() {
         .expect("read before late arrival")
         .expect("earlier visible revision");
     assert_eq!(
-        before_late_arrival.bid_prices[0].to_price().inner(),
+        Price::from(before_late_arrival.bid_prices[0]).inner(),
         Decimal::new(49, 2),
         "a backdated revision must not be visible before its ingestion time"
     );
@@ -647,13 +647,13 @@ pub async fn ch_read_orders_by_event_time_with_tiebreaker() {
             )
         });
     assert_eq!(
-        row.bid_prices[0].to_price().inner(),
+        Price::from(row.bid_prices[0]).inner(),
         Decimal::new(50, 2),
         "tie-breaker must prefer later ingestion_time at same event_time"
     );
 }
 
-pub async fn historical_scans_reject_rows_not_yet_available() {
+pub async fn scans_reject_unavailable_rows() {
     let (pool, client, _container) = setup_clickhouse().await;
     let read = ChQuantFactReadRepository::new(pool);
     let event_time = fresh_event_time_ms();
@@ -670,7 +670,7 @@ pub async fn historical_scans_reject_rows_not_yet_available() {
     );
     late_book.market_id = Some(market_id.clone());
     insert_book_rows(&client, slice::from_ref(&late_book)).await;
-    wait_for_book_snapshot_rows(&client, &token_id, 1).await;
+    wait_book_snapshot_rows(&client, &token_id, 1).await;
 
     assert!(
         read.observed_markets_between(event_time - 1, event_time + 1, event_time)
@@ -721,7 +721,7 @@ pub async fn historical_scans_reject_rows_not_yet_available() {
         .expect("mid series before correction");
     assert_eq!(before_correction.len(), 1);
     assert_eq!(
-        before_correction[0].mid_price.map(ChPrice::to_price),
+        before_correction[0].mid_price.map(Price::from),
         Some(Price::new(Decimal::new(40, 2)))
     );
 
@@ -737,12 +737,12 @@ pub async fn historical_scans_reject_rows_not_yet_available() {
         .expect("mid series after correction");
     assert_eq!(after_correction.len(), 1);
     assert_eq!(
-        after_correction[0].mid_price.map(ChPrice::to_price),
+        after_correction[0].mid_price.map(Price::from),
         Some(Price::new(Decimal::new(60, 2)))
     );
 }
 
-pub async fn resolution_at_is_pit_bounded() {
+pub async fn resolution_pit_bounded() {
     let (pool, client, _container) = setup_clickhouse().await;
     let read = ChQuantFactReadRepository::new(pool);
     let market_id = MarketId::new("0xchpit-res");
@@ -935,7 +935,7 @@ async fn assert_resolution_identity_queries(
     ));
 }
 
-pub async fn weather_long_form_facts_are_pit_visible_and_revision_preserving() {
+pub async fn weather_long_form_preserving() {
     let (pool, client, _container) = setup_clickhouse().await;
     let read = ChQuantFactReadRepository::new(pool);
     let observed_at = fresh_event_time_ms();
@@ -1005,7 +1005,7 @@ pub async fn weather_long_form_facts_are_pit_visible_and_revision_preserving() {
         .await
         .expect("end weather observation insert");
 
-    assert_preposted_nhc_advisory_pit(&client, &read, observed_at, first_visible_at).await;
+    assert_preposted_nhc_pit(&client, &read, observed_at, first_visible_at).await;
 
     let before_correction = read
         .weather_observation_facts_between(
@@ -1064,7 +1064,7 @@ pub async fn weather_long_form_facts_are_pit_visible_and_revision_preserving() {
     .await;
 }
 
-async fn assert_preposted_nhc_advisory_pit(
+async fn assert_preposted_nhc_pit(
     client: &Client,
     read: &ChQuantFactReadRepository,
     base_time: i64,
@@ -1209,7 +1209,7 @@ async fn assert_weather_forecast_pit(
     );
 }
 
-pub async fn trade_tape_preserves_prior_revisions_after_merge() {
+pub async fn trade_preserves_after_merge() {
     let (pool, client, _container) = setup_clickhouse().await;
     let read = ChQuantFactReadRepository::new(Arc::clone(&pool));
     let market_id = MarketId::new("0xtrade-tape-dedupe");
@@ -1265,7 +1265,7 @@ pub async fn trade_tape_preserves_prior_revisions_after_merge() {
         .expect("merge trade tape parts");
 
     let rows_before_revision = read
-        .trade_tape_window_by_market(
+        .market_tape_window(
             vec![market_id.clone()],
             event_time - 1,
             event_time + 1,
@@ -1276,7 +1276,7 @@ pub async fn trade_tape_preserves_prior_revisions_after_merge() {
     assert!(rows_before_revision.is_empty());
 
     let rows = read
-        .trade_tape_window_by_market(
+        .market_tape_window(
             vec![market_id.clone()],
             event_time - 1,
             event_time + 1,

@@ -428,65 +428,85 @@ mod tests {
 
     use super::{SubscriptionSource, SubscriptionState};
 
-    fn tok(s: &str) -> TokenId {
-        TokenId::new(s)
-    }
-
     #[test]
-    fn first_subscriber_drives_transport_subscribe() {
+    fn first_subscriber_drives_subscribe() {
         let mut state = SubscriptionState::default();
-        let newly = state.add(SubscriptionSource::Engine, &[tok("a"), tok("b")]);
+        let newly = state.add(
+            SubscriptionSource::Engine,
+            &[TokenId::new("a"), TokenId::new("b")],
+        );
         assert_eq!(newly.len(), 2, "both tokens newly enter the union");
     }
 
     #[test]
-    fn overlapping_source_is_noop_on_the_wire() {
+    fn overlapping_source_noop_wire() {
         let mut state = SubscriptionState::default();
-        state.add(SubscriptionSource::Engine, &[tok("a"), tok("b")]);
+        state.add(
+            SubscriptionSource::Engine,
+            &[TokenId::new("a"), TokenId::new("b")],
+        );
         // Web overlaps `b` and adds `c`; only `c` newly enters the union.
-        let newly = state.add(SubscriptionSource::Web, &[tok("b"), tok("c")]);
-        assert_eq!(newly, vec![tok("c")]);
+        let newly = state.add(
+            SubscriptionSource::Web,
+            &[TokenId::new("b"), TokenId::new("c")],
+        );
+        assert_eq!(newly, vec![TokenId::new("c")]);
     }
 
     #[test]
-    fn web_unsubscribe_never_drops_an_engine_token() {
+    fn web_never_drops_token() {
         let mut state = SubscriptionState::default();
-        state.add(SubscriptionSource::Engine, &[tok("a"), tok("b")]);
-        state.add(SubscriptionSource::Web, &[tok("b"), tok("c")]);
+        state.add(
+            SubscriptionSource::Engine,
+            &[TokenId::new("a"), TokenId::new("b")],
+        );
+        state.add(
+            SubscriptionSource::Web,
+            &[TokenId::new("b"), TokenId::new("c")],
+        );
 
         // Web drops everything it added. `b` stays (engine baseline), only `c`
         // leaves the union and is torn down on the transport.
-        let gone = state.remove(SubscriptionSource::Web, &[tok("b"), tok("c")]);
-        assert_eq!(gone, vec![tok("c")]);
+        let gone = state.remove(
+            SubscriptionSource::Web,
+            &[TokenId::new("b"), TokenId::new("c")],
+        );
+        assert_eq!(gone, vec![TokenId::new("c")]);
 
         // Engine still holds both of its tokens.
         assert_eq!(state.split(SubscriptionSource::Engine).0.len(), 2);
     }
 
     #[test]
-    fn web_cannot_remove_a_token_it_never_held() {
+    fn web_cannot_remove_unheld() {
         let mut state = SubscriptionState::default();
-        state.add(SubscriptionSource::Engine, &[tok("a")]);
-        let gone = state.remove(SubscriptionSource::Web, &[tok("a")]);
+        state.add(SubscriptionSource::Engine, &[TokenId::new("a")]);
+        let gone = state.remove(SubscriptionSource::Web, &[TokenId::new("a")]);
         assert!(gone.is_empty(), "web never held `a`, transport untouched");
         assert!(
             state
                 .split(SubscriptionSource::Engine)
                 .0
-                .contains(&tok("a"))
+                .contains(&TokenId::new("a"))
         );
     }
 
     #[test]
-    fn engine_sync_protects_the_web_overlay() {
+    fn engine_sync_protects_overlay() {
         let mut state = SubscriptionState::default();
-        state.add(SubscriptionSource::Engine, &[tok("a"), tok("b")]);
-        state.add(SubscriptionSource::Web, &[tok("b"), tok("c")]);
+        state.add(
+            SubscriptionSource::Engine,
+            &[TokenId::new("a"), TokenId::new("b")],
+        );
+        state.add(
+            SubscriptionSource::Web,
+            &[TokenId::new("b"), TokenId::new("c")],
+        );
 
         // Engine reconciles to {a}: it drops `b` from its own set, but `b` stays
         // on the wire because the web overlay still holds it; only engine-only
         // tokens would be removed (none here besides what web protects).
-        let desired: HashSet<TokenId> = iter::once(tok("a")).collect();
+        let desired: HashSet<TokenId> = iter::once(TokenId::new("a")).collect();
         let (to_subscribe, to_unsubscribe) = state.sync(SubscriptionSource::Engine, desired);
         assert!(to_subscribe.is_empty());
         assert!(
@@ -496,16 +516,19 @@ mod tests {
     }
 
     #[test]
-    fn physical_session_scope_must_still_belong_to_the_transport_union() {
+    fn physical_session_scope_union() {
         let mut state = SubscriptionState::default();
-        state.add(SubscriptionSource::Engine, &[tok("a"), tok("b")]);
-        assert!(state.owns_all(&[tok("a"), tok("b")]));
+        state.add(
+            SubscriptionSource::Engine,
+            &[TokenId::new("a"), TokenId::new("b")],
+        );
+        assert!(state.owns_all(&[TokenId::new("a"), TokenId::new("b")]));
 
         assert_eq!(
-            state.remove(SubscriptionSource::Engine, &[tok("b")]),
-            vec![tok("b")]
+            state.remove(SubscriptionSource::Engine, &[TokenId::new("b")]),
+            vec![TokenId::new("b")]
         );
-        assert!(!state.owns_all(&[tok("a"), tok("b")]));
-        assert!(state.owns_all(&[tok("a")]));
+        assert!(!state.owns_all(&[TokenId::new("a"), TokenId::new("b")]));
+        assert!(state.owns_all(&[TokenId::new("a")]));
     }
 }

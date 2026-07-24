@@ -291,7 +291,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn duplicate_display_names_entity_and_key() {
+    fn duplicate_display_names_key() {
         let error = StorageError::Duplicate {
             entity: USER,
             key: "alice".to_owned(),
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn illegal_transition_display_includes_states() {
+    fn illegal_transition_display_states() {
         let error = StorageError::IllegalTransition {
             entity: QUANT_ORDER_INTENT,
             id: Some("intent-1".to_owned()),

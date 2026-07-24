@@ -34,7 +34,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_production_environment_blocks_destructive_reset() {
+    fn only_production_blocks_reset() {
         let production = DeploymentConfig {
             environment: DeploymentEnvironment::parse("production").expect("production"),
         };

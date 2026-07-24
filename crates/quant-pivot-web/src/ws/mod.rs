@@ -27,7 +27,7 @@ use prometheus::{GaugeVec, Histogram, IntCounter, IntGauge, IntGaugeVec};
 use quant_pivot_models::{
     domain::{
         runtime::CoreEvent,
-        ws::{SubscriptionKey, WsChannel, event_envelope},
+        ws::{SubscriptionKey, WsChannel},
     },
     types::{MarketId, UserId},
 };
@@ -964,7 +964,7 @@ pub async fn spawn_ws_broadcaster(
                     tracing::info!("ws broadcaster event bus closed");
                     return;
                 };
-                if let Some((key, envelope)) = event_envelope(&event) {
+                if let Some((key, envelope)) = event.event_envelope() {
                     let delivery = DeliveryClass::for_channel(key.channel);
                     let frame = ByteString::from(envelope.to_text());
                     if !registry.fanout(key, frame, delivery).await {
@@ -1085,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn bytestring_conversion_and_clone_share_the_encoded_allocation() {
+    fn bytestring_conversion_clone_allocation() {
         let encoded = String::from(r#"{"type":"market.book_update"}"#);
         let allocation = encoded.as_ptr();
         let frame = ByteString::from(encoded);
@@ -1095,7 +1095,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn topic_index_delivers_only_to_exact_subscribers() {
+    async fn topic_index_delivers_subscribers() {
         let (registry, hub, _metrics, shutdown) = test_hub();
         let task = tokio::spawn(hub.run(shutdown.clone()));
         let (first, mut first_rx, _) = registration(8, user(1), "family-1", false);
@@ -1126,7 +1126,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watched_market_snapshot_tracks_first_and_last_subscription() {
+    async fn watched_market_tracks_subscription() {
         let (registry, hub, _metrics, shutdown) = test_hub();
         let task = tokio::spawn(hub.run(shutdown.clone()));
         let (first, _first_rx, _) = registration(8, user(1), "family-1", false);
@@ -1149,7 +1149,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_frames_use_permission_index_without_explicit_subscription() {
+    async fn system_frames_without_subscription() {
         let (registry, hub, _metrics, shutdown) = test_hub();
         let task = tokio::spawn(hub.run(shutdown.clone()));
         let (reader, mut reader_rx, _) = registration(8, user(1), "family-1", true);
@@ -1173,7 +1173,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subject_and_family_indexes_close_only_matching_sessions() {
+    async fn subject_family_indexes_sessions() {
         let (registry, hub, _metrics, shutdown) = test_hub();
         let task = tokio::spawn(hub.run(shutdown.clone()));
         let (first, _first_rx, first_cancel) = registration(8, user(1), "family-1", false);
@@ -1196,7 +1196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slow_client_policy_drops_state_but_closes_on_lifecycle() {
+    async fn slow_client_drops_lifecycle() {
         let (registry, hub, metrics, shutdown) = test_hub();
         let task = tokio::spawn(hub.run(shutdown.clone()));
         let (registration, mut receiver, cancellation) = registration(1, user(1), "family", false);
@@ -1275,7 +1275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn best_effort_lane_keeps_only_the_latest_frame_per_topic() {
+    async fn best_effort_keeps_topic() {
         let (registry, _hub, metrics, _shutdown) = test_hub();
         let key = book("0xlatest");
         assert!(
@@ -1305,7 +1305,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_control_ack_cancels_every_socket_fail_closed() {
+    async fn missing_control_cancels_rejects() {
         let (registry, _hub, metrics, _shutdown) = test_hub();
 
         registry.close_all().await;
@@ -1315,7 +1315,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_id_exhaustion_is_fail_closed() {
+    async fn session_id_exhaustion_rejects() {
         let (registry, _hub, _metrics, _shutdown) = test_hub();
         registry.next_id.store(u64::MAX, Ordering::Relaxed);
         let (registration, _receiver, _cancellation) =
@@ -1326,7 +1326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_best_effort_frame_is_rejected_before_queueing() {
+    async fn oversized_rejected_before_queueing() {
         let (registry, _hub, metrics, _shutdown) = test_hub();
         let oversized = ByteString::from("x".repeat(HUB_MAX_FRAME_BYTES + 1));
 
@@ -1342,7 +1342,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reliable_lane_overflow_disconnects_the_affected_topic() {
+    async fn reliable_lane_overflow_topic() {
         let (registry, mut hub, metrics, shutdown) = test_hub();
         let key = book("0xreliable-overflow");
         let (registration, _receiver, cancellation) =
@@ -1388,7 +1388,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ten_thousand_session_fanout_cannot_starve_subject_revoke() {
+    async fn ten_thousand_cannot_revoke() {
         const SESSION_COUNT: usize = 10_000;
         const SUBSCRIBER_COUNT: usize = 1_000;
         const FLOOD_EVENTS: usize = 10_000;

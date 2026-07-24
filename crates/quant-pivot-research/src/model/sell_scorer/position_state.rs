@@ -45,70 +45,72 @@ pub struct LotStateInput {
     pub peak_mark: Option<Decimal>,
 }
 
-/// Derive position-state pseudo-features from ledger + mark inputs.
-pub fn position_state_features(input: LotStateInput) -> QuantResult<PositionStateFeatures> {
-    let avg = input.avg_price;
-    if avg <= Decimal::ZERO {
-        return Err(ResearchError::FactorComputation {
-            detail: format!("position state: lot average price must be positive, got {avg}"),
+impl LotStateInput {
+    /// Derive position-state pseudo-features from ledger + mark inputs.
+    pub fn position_state_features(self) -> QuantResult<PositionStateFeatures> {
+        let avg = self.avg_price;
+        if avg <= Decimal::ZERO {
+            return Err(ResearchError::FactorComputation {
+                detail: format!("position state: lot average price must be positive, got {avg}"),
+            }
+            .into());
         }
-        .into());
-    }
-    if input.max_hold_secs == 0 {
-        return Err(ResearchError::FactorComputation {
-            detail: "position state: max_hold_secs must be positive".to_owned(),
+        if self.max_hold_secs == 0 {
+            return Err(ResearchError::FactorComputation {
+                detail: "position state: max_hold_secs must be positive".to_owned(),
+            }
+            .into());
         }
-        .into());
-    }
-    let elapsed = (input.now - input.opened_at).num_seconds();
-    if elapsed < 0 {
-        return Err(ResearchError::FactorComputation {
-            detail: format!(
-                "position state: lot opened_at {} is after decision_at {}",
-                input.opened_at, input.now
-            ),
+        let elapsed = (self.now - self.opened_at).num_seconds();
+        if elapsed < 0 {
+            return Err(ResearchError::FactorComputation {
+                detail: format!(
+                    "position state: lot opened_at {} is after decision_at {}",
+                    self.opened_at, self.now
+                ),
+            }
+            .into());
         }
-        .into());
-    }
-    let mark = input.mark;
-    if mark.is_some_and(|value| value <= Decimal::ZERO) {
-        return Err(ResearchError::FactorComputation {
-            detail: "position state: mark price must be positive when present".to_owned(),
+        let mark = self.mark;
+        if mark.is_some_and(|value| value <= Decimal::ZERO) {
+            return Err(ResearchError::FactorComputation {
+                detail: "position state: mark price must be positive when present".to_owned(),
+            }
+            .into());
         }
-        .into());
-    }
-    if input.peak_mark.is_some_and(|value| value <= Decimal::ZERO) {
-        return Err(ResearchError::FactorComputation {
-            detail: "position state: peak mark price must be positive when present".to_owned(),
+        if self.peak_mark.is_some_and(|value| value <= Decimal::ZERO) {
+            return Err(ResearchError::FactorComputation {
+                detail: "position state: peak mark price must be positive when present".to_owned(),
+            }
+            .into());
         }
-        .into());
-    }
-    let unrealized_pnl_pct = mark
-        .map(|mark| {
-            checked_difference("unrealized PnL", mark, avg)
-                .and_then(|difference| checked_ratio("unrealized PnL", difference, avg))
+        let unrealized_pnl_pct = mark
+            .map(|mark| {
+                checked_difference("unrealized PnL", mark, avg)
+                    .and_then(|difference| checked_ratio("unrealized PnL", difference, avg))
+            })
+            .transpose()?;
+        let time_in_trade_ratio = checked_ratio(
+            "time in trade",
+            Decimal::from(elapsed),
+            Decimal::from(self.max_hold_secs),
+        )?
+        .clamp(Decimal::ZERO, Decimal::ONE);
+        let peak_mark_drawdown = self
+            .peak_mark
+            .zip(mark)
+            .map(|(peak, mark)| {
+                checked_difference("peak drawdown", peak, mark)
+                    .and_then(|difference| checked_ratio("peak drawdown", difference, peak))
+            })
+            .transpose()?
+            .map(|value| value.clamp(Decimal::ZERO, Decimal::ONE));
+        Ok(PositionStateFeatures {
+            unrealized_pnl_pct,
+            time_in_trade_ratio,
+            peak_mark_drawdown,
         })
-        .transpose()?;
-    let time_in_trade_ratio = checked_ratio(
-        "time in trade",
-        Decimal::from(elapsed),
-        Decimal::from(input.max_hold_secs),
-    )?
-    .clamp(Decimal::ZERO, Decimal::ONE);
-    let peak_mark_drawdown = input
-        .peak_mark
-        .zip(mark)
-        .map(|(peak, mark)| {
-            checked_difference("peak drawdown", peak, mark)
-                .and_then(|difference| checked_ratio("peak drawdown", difference, peak))
-        })
-        .transpose()?
-        .map(|value| value.clamp(Decimal::ZERO, Decimal::ONE));
-    Ok(PositionStateFeatures {
-        unrealized_pnl_pct,
-        time_in_trade_ratio,
-        peak_mark_drawdown,
-    })
+    }
 }
 
 /// Whether `name` is a position-state pseudo-factor consumed by the Sell scorer.
@@ -120,25 +122,26 @@ pub fn is_position_state_factor(name: &FactorName) -> bool {
     )
 }
 
-/// The signed `[-1, 1]` position-state contributions keyed by pseudo-factor name.
-#[must_use]
-pub fn position_state_signed(state: &PositionStateFeatures) -> Vec<(FactorName, Option<Decimal>)> {
-    vec![
-        (
-            names::POSITION_UNREALIZED_PNL,
-            state
-                .unrealized_pnl_pct
-                .map(|value| clamp_signed(value / unrealized_pnl_scale())),
-        ),
-        (
-            names::POSITION_TIME_IN_TRADE,
-            Some(clamp_signed(state.time_in_trade_ratio)),
-        ),
-        (
-            names::POSITION_PEAK_DRAWDOWN,
-            state.peak_mark_drawdown.map(clamp_signed),
-        ),
-    ]
+impl PositionStateFeatures {
+    /// The signed `[-1, 1]` position-state contributions keyed by pseudo-factor name.
+    #[must_use]
+    pub fn position_state_signed(&self) -> Vec<(FactorName, Option<Decimal>)> {
+        vec![
+            (
+                names::POSITION_UNREALIZED_PNL,
+                self.unrealized_pnl_pct
+                    .map(|value| clamp_signed(value / unrealized_pnl_scale())),
+            ),
+            (
+                names::POSITION_TIME_IN_TRADE,
+                Some(clamp_signed(self.time_in_trade_ratio)),
+            ),
+            (
+                names::POSITION_PEAK_DRAWDOWN,
+                self.peak_mark_drawdown.map(clamp_signed),
+            ),
+        ]
+    }
 }
 
 /// Signed contribution for one position-state pseudo-factor (training simplex fit).
@@ -147,7 +150,8 @@ pub fn position_state_signed_contribution(
     state: &PositionStateFeatures,
     factor: &FactorName,
 ) -> Option<Decimal> {
-    position_state_signed(state)
+    (state)
+        .position_state_signed()
         .into_iter()
         .find(|(name, _)| name == factor)
         .and_then(|(_, signed)| signed)
@@ -181,14 +185,14 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use rust_decimal_macros::dec;
 
-    use super::{LotStateInput, position_state_features, position_state_signed_contribution};
+    use super::{LotStateInput, position_state_signed_contribution};
     use crate::factors::{names, names::POSITION_UNREALIZED_PNL};
 
     #[test]
-    fn position_state_matches_runtime_formula() {
+    fn position_state_matches_formula() {
         let opened = Utc.timestamp_opt(1_000, 0).single().expect("ts");
         let now = opened + Duration::seconds(43_200);
-        let state = position_state_features(LotStateInput {
+        let state = (LotStateInput {
             avg_price: dec!(0.40),
             mark: Some(dec!(0.50)),
             opened_at: opened,
@@ -196,6 +200,7 @@ mod tests {
             max_hold_secs: 86_400,
             peak_mark: Some(dec!(0.55)),
         })
+        .position_state_features()
         .expect("position state");
         assert_eq!(state.unrealized_pnl_pct, Some(dec!(0.25)));
         assert_eq!(state.time_in_trade_ratio, dec!(0.5));
@@ -209,9 +214,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_mark_and_peak_remain_explicitly_missing() {
+    fn missing_mark_peak_missing() {
         let opened = Utc.timestamp_opt(1_000, 0).single().expect("ts");
-        let state = position_state_features(LotStateInput {
+        let state = (LotStateInput {
             avg_price: dec!(0.40),
             mark: None,
             opened_at: opened,
@@ -219,6 +224,7 @@ mod tests {
             max_hold_secs: 3_600,
             peak_mark: None,
         })
+        .position_state_features()
         .expect("position state");
         assert_eq!(state.unrealized_pnl_pct, None);
         assert_eq!(state.peak_mark_drawdown, None);

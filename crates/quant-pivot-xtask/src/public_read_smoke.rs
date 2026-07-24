@@ -107,7 +107,7 @@ async fn binance(compute: Arc<ComputeExecutor>) -> Result<()> {
     let futures_config = BinanceSourceConfig::usdm_futures_default();
     let futures_budget =
         BinanceRequestBudget::new(&futures_config).context("build Binance USD-M request budget")?;
-    let futures = BinanceKlineSource::connect_usdm_futures_with_budget(
+    let futures = BinanceKlineSource::connect_usdm_futures(
         futures_config.clone(),
         futures_budget,
         Arc::clone(&compute),
@@ -138,7 +138,7 @@ async fn binance(compute: Arc<ComputeExecutor>) -> Result<()> {
 
     let aggregate_trade_budget =
         BinanceRequestBudget::new(&futures_config).context("build Binance USD-M stream budget")?;
-    let aggregate_trades = BinanceAggTradeSource::connect_usdm_futures_with_budget(
+    let aggregate_trades = BinanceAggTradeSource::connect_usdm_futures(
         futures_config,
         aggregate_trade_budget,
         Arc::clone(&compute),
@@ -150,9 +150,8 @@ async fn binance(compute: Arc<ComputeExecutor>) -> Result<()> {
         .context("read Binance USD-M aggregate-trade frontier")?
         .context("Binance USD-M aggregate-trade frontier was empty")?;
     ensure!(
-        report.source_id == DomainSourceId::binance_usdm_futures_agg_trade()
-            && report.instrument_key
-                == DomainInstrumentKey::binance_usdm_futures_agg_trade(&futures_symbol)
+        report.source_id == DomainSourceId::binance_futures_trade()
+            && report.instrument_key == DomainInstrumentKey::binance_futures_trade(&futures_symbol)
             && report.source_sequence > 0
             && report.price.inner() > Decimal::ZERO,
         "Binance USD-M aggregate-trade frontier violated typed provenance"

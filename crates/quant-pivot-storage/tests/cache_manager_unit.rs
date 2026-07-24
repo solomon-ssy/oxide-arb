@@ -28,9 +28,11 @@ struct Stub {
     id: String,
 }
 
-fn stub() -> Stub {
-    Stub {
-        id: "0xstub".into(),
+impl Stub {
+    fn test_fixture() -> Self {
+        Self {
+            id: "0xstub".into(),
+        }
     }
 }
 
@@ -60,15 +62,18 @@ fn config(fail_open: bool) -> CacheConfig {
 }
 
 #[tokio::test]
-async fn noop_manager_skips_all_operations() {
+async fn noop_manager_skips_operations() {
     let manager = CacheManager::noop();
     assert!(manager.is_noop());
 
     let missing: Option<Stub> = manager.get(&market_key()).await;
     assert!(missing.is_none());
-    manager.set(&market_key(), &stub()).await.expect("noop set");
     manager
-        .set_json(&market_key(), &stub())
+        .set(&market_key(), &Stub::test_fixture())
+        .await
+        .expect("noop set");
+    manager
+        .set_json(&market_key(), &Stub::test_fixture())
         .await
         .expect("noop set_json");
     manager.invalidate(&market_key()).await;
@@ -87,21 +92,21 @@ async fn disabled_config_builds_noop() {
 }
 
 #[tokio::test]
-async fn get_is_fail_open_on_backend_error() {
+async fn get_fail_open_error() {
     let manager = unreachable_manager(&config(true));
     let missing: Option<Stub> = manager.get(&market_key()).await;
     assert!(missing.is_none(), "backend error must degrade to a miss");
 }
 
 #[tokio::test]
-async fn get_json_is_fail_open_on_backend_error() {
+async fn get_json_fail_error() {
     let manager = unreachable_manager(&config(true));
     let missing: Option<Stub> = manager.get_json(&market_key()).await;
     assert!(missing.is_none(), "backend error must degrade to a miss");
 }
 
 #[tokio::test]
-async fn get_is_fail_open_even_when_writes_fail_closed() {
+async fn get_fail_writes_rejects() {
     // Reads never propagate cache errors regardless of the fail_open policy:
     // callers must always be able to fall through to the source of truth.
     let manager = unreachable_manager(&config(false));
@@ -110,27 +115,37 @@ async fn get_is_fail_open_even_when_writes_fail_closed() {
 }
 
 #[tokio::test]
-async fn set_fail_open_swallows_backend_error() {
+async fn set_fail_open_error() {
     let manager = unreachable_manager(&config(true));
     manager
-        .set(&market_key(), &stub())
+        .set(&market_key(), &Stub::test_fixture())
         .await
         .expect("fail-open set must swallow backend errors");
     manager
-        .set_json(&market_key(), &stub())
+        .set_json(&market_key(), &Stub::test_fixture())
         .await
         .expect("fail-open set_json must swallow backend errors");
 }
 
 #[tokio::test]
-async fn set_fail_closed_propagates_backend_error() {
+async fn set_propagates_backend_error() {
     let manager = unreachable_manager(&config(false));
-    assert!(manager.set(&market_key(), &stub()).await.is_err());
-    assert!(manager.set_json(&market_key(), &stub()).await.is_err());
+    assert!(
+        manager
+            .set(&market_key(), &Stub::test_fixture())
+            .await
+            .is_err()
+    );
+    assert!(
+        manager
+            .set_json(&market_key(), &Stub::test_fixture())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
-async fn disabled_domain_skips_operations_entirely() {
+async fn disabled_domain_skips_entirely() {
     let mut cfg = config(false);
     cfg.domains = HashMap::from([(
         "market".to_owned(),
@@ -145,7 +160,7 @@ async fn disabled_domain_skips_operations_entirely() {
     // Even with fail-closed writes and an unreachable backend, a disabled
     // domain is skipped before any backend call.
     manager
-        .set(&market_key(), &stub())
+        .set(&market_key(), &Stub::test_fixture())
         .await
         .expect("disabled domain set is a no-op");
     let missing: Option<Stub> = manager.get(&market_key()).await;
@@ -153,14 +168,14 @@ async fn disabled_domain_skips_operations_entirely() {
 }
 
 #[tokio::test]
-async fn invalidate_is_fail_open_on_backend_error() {
+async fn invalidate_fail_open_error() {
     let manager = unreachable_manager(&config(false));
     // Must not panic or propagate.
     manager.invalidate(&market_key()).await;
 }
 
 #[tokio::test]
-async fn register_metrics_registers_cache_counters() {
+async fn register_metrics_registers_counters() {
     let manager = unreachable_manager(&config(true));
     let registry = Registry::new();
     manager

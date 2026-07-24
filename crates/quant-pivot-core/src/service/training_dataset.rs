@@ -22,7 +22,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
-    clickhouse::{BookMicrostructureRow, ChPrice},
+    clickhouse::BookMicrostructureRow,
     domain::{
         data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
         market::{MarketInfo, MarketRegistryInfo, fee::MarketFeeSchedule},
@@ -63,7 +63,7 @@ use quant_pivot_research::{
     hashing::ResearchHasher,
     model::{
         FavoriteLongshotBiasTable,
-        sell_scorer::{LotStateInput, PositionStateFeatures, position_state_features},
+        sell_scorer::{LotStateInput, PositionStateFeatures},
     },
     pit::PointInTimeSnapshotSource,
     selection::{ModelFeatureRequirements, SelectedMarket},
@@ -94,7 +94,7 @@ use crate::{
         source_slice::FrozenSourceSlice,
     },
     service::{
-        calibration_shared::assert_disjoint_from_all_training_datasets,
+        calibration_shared::assert_dataset_disjoint,
         historical_replay::{
             CrossSectionRequest, ReplayConfig, ReplayCrossSection, materialize_cross_section,
         },
@@ -460,7 +460,7 @@ pub struct TrainingDatasetServiceWire {
 }
 
 /// Fail closed on empty/inverted half-open dataset windows (shared by plan/build).
-fn require_half_open_dataset_window(
+fn require_half_open_window(
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
 ) -> QuantResult<()> {
@@ -540,7 +540,7 @@ impl TrainingDatasetService {
         request: DatasetPlanRequest,
         source: &FrozenSourceSlice,
     ) -> QuantResult<DatasetPlan> {
-        require_half_open_dataset_window(request.window_start, request.window_end)?;
+        require_half_open_window(request.window_start, request.window_end)?;
         if request
             .sample_sources
             .iter()
@@ -659,7 +659,7 @@ impl TrainingDatasetService {
         config: TrainingDatasetBuildConfig,
         max_spine_samples: u64,
     ) -> QuantResult<Self> {
-        let min_exit_depth_usd = config.training.min_exit_depth_usd_typed();
+        let min_exit_depth_usd = config.training.min_exit_depth();
         let max_book_staleness = Duration::from_millis(config.training.max_book_staleness_ms);
         Ok(Self {
             compute: deps.compute,
@@ -705,7 +705,7 @@ impl TrainingDatasetService {
     ) -> QuantResult<ModelFeatureRequirements> {
         let spec = self
             .model_registry
-            .find_model_spec_by_id(model_spec_id)
+            .find_model_spec(model_spec_id)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| StorageError::NotFound {
@@ -728,7 +728,7 @@ impl TrainingDatasetService {
     )> {
         let spec = self
             .model_registry
-            .find_model_spec_by_id(&request.model_spec_id)
+            .find_model_spec(&request.model_spec_id)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| StorageError::NotFound {
@@ -905,9 +905,11 @@ impl TrainingDatasetService {
         sample_slices: u32,
         sample_markets: u32,
     ) -> QuantResult<PlanCounts> {
-        require_half_open_dataset_window(request.window_start, request.window_end)?;
+        require_half_open_window(request.window_start, request.window_end)?;
         let mut total: u64 = 0;
-        let wants_historical = wants_sample_source(request, TrainingSampleSource::HistoricalPit);
+        let wants_historical = request
+            .sample_sources
+            .contains(&TrainingSampleSource::HistoricalPit);
         // Candidate `MarketInfo` set (category + lifetime), reused for both the
         // arithmetic spine upper bound and the sampled keep-rate estimate. Sourced
         // from ClickHouse-observed markets so since-resolved markets are included.
@@ -983,7 +985,10 @@ impl TrainingDatasetService {
 
     async fn additional_plan_sample_count(&self, request: &DatasetPlanRequest) -> QuantResult<u64> {
         let mut total = 0_u64;
-        if wants_sample_source(request, TrainingSampleSource::ExitDecision) {
+        if request
+            .sample_sources
+            .contains(&TrainingSampleSource::ExitDecision)
+        {
             let lots = self
                 .position_repo
                 .find_exit_training_lots(
@@ -1141,7 +1146,7 @@ fn stride_sample<'a>(candidates: &[&'a MarketInfo], limit: usize) -> Vec<&'a Mar
 #[async_trait]
 impl TrainingDatasetPlanner for TrainingDatasetService {
     async fn plan(&self, request: DatasetPlanRequest) -> QuantResult<DatasetPlan> {
-        require_half_open_dataset_window(request.window_start, request.window_end)?;
+        require_half_open_window(request.window_start, request.window_end)?;
         let (model_spec_definition_hash, trade_policy_artifact_id, trade_policy_hash, trade_policy) =
             self.resolve_trade_policy_binding(&request).await?;
         // Point-in-time candidate selection: markets observed (had a book) in the
@@ -1157,7 +1162,10 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
         let samples = plan_samples(&request, &plan_markets)?;
         let mut lot_samples = Vec::new();
         let mut exit_training_lots = Vec::new();
-        if wants_sample_source(&request, TrainingSampleSource::ExitDecision) {
+        if request
+            .sample_sources
+            .contains(&TrainingSampleSource::ExitDecision)
+        {
             exit_training_lots = self
                 .position_repo
                 .find_exit_training_lots(
@@ -1197,7 +1205,11 @@ impl TrainingDatasetService {
     /// Dry-run sample count aligned with [`TrainingDatasetBuilder::build`] coverage.
     pub fn count_planned_samples(&self, plan: &DatasetPlan) -> QuantResult<u64> {
         let mut total = planned_historical_samples(plan);
-        if wants_sample_source(&plan.request, TrainingSampleSource::ExitDecision) {
+        if plan
+            .request
+            .sample_sources
+            .contains(&TrainingSampleSource::ExitDecision)
+        {
             total += plan.lot_samples.len() as u64;
         }
         Ok(total)
@@ -1333,7 +1345,11 @@ impl TrainingDatasetService {
         // cooperative cancel latency.
         let mut spine = HistoricalSpine::default();
         let mut coverage = coverage;
-        if wants_sample_source(&plan.request, TrainingSampleSource::HistoricalPit) {
+        if plan
+            .request
+            .sample_sources
+            .contains(&TrainingSampleSource::HistoricalPit)
+        {
             let inputs = self
                 .historical_inputs(
                     &plan,
@@ -1550,7 +1566,11 @@ impl TrainingDatasetService {
         };
         let cancel = CancellationToken::new();
         let mut spine = HistoricalSpine::default();
-        if wants_sample_source(&plan.request, TrainingSampleSource::HistoricalPit) {
+        if plan
+            .request
+            .sample_sources
+            .contains(&TrainingSampleSource::HistoricalPit)
+        {
             let params = self
                 .historical_params(&plan, pit, &prefetched, &NoopProgressSink, &cancel)
                 .await?;
@@ -1664,7 +1684,11 @@ impl TrainingDatasetService {
             self.bias_table.as_ref().map(Arc::clone),
         );
 
-        if wants_sample_source(&plan.request, TrainingSampleSource::ExitDecision) {
+        if plan
+            .request
+            .sample_sources
+            .contains(&TrainingSampleSource::ExitDecision)
+        {
             coverage.exit_decision_candidates = plan.lot_samples.len() as u64;
             coverage.planned_samples += plan.lot_samples.len() as u64;
             self.append_exit_decision_examples(
@@ -1791,7 +1815,7 @@ impl TrainingDatasetService {
                 let Some(lot) = lot_by_intent.get(&sample.order_intent_id) else {
                     continue;
                 };
-                let Some(index) = cross_section_index_for_lot_sample(&cross_section, sample) else {
+                let Some(index) = lot_cross_section_index(&cross_section, sample) else {
                     sink.coverage.samples_dropped_insufficient += 1;
                     continue;
                 };
@@ -1921,14 +1945,15 @@ impl TrainingDatasetService {
         // Peak-to-cutoff is strictly historical. The lot's terminal lifetime
         // peak would leak future price into an early-tick drawdown feature.
         let peak_mark = peak_mark_to(micro, input.lot.opened_at, &boundary);
-        let position_state = position_state_features(LotStateInput {
+        let position_state = LotStateInput {
             avg_price: input.lot.avg_price.inner(),
             mark: entry_mid.map(Price::inner),
             opened_at: input.lot.opened_at,
             now: input.sample.decision_at,
             max_hold_secs: input.lot.max_hold_secs,
             peak_mark: peak_mark.map(Price::inner),
-        })?;
+        }
+        .position_state_features()?;
         let (decision_book, book_fidelity) =
             decision_book_at(input.pit, &input.sample.token_id, &boundary, micro).await?;
         // Quote fees from the actual executable bid used by the label. The lot
@@ -2061,7 +2086,7 @@ impl TrainingDatasetService {
         // concern because this dataset is not yet bound to one model version.
         if plan.request.purpose == DatasetPurpose::Calibration {
             let window = TimeWindow::new(plan.request.window_start, plan.request.window_end);
-            assert_disjoint_from_all_training_datasets(
+            assert_dataset_disjoint(
                 self.dataset_repo.as_ref(),
                 &window,
                 "calibration dataset build",
@@ -2080,7 +2105,7 @@ impl TrainingDatasetService {
     ) -> QuantResult<DatasetCoverage> {
         let model_spec = self
             .model_registry
-            .find_model_spec_by_id(model_spec_id)
+            .find_model_spec(model_spec_id)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| StorageError::NotFound {
@@ -2670,12 +2695,12 @@ fn append_historical_examples(
     Ok(())
 }
 
-fn wants_sample_source(request: &DatasetPlanRequest, source: TrainingSampleSource) -> bool {
-    request.sample_sources.contains(&source)
-}
-
 fn planned_historical_samples(plan: &DatasetPlan) -> u64 {
-    if wants_sample_source(&plan.request, TrainingSampleSource::HistoricalPit) {
+    if plan
+        .request
+        .sample_sources
+        .contains(&TrainingSampleSource::HistoricalPit)
+    {
         plan.samples.len() as u64
     } else {
         0
@@ -2807,7 +2832,7 @@ fn peak_mark_to(
                 .or(row.best_bid_close)
                 .or(row.mid_price_close)
         })
-        .map(ChPrice::to_price)
+        .map(Price::from)
         .max()
 }
 
@@ -2936,7 +2961,7 @@ impl ReplayContext {
     }
 }
 
-fn cross_section_index_for_lot_sample(
+fn lot_cross_section_index(
     cross_section: &ReplayCrossSection,
     sample: &LotSamplePlan,
 ) -> Option<usize> {
@@ -3039,7 +3064,7 @@ mod keep_rate_tests {
     }
 
     #[test]
-    fn keep_rate_uses_checked_integer_rounding() {
+    fn keep_rate_uses_rounding() {
         assert_eq!(
             KeepRateEstimate {
                 included: 1,
@@ -3069,7 +3094,7 @@ mod keep_rate_tests {
     }
 
     #[test]
-    fn keep_rate_rejects_impossible_counts() {
+    fn keep_rate_rejects_counts() {
         assert!(
             KeepRateEstimate {
                 included: 0,
@@ -3089,7 +3114,7 @@ mod keep_rate_tests {
     }
 
     #[test]
-    fn keep_rate_grid_uses_integer_midpoints_and_one_boundary_derivation() {
+    fn keep_rate_uses_derivation() {
         let grid = KeepRateGrid::new(&request(), 4, 30, 60).expect("grid");
         let expected_offsets = [12, 37, 62, 87];
         for (index, expected_offset) in expected_offsets.into_iter().enumerate() {
@@ -3126,7 +3151,7 @@ mod decision_book_tests {
     use super::{DecisionBook, decision_book_quote_price};
 
     #[test]
-    fn fee_quote_price_comes_from_executable_decision_bid() {
+    fn fee_quote_price_bid() {
         let book = DecisionBook::L2 {
             bids: Arc::from([
                 BookLevel::from_decimal_unchecked(
@@ -3210,7 +3235,7 @@ mod pit_fee_tests {
     }
 
     #[test]
-    fn exit_fee_uses_only_the_pit_visible_market_info_version() {
+    fn exit_fee_uses_version() {
         let decision_at = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
         let cutoff = decision_at - Duration::seconds(10);
         let market_id = MarketId::new("fee-market");

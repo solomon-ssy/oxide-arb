@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn poison_is_sticky_and_epoch_scoped() {
+    fn poison_sticky_epoch_scoped() {
         let sessions = SessionDirectory::default();
         let active = ticket(1);
         let tokens: Arc<[TokenId]> = Arc::from([TokenId::new("1"), TokenId::new("2")]);
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn close_makes_queued_ticket_unavailable() {
+    fn close_makes_queued_unavailable() {
         let sessions = SessionDirectory::default();
         let active = ticket(1);
         assert!(sessions.open(active, Arc::from([TokenId::new("1")])));
@@ -181,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn epoch_cannot_be_rebound_to_another_uuid() {
+    fn epoch_cannot_rebound_uuid() {
         let sessions = SessionDirectory::default();
         let active = ticket(1);
         assert!(sessions.open(active, Arc::from([TokenId::new("1")])));

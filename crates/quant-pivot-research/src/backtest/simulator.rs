@@ -33,24 +33,27 @@ mod tests {
     use super::settle_executed_buy;
     use crate::execution_semantics::{LiquidityRole, PitFeeSchedule, walk_buy_cash_budget};
 
-    fn schedule() -> PitFeeSchedule {
-        let at = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
-        PitFeeSchedule {
-            schedule_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
-            effective_at: at,
-            available_at: at,
-            platform_rate: dec!(0.05),
-            exponent: Decimal::ONE,
-            taker_only: true,
-            builder_maker_fee_bps: Bps::ZERO,
-            builder_taker_fee_bps: Bps::ZERO,
-            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+    impl PitFeeSchedule {
+        fn simulator_fixture() -> Self {
+            let at = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
+            Self {
+                schedule_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64)))
+                    .expect("hash"),
+                effective_at: at,
+                available_at: at,
+                platform_rate: dec!(0.05),
+                exponent: Decimal::ONE,
+                taker_only: true,
+                builder_maker_fee_bps: Bps::ZERO,
+                builder_taker_fee_bps: Bps::ZERO,
+                builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+            }
         }
     }
 
     #[test]
-    fn settlement_uses_walk_cash_outlay_and_fee() {
-        let fees = schedule();
+    fn settlement_uses_walk_fee() {
+        let fees = PitFeeSchedule::simulator_fixture();
         let asks = [BookLevel::from_decimal_unchecked(
             Price::new(dec!(0.5)),
             Shares::new(dec!(1000)),

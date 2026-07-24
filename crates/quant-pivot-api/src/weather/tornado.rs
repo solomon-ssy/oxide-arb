@@ -27,7 +27,7 @@ use reqwest::Client;
 use rust_decimal::Decimal;
 
 use crate::infra::{
-    http::{get_optional_bytes_with_retry, get_text_with_retry},
+    http::{get_optional_bytes, get_text_with_retry},
     retry::RetryPolicy,
 };
 
@@ -89,7 +89,7 @@ impl TornadoSource {
             self.config.spc_base_url.trim_end_matches('/'),
             report_date.format("%y%m%d")
         );
-        let Some(bytes) = get_optional_bytes_with_retry(&self.http, &self.retry_policy, &url)
+        let Some(bytes) = get_optional_bytes(&self.http, &self.retry_policy, &url)
             .await
             .map_err(QuantError::from)?
         else {
@@ -122,7 +122,7 @@ impl TornadoSource {
             self.config.ncei_csv_base_url.trim_end_matches('/'),
             filename
         );
-        let bytes = get_optional_bytes_with_retry(&self.http, &self.retry_policy, &url)
+        let bytes = get_optional_bytes(&self.http, &self.retry_policy, &url)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| parse_error("NCEI Storm Events index", "indexed file returned 404"))?;
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spc_partition_counts_matching_preliminary_reports() {
+    async fn spc_partition_counts_reports() {
         let server = MockServer::start().await;
         let body = concat!(
             "Time,F_Scale,Location,County,State,Lat,Lon,Comments\n",
@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ncei_latest_revision_counts_unique_final_events() {
+    async fn ncei_latest_unique_events() {
         let server = MockServer::start().await;
         let index = concat!(
             "<a href=\"StormEvents_details-ftp_v1.0_d2025_c20260201.csv.gz\">old</a>",

@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_ignores_checked_at_and_uptime() {
+    fn fingerprint_ignores_checked_uptime() {
         let mut first = SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly);
         first.uptime_secs = 1;
         let mut second = first.clone();
@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_tracks_catalog_ready_transition() {
+    fn fingerprint_tracks_catalog_transition() {
         let mut warming = SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly);
         warming.catalog = CatalogState::Warming;
 
@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_tracks_ws_shard_connectivity() {
+    fn fingerprint_tracks_ws_connectivity() {
         let mut status = SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly);
         status.market_data = MarketDataConnectivity {
             ready: false,
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_ready_nudge_publishes_system_status_changed() {
+    async fn catalog_ready_publishes_changed() {
         let catalog = Arc::new(CatalogReadiness::new());
         let (events, event_rx) = CoreEventPublisher::bounded(8);
         let status_publisher = SystemStatusPublisher::new(events);

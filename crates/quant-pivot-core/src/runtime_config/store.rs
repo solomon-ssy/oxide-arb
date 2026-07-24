@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn publication_is_monotonic_idempotent_and_rejects_generation_forks() {
+    fn publication_monotonic_rejects_forks() {
         let base = bundle(1, 0);
         let committed = bundle(2, 1);
         let store = DecisionPolicyStore::new_active(base.clone());
@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_bundle_recovers_publish_crash_restart_and_delayed_instances() {
+    fn durable_bundle_recovers_instances() {
         let base = bundle(1, 0);
         let committed = bundle(2, 1);
 

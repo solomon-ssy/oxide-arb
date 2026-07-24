@@ -380,7 +380,7 @@ mod tests {
     use crate::types::Shares;
 
     #[test]
-    fn partial_fill_does_not_settle_target_before_cumulative_goal() {
+    fn partial_fill_never_settles() {
         let mut state = ScaleOutState {
             denominator_shares: Some(Shares::new(dec!(100))),
             pending_target: Some(PendingScaleOut {
@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_and_opportunistic_fills_share_one_monotonic_denominator() {
+    fn deterministic_opportunistic_fills_denominator() {
         let mut state = ScaleOutState {
             denominator_shares: Some(Shares::new(dec!(100))),
             pending_target: Some(PendingScaleOut {

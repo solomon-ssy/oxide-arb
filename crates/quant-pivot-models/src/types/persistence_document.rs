@@ -158,7 +158,7 @@ mod tests {
     use super::OperationDetailDocument;
 
     #[test]
-    fn operation_detail_requires_redacted_bounded_object() {
+    fn operation_detail_requires_object() {
         assert!(OperationDetailDocument::try_from(serde_json::json!([1, 2])).is_err());
         assert!(
             OperationDetailDocument::try_from(serde_json::json!({

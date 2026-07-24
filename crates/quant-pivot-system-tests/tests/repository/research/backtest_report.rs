@@ -145,7 +145,7 @@ fn new_report(
     }
 }
 
-pub async fn quant_backtest_report_migration_and_crud() {
+pub async fn quant_backtest_report_crud() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;

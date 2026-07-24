@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn thin_history_falls_back_to_proxy() {
+    fn thin_history_falls_proxy() {
         let a = market("0xa", Some("evt1"), MarketCategory::Crypto, &[0.5]);
         let b = market("0xb", Some("evt1"), MarketCategory::Crypto, &[0.4]);
         let markets = vec![a, b];
@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn cluster_mean_rho_averages_every_pair_not_only_threshold_clearing_ones() {
+    fn cluster_mean_not_ones() {
         // a-b and b-c both clear the 0.7 threshold and union transitively into
         // one 3-market cluster; a-c does NOT clear it directly (~0.26) but
         // must still be averaged into the cluster's mean ρ̄ once all three

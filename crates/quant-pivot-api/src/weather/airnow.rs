@@ -24,7 +24,7 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 
 use crate::infra::{
-    http::{get_optional_bytes_with_retry, get_text_with_retry},
+    http::{get_optional_bytes, get_text_with_retry},
     retry::RetryPolicy,
 };
 
@@ -102,7 +102,7 @@ impl AirNowSource {
         let Some(body) = self.hourly_file(hour).await? else {
             return Ok(None);
         };
-        parse_hourly_pm25_area_observation(&body, area, state, hour, available_at)
+        parse_area_pm25(&body, area, state, hour, available_at)
     }
 
     /// Fetch one exact monitoring site's preliminary PM2.5 AQI observation.
@@ -117,7 +117,7 @@ impl AirNowSource {
         let Some(body) = self.hourly_file(hour).await? else {
             return Ok(None);
         };
-        parse_hourly_pm25_site_observation(&body, binding, hour, available_at)
+        parse_site_pm25(&body, binding, hour, available_at)
     }
 
     async fn hourly_file(&self, hour: DateTime<Utc>) -> QuantResult<Option<String>> {
@@ -128,7 +128,7 @@ impl AirNowSource {
             hour.format("%Y%m%d"),
             hour.format("HourlyAQObs_%Y%m%d%H.dat")
         );
-        let Some(bytes) = get_optional_bytes_with_retry(&self.http, &self.retry_policy, &url)
+        let Some(bytes) = get_optional_bytes(&self.http, &self.retry_policy, &url)
             .await
             .map_err(QuantError::from)?
         else {
@@ -318,7 +318,7 @@ fn parse_pm25_reporting_area(
     })
 }
 
-fn parse_hourly_pm25_area_observation(
+fn parse_area_pm25(
     body: &str,
     area: &str,
     state: &str,
@@ -396,7 +396,7 @@ fn parse_hourly_pm25_area_observation(
     }))
 }
 
-fn parse_hourly_pm25_site_observation(
+fn parse_site_pm25(
     body: &str,
     binding: &AirNowPm25SiteBindingConfig,
     hour: DateTime<Utc>,
@@ -779,7 +779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reporting_area_isolates_pm25_and_separates_observation_forecast() {
+    async fn reporting_area_isolates_forecast() {
         let server = MockServer::start().await;
         let body = concat!(
             "07/18/26|07/18/26|10:00|EDT|0|O|Y|New York City Region|NY|40.7|-74.0|OZONE|45|Good|No||Agency\n",
@@ -820,7 +820,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_invalid_record_type_sequence_contract() {
+    async fn rejects_invalid_type_contract() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
@@ -840,7 +840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hourly_file_aggregates_pm25_across_area_sites() {
+    async fn hourly_file_aggregates_sites() {
         let server = MockServer::start().await;
         let body = hourly_body(&[
             HourlyRow {
@@ -916,7 +916,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hourly_site_selects_exact_pm25_aqi_and_rejects_binding_drift() {
+    async fn hourly_selects_rejects_drift() {
         let server = MockServer::start().await;
         let body = hourly_body(&[
             HourlyRow {
@@ -983,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn aqi_parser_accepts_beyond_scale_and_only_the_official_missing_sentinel() {
+    fn aqi_accepts_missing_sentinel() {
         assert_eq!(
             parse_optional_aqi(Some("680"), "test").unwrap(),
             Some(dec!(680))

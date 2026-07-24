@@ -254,7 +254,7 @@ fn book_at_times(
 // ── Null policy ────────────────────────────────────────────────────────────
 
 #[test]
-fn feature_null_policy_rejects_required_missing() {
+fn feature_rejects_required_missing() {
     let spec = FeatureSchema::build(&FeaturesConfig::default())
         .expect("schema")
         .by_name(&BEST_BID)
@@ -271,7 +271,7 @@ fn feature_null_policy_rejects_required_missing() {
 }
 
 #[test]
-fn feature_null_policy_no_silent_zero() {
+fn feature_null_no_zero() {
     let spec = FeatureSchema::build(&FeaturesConfig::default())
         .expect("schema")
         .by_name(&DEPTH_IMBALANCE)
@@ -362,7 +362,7 @@ impl PointInTimeSnapshotSource for MemoryPitEngine {
 }
 
 #[tokio::test]
-async fn feature_pit_visibility_excludes_future_book() {
+async fn feature_pit_excludes_book() {
     let token = TokenId::new("tok-pit");
     let as_of = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
     let past = as_of - ChronoDuration::minutes(5);
@@ -418,7 +418,7 @@ async fn feature_pit_visibility_excludes_future_book() {
 }
 
 #[tokio::test]
-async fn primary_and_secondary_executable_asks_share_one_nonzero_lag_boundary() {
+async fn primary_secondary_executable_boundary() {
     let decision_at = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
     let boundary = DecisionClock::new(2)
         .boundary(decision_at)
@@ -514,7 +514,7 @@ async fn primary_and_secondary_executable_asks_share_one_nonzero_lag_boundary() 
 }
 
 #[tokio::test]
-async fn unquoted_secondary_ask_preserves_snapshot_evidence_without_a_value() {
+async fn unquoted_preserves_without_value() {
     let decision_at = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
     let boundary = DecisionClock::new(0)
         .boundary(decision_at)
@@ -591,38 +591,42 @@ async fn unquoted_secondary_ask_preserves_snapshot_evidence_without_a_value() {
 
 // ── Hash stability ─────────────────────────────────────────────────────────
 
-fn sample_vector() -> FeatureVector {
-    let as_of = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-    let mut values = BTreeMap::new();
-    values.insert(
-        MID,
-        FeatureCell::observed(
-            FeatureValue::Probability(Probability::new(Decimal::new(50, 2))),
-            Some(EvidenceSourceRef {
-                source_kind: EvidenceSourceKind::Book,
-                reference: "book:m1:t1:v1".to_owned(),
-                effective_at: as_of - ChronoDuration::seconds(60),
-                available_at: Some(as_of - ChronoDuration::seconds(59)),
-            }),
-            FeatureStaleness::Known { age_ms: 60_000 },
-        ),
-    );
-    FeatureVector {
-        market_id: MarketId::new("m1"),
-        token_id: Some(TokenId::new("t1")),
-        decision_at: as_of,
-        generic_schema_version: SchemaVersion::FIRST,
-        generic: values,
-        domain: None,
-        data_quality: DataQualityStatus::Fresh,
+impl FeatureVector {
+    fn hash_fixture() -> Self {
+        let as_of = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let mut values = BTreeMap::new();
+        values.insert(
+            MID,
+            FeatureCell::observed(
+                FeatureValue::Probability(Probability::new(Decimal::new(50, 2))),
+                Some(EvidenceSourceRef {
+                    source_kind: EvidenceSourceKind::Book,
+                    reference: "book:m1:t1:v1".to_owned(),
+                    effective_at: as_of - ChronoDuration::seconds(60),
+                    available_at: Some(as_of - ChronoDuration::seconds(59)),
+                }),
+                FeatureStaleness::Known { age_ms: 60_000 },
+            ),
+        );
+        Self {
+            market_id: MarketId::new("m1"),
+            token_id: Some(TokenId::new("t1")),
+            decision_at: as_of,
+            generic_schema_version: SchemaVersion::FIRST,
+            generic: values,
+            domain: None,
+            data_quality: DataQualityStatus::Fresh,
+        }
     }
 }
 
-fn persisted_feature(vector: &FeatureVector) -> FeatureVectorInfo {
-    let boundary = DecisionClock::new(0)
-        .boundary(vector.decision_at)
-        .expect("decision boundary");
-    persisted_feature_at(vector, &boundary)
+impl FeatureVector {
+    fn persisted_feature(&self) -> FeatureVectorInfo {
+        let boundary = DecisionClock::new(0)
+            .boundary(self.decision_at)
+            .expect("decision boundary");
+        persisted_feature_at(self, &boundary)
+    }
 }
 
 fn persisted_feature_at(vector: &FeatureVector, boundary: &DecisionBoundary) -> FeatureVectorInfo {
@@ -713,9 +717,9 @@ fn test_decision_capture(
 }
 
 #[test]
-fn feature_hash_stable_for_same_input() {
-    let left = sample_vector();
-    let right = sample_vector();
+fn feature_hash_stable_input() {
+    let left = FeatureVector::hash_fixture();
+    let right = FeatureVector::hash_fixture();
     assert_eq!(
         ResearchHasher::feature_vector(&left).expect("hash"),
         ResearchHasher::feature_vector(&right).expect("hash"),
@@ -723,7 +727,7 @@ fn feature_hash_stable_for_same_input() {
 }
 
 #[test]
-fn feature_schema_version_change_changes_hash() {
+fn feature_schema_changes_hash() {
     let config_v1 = FeaturesConfig {
         feature_schema_version: SchemaVersion::FIRST,
         ..FeaturesConfig::default()
@@ -778,7 +782,7 @@ impl PointInTimeSnapshotSource for HealthyPit {
 }
 
 #[tokio::test]
-async fn binary_market_negrisk_feature_is_not_applicable() {
+async fn binary_market_not_applicable() {
     // A binary (non-neg-risk) market's neg-risk full-leg aggregate is
     // `NotApplicable` — structurally absent, never a fabricated zero and never a
     // data-missing reason.
@@ -830,7 +834,7 @@ async fn binary_market_negrisk_feature_is_not_applicable() {
 }
 
 #[tokio::test]
-async fn unresolved_mapped_domain_is_missing_not_not_applicable() {
+async fn unresolved_missing_not_not() {
     let config = FeaturesConfig {
         enabled_feature_families: vec![FeatureFamily::Domain],
         ..FeaturesConfig::default()
@@ -921,7 +925,7 @@ impl PointInTimeSnapshotSource for CountingPit {
 }
 
 #[tokio::test]
-async fn builder_resolves_capture_inputs_even_when_feature_families_skip_book() {
+async fn builder_resolves_capture_book() {
     // Only time-series + microstructure: no book- or metadata-sourced features, but
     // decision capture still resolves book + market context for evidence refs.
     let config = FeaturesConfig {
@@ -978,9 +982,9 @@ async fn builder_resolves_capture_inputs_even_when_feature_families_skip_book() 
 // ── CH writer (pure projection) ────────────────────────────────────────────
 
 #[test]
-fn feature_event_writer_emits_every_cell_state_with_full_audit_context() {
+fn feature_event_emits_context() {
     let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
-    let mut vector = sample_vector();
+    let mut vector = FeatureVector::hash_fixture();
     vector.generic_schema_version = schema.version();
     vector.generic.insert(
         CROSSED,
@@ -1085,11 +1089,11 @@ fn feature_event_writer_emits_every_cell_state_with_full_audit_context() {
 }
 
 #[test]
-fn feature_event_writer_rejects_persistence_binding_mismatch() {
+fn feature_event_rejects_mismatch() {
     let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
-    let mut vector = sample_vector();
+    let mut vector = FeatureVector::hash_fixture();
     vector.generic_schema_version = schema.version();
-    let mut persisted = persisted_feature(&vector);
+    let mut persisted = vector.persisted_feature();
     persisted.market_id = MarketId::new("wrong-market");
     let boundary = DecisionClock::new(0)
         .boundary(vector.decision_at)
@@ -1133,7 +1137,7 @@ fn candidate_with_book() -> MarketCandidate {
 }
 
 #[test]
-fn model_eligibility_uses_real_availability_oracle() {
+fn model_eligibility_uses_oracle() {
     let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
     let oracle = FeatureAvailabilityOracle::new(&schema);
     let candidate = candidate_with_book();
@@ -1431,7 +1435,7 @@ fn lvl(price: Decimal) -> BookLevel {
 }
 
 #[tokio::test]
-async fn feature_window_nonempty_yields_timeseries_and_is_not_stale() {
+async fn feature_window_not_stale() {
     let as_of = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
     let token = TokenId::new("tok-window");
     // Five 1s buckets within the trailing minute; the freshest is 1s old.
@@ -1492,7 +1496,7 @@ async fn feature_window_nonempty_yields_timeseries_and_is_not_stale() {
 }
 
 #[tokio::test]
-async fn feature_stale_book_rejects_market() {
+async fn feature_stale_rejects_market() {
     let as_of = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
     let token = TokenId::new("tok-stale");
     // 10s old > the 5s default `max_book_age_ms`.
@@ -1551,7 +1555,7 @@ async fn feature_stale_book_rejects_market() {
 }
 
 #[tokio::test]
-async fn allow_degraded_keeps_stale_required_fact_feature() {
+async fn allow_keeps_stale_required() {
     let as_of = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
     let token = TokenId::new("tok-degraded");
     // Buckets older than the 30s `max_feature_bucket_age_secs` but within the 60s window,
@@ -1642,7 +1646,7 @@ async fn allow_degraded_keeps_stale_required_fact_feature() {
 }
 
 #[tokio::test]
-async fn feature_out_of_valid_range_rejects() {
+async fn feature_out_valid_rejects() {
     let as_of = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
     let token = TokenId::new("tok-oor");
     // best_bid = 1.50 is outside the `[0, 1]` probability range.
@@ -1697,7 +1701,7 @@ async fn feature_out_of_valid_range_rejects() {
 }
 
 #[test]
-fn category_feature_projects_table_index() {
+fn category_feature_projects_index() {
     let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
     let as_of = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
     let mut values = BTreeMap::new();
@@ -1724,7 +1728,7 @@ fn category_feature_projects_table_index() {
         data_quality: DataQualityStatus::Fresh,
     };
 
-    let persisted = persisted_feature(&vector);
+    let persisted = vector.persisted_feature();
     let rows = feature_events(
         &vector,
         &persisted,
@@ -1759,7 +1763,7 @@ fn parity_selected_market(market_id: &MarketId, token: &TokenId) -> SelectedMark
 }
 
 #[tokio::test]
-async fn online_offline_parity_full_families_with_window() {
+async fn online_offline_parity_window() {
     let as_of = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
     let token = TokenId::new("tok-parity-win");
     let market_id = MarketId::new("m-parity-win");
@@ -2111,7 +2115,7 @@ async fn build_sibling_parity_vectors(
 }
 
 #[tokio::test]
-async fn negrisk_sibling_legs_online_offline_parity() {
+async fn negrisk_sibling_legs_parity() {
     let (fixture, sibling_legs, selected) = sibling_leg_parity_fixture();
     let sibling = NegRiskLegSet {
         expected_legs: sibling_legs.len(),
@@ -2140,7 +2144,7 @@ async fn negrisk_sibling_legs_online_offline_parity() {
 }
 
 #[tokio::test]
-async fn negrisk_missing_catalog_leg_fails_closed() {
+async fn negrisk_missing_catalog_rejects() {
     let (fixture, sibling_legs, selected) = sibling_leg_parity_fixture();
     // Catalog expects one more neg-risk leg than we enumerate — structural features must
     // fail closed with LegBookMissing, never a partial aggregate.
@@ -2161,7 +2165,7 @@ async fn negrisk_missing_catalog_leg_fails_closed() {
 }
 
 #[test]
-fn negrisk_from_catalog_excludes_non_neg_risk_members() {
+fn negrisk_excludes_non_members() {
     let now = Utc::now();
     let catalog = |id: &str, neg_risk: bool| {
         Arc::new(MarketInfo {

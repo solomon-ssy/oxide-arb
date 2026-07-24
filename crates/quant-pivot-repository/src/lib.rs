@@ -26,7 +26,7 @@ mod seaorm_stable_semantics {
     use sea_query::{Expr, Query};
 
     #[tokio::test]
-    async fn stable_count_honors_limit_and_offset() -> Result<(), DbErr> {
+    async fn stable_count_honors_offset() -> Result<(), DbErr> {
         let mut count_row = BTreeMap::new();
         count_row.insert("num_items", Value::BigInt(Some(2)));
         let db = MockDatabase::new(DbBackend::Postgres)

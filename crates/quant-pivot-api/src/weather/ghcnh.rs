@@ -17,7 +17,7 @@ use quant_pivot_models::{
 use reqwest::Client;
 use rust_decimal::Decimal;
 
-use crate::infra::{http::get_optional_bounded_bytes_with_retry, retry::RetryPolicy};
+use crate::infra::{http::get_optional_bounded_bytes, retry::RetryPolicy};
 
 const MAX_YEAR_FILE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -77,7 +77,7 @@ impl GhcnhSource {
             base = self.config.base_url.trim_end_matches('/'),
             station_id = ghcnh_station_id,
         );
-        let Some(body) = get_optional_bounded_bytes_with_retry(
+        let Some(body) = get_optional_bounded_bytes(
             &self.http,
             &self.retry_policy,
             &url,
@@ -235,7 +235,7 @@ mod tests {
     use super::GhcnhSource;
 
     #[tokio::test]
-    async fn reads_yearly_psv_and_excludes_failed_qc() {
+    async fn reads_excludes_failed_qc() {
         let server = MockServer::start().await;
         let body = concat!(
             "STATION|DATE|temperature|temperature_Measurement_Code|temperature_Quality_Code|temperature_Report_Type\n",
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn represents_unpublished_year_partition_without_fabricating_empty_data() {
+    async fn represents_without_empty_data() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/2026/psv/GHCNh_USW00014732_2026.psv"))

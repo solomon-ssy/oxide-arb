@@ -120,7 +120,7 @@ mod tests {
     use super::{TRAINING_MATRIX_COLUMNS, training_matrix_fixture};
 
     #[test]
-    fn mixed_fixture_satisfies_required_column_contract() -> QuantResult<()> {
+    fn mixed_satisfies_required_contract() -> QuantResult<()> {
         let rows = 34;
         let matrix = training_matrix_fixture(rows)?;
         let (transform, dense) = FittedInputTransform::fit(&matrix)?;

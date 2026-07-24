@@ -10,7 +10,7 @@
 //!
 //! `protected_route_specs` is the *one* declarative list of every protected
 //! route: its method, path pattern, authorization rule, and handler. Both
-//! [`configure`] (which registers the actix routes) and [`init_rbac_rules`]
+//! [`configure`] (which registers the actix routes) and [`PermChecker::route_rules`]
 //! (which builds the [`PermChecker`]) derive from it, so every registered
 //! protected route is guaranteed to have a rule **by construction** — there is
 //! no way to add a route without also declaring how it is authorized.
@@ -122,13 +122,16 @@ fn protected_route_specs() -> Vec<RouteSpec> {
 ///
 /// Keys are `(method, API_PREFIX + path)`, matching the pattern the authz
 /// middleware reads from `ServiceRequest::match_pattern`.
-#[must_use]
-pub fn init_rbac_rules() -> PermChecker {
-    let mut checker = PermChecker::new();
-    for spec in protected_route_specs() {
-        checker.register(spec.method, format!("{API_PREFIX}{}", spec.path), spec.rule);
+impl PermChecker {
+    /// Build the route-level authorization registry from the canonical manifest.
+    #[must_use]
+    pub fn route_rules() -> Self {
+        let mut checker = Self::new();
+        for spec in protected_route_specs() {
+            checker.register(spec.method, format!("{API_PREFIX}{}", spec.path), spec.rule);
+        }
+        checker
     }
-    checker
 }
 
 /// Group the manifest's routes into one actix [`Resource`] per path (preserving
@@ -197,7 +200,7 @@ mod tests {
     use crate::auth::casbin::Rule;
 
     #[test]
-    fn feature_integrity_routes_are_in_the_protected_manifest() {
+    fn feature_integrity_routes_manifest() {
         let paths = protected_route_specs()
             .into_iter()
             .filter_map(|spec| {
@@ -220,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_money_actions_are_governed_and_readiness_is_read_only() {
+    fn settlement_money_actions_only() {
         let routes = protected_route_specs()
             .into_iter()
             .filter(|spec| spec.path.starts_with("/quant/settlement-"))

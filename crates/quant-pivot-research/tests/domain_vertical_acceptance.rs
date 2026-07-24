@@ -57,7 +57,7 @@ use quant_pivot_research::{
         DomainFeatureBuilder, DomainSliceData, DomainSliceDataRef, DomainSliceInputs,
         FeatureVector, MarketDecisionCaptureInput, MarketWindowSnapshot, ResolvedBook,
         ResolvedInputs, ResolvedMarketBundle, ResolvedMarketContext, TradeTapeWindowSnapshot,
-        market_decision_capture_from_resolved,
+        capture_market_decision,
         names::{
             domain_crypto::{BASIS_VS_RESOLUTION_SOURCE, DISTANCE_TO_STRIKE},
             market::CATEGORY,
@@ -273,7 +273,7 @@ fn build_domain_test_vector(
     let hash = |seed: char| {
         ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("test hash")
     };
-    let capture = market_decision_capture_from_resolved(MarketDecisionCaptureInput {
+    let capture = capture_market_decision(MarketDecisionCaptureInput {
         boundary: &boundary,
         selected: &market,
         book: book.clone(),
@@ -380,7 +380,7 @@ fn linkage_evidence(as_of: DateTime<Utc>) -> EvidenceSourceRef {
 }
 
 #[test]
-fn feature_vector_domain_slice_only_for_mapped_category() {
+fn feature_vector_domain_category() {
     // Drives through the real `ConfiguredFeatureBuilder::compute_vector` — the
     // production domain-slice assembly path — rather than a hand-built
     // `FeatureVector` literal.
@@ -425,7 +425,7 @@ fn feature_vector_domain_slice_only_for_mapped_category() {
 }
 
 #[test]
-fn feature_hash_composite_stable_and_distinguishes_domain_family() {
+fn feature_hash_distinguishes_family() {
     let base = vector(MarketCategory::Crypto, None);
     let with_crypto = vector(MarketCategory::Crypto, Some(crypto_slice()));
 
@@ -455,7 +455,7 @@ fn feature_hash_composite_stable_and_distinguishes_domain_family() {
 }
 
 #[test]
-fn domain_factor_registered_and_routed_by_category() {
+fn domain_factor_registered_category() {
     let registry = DomainFactorRegistry::build(&DomainConfig::default());
     assert_eq!(registry.for_category(MarketCategory::Crypto).len(), 2);
     assert!(registry.for_category(MarketCategory::Sports).is_empty());
@@ -510,7 +510,7 @@ fn domain_factor_registered_and_routed_by_category() {
 }
 
 #[test]
-fn dataset_hash_changes_when_domain_slice_added() {
+fn dataset_hash_changes_added() {
     let spec = ModelSpecId::from_v7();
     let as_of = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
     let (feature, factor, label) = (
@@ -587,7 +587,7 @@ fn dataset_hash_changes_when_domain_slice_added() {
 }
 
 #[test]
-fn dataset_builder_domain_slice_no_future_leakage() {
+fn dataset_builder_no_leakage() {
     let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
     let cutoff = as_of - Duration::seconds(5);
     let mut fv = vector(MarketCategory::Crypto, Some(crypto_slice()));
@@ -637,7 +637,7 @@ fn dataset_builder_domain_slice_no_future_leakage() {
 }
 
 #[test]
-fn crypto_subject_parser_tier1_deterministic_fail_closed() {
+fn crypto_subject_parser_rejects() {
     let parser = CryptoSubjectParser;
     let meta = LinkageSourceMetadata {
         market_id: MarketId::new("0xmarket"),
@@ -683,7 +683,7 @@ fn crypto_subject_parser_tier1_deterministic_fail_closed() {
 }
 
 #[test]
-fn linkage_tier0_slug_direct_read_matches_tier1() {
+fn linkage_tier0_matches_tier1() {
     // Invoke both deterministic tiers **independently** (not through
     // `LayeredResolver`, which would short-circuit at the first hit) on the
     // same metadata, and assert they agree: Tier 0 owns the short-cycle
@@ -726,7 +726,7 @@ fn linkage_tier0_slug_direct_read_matches_tier1() {
 }
 
 #[test]
-fn linkage_grounding_rejects_field_absent_from_source() {
+fn linkage_grounding_rejects_source() {
     let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
     let bad = resolver
         .resolve(&metadata("totally-unknown-market-slug"), Utc::now())
@@ -771,7 +771,7 @@ fn linkage_grounding_rejects_field_absent_from_source() {
 }
 
 #[test]
-fn crypto_domain_feature_present_with_domain_external_evidence() {
+fn crypto_domain_feature_evidence() {
     let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
     let at = as_of - Duration::minutes(1);
     let primary = DomainObservationWindow {
@@ -880,7 +880,7 @@ fn crypto_pit_linkage(
 }
 
 #[test]
-fn domain_observation_pit_excludes_after_as_of_minus_delay() {
+fn domain_excludes_after_delay() {
     // Exercises the **actual** production PIT assembly (`build_domain_slice_inputs`
     // over a prefetched `HashMap`) — the single path both the online and
     // offline planes call — rather than a deleted, never-wired dual-engine
@@ -958,7 +958,7 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
 }
 
 #[test]
-fn linkage_pit_uses_metadata_version_not_future_revision() {
+fn linkage_uses_not_revision() {
     // The bitemporal axis: a market's linkage can be
     // re-derived after a metadata revision, appending a **new** ledger row
     // rather than mutating the old one. A PIT read at an `as_of` between two
@@ -1071,10 +1071,10 @@ fn linkage_pit_uses_metadata_version_not_future_revision() {
 /// `detect_basis_alerts` — see
 /// `crates/quant-pivot-core/src/service/basis_alert.rs`'s own unit tests and
 /// `crates/quant-pivot-repository/tests/pg_basis_alert.rs`'s
-/// `acknowledge_marks_the_alert_and_is_idempotent` for that closed loop. This
+/// `acknowledge_marks_alert_idempotent` for that closed loop. This
 /// test deliberately asserts computation, not alert persistence.
 #[test]
-fn basis_vs_resolution_source_computes_bps_from_close_and_oracle() {
+fn basis_vs_computes_oracle() {
     let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
     let primary = DomainObservationWindow {
         cutoff: as_of,

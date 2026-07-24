@@ -26,7 +26,7 @@ use sea_query::{
     extension::postgres::PgExpr,
 };
 
-use crate::postgres::primitives::enum_value;
+use crate::postgres::{governance::runtime_config::PgPolicyRepository, primitives::enum_value};
 
 const VALIDATION_SUBJECT_FIELD: &str = "subject";
 const VALIDATION_BASE_GENERATION_FIELD: &str = "base_generation";
@@ -321,126 +321,131 @@ fn inventory_query() -> SelectStatement {
         .to_owned()
 }
 
-fn validate_global_identity(
-    row: &InventoryRow,
-) -> Result<
-    (
-        PolicyBundleGeneration,
-        Option<DecisionPolicySnapshotId>,
-        Option<ContentHash>,
-    ),
-    StorageError,
-> {
-    match (
-        &row.guard_snapshot_id,
-        &row.guard_snapshot_hash,
-        row.snapshot_generation,
-        &row.snapshot_id,
-        &row.snapshot_hash,
-    ) {
-        (None, None, None, None, None) => Ok((row.guard_generation, None, None)),
-        (Some(guard_id), Some(guard_hash), Some(snapshot_generation), Some(id), Some(hash))
-            if guard_id == id
-                && guard_hash == hash
-                && row.guard_generation == snapshot_generation =>
-        {
-            Ok((row.guard_generation, Some(*guard_id), Some(*guard_hash)))
+impl InventoryRow {
+    fn validate_global_identity(
+        &self,
+    ) -> Result<
+        (
+            PolicyBundleGeneration,
+            Option<DecisionPolicySnapshotId>,
+            Option<ContentHash>,
+        ),
+        StorageError,
+    > {
+        match (
+            &self.guard_snapshot_id,
+            &self.guard_snapshot_hash,
+            self.snapshot_generation,
+            &self.snapshot_id,
+            &self.snapshot_hash,
+        ) {
+            (None, None, None, None, None) => Ok((self.guard_generation, None, None)),
+            (Some(guard_id), Some(guard_hash), Some(snapshot_generation), Some(id), Some(hash))
+                if guard_id == id
+                    && guard_hash == hash
+                    && self.guard_generation == snapshot_generation =>
+            {
+                Ok((self.guard_generation, Some(*guard_id), Some(*guard_hash)))
+            }
+            _ => Err(StorageError::invariant_violation(
+                Some("policy_activation_guard"),
+                "guard generation/id/hash does not match its current decision snapshot",
+            )),
         }
-        _ => Err(StorageError::invariant_violation(
-            Some("policy_activation_guard"),
-            "guard generation/id/hash does not match its current decision snapshot",
-        )),
     }
 }
 
-pub(super) async fn load(
-    db: &impl ConnectionTrait,
-) -> Result<ConfigResourceInventoryInfo, StorageError> {
-    let rows = InventoryRow::find_by_statement(db.get_database_backend().build(&inventory_query()))
-        .all(db)
-        .await
-        .map_err(StorageError::from)?;
-    let first = rows.first().ok_or_else(|| {
-        StorageError::invariant_violation(
-            Some("policy_activation_guard"),
-            "boot seed row is missing",
-        )
-    })?;
-    let (bundle_generation, active_snapshot_id, active_snapshot_hash) =
-        validate_global_identity(first)?;
-    let mut by_kind = BTreeMap::new();
-    for row in rows {
-        let identity = validate_global_identity(&row)?;
-        if identity != (bundle_generation, active_snapshot_id, active_snapshot_hash) {
-            return Err(StorageError::invariant_violation(
+impl PgPolicyRepository {
+    pub(super) async fn load(
+        db: &impl ConnectionTrait,
+    ) -> Result<ConfigResourceInventoryInfo, StorageError> {
+        let rows =
+            InventoryRow::find_by_statement(db.get_database_backend().build(&inventory_query()))
+                .all(db)
+                .await
+                .map_err(StorageError::from)?;
+        let first = rows.first().ok_or_else(|| {
+            StorageError::invariant_violation(
                 Some("policy_activation_guard"),
-                "Config inventory statement returned inconsistent bundle identities",
-            ));
-        }
-        let activation_shape = (
-            row.active_revision_id.is_some(),
-            row.active_revision_hash.is_some(),
-            row.last_activated_at.is_some(),
-        );
-        if activation_shape != (false, false, false) && activation_shape != (true, true, true) {
-            return Err(StorageError::invariant_violation(
-                Some("policy_activation"),
-                format!(
-                    "{} current activation has incomplete revision lineage",
-                    row.resource_kind
-                ),
-            ));
-        }
-        let pending_approval_count = u64::try_from(row.pending_approval_count.unwrap_or(0))
-            .map_err(|error| {
-                StorageError::invariant_violation(
-                    Some("policy_approval"),
-                    format!("negative approval count: {error}"),
-                )
-            })?;
-        let resource_kind = row.resource_kind;
-        if by_kind
-            .insert(
-                resource_kind,
-                ConfigResourceInventoryRow {
-                    resource_kind,
-                    active_revision_id: row.active_revision_id,
-                    active_revision_hash: row.active_revision_hash,
-                    last_activated_at: row.last_activated_at,
-                    pending_approval_count,
-                },
+                "boot seed row is missing",
             )
-            .is_some()
-        {
+        })?;
+        let (bundle_generation, active_snapshot_id, active_snapshot_hash) =
+            (first).validate_global_identity()?;
+        let mut by_kind = BTreeMap::new();
+        for row in rows {
+            let identity = row.validate_global_identity()?;
+            if identity != (bundle_generation, active_snapshot_id, active_snapshot_hash) {
+                return Err(StorageError::invariant_violation(
+                    Some("policy_activation_guard"),
+                    "Config inventory statement returned inconsistent bundle identities",
+                ));
+            }
+            let activation_shape = (
+                row.active_revision_id.is_some(),
+                row.active_revision_hash.is_some(),
+                row.last_activated_at.is_some(),
+            );
+            if activation_shape != (false, false, false) && activation_shape != (true, true, true) {
+                return Err(StorageError::invariant_violation(
+                    Some("policy_activation"),
+                    format!(
+                        "{} current activation has incomplete revision lineage",
+                        row.resource_kind
+                    ),
+                ));
+            }
+            let pending_approval_count = u64::try_from(row.pending_approval_count.unwrap_or(0))
+                .map_err(|error| {
+                    StorageError::invariant_violation(
+                        Some("policy_approval"),
+                        format!("negative approval count: {error}"),
+                    )
+                })?;
+            let resource_kind = row.resource_kind;
+            if by_kind
+                .insert(
+                    resource_kind,
+                    ConfigResourceInventoryRow {
+                        resource_kind,
+                        active_revision_id: row.active_revision_id,
+                        active_revision_hash: row.active_revision_hash,
+                        last_activated_at: row.last_activated_at,
+                        pending_approval_count,
+                    },
+                )
+                .is_some()
+            {
+                return Err(StorageError::invariant_violation(
+                    Some("policy_activation"),
+                    format!("duplicate Config inventory row for {resource_kind}"),
+                ));
+            }
+        }
+        let resources = ConfigResourceKind::ALL
+            .into_iter()
+            .map(|kind| {
+                by_kind.remove(&kind).ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some("policy_activation"),
+                        format!("Config inventory is missing {kind}"),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !by_kind.is_empty() {
             return Err(StorageError::invariant_violation(
                 Some("policy_activation"),
-                format!("duplicate Config inventory row for {resource_kind}"),
+                "Config inventory returned unknown resource rows",
             ));
         }
-    }
-    let resources = ConfigResourceKind::ALL
-        .into_iter()
-        .map(|kind| {
-            by_kind.remove(&kind).ok_or_else(|| {
-                StorageError::invariant_violation(
-                    Some("policy_activation"),
-                    format!("Config inventory is missing {kind}"),
-                )
-            })
+        Ok(ConfigResourceInventoryInfo {
+            bundle_generation,
+            active_snapshot_id,
+            active_snapshot_hash,
+            resources,
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    if !by_kind.is_empty() {
-        return Err(StorageError::invariant_violation(
-            Some("policy_activation"),
-            "Config inventory returned unknown resource rows",
-        ));
     }
-    Ok(ConfigResourceInventoryInfo {
-        bundle_generation,
-        active_snapshot_id,
-        active_snapshot_hash,
-        resources,
-    })
 }
 
 #[cfg(test)]
@@ -450,15 +455,15 @@ mod tests {
     use quant_pivot_error::storage::StorageError;
     use sea_orm::{DbBackend, MockDatabase, Value};
 
-    use super::load;
+    use super::PgPolicyRepository;
 
     #[tokio::test]
-    async fn load_executes_one_consistent_inventory_statement() {
+    async fn load_executes_one_statement() {
         let db = MockDatabase::new(DbBackend::Postgres)
             .append_query_results([Vec::<BTreeMap<String, Value>>::new()])
             .into_connection();
 
-        let result = load(&db).await;
+        let result = PgPolicyRepository::load(&db).await;
 
         assert!(matches!(
             result,

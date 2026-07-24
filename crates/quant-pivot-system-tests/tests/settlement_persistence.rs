@@ -124,7 +124,7 @@ use quant_pivot_system_tests::{
     support::{
         catalog_fixtures::{make_event, make_market},
         execution_pg_seed::{
-            ENTRY_FILLED_SHARES, enable_entry_admission_for_test, fill_entry_lot, partial_exit_lot,
+            ENTRY_FILLED_SHARES, enable_test_admission, fill_entry_lot, partial_exit_lot,
             seed_approved_intent, seed_settlement_report_fixture,
         },
     },
@@ -149,58 +149,56 @@ const CURRENT_PUSD: &str = "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb";
 const CURRENT_USDCE: &str = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174";
 
 #[tokio::test]
-async fn canonical_settlement_schema_rejects_unsafe_identity_and_scope_combinations() {
+async fn canonical_settlement_rejects_combinations() {
     Box::pin(with_postgres_suite(settlement_persistence_scenario()))
         .await
         .expect("start disposable PostgreSQL settlement suite");
 }
 
 #[tokio::test]
-async fn settlement_orchestration_is_exclusive_authorized_and_recovery_first() {
+async fn settlement_orchestration_exclusive_first() {
     Box::pin(with_postgres_suite(settlement_orchestration_scenario()))
         .await
         .expect("start disposable PostgreSQL settlement orchestration suite");
 }
 
 #[tokio::test]
-async fn settlement_confirmation_atomically_closes_accounting_and_enqueues_outbox() {
+async fn settlement_confirmation_atomically_outbox() {
     Box::pin(with_postgres_suite(settlement_confirmation_scenario()))
         .await
         .expect("start disposable PostgreSQL settlement confirmation suite");
 }
 
 #[tokio::test]
-async fn partial_exchange_exit_then_resolution_balances_one_execution_outcome() {
-    Box::pin(with_postgres_suite(
-        partial_exchange_then_resolution_scenario(),
-    ))
-    .await
-    .expect("start mixed exchange/settlement outcome suite");
+async fn partial_exchange_exit_outcome() {
+    Box::pin(with_postgres_suite(partial_exchange_resolution_scenario()))
+        .await
+        .expect("start mixed exchange/settlement outcome suite");
 }
 
 #[tokio::test]
-async fn settlement_discovery_tracks_late_inventory_from_durable_postgres_truth() {
+async fn settlement_discovery_tracks_truth() {
     Box::pin(with_postgres_suite(settlement_discovery_scenario()))
         .await
         .expect("start disposable PostgreSQL settlement discovery suite");
 }
 
 #[tokio::test]
-async fn governed_action_worker_is_exclusive_durable_and_recovery_first() {
+async fn governed_action_worker_first() {
     Box::pin(with_postgres_suite(governed_action_worker_scenario()))
         .await
         .expect("start disposable PostgreSQL governed-action worker suite");
 }
 
 #[tokio::test]
-async fn governed_canary_is_consumed_atomically_with_one_prepared_submission() {
+async fn governed_canary_consumed_submission() {
     Box::pin(with_postgres_suite(governed_canary_consumption_scenario()))
         .await
         .expect("start disposable PostgreSQL governed-canary consumption suite");
 }
 
 #[tokio::test]
-async fn manual_only_inventory_cannot_create_submission_but_durable_identity_recovers() {
+async fn manual_only_cannot_recovers() {
     Box::pin(with_postgres_suite(manual_only_inventory_scenario()))
         .await
         .expect("start disposable PostgreSQL manual-only settlement suite");
@@ -507,7 +505,7 @@ struct PreparedDiscoveryScenario {
 
 async fn prepare_discovery_scenario(db: &DatabaseConnection) -> PreparedDiscoveryScenario {
     let ids = seed_settlement_report_fixture(db).await;
-    enable_entry_admission_for_test(db, "settlement-discovery-test").await;
+    enable_test_admission(db, "settlement-discovery-test").await;
     let intent_id = seed_approved_intent(db, &ids).await;
     let execution = PgExecutionSubmissionRepository::new(db.clone());
     fill_entry_lot(db, &execution, &ids, &intent_id).await;
@@ -1013,10 +1011,10 @@ async fn settlement_confirmation_scenario() {
     .await;
 }
 
-async fn partial_exchange_then_resolution_scenario() {
+async fn partial_exchange_resolution_scenario() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let fixture = prepare_partial_exchange_confirmation_fixture(&db).await;
+    let fixture = prepare_partial_exchange_fixture(&db).await;
     let confirmed_at = Utc::now();
     let settlement = PgSettlementRedeemRepository::new(db.clone());
     let confirmation_worker = WorkerId::from_v7();
@@ -1070,17 +1068,14 @@ struct SettlementConfirmationFixture {
 }
 
 async fn prepare_confirmation_fixture(db: &DatabaseConnection) -> SettlementConfirmationFixture {
-    prepare_confirmation_fixture_for_shape(db, ConfirmationFixtureShape::ResolutionOnly).await
+    prepare_confirmation_fixture_shape(db, ConfirmationFixtureShape::ResolutionOnly).await
 }
 
-async fn prepare_partial_exchange_confirmation_fixture(
+async fn prepare_partial_exchange_fixture(
     db: &DatabaseConnection,
 ) -> SettlementConfirmationFixture {
-    prepare_confirmation_fixture_for_shape(
-        db,
-        ConfirmationFixtureShape::PartialExchangeThenResolution,
-    )
-    .await
+    prepare_confirmation_fixture_shape(db, ConfirmationFixtureShape::PartialExchangeThenResolution)
+        .await
 }
 
 #[derive(Clone, Copy)]
@@ -1089,13 +1084,13 @@ enum ConfirmationFixtureShape {
     PartialExchangeThenResolution,
 }
 
-async fn prepare_confirmation_fixture_for_shape(
+async fn prepare_confirmation_fixture_shape(
     db: &DatabaseConnection,
     shape: ConfirmationFixtureShape,
 ) -> SettlementConfirmationFixture {
     seed_execution_accounts(db, &[0x75]).await;
     let ids = seed_settlement_report_fixture(db).await;
-    enable_entry_admission_for_test(db, "settlement-confirmation-test").await;
+    enable_test_admission(db, "settlement-confirmation-test").await;
     let intent_id = seed_approved_intent(db, &ids).await;
     let execution = PgExecutionSubmissionRepository::new(db.clone());
     fill_entry_lot(db, &execution, &ids, &intent_id).await;
@@ -1133,7 +1128,7 @@ async fn prepare_confirmation_fixture_for_shape(
         .expect("load settlement market")
         .expect("settlement market exists");
     let positions = position_repository
-        .find_open_by_market_account(&MarketId::new(&ids.market), &ids.execution_account)
+        .find_open_position(&MarketId::new(&ids.market), &ids.execution_account)
         .await
         .expect("load open settlement lots");
     assert_eq!(positions.len(), 1);
@@ -1735,18 +1730,14 @@ async fn settlement_persistence_scenario() {
         "Ready cannot be persisted without target, digest, evidence version and block hash"
     );
 
-    Box::pin(assert_account_scope_isolation_and_authorization_renewal(
-        &db,
-        &repository,
-    ))
-    .await;
+    Box::pin(assert_account_scope_renewal(&db, &repository)).await;
     let governed_parent = insert_case_fixture(&db, &repository, ready_case(0x18))
         .await
         .expect("insert governed-action parent constraint case");
-    assert_governed_action_and_cursor_invariants(&db, &repository, governed_parent).await;
+    assert_governed_action_invariants(&db, &repository, governed_parent).await;
 }
 
-async fn assert_account_scope_isolation_and_authorization_renewal(
+async fn assert_account_scope_renewal(
     db: &DatabaseConnection,
     repository: &PgSettlementRedeemRepository,
 ) {
@@ -1846,7 +1837,7 @@ async fn assert_account_scope_isolation_and_authorization_renewal(
     assert_eq!(attempts[1].state, SettlementAuthorizationState::Pending);
 }
 
-async fn assert_governed_action_and_cursor_invariants(
+async fn assert_governed_action_invariants(
     db: &DatabaseConnection,
     redeem_repository: &PgSettlementRedeemRepository,
     redeem: SettlementRedeemInfo,
@@ -2026,7 +2017,7 @@ async fn seed_ready_automatic_case(
     identity_byte: u8,
 ) -> SettlementRedeemInfo {
     let ids = seed_settlement_report_fixture(db).await;
-    enable_entry_admission_for_test(db, "settlement-ready-case").await;
+    enable_test_admission(db, "settlement-ready-case").await;
     let intent_id = seed_approved_intent(db, &ids).await;
     set_intent_redeem_policy(db, intent_id, RedeemPolicy::Auto, Utc::now()).await;
     fill_entry_lot(

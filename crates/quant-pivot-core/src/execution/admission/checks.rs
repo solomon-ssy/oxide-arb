@@ -592,7 +592,7 @@ impl AdmissionCheck for LiquidityDepthCheck {
                 );
             }
         } else {
-            let Ok(fill) = entry_walk(input) else {
+            let Ok(fill) = (input).entry_walk() else {
                 return AdmissionCheckTrace::deny(
                     self.id(),
                     "entry book walk or fee schedule is invalid",
@@ -659,7 +659,7 @@ impl AdmissionCheck for SlippageCheck {
         let Some(best_ask) = book.best_ask() else {
             return AdmissionCheckTrace::defer(self.id(), "ask side empty");
         };
-        let Ok(fill) = entry_walk(input) else {
+        let Ok(fill) = (input).entry_walk() else {
             return AdmissionCheckTrace::deny(
                 self.id(),
                 "entry book walk or fee schedule is invalid",
@@ -682,35 +682,37 @@ impl AdmissionCheck for SlippageCheck {
     }
 }
 
-fn entry_walk(input: &AdmissionInput) -> Result<BookWalkFill, ()> {
-    let book = input.book.as_ref().ok_or(())?;
-    let spec = &input.intent.entry_order_json;
-    let requirement = match spec.order_type {
-        OrderType::Fok => FillRequirement::AllOrNothing,
-        OrderType::Fak => FillRequirement::AllowPartial,
-        OrderType::Gtc | OrderType::Gtd { .. } => return Err(()),
-    };
-    let fill = match spec.amount {
-        OrderAmount::CashBudget(usd) => walk_buy_cash_budget(
-            &book.asks,
-            usd,
-            spec.limit_price,
-            requirement,
-            &input.fee_schedule,
-            LiquidityRole::Taker,
-            input.now,
-        ),
-        OrderAmount::Shares(shares) => walk_buy_exact_shares(
-            &book.asks,
-            shares,
-            spec.limit_price,
-            requirement,
-            &input.fee_schedule,
-            LiquidityRole::Taker,
-            input.now,
-        ),
-    };
-    fill.map_err(|_| ())
+impl AdmissionInput {
+    fn entry_walk(&self) -> Result<BookWalkFill, ()> {
+        let book = self.book.as_ref().ok_or(())?;
+        let spec = &self.intent.entry_order_json;
+        let requirement = match spec.order_type {
+            OrderType::Fok => FillRequirement::AllOrNothing,
+            OrderType::Fak => FillRequirement::AllowPartial,
+            OrderType::Gtc | OrderType::Gtd { .. } => return Err(()),
+        };
+        let fill = match spec.amount {
+            OrderAmount::CashBudget(usd) => walk_buy_cash_budget(
+                &book.asks,
+                usd,
+                spec.limit_price,
+                requirement,
+                &self.fee_schedule,
+                LiquidityRole::Taker,
+                self.now,
+            ),
+            OrderAmount::Shares(shares) => walk_buy_exact_shares(
+                &book.asks,
+                shares,
+                spec.limit_price,
+                requirement,
+                &self.fee_schedule,
+                LiquidityRole::Taker,
+                self.now,
+            ),
+        };
+        fill.map_err(|_| ())
+    }
 }
 
 // 16 ─────────────────────────────────────────────────────────────────────────

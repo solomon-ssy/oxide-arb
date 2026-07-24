@@ -33,7 +33,13 @@ use self::deposit_wallet_wire::{
     Batch as DepositWalletBatch, Call as DepositWalletCall,
     Factory::proxyCall as DepositWalletProxyCall,
 };
-use super::{adapter::PreparedSettlementCall, eoa::EoaPreparedBlock};
+use super::{
+    adapter::PreparedSettlementCall,
+    eoa::EoaPreparedBlock,
+    typed::{
+        IntoAlloyAddress, IntoEvmAddress, IntoEvmBlockHash, IntoEvmUint, SettlementValueError,
+    },
+};
 use crate::{keystore::OrderSigner, wallet::WalletTopology};
 
 const POLYGON_CHAIN_ID: u64 = 137;
@@ -318,6 +324,14 @@ pub enum RelayerError {
     CorruptDurableEnvelope,
 }
 
+impl From<SettlementValueError> for RelayerError {
+    fn from(error: SettlementValueError) -> Self {
+        Self::InvalidPreparedValue {
+            detail: error.detail().to_owned(),
+        }
+    }
+}
+
 /// Read-only Polygon boundary used while freezing a relayer body.
 #[async_trait]
 pub trait RelayerPreparationRpc: Send + Sync {
@@ -357,7 +371,7 @@ impl RelayerRequestBuilder {
             return Err(RelayerError::WrongChain { actual: chain_id });
         }
         let prepared_block = rpc.canonical_head().await?;
-        let target = typed_address(call.call_target())?;
+        let target = (call.call_target()).into_alloy_address()?;
 
         let (signed_envelope, nonce, gas_limit) = match topology.kind {
             ExecutionWalletKind::GnosisSafe => {
@@ -444,8 +458,8 @@ impl RelayerRequestBuilder {
             deployment_digest: call.deployment_digest(),
             calldata_hash: call.calldata_hash().clone(),
             prepared_block,
-            nonce: typed_uint(nonce)?,
-            gas_limit: gas_limit.map(typed_uint).transpose()?,
+            nonce: (nonce).into_evm_uint()?,
+            gas_limit: gas_limit.map(IntoEvmUint::into_evm_uint).transpose()?,
             signed_envelope,
             signed_envelope_hash,
         })
@@ -586,7 +600,7 @@ impl RelayerTransport {
             });
         };
         verify_transaction_record(transaction_id, prepared, &transaction)?;
-        transaction_poll_outcome(&transaction)
+        transaction.transaction_poll_outcome()
     }
 
     async fn transaction_record(
@@ -760,7 +774,7 @@ impl RelayerPreparationRpc for AlloyRelayerPreparationRpc {
         })?;
         Ok(EoaPreparedBlock {
             number: block.number,
-            hash: typed_block_hash(block.hash)?,
+            hash: (block.hash).into_evm_block_hash()?,
         })
     }
 
@@ -796,7 +810,10 @@ impl RelayerPreparationRpc for AlloyRelayerPreparationRpc {
             .map_err(|error| {
                 preparation_error("eth_getBlockByNumber(canonical recheck)", &error)
             })?;
-        block.map(|value| typed_block_hash(value.hash)).transpose()
+        block
+            .map(|value| (value.hash).into_evm_block_hash())
+            .transpose()
+            .map_err(Into::into)
     }
 }
 
@@ -945,7 +962,7 @@ fn verify_transaction_record(
         ExecutionWalletKind::GnosisSafe | ExecutionWalletKind::Proxy => {
             let body: FrozenSafeProxyRequest = serde_json::from_slice(prepared.signed_envelope())
                 .map_err(|_| RelayerError::CorruptDurableEnvelope)?;
-            verify_safe_proxy_prepared_scope(prepared, &body)?;
+            verify_safe_scope(prepared, &body)?;
             if record.tx_type != body.tx_type
                 || !same_address(&record.from, &body.from)
                 || !same_address(&record.owner, &body.from)
@@ -963,7 +980,7 @@ fn verify_transaction_record(
             let body: FrozenDepositWalletRequest =
                 serde_json::from_slice(prepared.signed_envelope())
                     .map_err(|_| RelayerError::CorruptDurableEnvelope)?;
-            let factory_calldata = verify_deposit_wallet_prepared_scope(prepared, &body)?;
+            let factory_calldata = verify_deposit_scope(prepared, &body)?;
             if record.tx_type != body.tx_type
                 || !same_address(&record.from, &body.from)
                 || !same_address(&record.owner, &body.from)
@@ -987,39 +1004,39 @@ fn verify_transaction_record(
     Ok(())
 }
 
-fn transaction_poll_outcome(
-    transaction: &TransactionResponse,
-) -> Result<RelayerPollOutcome, RelayerError> {
-    let state = RelayerTransactionState::parse(&transaction.state)?;
-    if state.terminal_failure() {
-        return Ok(RelayerPollOutcome::TerminalFailure { state });
-    }
-    let chain_hash = transaction
-        .transaction_hash
-        .as_deref()
-        .filter(|value| !value.is_empty());
-    if let Some(chain_hash) = chain_hash {
-        let transaction_hash = EvmTransactionHash::parse(chain_hash).map_err(|error| {
-            RelayerError::InvalidResponse {
+impl TransactionResponse {
+    fn transaction_poll_outcome(&self) -> Result<RelayerPollOutcome, RelayerError> {
+        let state = RelayerTransactionState::parse(&self.state)?;
+        if state.terminal_failure() {
+            return Ok(RelayerPollOutcome::TerminalFailure { state });
+        }
+        let chain_hash = self
+            .transaction_hash
+            .as_deref()
+            .filter(|value| !value.is_empty());
+        if let Some(chain_hash) = chain_hash {
+            let transaction_hash = EvmTransactionHash::parse(chain_hash).map_err(|error| {
+                RelayerError::InvalidResponse {
+                    operation: "GET /transaction",
+                    detail: format!("invalid transactionHash: {error}"),
+                }
+            })?;
+            return Ok(RelayerPollOutcome::ChainHashObserved {
+                state,
+                transaction_hash,
+            });
+        }
+        if state.requires_chain_hash() {
+            return Err(RelayerError::InvalidResponse {
                 operation: "GET /transaction",
-                detail: format!("invalid transactionHash: {error}"),
-            }
-        })?;
-        return Ok(RelayerPollOutcome::ChainHashObserved {
-            state,
-            transaction_hash,
-        });
+                detail: "mined/confirmed state omitted transactionHash".to_owned(),
+            });
+        }
+        Ok(RelayerPollOutcome::Pending { state })
     }
-    if state.requires_chain_hash() {
-        return Err(RelayerError::InvalidResponse {
-            operation: "GET /transaction",
-            detail: "mined/confirmed state omitted transactionHash".to_owned(),
-        });
-    }
-    Ok(RelayerPollOutcome::Pending { state })
 }
 
-fn verify_safe_proxy_prepared_scope(
+fn verify_safe_scope(
     prepared: &PreparedRelayerEnvelope,
     body: &FrozenSafeProxyRequest,
 ) -> Result<(), RelayerError> {
@@ -1040,7 +1057,10 @@ fn verify_safe_proxy_prepared_scope(
         _ => return Err(RelayerError::CorruptDurableEnvelope),
     };
     if !same_address(&body.proxy_wallet, prepared.funder.as_str())
-        || typed_wire_address(target)? != prepared.call_target
+        || target
+            .into_evm_address()
+            .map_err(|_| RelayerError::CorruptDurableEnvelope)?
+            != prepared.call_target
         || !calldata_hash_matches(&calldata, &prepared.calldata_hash)
         || body.nonce != prepared.nonce.as_str()
     {
@@ -1049,7 +1069,7 @@ fn verify_safe_proxy_prepared_scope(
     Ok(())
 }
 
-fn verify_deposit_wallet_prepared_scope(
+fn verify_deposit_scope(
     prepared: &PreparedRelayerEnvelope,
     body: &FrozenDepositWalletRequest,
 ) -> Result<Vec<u8>, RelayerError> {
@@ -1097,10 +1117,6 @@ fn same_address(left: &str, right: &str) -> bool {
 
 fn wire_address(value: &str) -> Result<Address, RelayerError> {
     Address::from_str(value).map_err(|_| RelayerError::CorruptDurableEnvelope)
-}
-
-fn typed_wire_address(value: Address) -> Result<EvmAddress, RelayerError> {
-    EvmAddress::parse(format!("{value:#x}")).map_err(|_| RelayerError::CorruptDurableEnvelope)
 }
 
 fn decode_wire_hex(value: &str) -> Result<Vec<u8>, RelayerError> {
@@ -1214,7 +1230,7 @@ fn build_deposit_wallet_body(
     nonce: u64,
     deadline: u64,
 ) -> Result<FrozenDepositWalletRequest, RelayerError> {
-    let target = typed_address(call.call_target())?;
+    let target = (call.call_target()).into_alloy_address()?;
     let batch = DepositWalletBatch {
         wallet: topology.funder,
         nonce: U256::from(nonce),
@@ -1392,26 +1408,8 @@ fn parse_u64(field: &'static str, value: &str) -> Result<u64, RelayerError> {
     Ok(parsed)
 }
 
-fn typed_address(value: &EvmAddress) -> Result<Address, RelayerError> {
-    Address::from_str(value.as_str()).map_err(|error| RelayerError::InvalidPreparedValue {
-        detail: error.to_string(),
-    })
-}
-
 fn official_address(value: &str) -> Result<Address, RelayerError> {
     Address::from_str(value).map_err(|error| RelayerError::InvalidConfiguration {
-        detail: error.to_string(),
-    })
-}
-
-fn typed_uint(value: u64) -> Result<EvmUint256, RelayerError> {
-    EvmUint256::parse(value.to_string()).map_err(|error| RelayerError::InvalidPreparedValue {
-        detail: error.to_string(),
-    })
-}
-
-fn typed_block_hash(hash: B256) -> Result<EvmBlockHash, RelayerError> {
-    EvmBlockHash::parse(format!("{hash:#x}")).map_err(|error| RelayerError::InvalidPreparedValue {
         detail: error.to_string(),
     })
 }
@@ -1463,7 +1461,7 @@ mod tests {
     use super::{
         EoaPreparedBlock, FrozenDepositWalletRequest, PreparedSettlementCall, RelayerError,
         RelayerPollOutcome, RelayerPreparationRpc, RelayerRequestBuilder, RelayerTransactionState,
-        RelayerTransport, build_deposit_wallet_body, verify_deposit_wallet_prepared_scope,
+        RelayerTransport, build_deposit_wallet_body, verify_deposit_scope,
     };
     use crate::{
         keystore::OrderSigner,
@@ -1507,7 +1505,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn safe_body_matches_official_shape_and_replays_byte_for_byte() {
+    async fn safe_body_matches_byte() {
         let server = MockServer::start().await;
         let signer = OrderSigner::from_bytes(&[0x21; 32]).expect("test signer");
         let topology = topology(&signer, ExecutionWalletKind::GnosisSafe);
@@ -1571,7 +1569,7 @@ mod tests {
     }
 
     #[test]
-    fn official_wire_fixture_lock_matches_every_golden_body() {
+    fn official_wire_matches_body() {
         let lock = include_str!("../../tests/fixtures/relayer/source.lock");
         assert_eq!(
             lock_value(lock, "repository"),
@@ -1616,7 +1614,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_body_uses_buffered_estimate_and_bounded_fallback() {
+    async fn proxy_body_uses_fallback() {
         let server = MockServer::start().await;
         let signer = OrderSigner::from_bytes(&[0x31; 32]).expect("test signer");
         let topology = topology(&signer, ExecutionWalletKind::Proxy);
@@ -1670,7 +1668,7 @@ mod tests {
     }
 
     #[test]
-    fn deposit_wallet_body_matches_official_eip712_wire_fixture() {
+    fn deposit_wallet_matches_fixture() {
         let signer = OrderSigner::from_bytes(&[0x51; 32]).expect("test signer");
         let topology = topology(&signer, ExecutionWalletKind::DepositWallet);
         let (call, _) = call_and_rpc(&topology, SettlementRoute::StandardV2, None);
@@ -1685,7 +1683,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deposit_wallet_prepare_and_poll_bind_the_exact_factory_record() {
+    async fn deposit_wallet_prepare_record() {
         let server = MockServer::start().await;
         let signer = OrderSigner::from_bytes(&[0x52; 32]).expect("test signer");
         let topology = topology(&signer, ExecutionWalletKind::DepositWallet);
@@ -1717,8 +1715,7 @@ mod tests {
         assert_eq!(body.nonce, "17");
         assert_eq!(body.deposit_wallet_params.calls.len(), 1);
         assert_eq!(prepared.nonce().as_str(), "17");
-        let factory_calldata =
-            verify_deposit_wallet_prepared_scope(&prepared, &body).expect("factory calldata");
+        let factory_calldata = verify_deposit_scope(&prepared, &body).expect("factory calldata");
         Mock::given(method("GET"))
             .and(path("/transaction"))
             .and(query_param("id", "relay_wallet_17"))
@@ -1752,7 +1749,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_timeout_is_ambiguous_and_poll_adds_only_a_typed_chain_hash() {
+    async fn submit_timeout_adds_hash() {
         let server = MockServer::start().await;
         let signer = OrderSigner::from_bytes(&[0x41; 32]).expect("test signer");
         let topology = topology(&signer, ExecutionWalletKind::GnosisSafe);
@@ -1835,7 +1832,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_rejects_wrong_identity_nonce_signature_and_multiple_records() {
+    async fn poll_rejects_wrong_records() {
         let server = MockServer::start().await;
         let signer = OrderSigner::from_bytes(&[0x42; 32]).expect("test signer");
         let topology = topology(&signer, ExecutionWalletKind::GnosisSafe);

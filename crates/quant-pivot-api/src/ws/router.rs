@@ -226,83 +226,82 @@ mod tests {
         )
     }
 
-    fn tok(s: &str) -> TokenId {
-        TokenId::new(s)
-    }
-
     #[tokio::test]
-    async fn repeated_assigns_reuse_the_resident_shard() {
+    async fn repeated_assigns_reuse_shard() {
         let router = test_router(8);
 
-        router.assign_tokens(&[tok("1"), tok("2")]);
+        router.assign_tokens(&[TokenId::new("1"), TokenId::new("2")]);
         assert_eq!(router.shard_count(), 1);
 
         // Second assignment to the same shard must not spawn a new task and
         // must publish the merged full set.
-        router.assign_tokens(&[tok("2"), tok("3")]);
+        router.assign_tokens(&[TokenId::new("2"), TokenId::new("3")]);
         assert_eq!(router.shard_count(), 1, "no duplicate shard spawn");
         assert_eq!(
             router.shard_tokens(0),
-            HashSet::from([tok("1"), tok("2"), tok("3")])
+            HashSet::from([TokenId::new("1"), TokenId::new("2"), TokenId::new("3")])
         );
         drop(router);
     }
 
     #[tokio::test]
-    async fn remove_publishes_the_shrunk_set() {
+    async fn remove_publishes_shrunk_set() {
         let router = test_router(8);
-        router.assign_tokens(&[tok("1"), tok("2")]);
+        router.assign_tokens(&[TokenId::new("1"), TokenId::new("2")]);
 
-        router.remove_tokens(&[tok("1")]);
-        assert_eq!(router.shard_tokens(0), HashSet::from([tok("2")]));
+        router.remove_tokens(&[TokenId::new("1")]);
+        assert_eq!(router.shard_tokens(0), HashSet::from([TokenId::new("2")]));
 
         // Removing the rest empties the set (shard parks, stays resident).
-        router.remove_tokens(&[tok("2")]);
+        router.remove_tokens(&[TokenId::new("2")]);
         assert!(router.shard_tokens(0).is_empty());
         assert_eq!(router.shard_count(), 1);
         drop(router);
     }
 
     #[tokio::test]
-    async fn restart_publishes_a_new_generation_without_changing_tokens() {
+    async fn restart_preserves_tokens() {
         let router = test_router(8);
-        router.assign_tokens(&[tok("1"), tok("2")]);
+        router.assign_tokens(&[TokenId::new("1"), TokenId::new("2")]);
         let tokens = router.shard_tokens(0);
 
-        router.restart_tokens(&[tok("1"), tok("2")]);
+        router.restart_tokens(&[TokenId::new("1"), TokenId::new("2")]);
 
         assert_eq!(router.shard_tokens(0), tokens);
         assert_eq!(router.shard_restart_generation(0), 1);
-        router.restart_tokens(&[tok("1")]);
+        router.restart_tokens(&[TokenId::new("1")]);
         assert_eq!(router.shard_restart_generation(0), 2);
         drop(router);
     }
 
     #[tokio::test]
-    async fn restart_generation_exhaustion_cancels_the_data_plane() {
+    async fn restart_generation_cancels_plane() {
         let router = test_router(8);
-        router.assign_tokens(&[tok("1")]);
+        router.assign_tokens(&[TokenId::new("1")]);
         router.ledger.lock().shards[0].restart_generation = u64::MAX;
 
-        router.restart_tokens(&[tok("1")]);
+        router.restart_tokens(&[TokenId::new("1")]);
 
         assert!(router.deps.shutdown.is_cancelled());
         drop(router);
     }
 
     #[tokio::test]
-    async fn overflow_spawns_a_second_shard_and_freed_capacity_is_reused() {
+    async fn overflow_spawns_second_reused() {
         let router = test_router(2);
-        router.assign_tokens(&[tok("1"), tok("2"), tok("3")]);
+        router.assign_tokens(&[TokenId::new("1"), TokenId::new("2"), TokenId::new("3")]);
         assert_eq!(router.shard_count(), 2);
-        assert_eq!(router.shard_tokens(1), HashSet::from([tok("3")]));
+        assert_eq!(router.shard_tokens(1), HashSet::from([TokenId::new("3")]));
 
         // Freeing capacity on shard 0 lets the next token land there instead
         // of spawning a third shard.
-        router.remove_tokens(&[tok("1")]);
-        router.assign_tokens(&[tok("4")]);
+        router.remove_tokens(&[TokenId::new("1")]);
+        router.assign_tokens(&[TokenId::new("4")]);
         assert_eq!(router.shard_count(), 2);
-        assert_eq!(router.shard_tokens(0), HashSet::from([tok("2"), tok("4")]));
+        assert_eq!(
+            router.shard_tokens(0),
+            HashSet::from([TokenId::new("2"), TokenId::new("4")])
+        );
         drop(router);
     }
 }

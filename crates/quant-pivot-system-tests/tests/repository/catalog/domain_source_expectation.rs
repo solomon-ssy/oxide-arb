@@ -43,7 +43,7 @@ fn expectation_with_required(required: bool) -> UpsertDomainSourceExpectation {
     .expect("expectation")
 }
 
-pub async fn expected_source_exists_before_cursor_and_transitions_optimistically() {
+pub async fn source_exists_before_optimistically() {
     let (pool, _container) = setup_pg().await;
     let repo = PgDomainSourceExpectationRepository::new(pool.connection().clone());
     let inserted = repo
@@ -79,7 +79,7 @@ pub async fn expected_source_exists_before_cursor_and_transitions_optimistically
     ));
 }
 
-pub async fn natural_key_upsert_updates_one_stable_expectation() {
+pub async fn natural_key_updates_expectation() {
     let (pool, _container) = setup_pg().await;
     let repo = PgDomainSourceExpectationRepository::new(pool.connection().clone());
     let initial = repo

@@ -1,7 +1,7 @@
 //! Structural diff between two recommendation reports.
 //!
 //! A [`ReportDiff`] is a pure, computed read projection (no persistence):
-//! [`compute_report_diff`] builds it from two reports plus their
+//! [`RecommendationReportInfo::diff`] builds it from two reports plus their
 //! recommendations, and the web layer projects it through `ReportDiffView`.
 //!
 //! Recommendations are matched by their `(market_id, outcome_side)` identity
@@ -128,8 +128,10 @@ pub struct ReportDiff {
 /// Stable position identity: market id text plus outcome side code.
 type PositionKey = (String, i8);
 
-fn position_key(rec: &RecommendationInfo) -> PositionKey {
-    (rec.market_id.to_string(), rec.outcome_side.as_i8())
+impl RecommendationInfo {
+    fn position_key(&self) -> PositionKey {
+        (self.market_id.to_string(), self.outcome_side.as_i8())
+    }
 }
 
 fn total_suggested(recs: &[RecommendationInfo]) -> Usd {
@@ -138,62 +140,64 @@ fn total_suggested(recs: &[RecommendationInfo]) -> Usd {
         .sum()
 }
 
-/// Compute the diff of `compare` against `base`.
-///
-/// Positions are matched by `(market_id, outcome_side)`; the result is
-/// deterministic (sorted by that key within each bucket).
-#[must_use]
-pub fn compute_report_diff(
-    base: &RecommendationReportInfo,
-    base_recs: &[RecommendationInfo],
-    compare: &RecommendationReportInfo,
-    compare_recs: &[RecommendationInfo],
-) -> ReportDiff {
-    let base_by_key: BTreeMap<PositionKey, &RecommendationInfo> = base_recs
-        .iter()
-        .map(|rec| (position_key(rec), rec))
-        .collect();
-    let compare_by_key: BTreeMap<PositionKey, &RecommendationInfo> = compare_recs
-        .iter()
-        .map(|rec| (position_key(rec), rec))
-        .collect();
+impl RecommendationReportInfo {
+    /// Compute the diff of `compare` against this base report.
+    ///
+    /// Positions are matched by `(market_id, outcome_side)`; the result is
+    /// deterministic (sorted by that key within each bucket).
+    #[must_use]
+    pub fn diff(
+        &self,
+        base_recs: &[RecommendationInfo],
+        compare: &Self,
+        compare_recs: &[RecommendationInfo],
+    ) -> ReportDiff {
+        let base_by_key: BTreeMap<PositionKey, &RecommendationInfo> = base_recs
+            .iter()
+            .map(|rec| ((rec).position_key(), rec))
+            .collect();
+        let compare_by_key: BTreeMap<PositionKey, &RecommendationInfo> = compare_recs
+            .iter()
+            .map(|rec| ((rec).position_key(), rec))
+            .collect();
 
-    let mut keys: Vec<&PositionKey> = base_by_key.keys().chain(compare_by_key.keys()).collect();
-    keys.sort_unstable();
-    keys.dedup();
+        let mut keys: Vec<&PositionKey> = base_by_key.keys().chain(compare_by_key.keys()).collect();
+        keys.sort_unstable();
+        keys.dedup();
 
-    let mut added = Vec::new();
-    let mut removed = Vec::new();
-    let mut retained = Vec::new();
-    for key in keys {
-        let base_rec = base_by_key.get(key).copied();
-        let compare_rec = compare_by_key.get(key).copied();
-        if let Some(delta) = recommendation_delta(base_rec, compare_rec) {
-            match (base_rec, compare_rec) {
-                (Some(_), Some(_)) => retained.push(delta),
-                (None, Some(_)) => added.push(delta),
-                (Some(_), None) => removed.push(delta),
-                (None, None) => {}
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        let mut retained = Vec::new();
+        for key in keys {
+            let base_rec = base_by_key.get(key).copied();
+            let compare_rec = compare_by_key.get(key).copied();
+            if let Some(delta) = recommendation_delta(base_rec, compare_rec) {
+                match (base_rec, compare_rec) {
+                    (Some(_), Some(_)) => retained.push(delta),
+                    (None, Some(_)) => added.push(delta),
+                    (Some(_), None) => removed.push(delta),
+                    (None, None) => {}
+                }
             }
         }
-    }
 
-    let base_total = total_suggested(base_recs);
-    let compare_total = total_suggested(compare_recs);
+        let base_total = total_suggested(base_recs);
+        let compare_total = total_suggested(compare_recs);
 
-    ReportDiff {
-        base_report_id: base.recommendation_report_id,
-        compare_report_id: compare.recommendation_report_id,
-        added,
-        removed,
-        retained,
-        base_total_suggested_usd: base_total,
-        compare_total_suggested_usd: compare_total,
-        total_suggested_usd_delta: compare_total - base_total,
-        eligibility: EligibilityShift {
-            base: base.summary_json.execution_eligibility_summary,
-            compare: compare.summary_json.execution_eligibility_summary,
-        },
+        ReportDiff {
+            base_report_id: self.recommendation_report_id,
+            compare_report_id: compare.recommendation_report_id,
+            added,
+            removed,
+            retained,
+            base_total_suggested_usd: base_total,
+            compare_total_suggested_usd: compare_total,
+            total_suggested_usd_delta: compare_total - base_total,
+            eligibility: EligibilityShift {
+                base: self.summary_json.execution_eligibility_summary,
+                compare: compare.summary_json.execution_eligibility_summary,
+            },
+        }
     }
 }
 

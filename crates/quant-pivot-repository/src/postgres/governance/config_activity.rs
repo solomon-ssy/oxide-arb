@@ -26,7 +26,7 @@ use sea_orm::{
     sea_query::{Expr, Iden, Query, SelectStatement, UnionType},
 };
 
-use crate::postgres::primitives::enum_null;
+use crate::postgres::{governance::runtime_config::PgPolicyRepository, primitives::enum_null};
 
 #[derive(Debug, Clone, Copy)]
 enum ActivityRecordKind {
@@ -146,93 +146,87 @@ struct ActivityRow {
     audit_event_id: Option<AuditEventId>,
 }
 
-impl ActivityRow {
-    fn into_info(self) -> Result<ConfigActivityInfo, StorageError> {
-        let kind = ActivityRecordKind::parse(&self.event_type)?;
+impl TryFrom<ActivityRow> for ConfigActivityInfo {
+    type Error = StorageError;
+
+    fn try_from(row: ActivityRow) -> Result<Self, Self::Error> {
+        let kind = ActivityRecordKind::parse(&row.event_type)?;
         match kind {
-            ActivityRecordKind::Revision => {
-                Ok(ConfigActivityInfo::Revision(Box::new(PolicyRevisionInfo {
-                    policy_revision_id: self.policy_revision_id,
-                    resource_kind: self.resource_kind,
-                    schema_version: required(self.schema_version, kind, "schema_version")?,
-                    revision_hash: required(self.revision_hash, kind, "revision_hash")?,
-                    document: required(self.document, kind, "document")?,
-                    status: required(self.revision_status, kind, "revision_status")?,
-                    validation_evidence: self.validation_evidence,
-                    validated_at: self.validated_at,
-                    preflight_token_hash: self.preflight_token_hash,
-                    preflight_expires_at: self.preflight_expires_at,
-                    created_by_kind: self.actor_kind,
-                    created_by_user_id: self.actor_user_id,
-                    created_by_label: self.actor_label,
-                    reason: self.reason,
-                    created_at: self.created_at,
-                })))
-            }
-            ActivityRecordKind::Approval => Ok(ConfigActivityInfo::Approval(PolicyApprovalInfo {
-                policy_approval_id: required(self.policy_approval_id, kind, "policy_approval_id")?,
-                policy_revision_id: self.policy_revision_id,
-                resource_kind: self.resource_kind,
-                revision_hash: required(self.revision_hash, kind, "revision_hash")?,
-                validation_subject: self.approval_validation_subject,
-                decision: required(self.approval_decision, kind, "approval_decision")?,
-                decided_by_kind: self.actor_kind,
-                decided_by_user_id: self.actor_user_id,
-                decided_by_label: self.actor_label,
-                reason: self.reason,
-                decided_at: required(self.decided_at, kind, "decided_at")?,
-                expires_at: self.approval_expires_at,
-                created_at: self.created_at,
+            ActivityRecordKind::Revision => Ok(Self::Revision(Box::new(PolicyRevisionInfo {
+                policy_revision_id: row.policy_revision_id,
+                resource_kind: row.resource_kind,
+                schema_version: required(row.schema_version, kind, "schema_version")?,
+                revision_hash: required(row.revision_hash, kind, "revision_hash")?,
+                document: required(row.document, kind, "document")?,
+                status: required(row.revision_status, kind, "revision_status")?,
+                validation_evidence: row.validation_evidence,
+                validated_at: row.validated_at,
+                preflight_token_hash: row.preflight_token_hash,
+                preflight_expires_at: row.preflight_expires_at,
+                created_by_kind: row.actor_kind,
+                created_by_user_id: row.actor_user_id,
+                created_by_label: row.actor_label,
+                reason: row.reason,
+                created_at: row.created_at,
+            }))),
+            ActivityRecordKind::Approval => Ok(Self::Approval(PolicyApprovalInfo {
+                policy_approval_id: required(row.policy_approval_id, kind, "policy_approval_id")?,
+                policy_revision_id: row.policy_revision_id,
+                resource_kind: row.resource_kind,
+                revision_hash: required(row.revision_hash, kind, "revision_hash")?,
+                validation_subject: row.approval_validation_subject,
+                decision: required(row.approval_decision, kind, "approval_decision")?,
+                decided_by_kind: row.actor_kind,
+                decided_by_user_id: row.actor_user_id,
+                decided_by_label: row.actor_label,
+                reason: row.reason,
+                decided_at: required(row.decided_at, kind, "decided_at")?,
+                expires_at: row.approval_expires_at,
+                created_at: row.created_at,
             })),
-            ActivityRecordKind::Activation => {
-                Ok(ConfigActivityInfo::Activation(PolicyActivationInfo {
-                    bundle_generation: required(self.bundle_generation, kind, "bundle_generation")?,
-                    expected_bundle_generation: required(
-                        self.expected_bundle_generation,
-                        kind,
-                        "expected_bundle_generation",
-                    )?,
-                    policy_activation_id: required(
-                        self.policy_activation_id,
-                        kind,
-                        "policy_activation_id",
-                    )?,
-                    resource_kind: self.resource_kind,
-                    policy_revision_id: self.policy_revision_id,
-                    decision_policy_snapshot_id: required(
-                        self.decision_policy_snapshot_id,
-                        kind,
-                        "decision_policy_snapshot_id",
-                    )?,
-                    policy_approval_id: required(
-                        self.policy_approval_id,
-                        kind,
-                        "policy_approval_id",
-                    )?,
-                    activated_at: required(self.activated_at, kind, "activated_at")?,
-                    activated_by_kind: self.actor_kind,
-                    activated_by_user_id: self.actor_user_id,
-                    activated_by_label: self.actor_label,
-                    reason: self.reason,
-                    activation_kind: required(self.activation_kind, kind, "activation_kind")?,
-                    expected_active_revision_id: self.expected_active_revision_id,
-                    previous_policy_revision_id: self.previous_policy_revision_id,
-                    rollback_target_revision_id: self.rollback_target_revision_id,
-                    preflight_token_hash: required(
-                        self.preflight_token_hash,
-                        kind,
-                        "preflight_token_hash",
-                    )?,
-                    idempotency_key: required(self.idempotency_key, kind, "idempotency_key")?,
-                    activation_request_hash: required(
-                        self.activation_request_hash,
-                        kind,
-                        "activation_request_hash",
-                    )?,
-                    audit_event_id: required(self.audit_event_id, kind, "audit_event_id")?,
-                    created_at: self.created_at,
-                }))
-            }
+            ActivityRecordKind::Activation => Ok(Self::Activation(PolicyActivationInfo {
+                bundle_generation: required(row.bundle_generation, kind, "bundle_generation")?,
+                expected_bundle_generation: required(
+                    row.expected_bundle_generation,
+                    kind,
+                    "expected_bundle_generation",
+                )?,
+                policy_activation_id: required(
+                    row.policy_activation_id,
+                    kind,
+                    "policy_activation_id",
+                )?,
+                resource_kind: row.resource_kind,
+                policy_revision_id: row.policy_revision_id,
+                decision_policy_snapshot_id: required(
+                    row.decision_policy_snapshot_id,
+                    kind,
+                    "decision_policy_snapshot_id",
+                )?,
+                policy_approval_id: required(row.policy_approval_id, kind, "policy_approval_id")?,
+                activated_at: required(row.activated_at, kind, "activated_at")?,
+                activated_by_kind: row.actor_kind,
+                activated_by_user_id: row.actor_user_id,
+                activated_by_label: row.actor_label,
+                reason: row.reason,
+                activation_kind: required(row.activation_kind, kind, "activation_kind")?,
+                expected_active_revision_id: row.expected_active_revision_id,
+                previous_policy_revision_id: row.previous_policy_revision_id,
+                rollback_target_revision_id: row.rollback_target_revision_id,
+                preflight_token_hash: required(
+                    row.preflight_token_hash,
+                    kind,
+                    "preflight_token_hash",
+                )?,
+                idempotency_key: required(row.idempotency_key, kind, "idempotency_key")?,
+                activation_request_hash: required(
+                    row.activation_request_hash,
+                    kind,
+                    "activation_request_hash",
+                )?,
+                audit_event_id: required(row.audit_event_id, kind, "audit_event_id")?,
+                created_at: row.created_at,
+            })),
         }
     }
 }
@@ -680,26 +674,28 @@ fn activation_query() -> SelectStatement {
         .to_owned()
 }
 
-pub(super) async fn list(
-    db: &impl ConnectionTrait,
-    limit: u64,
-) -> Result<Vec<ConfigActivityInfo>, StorageError> {
-    // Global ordering follows the database commit clock (`created_at`). Domain
-    // timestamps such as `decided_at` may originate on another host and cannot
-    // establish causal order across revision, approval, and activation tables.
-    let mut query = revision_query();
-    query
-        .union(UnionType::All, approval_query())
-        .union(UnionType::All, activation_query())
-        .order_by(ActivityColumn::EventAt, Order::Desc)
-        .order_by(ActivityColumn::EventRank, Order::Desc)
-        .order_by(ActivityColumn::SortId, Order::Desc)
-        .limit(limit);
-    let rows = ActivityRow::find_by_statement(db.get_database_backend().build(&query))
-        .all(db)
-        .await
-        .map_err(StorageError::from)?;
-    rows.into_iter().map(ActivityRow::into_info).collect()
+impl PgPolicyRepository {
+    pub(super) async fn list(
+        db: &impl ConnectionTrait,
+        limit: u64,
+    ) -> Result<Vec<ConfigActivityInfo>, StorageError> {
+        // Global ordering follows the database commit clock (`created_at`). Domain
+        // timestamps such as `decided_at` may originate on another host and cannot
+        // establish causal order across revision, approval, and activation tables.
+        let mut query = revision_query();
+        query
+            .union(UnionType::All, approval_query())
+            .union(UnionType::All, activation_query())
+            .order_by(ActivityColumn::EventAt, Order::Desc)
+            .order_by(ActivityColumn::EventRank, Order::Desc)
+            .order_by(ActivityColumn::SortId, Order::Desc)
+            .limit(limit);
+        let rows = ActivityRow::find_by_statement(db.get_database_backend().build(&query))
+            .all(db)
+            .await
+            .map_err(StorageError::from)?;
+        rows.into_iter().map(ConfigActivityInfo::try_from).collect()
+    }
 }
 
 #[cfg(test)]
@@ -709,15 +705,15 @@ mod tests {
     use quant_pivot_error::storage::StorageError;
     use sea_orm::{DbBackend, MockDatabase, Value};
 
-    use super::list;
+    use super::PgPolicyRepository;
 
     #[tokio::test]
-    async fn list_executes_one_global_activity_statement() -> Result<(), StorageError> {
+    async fn list_executes_one_statement() -> Result<(), StorageError> {
         let db = MockDatabase::new(DbBackend::Postgres)
             .append_query_results([Vec::<BTreeMap<String, Value>>::new()])
             .into_connection();
 
-        let activity = list(&db, 50).await?;
+        let activity = PgPolicyRepository::list(&db, 50).await?;
 
         assert!(activity.is_empty());
         assert_eq!(db.into_transaction_log().len(), 1);

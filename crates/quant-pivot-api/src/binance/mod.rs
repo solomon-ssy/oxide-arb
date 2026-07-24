@@ -107,7 +107,7 @@ impl BinanceKlineSource {
     }
 
     /// Build a USD-M Futures client with its own venue request budget.
-    pub fn connect_usdm_futures_with_budget(
+    pub fn connect_usdm_futures(
         config: BinanceSourceConfig,
         request_budget: BinanceRequestBudget,
         compute: Arc<ComputeExecutor>,
@@ -165,26 +165,6 @@ impl BinanceKlineSource {
         Ok((symbol, interval))
     }
 
-    fn source_id_for_market(&self) -> DomainSourceId {
-        match self.market {
-            BinanceMarketSegment::Spot => DomainSourceId::binance(),
-            BinanceMarketSegment::UsdmFutures => DomainSourceId::binance_usdm_futures(),
-        }
-    }
-
-    fn instrument_key(
-        &self,
-        symbol: &BinanceSymbol,
-        interval: KlineInterval,
-    ) -> DomainInstrumentKey {
-        match self.market {
-            BinanceMarketSegment::Spot => DomainInstrumentKey::binance_kline(symbol, interval),
-            BinanceMarketSegment::UsdmFutures => {
-                DomainInstrumentKey::binance_usdm_futures_kline(symbol, interval)
-            }
-        }
-    }
-
     const fn rest_prefix(&self) -> &'static str {
         match self.market {
             BinanceMarketSegment::Spot => "/api/v3",
@@ -230,7 +210,7 @@ impl BinanceKlineSource {
         else {
             return Ok(None);
         };
-        let instrument_key = self.instrument_key(symbol, interval);
+        let instrument_key = self.market.kline_instrument(symbol, interval);
         let member = filename.replace(".zip", ".csv");
         let batch_size = self.config.batch_size.max(1);
         let (sender, receiver) = mpsc::channel(2);
@@ -279,7 +259,7 @@ impl BinanceKlineSource {
                 detail: error.to_string(),
             })?;
         validate_kline_rows(&rows, interval)?;
-        let instrument_key = self.instrument_key(symbol, interval);
+        let instrument_key = self.market.kline_instrument(symbol, interval);
         let mut observations = Vec::with_capacity(rows.len());
         // Binance includes the currently open kline when its open time is in
         // range, even though that row's close time is after `endTime`. An open
@@ -298,7 +278,7 @@ impl DomainDataSource for BinanceKlineSource {
     }
 
     fn source_id(&self) -> DomainSourceId {
-        self.source_id_for_market()
+        self.market.kline_source()
     }
 
     async fn fetch(&self, request: DomainFetchRequest) -> QuantResult<Vec<DomainObservation>> {
@@ -375,7 +355,7 @@ fn validate_kline_rows(rows: &[BinanceKlineRow], interval: KlineInterval) -> Qua
         }
     }
     for (index, pair) in rows.windows(2).enumerate() {
-        validate_adjacent_kline_rows(&pair[0], &pair[1], interval_ms, index + 1)?;
+        pair[0].validate_next(&pair[1], interval_ms, index + 1)?;
     }
     Ok(())
 }
@@ -388,24 +368,21 @@ fn kline_interval_ms(interval: KlineInterval) -> QuantResult<i64> {
     })
 }
 
-fn validate_adjacent_kline_rows(
-    previous: &BinanceKlineRow,
-    next: &BinanceKlineRow,
-    interval_ms: i64,
-    index: usize,
-) -> QuantResult<()> {
-    let expected = previous.open_time_ms.saturating_add(interval_ms);
-    if next.open_time_ms != expected {
-        return Err(ApiError::Deserialize {
-            context: "binance kline continuity".to_owned(),
-            detail: format!(
-                "row {index} opens at {} but expected {expected}",
-                next.open_time_ms
-            ),
+impl BinanceKlineRow {
+    fn validate_next(&self, next: &Self, interval_ms: i64, index: usize) -> QuantResult<()> {
+        let expected = self.open_time_ms.saturating_add(interval_ms);
+        if next.open_time_ms != expected {
+            return Err(ApiError::Deserialize {
+                context: "binance kline continuity".to_owned(),
+                detail: format!(
+                    "row {index} opens at {} but expected {expected}",
+                    next.open_time_ms
+                ),
+            }
+            .into());
         }
-        .into());
+        Ok(())
     }
-    Ok(())
 }
 
 fn validate_observation_continuity(
@@ -477,7 +454,7 @@ fn decode_kline_archive_batches(
             let row = parse_archive_kline_row(&record)?;
             validate_kline_rows(slice::from_ref(&row), interval)?;
             if let Some(previous) = previous.as_ref() {
-                validate_adjacent_kline_rows(previous, &row, interval_ms, index)?;
+                previous.validate_next(&row, interval_ms, index)?;
             }
             let [mut observation] = mapper::into_observations(&row, instrument_key)?;
             observation.available_at = Some(available_at);
@@ -691,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_normalizes_microseconds_and_rejects_kline_gaps() {
+    fn archive_normalizes_rejects_gaps() {
         let first = "1735689600000000,4.1507,4.1587,4.1506,4.1554,539.23,\
                      1735689659999999,2240.39,13,401.82,1669.98,0";
         let second = "1735689660000000,4.1554,4.1600,4.1500,4.1580,100.0,\
@@ -719,7 +696,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archive_transport_requires_sidecar_and_streams_bounded_batches() {
+    async fn archive_requires_streams_batches() {
         let server = MockServer::start().await;
         let first = "1735689600000000,4.1507,4.1587,4.1506,4.1554,539.23,\
                      1735689659999999,2240.39,13,401.82,1669.98,0";
@@ -803,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn clock_sample_uses_request_midpoint_and_fails_closed_on_rtt_or_skew() {
+    fn clock_uses_rejects_skew() {
         let sent = Utc.with_ymd_and_hms(2026, 7, 18, 0, 0, 0).unwrap();
         let received = sent + Duration::milliseconds(200);
         let midpoint = sent + Duration::milliseconds(100);
@@ -821,7 +798,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_parses_klines_into_close_observations() {
+    async fn fetch_parses_klines_observations() {
         let server = MockServer::start().await;
         mock_server_time(&server, "/api/v3/time").await;
         Mock::given(method("GET"))
@@ -872,7 +849,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usdm_futures_fetch_uses_fapi_and_preserves_provenance() {
+    async fn usdm_futures_preserves_provenance() {
         let server = MockServer::start().await;
         mock_server_time(&server, "/fapi/v1/time").await;
         Mock::given(method("GET"))
@@ -902,7 +879,7 @@ mod tests {
             rest_url: server.uri(),
             ..BinanceSourceConfig::default()
         };
-        let source = BinanceKlineSource::connect_usdm_futures_with_budget(
+        let source = BinanceKlineSource::connect_usdm_futures(
             config.clone(),
             BinanceRequestBudget::new(&config).expect("budget"),
             test_compute(),
@@ -952,7 +929,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_paginates_until_short_page() {
+    async fn fetch_paginates_until_page() {
         let server = MockServer::start().await;
         mock_server_time(&server, "/api/v3/time").await;
         let range_start = Utc
@@ -1008,7 +985,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_excludes_current_open_kline_past_scan_boundary() {
+    async fn fetch_excludes_open_boundary() {
         let server = MockServer::start().await;
         mock_server_time(&server, "/api/v3/time").await;
         let boundary = Utc.with_ymd_and_hms(2026, 7, 17, 3, 9, 54).unwrap();

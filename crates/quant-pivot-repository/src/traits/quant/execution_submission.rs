@@ -19,7 +19,7 @@ use quant_pivot_models::{
 /// order, order intent, capital allocation, position ledger, recommendation, and
 /// reconciliation tables, so a submission's money state can never partially
 /// apply. Network I/O (venue sign + post) happens **between**
-/// [`create_entry_order_and_lock_capital`](Self::create_entry_order_and_lock_capital)
+/// [`create_entry_order`](Self::create_entry_order)
 /// and [`record_submission_result`](Self::record_submission_result), never
 /// inside a transaction (no DB lock is held across venue calls).
 #[async_trait::async_trait]
@@ -58,7 +58,7 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
     /// row is re-locked and its `AdmissionPending` claim re-verified inside this
     /// txn. The exact clear parity generation is verified under the global
     /// parity advisory lock in the same transaction.
-    async fn create_entry_order_and_lock_capital(
+    async fn create_entry_order(
         &self,
         order: NewExecutionOrder,
         feature_parity_state_id: &FeatureParityStateId,
@@ -94,7 +94,7 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
     /// per-intent position lot `Open -> Closing`, and advance the intent's exit
     /// FSM to `OrderSubmitted` recording `exit_reason`. No capital change — the
     /// lot's capital is already `Spent` from entry.
-    async fn create_exit_order_and_mark_closing(
+    async fn create_exit_order(
         &self,
         order: NewExecutionOrder,
         exit_reason: ExitReason,

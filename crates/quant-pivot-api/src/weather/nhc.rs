@@ -436,7 +436,7 @@ mod tests {
     use super::{NhcBasin, NhcSource};
 
     #[tokio::test]
-    async fn current_advisory_preserves_preposted_publication_and_nominal_validity() {
+    async fn advisory_preserves_preposted_validity() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovers_latest_hurdat_and_projects_one_storm() {
+    async fn discovers_latest_projects_storm() {
         let server = MockServer::start().await;
         let archive = format!(
             "<a href=\"{}/data/hurdat/hurdat2-1851-2025-02272026.txt\">latest</a>",

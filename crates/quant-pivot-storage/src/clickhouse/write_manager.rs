@@ -135,12 +135,11 @@ impl ChWriteManager {
     where
         T: RowOwned + RowWrite + Send + Sync,
     {
-        self.write_batch_borrowed_with_mode(client, table, rows, false)
-            .await
+        self.write_borrowed_mode(client, table, rows, false).await
     }
 
     /// Persist a borrowed batch through acknowledged `ClickHouse` async inserts.
-    pub async fn write_async_insert_batch_borrowed<T>(
+    pub async fn write_borrowed_batch<T>(
         &self,
         client: &Client,
         table: &'static str,
@@ -149,11 +148,10 @@ impl ChWriteManager {
     where
         T: RowOwned + RowWrite + Send + Sync,
     {
-        self.write_batch_borrowed_with_mode(client, table, rows, true)
-            .await
+        self.write_borrowed_mode(client, table, rows, true).await
     }
 
-    async fn write_batch_borrowed_with_mode<T>(
+    async fn write_borrowed_mode<T>(
         &self,
         client: &Client,
         table: &'static str,

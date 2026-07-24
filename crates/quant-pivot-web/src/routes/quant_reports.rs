@@ -256,7 +256,7 @@ pub async fn run_detail(
 ) -> Result<WebResponse<ReportRunView>, WebError> {
     let run = state
         .quant_reports
-        .find_report_run_by_id(&id)
+        .find_run_by_id(&id)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("report run not found: {id}")))?;
     Ok(WebResponse::ok(run.into()))

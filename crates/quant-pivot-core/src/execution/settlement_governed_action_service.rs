@@ -270,12 +270,12 @@ impl SettlementGovernedActionService {
         submission: SettlementChainSubmissionInfo,
         now: DateTime<Utc>,
     ) -> QuantResult<SettlementGovernedActionPassOutcome> {
-        self.metrics.observe_settlement_submission_age_ms(
+        self.metrics.observe_submission_age_ms(
             "governed_action",
             elapsed_ms_since(now, submission.created_at),
         );
         if submission.state == SettlementSubmissionState::AwaitingFinality {
-            self.metrics.observe_settlement_finality_lag_ms(
+            self.metrics.observe_finality_lag_ms(
                 "governed_action",
                 elapsed_ms_since(
                     now,
@@ -417,7 +417,7 @@ impl SettlementGovernedActionService {
                     .clone()
                     .ok_or_else(|| action_invariant("relayer action has no opaque identity"))?;
                 self.repository
-                    .record_action_relayer_chain_hash(RecordGovernedActionRelayerChainHash {
+                    .record_relayer_chain_hash(RecordGovernedActionRelayerChainHash {
                         settlement_governed_action_id: action.settlement_governed_action_id,
                         settlement_chain_submission_id: submission.settlement_chain_submission_id,
                         expected_relayer_transaction_id: transaction_id,

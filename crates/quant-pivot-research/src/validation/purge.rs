@@ -188,11 +188,7 @@ impl PurgedSplitter for DefaultPurgedSplitter {
                 purged_indices.push(i);
                 continue;
             }
-            if point_in_open_closed_union(
-                group.decision_at,
-                &embargo_intervals,
-                &mut embargo_cursor,
-            ) {
+            if point_in_interval_union(group.decision_at, &embargo_intervals, &mut embargo_cursor) {
                 embargoed_indices.push(i);
                 continue;
             }
@@ -245,7 +241,7 @@ fn overlaps_interval_union(
         .is_some_and(|interval| interval.start <= group.label_horizon_end)
 }
 
-fn point_in_open_closed_union(
+fn point_in_interval_union(
     point: DateTime<Utc>,
     intervals: &[TimeInterval],
     cursor: &mut usize,
@@ -341,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn purge_removes_overlapping_label_horizon_rows() {
+    fn purge_removes_overlapping_rows() {
         // 6 hourly groups, each maturing 90m forward: testing group index 3
         // must purge groups 2 and 4 (their intervals overlap group 3's), but
         // must NOT purge group 1 or 5 (no overlap: gap > 90m).
@@ -364,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_timestamp_only_purge_is_insufficient() {
+    fn feature_timestamp_only_insufficient() {
         // A splitter that ignored `label_horizon_end` (treating each group as a
         // zero-width instant) would find zero overlap between adjacent hourly
         // groups, since their `as_of`s never collide. The label-horizon-aware
@@ -381,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn embargo_removes_post_test_rows() {
+    fn embargo_removes_post_rows() {
         // 100 groups spaced 1 hour apart, non-overlapping labels (horizon = 0),
         // 2% embargo over a ~100h span ≈ 2h ≈ 2 groups after the test block.
         let groups: Vec<TimelineGroup> = (0..100)
@@ -408,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_embargo_pct_embargoes_nothing() {
+    fn zero_embargo_pct_nothing() {
         let groups: Vec<TimelineGroup> = (0..10)
             .map(|h| {
                 let as_of = Utc.timestamp_opt(1_700_000_000 + h * 3_600, 0).unwrap();
@@ -426,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn purged_splitter_is_agnostic_to_what_a_group_represents() {
+    fn purged_splitter_agnostic_represents() {
         // No field, method, or behavior here depends on "as_of" meaning a
         // cross-section — an abstract, business-meaning-free set of intervals
         // Per-lot groups must split identically to any other grouping scheme.
@@ -453,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn every_index_is_partitioned_exactly_once() {
+    fn index_partitioned_exactly_once() {
         let groups = overlapping_groups(12);
         let split = DefaultPurgedSplitter::new()
             .split(&groups, &[4, 5], &PurgeConfig::pct_only(dec!(0.05)))
@@ -478,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn interval_union_split_matches_the_quadratic_reference_semantics() {
+    fn interval_union_matches_semantics() {
         let groups = (0_i64..64)
             .map(|index| {
                 let decision_at = Utc.timestamp_opt(1_700_000_000 + index * 60, 0).unwrap();
@@ -527,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn embargo_duration_overflow_is_rejected_instead_of_saturated() {
+    fn embargo_duration_rejected_saturated() {
         let groups = overlapping_groups(2);
         let result = DefaultPurgedSplitter::new().split(
             &groups,
@@ -541,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_range_test_index_is_rejected_instead_of_panicking() {
+    fn out_range_rejected_panicking() {
         let groups = overlapping_groups(2);
         assert!(
             DefaultPurgedSplitter::new()

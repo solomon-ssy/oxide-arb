@@ -152,7 +152,7 @@ async fn seed_run(
     model_run_id
 }
 
-pub async fn quant_model_comparison_report_migration_and_crud() {
+pub async fn quant_model_comparison_crud() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -219,21 +219,21 @@ pub async fn quant_model_comparison_report_migration_and_crud() {
     assert_eq!(listed[0].comparison_report_id, comparison_report_id);
 
     let by_candidate = repo
-        .find_by_backtest_report_id(&candidate_report)
+        .find_by_backtest_report(&candidate_report)
         .await
         .expect("find by candidate report")
         .expect("row");
     assert_eq!(by_candidate.comparison_report_id, comparison_report_id);
 
     let by_baseline = repo
-        .find_by_backtest_report_id(&baseline_report)
+        .find_by_backtest_report(&baseline_report)
         .await
         .expect("find by baseline report")
         .expect("row");
     assert_eq!(by_baseline.comparison_report_id, comparison_report_id);
 
     let id_map = repo
-        .comparison_ids_for_backtest_reports(&[candidate_report, baseline_report])
+        .backtest_comparison_ids(&[candidate_report, baseline_report])
         .await
         .expect("batch lookup");
     assert_eq!(id_map.get(&candidate_report), Some(&comparison_report_id));

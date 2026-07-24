@@ -196,7 +196,7 @@ mod tests {
     use crate::types::Usd;
 
     #[test]
-    fn window_contract_is_closed_and_defaults_to_seven_days() {
+    fn window_contract_closed_days() {
         let default = serde_json::from_str::<DashboardOverviewQuery>("{}").expect("default window");
         assert_eq!(default.window, DashboardWindow::Days7);
         assert!(
@@ -206,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn section_serialization_is_explicitly_tagged() {
+    fn section_serialization_explicitly_tagged() {
         let section = DashboardSection::<u8>::Unavailable {
             reason_code: DashboardReasonCode::TimedOut,
         };
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn monetary_sections_preserve_decimal_precision_as_strings() {
+    fn monetary_sections_preserve_strings() {
         let section = DashboardSection::Ready {
             observed_at: Utc::now(),
             value: Usd::new(dec!(1234567890.12345678)),

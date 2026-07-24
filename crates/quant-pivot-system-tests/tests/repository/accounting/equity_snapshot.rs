@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
-    domain::quant::{NewEquitySnapshot, capital_drawdown},
+    domain::quant::{EquitySnapshotInfo, NewEquitySnapshot},
     enums::quant::AccountSource,
     types::{AccountSnapshotId, EquitySnapshotId, Usd},
 };
@@ -13,8 +13,7 @@ use quant_pivot_repository::{
 use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::execution_pg_seed::{
-        close_position_full, enable_entry_admission_for_test, seed_approved_intent,
-        seed_report_fixture,
+        close_position_full, enable_test_admission, seed_approved_intent, seed_report_fixture,
     },
 };
 use rust_decimal_macros::dec;
@@ -36,12 +35,12 @@ fn new_equity_snapshot(
         realized_pnl_cumulative_usd: Usd::ZERO,
         unrealized_pnl_usd: Usd::ZERO,
         high_water_mark_usd,
-        drawdown_pct: capital_drawdown(capital_base_usd, high_water_mark_usd),
+        drawdown_pct: EquitySnapshotInfo::drawdown(capital_base_usd, high_water_mark_usd),
         account_snapshot_ref,
     }
 }
 
-pub async fn equity_snapshot_repo_create_latest_hwm() {
+pub async fn equity_snapshot_repo_hwm() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgEquitySnapshotRepository::new(db);
@@ -61,7 +60,7 @@ pub async fn equity_snapshot_repo_create_latest_hwm() {
     assert_eq!(latest.equity_snapshot_id, first.equity_snapshot_id);
 }
 
-pub async fn high_water_mark_is_monotonic_max() {
+pub async fn high_water_mark_max() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgEquitySnapshotRepository::new(db);
@@ -100,7 +99,7 @@ pub async fn high_water_mark_is_monotonic_max() {
     assert_eq!(recovery.drawdown_pct, dec!(0));
 }
 
-pub async fn drawdown_pct_is_hwm_minus_equity_over_hwm() {
+pub async fn drawdown_pct_hwm_hwm() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgEquitySnapshotRepository::new(db);
@@ -127,14 +126,14 @@ pub async fn drawdown_pct_is_hwm_minus_equity_over_hwm() {
     assert_eq!(snapshot.drawdown_pct, dec!(0.2));
 }
 
-pub async fn realized_pnl_cumulative_matches_position_ledger_sum() {
+pub async fn realized_pnl_matches_sum() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let positions = PgPositionRepository::new(db.clone());
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
     let ids = seed_report_fixture(&db).await;
-    enable_entry_admission_for_test(&db, "pg-equity-snapshot-it-operator").await;
+    enable_test_admission(&db, "pg-equity-snapshot-it-operator").await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     close_position_full(&db, &submission, &ids, &intent_id, None).await;
 

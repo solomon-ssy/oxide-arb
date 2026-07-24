@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_steps_order_unresolvable_then_ack() {
+    fn recovery_steps_order_ack() {
         let summary = summary_from_parts(
             2,
             &kill_switch(KillSwitchState::ExecutionHalted, true),
@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_after_resolve_still_requires_ack() {
+    fn recovery_after_requires_ack() {
         let summary = summary_from_parts(
             0,
             &kill_switch(KillSwitchState::ExecutionHalted, true),

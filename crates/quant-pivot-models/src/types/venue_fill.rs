@@ -99,7 +99,7 @@ mod tests {
     };
 
     #[test]
-    fn fee_evidence_priority_is_strictly_monotonic() {
+    fn fee_evidence_priority_monotonic() {
         let prepared = FeeEvidencePriority::PreparedScheduleExpected;
         let authenticated = FeeEvidencePriority::AuthenticatedTradeReconstructed;
         let on_chain = FeeEvidencePriority::OnChainExact;

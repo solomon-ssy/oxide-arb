@@ -356,7 +356,7 @@ mod tests {
     use super::{Operation, RESOURCE_OPERATIONS, ResourceType, parse_permission};
 
     #[test]
-    fn resource_type_round_trips_via_from_str() {
+    fn resource_type_round_str() {
         for variant in ResourceType::iter() {
             let parsed = ResourceType::from_str(variant.as_str()).expect("known resource");
             assert_eq!(parsed, variant);
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_round_trips_via_from_str() {
+    fn operation_round_trips_str() {
         for variant in Operation::iter() {
             let parsed = Operation::from_str(variant.as_str()).expect("known operation");
             assert_eq!(parsed, variant);
@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn from_str_rejects_unknown_tokens() {
+    fn str_rejects_unknown_tokens() {
         assert!(ResourceType::from_str("nope").is_err());
         assert!(Operation::from_str("nope").is_err());
         assert!(parse_permission("nope", "read").is_err());
@@ -381,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_covers_every_resource_exactly_once() {
+    fn catalog_covers_resource_once() {
         let mut seen = HashSet::new();
         for (resource, _) in RESOURCE_OPERATIONS {
             assert!(seen.insert(*resource), "duplicate resource {resource:?}");
@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_operations_are_unique_per_resource() {
+    fn catalog_operations_unique_resource() {
         for (resource, ops) in RESOURCE_OPERATIONS {
             let mut seen = HashSet::new();
             for op in *ops {

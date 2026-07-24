@@ -185,44 +185,34 @@ pub struct ModelVersionParityEvidence<'a> {
     pub artifact_bytes_hash: &'a ContentHash,
 }
 
-pub fn model_version_parity_evidence_hash(
-    evidence: &ModelVersionParityEvidence<'_>,
-) -> Result<ContentHash, CanonicalDigestError> {
-    CanonicalDigest::content_hash_typed(
-        "quant-pivot/feature-parity/model-version-evidence",
-        1,
-        evidence,
-    )
+impl ModelVersionParityEvidence<'_> {
+    pub fn content_hash(&self) -> Result<ContentHash, CanonicalDigestError> {
+        CanonicalDigest::content_hash_typed(
+            "quant-pivot/feature-parity/model-version-evidence",
+            1,
+            self,
+        )
+    }
 }
 
 /// Exact immutable model-run fields covered by a frozen parity subject.
-pub fn model_run_parity_evidence_hash(
-    model_run_id: &ModelRunId,
-    input_hash: &ContentHash,
-    output_hash: &ContentHash,
-    model_version_id: &Option<ModelVersionId>,
-    decision_policy_snapshot_id: &DecisionPolicySnapshotId,
-) -> Result<ContentHash, CanonicalDigestError> {
-    #[derive(Serialize)]
-    struct Evidence<'a> {
-        model_run_id: &'a ModelRunId,
-        input_hash: &'a ContentHash,
-        output_hash: &'a ContentHash,
-        model_version_id: &'a Option<ModelVersionId>,
-        decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
-    }
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ModelRunParityEvidence<'a> {
+    pub model_run_id: &'a ModelRunId,
+    pub input_hash: &'a ContentHash,
+    pub output_hash: &'a ContentHash,
+    pub model_version_id: &'a Option<ModelVersionId>,
+    pub decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
+}
 
-    CanonicalDigest::content_hash_typed(
-        "quant-pivot/feature-parity/model-run-evidence",
-        1,
-        &Evidence {
-            model_run_id,
-            input_hash,
-            output_hash,
-            model_version_id,
-            decision_policy_snapshot_id,
-        },
-    )
+impl ModelRunParityEvidence<'_> {
+    pub fn content_hash(&self) -> Result<ContentHash, CanonicalDigestError> {
+        CanonicalDigest::content_hash_typed(
+            "quant-pivot/feature-parity/model-run-evidence",
+            1,
+            self,
+        )
+    }
 }
 
 /// Stable generation identifier for an immutable report artifact.

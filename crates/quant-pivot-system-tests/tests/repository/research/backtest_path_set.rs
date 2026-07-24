@@ -58,8 +58,7 @@ async fn seed_model_and_dataset(
     let window_start = Utc::now() - ChronoDuration::hours(2);
     let training_dataset_id = seed_training_dataset(db, rc_id, &model_spec_id, window_start).await;
     let (model_version_id, model_run_id) =
-        seed_model_version_and_run(db, rc_id, model_spec_id, &training_dataset_id, window_start)
-            .await;
+        seed_model_version_run(db, rc_id, model_spec_id, &training_dataset_id, window_start).await;
 
     (model_version_id, model_run_id, training_dataset_id)
 }
@@ -167,7 +166,7 @@ async fn seed_training_dataset(
     training_dataset_id
 }
 
-async fn seed_model_version_and_run(
+async fn seed_model_version_run(
     db: &DatabaseConnection,
     rc_id: &DecisionPolicySnapshotId,
     model_spec_id: ModelSpecId,
@@ -223,7 +222,7 @@ async fn seed_model_version_and_run(
     (model_version_id, model_run_id)
 }
 
-pub async fn quant_backtest_path_set_migration_and_crud() {
+pub async fn quant_backtest_set_crud() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;

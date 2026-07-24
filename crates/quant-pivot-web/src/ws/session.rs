@@ -67,7 +67,7 @@ pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: Sessi
     };
 
     if ctx.can_read_system {
-        let status = control_plane_status(&ctx);
+        let status = ctx.control_plane_status();
         if let Ok(data) = serde_json::to_value(&status) {
             let _ = session
                 .text(frame(&WsEnvelope::channel(WsChannel::SystemStatus, data)))
@@ -114,7 +114,7 @@ pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: Sessi
                     tracing::debug!(?session_id, "ws session timed out (no pong)");
                     break;
                 }
-                if !session_identity_active(&ctx).await {
+                if !ctx.session_identity_active().await {
                     tracing::debug!(?session_id, "ws session identity is no longer active");
                     break;
                 }
@@ -129,32 +129,34 @@ pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: Sessi
     let _ = session.close(None).await;
 }
 
-async fn session_identity_active(ctx: &SessionContext) -> bool {
-    if !ctx.state.casbin.is_healthy()
-        || ctx.state.casbin.authorization_revision() != ctx.authorization_revision
-        || ctx
-            .state
-            .jwt
-            .is_revoked(&ctx.access_jti)
+impl SessionContext {
+    async fn session_identity_active(&self) -> bool {
+        if !self.state.casbin.is_healthy()
+            || self.state.casbin.authorization_revision() != self.authorization_revision
+            || self
+                .state
+                .jwt
+                .is_revoked(&self.access_jti)
+                .await
+                .unwrap_or(true)
+            || !self
+                .state
+                .jwt
+                .family_active(&self.family_id)
+                .await
+                .unwrap_or(false)
+        {
+            return false;
+        }
+        let Ok(user_id) = self.user_id.parse() else {
+            return false;
+        };
+        self.state
+            .users
+            .find_by_id(&user_id)
             .await
-            .unwrap_or(true)
-        || !ctx
-            .state
-            .jwt
-            .family_active(&ctx.family_id)
-            .await
-            .unwrap_or(false)
-    {
-        return false;
+            .is_ok_and(|user| user.status == UserStatus::Active)
     }
-    let Ok(user_id) = ctx.user_id.parse() else {
-        return false;
-    };
-    ctx.state
-        .users
-        .find_by_id(&user_id)
-        .await
-        .is_ok_and(|user| user.status == UserStatus::Active)
 }
 
 async fn handle_command(
@@ -194,27 +196,31 @@ async fn handle_command(
                 .await;
             None
         }
-        ClientCommand::Sync => Some(sync_snapshot(ctx).await),
+        ClientCommand::Sync => Some((ctx).sync_snapshot().await),
         ClientCommand::Ping => Some(frame(&WsEnvelope::pong())),
     }
 }
 
-async fn sync_snapshot(ctx: &SessionContext) -> ByteString {
-    let mut snapshot = SyncSnapshot::default();
-    if ctx.can_read(ResourceType::System).await {
-        snapshot.system_status = Some(control_plane_status(ctx));
+impl SessionContext {
+    async fn sync_snapshot(&self) -> ByteString {
+        let mut snapshot = SyncSnapshot::default();
+        if self.can_read(ResourceType::System).await {
+            snapshot.system_status = Some((self).control_plane_status());
+        }
+        let data = serde_json::to_value(&snapshot).unwrap_or_else(|_| serde_json::json!({}));
+        frame(&WsEnvelope::sync(data))
     }
-    let data = serde_json::to_value(&snapshot).unwrap_or_else(|_| serde_json::json!({}));
-    frame(&WsEnvelope::sync(data))
 }
 
 fn frame(envelope: &WsEnvelope) -> ByteString {
     ByteString::from(envelope.to_text())
 }
 
-fn control_plane_status(ctx: &SessionContext) -> SystemStatusView {
-    SystemStatusView {
-        runtime: ctx.state.control.system_status(),
-        capabilities: ctx.state.capabilities.capability_snapshot(),
+impl SessionContext {
+    fn control_plane_status(&self) -> SystemStatusView {
+        SystemStatusView {
+            runtime: self.state.control.system_status(),
+            capabilities: self.state.capabilities.capability_snapshot(),
+        }
     }
 }

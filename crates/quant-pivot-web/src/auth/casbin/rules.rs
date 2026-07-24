@@ -82,10 +82,7 @@ impl Rule {
     /// `super_admin`. This keeps governed handlers uniform — they always read a
     /// resolved [`ActingRole`](crate::extractors::ActingRole) from extensions.
     #[must_use]
-    pub fn resolve_super_admin_acting_role(
-        roles: &ActorRoles,
-        acting_role: Option<&str>,
-    ) -> String {
+    pub fn resolve_admin_role(roles: &ActorRoles, acting_role: Option<&str>) -> String {
         acting_role
             .map(str::trim)
             .filter(|role| !role.is_empty())
@@ -174,20 +171,22 @@ mod tests {
     use super::{ActorRoles, CasbinService, Claims, Rule, WebError};
     use crate::jwt::TokenUse;
 
-    fn claims() -> Claims {
-        Claims {
-            jti: "jti".to_owned(),
-            sub: "user-1".to_owned(),
-            iss: "quant-pivot".to_owned(),
-            aud: "quant-pivot-web".to_owned(),
-            iat: 0,
-            nbf: 0,
-            exp: 0,
-            username: "tester".to_owned(),
-            token_use: TokenUse::Access,
-            family_id: "family-1".to_owned(),
-            session_exp: 4_102_444_800,
-            generation: 0,
+    impl Claims {
+        fn rules_fixture() -> Self {
+            Self {
+                jti: "jti".to_owned(),
+                sub: "user-1".to_owned(),
+                iss: "quant-pivot".to_owned(),
+                aud: "quant-pivot-web".to_owned(),
+                iat: 0,
+                nbf: 0,
+                exp: 0,
+                username: "tester".to_owned(),
+                token_use: TokenUse::Access,
+                family_id: "family-1".to_owned(),
+                session_exp: 4_102_444_800,
+                generation: 0,
+            }
         }
     }
 
@@ -218,39 +217,39 @@ mod tests {
     async fn authenticated_only_always_allows() {
         let casbin = CasbinService::in_memory().await;
         let outcome = Rule::AuthenticatedOnly
-            .evaluate(&claims(), &roles(&[]), &casbin, None)
+            .evaluate(&Claims::rules_fixture(), &roles(&[]), &casbin, None)
             .await
             .expect("authenticated-only admits any actor");
         assert!(outcome.acting_role.is_none());
     }
 
     #[actix_web::test]
-    async fn resource_op_allows_with_matching_grant_and_denies_without() {
+    async fn resource_allows_denies_without() {
         let casbin = CasbinService::in_memory().await;
         casbin.add_test_grouping("user-1", "ops").await;
         casbin.add_test_policy("ops", "user", "read").await;
         let rule = Rule::ResourceOp(ResourceType::User, Operation::Read);
 
         assert!(
-            rule.evaluate(&claims(), &roles(&[]), &casbin, None)
+            rule.evaluate(&Claims::rules_fixture(), &roles(&[]), &casbin, None)
                 .await
                 .is_ok(),
             "a granted (resource, op) is allowed"
         );
 
         let denied = Rule::ResourceOp(ResourceType::User, Operation::Delete)
-            .evaluate(&claims(), &roles(&[]), &casbin, None)
+            .evaluate(&Claims::rules_fixture(), &roles(&[]), &casbin, None)
             .await;
         assert!(matches!(denied, Err(WebError::Forbidden)));
     }
 
     #[actix_web::test]
-    async fn acting_role_missing_is_bad_request() {
+    async fn acting_role_missing_request() {
         let casbin = CasbinService::in_memory().await;
         let result =
             Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)
                 .evaluate(
-                    &claims(),
+                    &Claims::rules_fixture(),
                     &roles(&[("risk_owner", RoleStatus::Enabled)]),
                     &casbin,
                     None,
@@ -260,7 +259,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn acting_role_not_held_is_forbidden() {
+    async fn acting_role_not_forbidden() {
         let casbin = CasbinService::in_memory().await;
         casbin
             .add_test_policy(
@@ -272,7 +271,7 @@ mod tests {
         let result =
             Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)
                 .evaluate(
-                    &claims(),
+                    &Claims::rules_fixture(),
                     &roles(&[("viewer", RoleStatus::Enabled)]),
                     &casbin,
                     Some("risk_owner"),
@@ -282,7 +281,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn acting_role_held_but_disabled_is_forbidden() {
+    async fn acting_role_held_forbidden() {
         let casbin = CasbinService::in_memory().await;
         casbin
             .add_test_policy(
@@ -294,7 +293,7 @@ mod tests {
         let result =
             Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)
                 .evaluate(
-                    &claims(),
+                    &Claims::rules_fixture(),
                     &roles(&[("risk_owner", RoleStatus::Disabled)]),
                     &casbin,
                     Some("risk_owner"),
@@ -304,12 +303,12 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn acting_role_held_without_policy_is_forbidden() {
+    async fn acting_role_without_forbidden() {
         let casbin = CasbinService::in_memory().await;
         let result =
             Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)
                 .evaluate(
-                    &claims(),
+                    &Claims::rules_fixture(),
                     &roles(&[("risk_owner", RoleStatus::Enabled)]),
                     &casbin,
                     Some("risk_owner"),
@@ -319,7 +318,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn acting_role_held_with_policy_is_allowed_and_returns_role() {
+    async fn acting_role_returns_role() {
         let casbin = CasbinService::in_memory().await;
         casbin
             .add_test_policy(
@@ -331,7 +330,7 @@ mod tests {
         let outcome =
             Rule::ActingRoleGoverned(ResourceType::DecisionPolicySnapshot, Operation::Activate)
                 .evaluate(
-                    &claims(),
+                    &Claims::rules_fixture(),
                     &roles(&[("risk_owner", RoleStatus::Enabled)]),
                     &casbin,
                     Some("  risk_owner  "),
@@ -342,11 +341,11 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn deferred_missing_acting_role_is_bad_request() {
+    async fn deferred_missing_acting_request() {
         let casbin = CasbinService::in_memory().await;
         let result = Rule::ActingRoleDeferred(ResourceType::System)
             .evaluate(
-                &claims(),
+                &Claims::rules_fixture(),
                 &roles(&[("operator", RoleStatus::Enabled)]),
                 &casbin,
                 None,
@@ -356,11 +355,11 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn deferred_acting_role_not_held_is_forbidden() {
+    async fn deferred_acting_not_forbidden() {
         let casbin = CasbinService::in_memory().await;
         let result = Rule::ActingRoleDeferred(ResourceType::System)
             .evaluate(
-                &claims(),
+                &Claims::rules_fixture(),
                 &roles(&[("viewer", RoleStatus::Enabled)]),
                 &casbin,
                 Some("operator"),
@@ -370,13 +369,13 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn deferred_held_role_resolves_without_op_check() {
+    async fn deferred_resolves_without_check() {
         // No policy is registered: the deferred rule authorizes the governed
         // preconditions only and leaves the op-level check to the handler.
         let casbin = CasbinService::in_memory().await;
         let outcome = Rule::ActingRoleDeferred(ResourceType::System)
             .evaluate(
-                &claims(),
+                &Claims::rules_fixture(),
                 &roles(&[("operator", RoleStatus::Enabled)]),
                 &casbin,
                 Some("  operator  "),

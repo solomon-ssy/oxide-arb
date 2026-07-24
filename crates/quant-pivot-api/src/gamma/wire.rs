@@ -253,20 +253,20 @@ mod tests {
     use super::{GammaStringList, KeysetEventsPage, WireEvent, WireMarket};
 
     #[test]
-    fn string_list_deserializes_json_array() {
+    fn string_list_deserializes_array() {
         let list: GammaStringList = serde_json::from_str(r#"["Yes", "No"]"#).expect("array form");
         assert_eq!(list.as_slice(), &["Yes", "No"]);
     }
 
     #[test]
-    fn string_list_deserializes_encoded_json_string() {
+    fn string_list_deserializes_string() {
         let list: GammaStringList =
             serde_json::from_str(r#""[\"111\", \"222\"]""#).expect("encoded form");
         assert_eq!(list.as_slice(), &["111", "222"]);
     }
 
     #[test]
-    fn string_list_rejects_invalid_encoded_json() {
+    fn string_rejects_invalid_json() {
         let err =
             serde_json::from_str::<GammaStringList>(r#""not-json""#).expect_err("must fail closed");
         assert!(err.to_string().contains("not valid JSON array"));
@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn event_list_deserializes_for_incremental_endpoint() {
+    fn event_list_deserializes_endpoint() {
         let events: Vec<WireEvent> = serde_json::from_str(
             r#"[{
                 "id": "evt-1",

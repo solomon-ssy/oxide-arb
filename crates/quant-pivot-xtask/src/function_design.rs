@@ -1,0 +1,1463 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env, fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result, bail};
+use proc_macro2::{Ident, Span, TokenTree};
+use quote::ToTokens;
+use syn::{
+    Attribute, Block, Expr, File, FnArg, GenericArgument, ImplItemFn, Item, ItemEnum, ItemFn,
+    ItemImpl, ItemMacro, ItemMod, ItemStruct, ItemTrait, ItemUnion, Pat, PathArguments, ReturnType,
+    Signature, Stmt, TraitItemFn, Type, TypeParamBound, UseTree, Visibility,
+    visit::{self, Visit},
+};
+
+const NAME_RULE: &str = "FD001";
+const FACTORY_RULE: &str = "FD002";
+const UNARY_RULE: &str = "FD003";
+const OPERAND_RULE: &str = "FD004";
+const FORWARD_RULE: &str = "FD005";
+const CONVERSION_RULE: &str = "FD006";
+const REPOSITORY_RULE: &str = "FD007";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Severity {
+    Hard,
+    Review,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Finding {
+    severity: Severity,
+    rule: &'static str,
+    category: &'static str,
+    crate_name: String,
+    path: PathBuf,
+    line: usize,
+    item: String,
+    detail: String,
+}
+
+impl Finding {
+    fn render(&self) -> String {
+        format!(
+            "{} [{}] {}:{} `{}`: {}",
+            self.rule,
+            self.category,
+            self.path.display(),
+            self.line,
+            self.item,
+            self.detail
+        )
+    }
+}
+
+struct AuditReport {
+    findings: Vec<Finding>,
+}
+
+impl AuditReport {
+    fn hard_findings(&self) -> impl Iterator<Item = &Finding> {
+        self.findings
+            .iter()
+            .filter(|finding| finding.severity == Severity::Hard)
+    }
+
+    fn review_findings(&self) -> impl Iterator<Item = &Finding> {
+        self.findings
+            .iter()
+            .filter(|finding| finding.severity == Severity::Review)
+    }
+}
+
+struct SourceUnit {
+    crate_name: String,
+    target_name: String,
+    path: PathBuf,
+    file: File,
+    imports: ImportScope,
+    generated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportOrigin {
+    Local,
+    External,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+struct ImportBinding {
+    canonical: String,
+    origin: ImportOrigin,
+}
+
+type ImportScope = BTreeMap<String, ImportBinding>;
+
+#[derive(Default)]
+struct TypeIndex {
+    nominals: BTreeMap<String, BTreeSet<String>>,
+    traits: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl TypeIndex {
+    fn add_nominal(&mut self, name: String, target_name: &str) {
+        self.nominals
+            .entry(name)
+            .or_default()
+            .insert(target_name.to_owned());
+    }
+
+    fn add_trait(&mut self, name: String, crate_name: &str) {
+        self.traits
+            .entry(name)
+            .or_default()
+            .insert(crate_name.to_owned());
+    }
+
+    fn owns_nominal(&self, name: &str, target_name: &str) -> bool {
+        self.nominals
+            .get(name)
+            .is_some_and(|owners| owners.contains(target_name))
+    }
+}
+
+pub fn run() -> Result<()> {
+    let workspace_root = workspace_root()?;
+    let report = audit_workspace(&workspace_root)?;
+    report.render_findings();
+
+    let hard_count = report.hard_findings().count();
+    if hard_count == 0 {
+        println!("function design audit passed");
+        return Ok(());
+    }
+
+    bail!("function design audit found {hard_count} hard violation(s)")
+}
+
+pub fn validate_workspace(workspace_root: &Path) -> Result<Vec<String>> {
+    Ok(audit_workspace(workspace_root)?
+        .hard_findings()
+        .map(Finding::render)
+        .collect())
+}
+
+fn workspace_root() -> Result<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .context("resolve workspace root from quant-pivot-xtask manifest")
+}
+
+fn audit_workspace(workspace_root: &Path) -> Result<AuditReport> {
+    let mut paths = Vec::new();
+    collect_rust_sources(&workspace_root.join("crates"), &mut paths)?;
+    paths.sort();
+
+    let mut sources = Vec::with_capacity(paths.len());
+    for path in paths {
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("read Rust source {}", path.display()))?;
+        let file = syn::parse_file(&source)
+            .with_context(|| format!("parse Rust source {}", path.display()))?;
+        let relative = path
+            .strip_prefix(workspace_root)
+            .unwrap_or(&path)
+            .to_path_buf();
+        let crate_name = crate_name(&relative)
+            .with_context(|| format!("resolve crate for {}", relative.display()))?;
+        let target_name = target_name(&relative, &crate_name);
+        let imports = collect_imports(&file.items, &crate_name);
+        let generated = file.attrs.iter().any(|attribute| {
+            attribute
+                .meta
+                .to_token_stream()
+                .to_string()
+                .contains("@generated by sea-orm-codegen")
+        });
+        sources.push(SourceUnit {
+            crate_name,
+            target_name,
+            path: relative,
+            file,
+            imports,
+            generated,
+        });
+    }
+
+    Ok(audit_sources(&sources))
+}
+
+fn audit_sources(sources: &[SourceUnit]) -> AuditReport {
+    let mut index = TypeIndex::default();
+    for source in sources {
+        let mut collector = DeclarationCollector {
+            crate_name: &source.crate_name,
+            target_name: &source.target_name,
+            index: &mut index,
+        };
+        collector.visit_file(&source.file);
+    }
+
+    let mut findings = Vec::new();
+    for source in sources {
+        if source.generated {
+            continue;
+        }
+        let mut visitor = FunctionVisitor {
+            source,
+            index: &index,
+            impl_owner: None,
+            trait_impl: false,
+            external_trait: false,
+            import_scopes: vec![source.imports.clone()],
+            findings: Vec::new(),
+        };
+        visitor.visit_file(&source.file);
+        findings.extend(visitor.findings);
+    }
+    findings.sort();
+
+    AuditReport { findings }
+}
+
+impl AuditReport {
+    fn render_findings(&self) {
+        let mut groups = BTreeMap::<(Severity, &str, &str), Vec<&Finding>>::new();
+        for finding in &self.findings {
+            groups
+                .entry((finding.severity, finding.crate_name.as_str(), finding.rule))
+                .or_default()
+                .push(finding);
+        }
+
+        for ((severity, crate_name, rule), findings) in groups {
+            println!(
+                "\n{} {crate_name} {rule} ({} finding(s))",
+                match severity {
+                    Severity::Hard => "hard",
+                    Severity::Review => "review",
+                },
+                findings.len()
+            );
+            for finding in findings {
+                println!("- {}", finding.render());
+            }
+        }
+
+        println!(
+            "\nfunction design summary: {} hard, {} review",
+            self.hard_findings().count(),
+            self.review_findings().count()
+        );
+    }
+}
+
+fn collect_rust_sources(directory: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("read source directory {}", directory.display()))?
+    {
+        let entry = entry.with_context(|| format!("read entry in {}", directory.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_sources(&path, output)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            output.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn crate_name(path: &Path) -> Result<String> {
+    path.components()
+        .nth(1)
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .context("Rust source is not below crates/<crate>")
+}
+
+fn target_name(path: &Path, crate_name: &str) -> String {
+    let target_kind = path
+        .components()
+        .nth(2)
+        .map(|component| component.as_os_str().to_string_lossy())
+        .unwrap_or_default();
+    match target_kind.as_ref() {
+        "tests" | "benches" | "examples" => format!("{crate_name}:{target_kind}"),
+        _ => format!("{crate_name}:src"),
+    }
+}
+
+struct DeclarationCollector<'a> {
+    crate_name: &'a str,
+    target_name: &'a str,
+    index: &'a mut TypeIndex,
+}
+
+impl Visit<'_> for DeclarationCollector<'_> {
+    fn visit_item_struct(&mut self, item: &ItemStruct) {
+        self.index
+            .add_nominal(item.ident.to_string(), self.target_name);
+        visit::visit_item_struct(self, item);
+    }
+
+    fn visit_item_enum(&mut self, item: &ItemEnum) {
+        self.index
+            .add_nominal(item.ident.to_string(), self.target_name);
+        visit::visit_item_enum(self, item);
+    }
+
+    fn visit_item_union(&mut self, item: &ItemUnion) {
+        self.index
+            .add_nominal(item.ident.to_string(), self.target_name);
+        visit::visit_item_union(self, item);
+    }
+
+    fn visit_item_trait(&mut self, item: &ItemTrait) {
+        self.index
+            .add_trait(item.ident.to_string(), self.crate_name);
+        visit::visit_item_trait(self, item);
+    }
+
+    fn visit_item_macro(&mut self, item: &ItemMacro) {
+        collect_macro_nominals(
+            item.mac.tokens.clone().into_iter(),
+            self.target_name,
+            self.index,
+        );
+        collect_invocation_nominal(item, self.target_name, self.index);
+        visit::visit_item_macro(self, item);
+    }
+}
+
+fn collect_macro_nominals(
+    tokens: impl Iterator<Item = TokenTree>,
+    crate_name: &str,
+    index: &mut TypeIndex,
+) {
+    let tokens = tokens.collect::<Vec<_>>();
+    for pair in tokens.windows(2) {
+        if let [TokenTree::Ident(keyword), TokenTree::Ident(name)] = pair
+            && matches!(keyword.to_string().as_str(), "struct" | "enum" | "union")
+        {
+            index.add_nominal(name.to_string(), crate_name);
+        }
+    }
+    for token in tokens {
+        if let TokenTree::Group(group) = token {
+            collect_macro_nominals(group.stream().into_iter(), crate_name, index);
+        }
+    }
+}
+
+fn collect_invocation_nominal(item: &ItemMacro, crate_name: &str, index: &mut TypeIndex) {
+    let Some(macro_name) = item.mac.path.segments.last() else {
+        return;
+    };
+    let macro_name = macro_name.ident.to_string();
+    let declares_nominal = macro_name.ends_with("_newtype")
+        || macro_name.ends_with("_id")
+        || macro_name.ends_with("_identity")
+        || macro_name.ends_with("_request")
+        || matches!(
+            macro_name.as_str(),
+            "info_from_model" | "validated_text_seaorm"
+        );
+    if !declares_nominal {
+        return;
+    }
+    if let Some(name) = first_type_ident(item.mac.tokens.clone().into_iter()) {
+        index.add_nominal(name, crate_name);
+    }
+}
+
+fn first_type_ident(tokens: impl Iterator<Item = TokenTree>) -> Option<String> {
+    for token in tokens {
+        match token {
+            TokenTree::Ident(ident)
+                if ident
+                    .to_string()
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_uppercase) =>
+            {
+                return Some(ident.to_string());
+            }
+            TokenTree::Group(group) => {
+                if let Some(ident) = first_type_ident(group.stream().into_iter()) {
+                    return Some(ident);
+                }
+            }
+            TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+        }
+    }
+    None
+}
+
+struct FunctionVisitor<'a> {
+    source: &'a SourceUnit,
+    index: &'a TypeIndex,
+    impl_owner: Option<String>,
+    trait_impl: bool,
+    external_trait: bool,
+    import_scopes: Vec<ImportScope>,
+    findings: Vec<Finding>,
+}
+
+impl FunctionVisitor<'_> {
+    fn inspect_free(&mut self, item: &ItemFn) {
+        if function_exempt(&item.sig, &item.attrs) {
+            return;
+        }
+        self.inspect_name(&item.sig, item.sig.ident.span());
+
+        let typed = typed_inputs(&item.sig);
+        let output = direct_output(&item.sig, None);
+        if typed.is_empty()
+            && let Some(output) = output
+            && self.is_local_nominal(&output)
+        {
+            self.push(
+                Severity::Hard,
+                FACTORY_RULE,
+                "zero-argument factory",
+                &item.sig,
+                item.sig.ident.span(),
+                format!(
+                    "returns locally owned `{output}`; make this an associated constructor or implement `Default`"
+                ),
+            );
+        }
+
+        if typed.len() == 1
+            && let Some(input) = direct_type_name(typed[0].1, None)
+            && self.is_workspace_nominal(&input)
+        {
+            let severity = if self.is_local_nominal(&input) {
+                Severity::Hard
+            } else {
+                Severity::Review
+            };
+            self.push(
+                severity,
+                UNARY_RULE,
+                "unary ownership",
+                &item.sig,
+                item.sig.ident.span(),
+                format!(
+                    "takes only `{input}`; move behavior to its real owner or use a standard conversion trait"
+                ),
+            );
+        }
+
+        self.inspect_operands(&item.sig, item.sig.ident.span());
+        self.inspect_conversion(&item.sig, None, item.sig.ident.span());
+        self.inspect_repository_owner(&item.sig, item.sig.ident.span());
+        if !self.trait_impl
+            && matches!(item.vis, Visibility::Inherited)
+            && is_exact_forward(&item.sig, &item.block)
+        {
+            self.push(
+                Severity::Hard,
+                FORWARD_RULE,
+                "exact forwarding",
+                &item.sig,
+                item.sig.ident.span(),
+                "is a private exact forwarding wrapper; inline the call at its callers".to_owned(),
+            );
+        } else if !self.trait_impl && is_exact_forward(&item.sig, &item.block) {
+            self.push(
+                Severity::Review,
+                FORWARD_RULE,
+                "public forwarding",
+                &item.sig,
+                item.sig.ident.span(),
+                "forwards parameters exactly; retain only if it owns a real boundary contract"
+                    .to_owned(),
+            );
+        }
+    }
+
+    fn inspect_method(&mut self, item: &ImplItemFn) {
+        if self.external_trait || function_exempt(&item.sig, &item.attrs) {
+            return;
+        }
+        self.inspect_name(&item.sig, item.sig.ident.span());
+        let impl_owner = self.impl_owner.clone();
+        self.inspect_conversion(&item.sig, impl_owner.as_deref(), item.sig.ident.span());
+        if !self.trait_impl
+            && matches!(item.vis, Visibility::Inherited)
+            && is_exact_forward(&item.sig, &item.block)
+        {
+            self.push(
+                Severity::Hard,
+                FORWARD_RULE,
+                "exact forwarding",
+                &item.sig,
+                item.sig.ident.span(),
+                "is a private exact forwarding wrapper; inline the call at its callers".to_owned(),
+            );
+        } else if !self.trait_impl && is_exact_forward(&item.sig, &item.block) {
+            self.push(
+                Severity::Review,
+                FORWARD_RULE,
+                "public forwarding",
+                &item.sig,
+                item.sig.ident.span(),
+                "forwards parameters exactly; retain only if it owns a real boundary contract"
+                    .to_owned(),
+            );
+        }
+    }
+
+    fn inspect_trait_method(&mut self, item: &TraitItemFn) {
+        if !function_exempt(&item.sig, &item.attrs) {
+            self.inspect_name(&item.sig, item.sig.ident.span());
+        }
+    }
+
+    fn inspect_name(&mut self, signature: &Signature, span: Span) {
+        let name = signature.ident.to_string();
+        self.inspect_name_value(&name, span);
+    }
+
+    fn inspect_name_value(&mut self, name: &str, span: Span) {
+        let words = snake_words(name);
+        if words > 4 {
+            self.findings.push(Finding {
+                severity: Severity::Hard,
+                rule: NAME_RULE,
+                category: "function naming",
+                crate_name: self.source.crate_name.clone(),
+                path: self.source.path.clone(),
+                line: span.start().line,
+                item: name.to_owned(),
+                detail: format!(
+                    "contains {words} snake_case words; user-authored Rust function names may contain at most four"
+                ),
+            });
+        }
+    }
+
+    fn inspect_operands(&mut self, signature: &Signature, span: Span) {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for (_, ty) in typed_inputs(signature) {
+            if let Some(name) = direct_type_name(ty, None)
+                && self.is_local_nominal(&name)
+            {
+                *counts.entry(name).or_default() += 1;
+            }
+        }
+        for (name, count) in counts {
+            if count >= 2 {
+                self.push(
+                    Severity::Hard,
+                    OPERAND_RULE,
+                    "same-type operands",
+                    signature,
+                    span,
+                    format!(
+                        "takes {count} locally owned `{name}` operands; use a receiver, associated function, or standard operator trait"
+                    ),
+                );
+            }
+        }
+    }
+
+    fn inspect_conversion(&mut self, signature: &Signature, impl_owner: Option<&str>, span: Span) {
+        if signature.asyncness.is_some() || !signature.generics.params.is_empty() {
+            return;
+        }
+        let name = signature.ident.to_string();
+        let conversion_name =
+            name.starts_with("try_to_") || name.starts_with("to_") || name.starts_with("into_");
+        if !conversion_name {
+            return;
+        }
+
+        let typed = typed_inputs(signature);
+        let source = if signature.receiver().is_some() && typed.is_empty() {
+            impl_owner.map(str::to_owned)
+        } else if signature.receiver().is_none() && typed.len() == 1 {
+            direct_type_name(typed[0].1, None)
+        } else {
+            None
+        };
+        let destination = conversion_output(signature, impl_owner);
+        if let (Some(source), Some(destination)) = (source, destination)
+            && source != destination
+            && self.is_workspace_nominal(&source)
+            && self.is_workspace_nominal(&destination)
+        {
+            self.push(
+                Severity::Hard,
+                CONVERSION_RULE,
+                "manual conversion",
+                signature,
+                span,
+                format!(
+                    "manually converts `{source}` to `{destination}`; implement `From`/`TryFrom` on the destination"
+                ),
+            );
+        }
+    }
+
+    fn inspect_repository_owner(&mut self, signature: &Signature, span: Span) {
+        if self.source.crate_name != "quant-pivot-repository" {
+            return;
+        }
+        let executor = typed_inputs(signature)
+            .into_iter()
+            .find_map(|(_, ty)| database_executor_name(ty));
+        if let Some(executor) = executor {
+            let reusable_kernel = !signature.generics.params.is_empty();
+            let concrete_executor = executor != "ConnectionTrait";
+            let domain_specific = typed_inputs(signature)
+                .into_iter()
+                .filter(|(_, ty)| database_executor_name(ty).is_none())
+                .any(|(_, ty)| self.type_has_workspace_nominal(ty))
+                || successful_output(signature)
+                    .is_some_and(|ty| self.type_has_workspace_nominal(ty));
+            self.push(
+                if !reusable_kernel && (concrete_executor || domain_specific) {
+                    Severity::Hard
+                } else {
+                    Severity::Review
+                },
+                REPOSITORY_RULE,
+                "repository I/O ownership",
+                signature,
+                span,
+                format!(
+                    "accepts concrete repository executor `{executor}`; move the operation into its concrete repository/adapter impl"
+                ),
+            );
+        }
+    }
+
+    fn type_has_workspace_nominal(&self, ty: &Type) -> bool {
+        let mut names = Vec::new();
+        collect_type_names(ty, &mut names);
+        names
+            .into_iter()
+            .any(|name| self.is_workspace_nominal(&name))
+    }
+
+    fn binding(&self, name: &str) -> Option<&ImportBinding> {
+        self.import_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+    }
+
+    fn resolved_name(&self, name: &str) -> String {
+        self.binding(name)
+            .map_or_else(|| name.to_owned(), |binding| binding.canonical.clone())
+    }
+
+    fn is_local_nominal(&self, name: &str) -> bool {
+        if self
+            .binding(name)
+            .is_some_and(|binding| binding.origin == ImportOrigin::External)
+        {
+            return false;
+        }
+        let resolved = self.resolved_name(name);
+        self.index.owns_nominal(&resolved, &self.source.target_name)
+    }
+
+    fn is_workspace_nominal(&self, name: &str) -> bool {
+        let resolved = self.resolved_name(name);
+        self.index.nominals.contains_key(&resolved)
+    }
+
+    fn push(
+        &mut self,
+        severity: Severity,
+        rule: &'static str,
+        category: &'static str,
+        signature: &Signature,
+        span: Span,
+        detail: String,
+    ) {
+        self.findings.push(Finding {
+            severity,
+            rule,
+            category,
+            crate_name: self.source.crate_name.clone(),
+            path: self.source.path.clone(),
+            line: span.start().line,
+            item: signature.ident.to_string(),
+            detail,
+        });
+    }
+}
+
+impl<'ast> Visit<'ast> for FunctionVisitor<'_> {
+    fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
+        let previous_owner = self.impl_owner.clone();
+        let previous_trait_impl = self.trait_impl;
+        let previous_trait = self.external_trait;
+        self.impl_owner = direct_type_name(&item.self_ty, None);
+        self.trait_impl = item.trait_.is_some();
+        self.external_trait = item
+            .trait_
+            .as_ref()
+            .and_then(|(_, path, _)| path.segments.last())
+            .is_some_and(|segment| {
+                self.binding(&segment.ident.to_string())
+                    .is_some_and(|binding| binding.origin == ImportOrigin::External)
+                    || !self.index.traits.contains_key(&segment.ident.to_string())
+            });
+        visit::visit_item_impl(self, item);
+        self.impl_owner = previous_owner;
+        self.trait_impl = previous_trait_impl;
+        self.external_trait = previous_trait;
+    }
+
+    fn visit_item_fn(&mut self, item: &'ast ItemFn) {
+        self.inspect_free(item);
+        visit::visit_item_fn(self, item);
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast ImplItemFn) {
+        self.inspect_method(item);
+        visit::visit_impl_item_fn(self, item);
+    }
+
+    fn visit_trait_item_fn(&mut self, item: &'ast TraitItemFn) {
+        self.inspect_trait_method(item);
+        visit::visit_trait_item_fn(self, item);
+    }
+
+    fn visit_item_mod(&mut self, item: &'ast ItemMod) {
+        let Some((_, items)) = &item.content else {
+            return;
+        };
+        self.import_scopes
+            .push(collect_imports(items, &self.source.crate_name));
+        for item in items {
+            self.visit_item(item);
+        }
+        self.import_scopes.pop();
+    }
+
+    fn visit_item_macro(&mut self, item: &'ast ItemMacro) {
+        let mut names = Vec::new();
+        collect_macro_function_names(item.mac.tokens.clone().into_iter(), &mut names);
+        for name in names {
+            self.inspect_name_value(&name.to_string(), name.span());
+        }
+        visit::visit_item_macro(self, item);
+    }
+}
+
+fn collect_macro_function_names(tokens: impl Iterator<Item = TokenTree>, names: &mut Vec<Ident>) {
+    let tokens = tokens.collect::<Vec<_>>();
+    for pair in tokens.windows(2) {
+        if let [TokenTree::Ident(keyword), TokenTree::Ident(name)] = pair
+            && keyword == "fn"
+        {
+            names.push(name.clone());
+        }
+    }
+    for token in tokens {
+        if let TokenTree::Group(group) = token {
+            collect_macro_function_names(group.stream().into_iter(), names);
+        }
+    }
+}
+
+fn function_exempt(signature: &Signature, attributes: &[Attribute]) -> bool {
+    signature.ident == "main"
+        || signature.abi.is_some()
+        || attributes.iter().any(|attribute| {
+            attribute.path().segments.last().is_some_and(|segment| {
+                matches!(
+                    segment.ident.to_string().as_str(),
+                    "no_mangle"
+                        | "export_name"
+                        | "proc_macro"
+                        | "proc_macro_attribute"
+                        | "proc_macro_derive"
+                )
+            })
+        })
+}
+
+fn snake_words(name: &str) -> usize {
+    name.trim_start_matches("r#")
+        .split('_')
+        .filter(|word| !word.is_empty())
+        .count()
+}
+
+fn typed_inputs(signature: &Signature) -> Vec<(&Pat, &Type)> {
+    signature
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            FnArg::Receiver(_) => None,
+            FnArg::Typed(input) => Some((input.pat.as_ref(), input.ty.as_ref())),
+        })
+        .collect()
+}
+
+fn direct_output(signature: &Signature, impl_owner: Option<&str>) -> Option<String> {
+    let ReturnType::Type(_, ty) = &signature.output else {
+        return None;
+    };
+    direct_type_name(ty, impl_owner)
+}
+
+fn conversion_output(signature: &Signature, impl_owner: Option<&str>) -> Option<String> {
+    let ReturnType::Type(_, ty) = &signature.output else {
+        return None;
+    };
+    if let Some(name) = direct_type_name(ty, impl_owner) {
+        return Some(name);
+    }
+    let Type::Path(path) = peel_type(ty) else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if !matches!(segment.ident.to_string().as_str(), "Result" | "QuantResult") {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    arguments.args.iter().find_map(|argument| {
+        let GenericArgument::Type(ty) = argument else {
+            return None;
+        };
+        direct_type_name(ty, impl_owner)
+    })
+}
+
+fn direct_type_name(ty: &Type, impl_owner: Option<&str>) -> Option<String> {
+    let Type::Path(path) = peel_type(ty) else {
+        return None;
+    };
+    if path.qself.is_some() {
+        return None;
+    }
+    let segment = path.path.segments.last()?;
+    if !matches!(segment.arguments, PathArguments::None) {
+        return None;
+    }
+    let name = segment.ident.to_string();
+    if name == "Self" {
+        impl_owner.map(str::to_owned)
+    } else {
+        Some(name)
+    }
+}
+
+fn peel_type(mut ty: &Type) -> &Type {
+    loop {
+        ty = match ty {
+            Type::Reference(reference) => &reference.elem,
+            Type::Paren(paren) => &paren.elem,
+            Type::Group(group) => &group.elem,
+            _ => return ty,
+        };
+    }
+}
+
+fn database_executor_name(ty: &Type) -> Option<String> {
+    match peel_type(ty) {
+        Type::Path(path) => path.path.segments.last().and_then(|segment| {
+            let name = segment.ident.to_string();
+            matches!(name.as_str(), "DatabaseConnection" | "DatabaseTransaction").then_some(name)
+        }),
+        Type::ImplTrait(impl_trait) => impl_trait.bounds.iter().find_map(|bound| {
+            let TypeParamBound::Trait(bound) = bound else {
+                return None;
+            };
+            bound.path.segments.last().and_then(|segment| {
+                (segment.ident == "ConnectionTrait").then(|| segment.ident.to_string())
+            })
+        }),
+        _ => None,
+    }
+}
+
+fn successful_output(signature: &Signature) -> Option<&Type> {
+    let ReturnType::Type(_, output) = &signature.output else {
+        return None;
+    };
+    let Type::Path(path) = peel_type(output) else {
+        return Some(output);
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return Some(output);
+    };
+    if !matches!(segment.ident.to_string().as_str(), "Result" | "QuantResult") {
+        return Some(output);
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return Some(output);
+    };
+    arguments.args.iter().find_map(|argument| {
+        let GenericArgument::Type(ty) = argument else {
+            return None;
+        };
+        Some(ty)
+    })
+}
+
+fn collect_type_names(ty: &Type, names: &mut Vec<String>) {
+    match peel_type(ty) {
+        Type::Path(path) => {
+            for segment in &path.path.segments {
+                names.push(segment.ident.to_string());
+                if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                    for argument in &arguments.args {
+                        if let GenericArgument::Type(ty) = argument {
+                            collect_type_names(ty, names);
+                        }
+                    }
+                }
+            }
+        }
+        Type::Array(array) => collect_type_names(&array.elem, names),
+        Type::BareFn(function) => {
+            for input in &function.inputs {
+                collect_type_names(&input.ty, names);
+            }
+            if let ReturnType::Type(_, output) = &function.output {
+                collect_type_names(output, names);
+            }
+        }
+        Type::ImplTrait(impl_trait) => {
+            for bound in &impl_trait.bounds {
+                if let TypeParamBound::Trait(bound) = bound
+                    && let Some(segment) = bound.path.segments.last()
+                {
+                    names.push(segment.ident.to_string());
+                }
+            }
+        }
+        Type::Ptr(pointer) => collect_type_names(&pointer.elem, names),
+        Type::Slice(slice) => collect_type_names(&slice.elem, names),
+        Type::Tuple(tuple) => {
+            for element in &tuple.elems {
+                collect_type_names(element, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_exact_forward(signature: &Signature, block: &Block) -> bool {
+    if block.stmts.len() != 1 {
+        return false;
+    }
+    let Stmt::Expr(expression, _) = &block.stmts[0] else {
+        return false;
+    };
+    let expression = peel_expr(expression);
+    let parameters = parameter_names(signature);
+    if parameters.is_empty() || parameters.iter().any(Option::is_none) {
+        return false;
+    }
+    let parameters = parameters.into_iter().flatten().collect::<Vec<_>>();
+
+    match expression {
+        Expr::Call(call) => {
+            let Expr::Path(callee) = peel_expr(&call.func) else {
+                return false;
+            };
+            let Some(name) = callee.path.segments.last() else {
+                return false;
+            };
+            name.ident
+                .to_string()
+                .chars()
+                .next()
+                .is_some_and(char::is_lowercase)
+                && expression_names(call.args.iter()).is_some_and(|names| names == parameters)
+        }
+        Expr::MethodCall(call) => {
+            let Some(receiver) = expression_root(&call.receiver) else {
+                return false;
+            };
+            let Some(arguments) = expression_names(call.args.iter()) else {
+                return false;
+            };
+            let mut forwarded = Vec::with_capacity(arguments.len() + 1);
+            forwarded.push(receiver);
+            forwarded.extend(arguments);
+            forwarded == parameters
+        }
+        _ => false,
+    }
+}
+
+fn peel_expr(mut expression: &Expr) -> &Expr {
+    loop {
+        expression = match expression {
+            Expr::Await(awaited) => &awaited.base,
+            Expr::Try(tried) => &tried.expr,
+            Expr::Paren(paren) => &paren.expr,
+            Expr::Group(group) => &group.expr,
+            Expr::Return(returned) => match returned.expr.as_deref() {
+                Some(inner) => inner,
+                None => return expression,
+            },
+            _ => return expression,
+        };
+    }
+}
+
+fn parameter_names(signature: &Signature) -> Vec<Option<String>> {
+    signature
+        .inputs
+        .iter()
+        .map(|input| match input {
+            FnArg::Receiver(_) => Some("self".to_owned()),
+            FnArg::Typed(input) => match input.pat.as_ref() {
+                Pat::Ident(ident) => Some(ident.ident.to_string()),
+                _ => None,
+            },
+        })
+        .collect()
+}
+
+fn expression_names<'a>(expressions: impl Iterator<Item = &'a Expr>) -> Option<Vec<String>> {
+    expressions.map(expression_root).collect()
+}
+
+fn expression_root(expression: &Expr) -> Option<String> {
+    match peel_expr(expression) {
+        Expr::Path(path) if path.path.segments.len() == 1 => {
+            Some(path.path.segments[0].ident.to_string())
+        }
+        Expr::Field(field) => expression_root(&field.base),
+        Expr::Reference(reference) => expression_root(&reference.expr),
+        _ => None,
+    }
+}
+
+fn collect_imports(items: &[Item], crate_name: &str) -> ImportScope {
+    let mut imports = BTreeMap::new();
+    for item in items {
+        if let Item::Use(item_use) = item {
+            collect_use_imports(&item_use.tree, &mut Vec::new(), crate_name, &mut imports);
+        }
+    }
+    imports
+}
+
+fn collect_use_imports(
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    crate_name: &str,
+    imports: &mut ImportScope,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_imports(&path.tree, prefix, crate_name, imports);
+            prefix.pop();
+        }
+        UseTree::Rename(rename) => {
+            imports.insert(
+                rename.rename.to_string(),
+                ImportBinding {
+                    canonical: rename.ident.to_string(),
+                    origin: import_origin(prefix, crate_name),
+                },
+            );
+        }
+        UseTree::Group(group) => {
+            for tree in &group.items {
+                collect_use_imports(tree, prefix, crate_name, imports);
+            }
+        }
+        UseTree::Name(name) => {
+            let canonical = if name.ident == "self" {
+                prefix.last().cloned()
+            } else {
+                Some(name.ident.to_string())
+            };
+            if let Some(canonical) = canonical {
+                imports.insert(
+                    canonical.clone(),
+                    ImportBinding {
+                        canonical,
+                        origin: import_origin(prefix, crate_name),
+                    },
+                );
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn import_origin(prefix: &[String], crate_name: &str) -> ImportOrigin {
+    let Some(root) = prefix.first() else {
+        return ImportOrigin::Unknown;
+    };
+    if matches!(root.as_str(), "crate" | "self" | "super") || root == &crate_name.replace('-', "_")
+    {
+        ImportOrigin::Local
+    } else if root.starts_with("quant_pivot_") {
+        ImportOrigin::External
+    } else {
+        ImportOrigin::Unknown
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(source: &str) -> SourceUnit {
+        fixture_for("quant-pivot-models", source)
+    }
+
+    fn fixture_for(crate_name: &str, source: &str) -> SourceUnit {
+        let file = syn::parse_file(source).expect("parse function-design fixture");
+        SourceUnit {
+            crate_name: crate_name.to_owned(),
+            target_name: format!("{crate_name}:src"),
+            path: PathBuf::from(format!("crates/{crate_name}/src/fixture.rs")),
+            imports: collect_imports(&file.items, crate_name),
+            generated: false,
+            file,
+        }
+    }
+
+    fn findings(source: &str) -> Vec<Finding> {
+        audit_sources(&[fixture(source)]).findings
+    }
+
+    #[test]
+    fn rejects_long_names() {
+        let findings = findings("fn five_word_function_names_are_rejected() {}");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, NAME_RULE);
+    }
+
+    #[test]
+    fn accepts_four_words() {
+        assert!(findings("fn four_word_names_pass() {}").is_empty());
+    }
+
+    #[test]
+    fn rejects_macro_functions() {
+        let findings = findings(
+            r"
+            macro_rules! declare_test {
+                () => {
+                    fn macro_generated_function_name_is_long() {}
+                };
+            }
+            ",
+        );
+        assert!(findings.iter().any(|finding| finding.rule == NAME_RULE));
+    }
+
+    #[test]
+    fn rejects_misplaced_owners() {
+        let findings = findings(
+            r"
+            struct Cohort;
+            struct Pair;
+            fn cohort_uses_resolution(cohort: Cohort) -> bool { true }
+            fn cohort_factory() -> Cohort { Cohort }
+            fn combine_pairs(left: Pair, right: Pair) -> Pair { left }
+            ",
+        );
+        assert!(findings.iter().any(|finding| finding.rule == UNARY_RULE));
+        assert!(findings.iter().any(|finding| finding.rule == FACTORY_RULE));
+        assert!(findings.iter().any(|finding| finding.rule == OPERAND_RULE));
+    }
+
+    #[test]
+    fn accepts_owned_methods() {
+        assert!(
+            findings(
+                r"
+                struct Cohort;
+                impl Cohort {
+                    fn requires_resolution(self) -> bool { true }
+                    fn new() -> Self { Self }
+                    fn combine(self, other: Self) -> Self { self }
+                }
+                ",
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn accepts_pure_kernels() {
+        assert!(
+            findings(
+                r"
+                fn dot(left: &[f64], right: &[f64]) -> f64 {
+                    left.iter().zip(right).map(|(a, b)| a * b).sum()
+                }
+                ",
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn rejects_exact_forwards() {
+        let findings = findings(
+            r"
+            fn target(value: u64) -> u64 { value + 1 }
+            fn wrapper(value: u64) -> u64 { target(value) }
+            ",
+        );
+        assert!(findings.iter().any(|finding| finding.rule == FORWARD_RULE));
+    }
+
+    #[test]
+    fn accepts_trait_forwards() {
+        assert!(
+            findings(
+                r"
+                trait Store {
+                    fn load(&self, value: u64) -> u64;
+                }
+                struct Inner;
+                impl Inner {
+                    fn load(&self, value: u64) -> u64 { value }
+                }
+                struct Decorator(Inner);
+                impl Store for Decorator {
+                    fn load(&self, value: u64) -> u64 { self.0.load(value) }
+                }
+                ",
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn reviews_public_boundaries() {
+        let findings = findings(
+            r"
+            fn target(value: u64) -> u64 { value + 1 }
+            pub fn boundary(value: u64) -> u64 { target(value) }
+            ",
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == FORWARD_RULE
+                    && finding.severity == Severity::Review)
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.severity != Severity::Hard)
+        );
+    }
+
+    #[test]
+    fn rejects_manual_conversions() {
+        let findings = findings(
+            r"
+            struct ChRatio;
+            struct Ratio;
+            impl ChRatio {
+                fn try_to_ratio(self) -> Result<Ratio, ()> { Ok(Ratio) }
+            }
+            ",
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == CONVERSION_RULE)
+        );
+    }
+
+    #[test]
+    fn accepts_conversion_traits() {
+        assert!(
+            findings(
+                r"
+                struct ChRatio;
+                struct Ratio;
+                impl TryFrom<ChRatio> for Ratio {
+                    type Error = ();
+                    fn try_from(value: ChRatio) -> Result<Self, Self::Error> { Ok(Self) }
+                }
+                ",
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn exempts_external_traits() {
+        assert!(
+            findings(
+                r"
+                struct Local;
+                impl foreign::External for Local {
+                    fn externally_required_method_name_is_long(&self) {}
+                }
+                ",
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn resolves_aliases_and_macros() {
+        let findings = findings(
+            r#"
+            pg_enum! { pub enum FeedbackCohort { Learning => "learning" } }
+            use crate::FeedbackCohort as Cohort;
+            fn cohort_matches(cohort: Cohort) -> bool { true }
+            "#,
+        );
+        assert!(findings.iter().any(|finding| finding.rule == UNARY_RULE));
+    }
+
+    #[test]
+    fn scans_inline_modules() {
+        let findings = findings(
+            r"
+            struct Cohort;
+            mod tests {
+                use super::Cohort;
+                fn inspect(cohort: Cohort) -> bool { true }
+            }
+            ",
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == UNARY_RULE && finding.severity == Severity::Hard)
+        );
+    }
+
+    #[test]
+    fn scans_out_of_line() {
+        let library = fixture_for("quant-pivot-models", "pub struct Cohort;");
+        let mut integration = fixture_for(
+            "quant-pivot-models",
+            r"
+            use quant_pivot_models::Cohort;
+            fn inspect(cohort: Cohort) -> bool { true }
+            ",
+        );
+        integration.target_name = "quant-pivot-models:tests".to_owned();
+        integration.path = PathBuf::from("crates/quant-pivot-models/tests/function_design.rs");
+        let report = audit_sources(&[library, integration]);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.rule == UNARY_RULE && finding.severity == Severity::Review)
+        );
+    }
+
+    #[test]
+    fn accepts_multi_domain_algorithms() {
+        let model_types = fixture_for(
+            "quant-pivot-models",
+            "pub struct Policy; pub struct Observation;",
+        );
+        let algorithm = fixture_for(
+            "quant-pivot-core",
+            r"
+            use quant_pivot_models::{Observation, Policy};
+            fn evaluate(policy: Policy, observation: Observation) -> bool { true }
+            ",
+        );
+        let report = audit_sources(&[model_types, algorithm]);
+        assert!(report.hard_findings().next().is_none());
+    }
+
+    #[test]
+    fn resolves_newtype_macros() {
+        let findings = findings(
+            r"
+            decimal_newtype!(Price, precision = (20, 18));
+            struct ChPrice;
+            impl ChPrice {
+                fn to_price(self) -> Price { unreachable!() }
+            }
+            ",
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == CONVERSION_RULE)
+        );
+    }
+
+    #[test]
+    fn exempts_abi_entries() {
+        assert!(
+            findings(
+                r#"
+                #[unsafe(no_mangle)]
+                pub extern "C" fn externally_required_abi_entry_name_is_long() {}
+                "#,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn exempts_generated_files() {
+        let mut source = fixture("fn generated_function_name_is_intentionally_long() {}");
+        source.generated = true;
+        let report = audit_sources(&[source]);
+        assert!(report.findings.is_empty());
+    }
+
+    #[test]
+    fn rejects_repository_io_helpers() {
+        let report = audit_sources(&[fixture_for(
+            "quant-pivot-repository",
+            r"
+            async fn load_rows(db: &impl ConnectionTrait) {}
+            async fn commit_rows(txn: &DatabaseTransaction) {}
+            ",
+        )]);
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.rule == REPOSITORY_RULE)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn accepts_repository_owners() {
+        let report = audit_sources(&[fixture_for(
+            "quant-pivot-repository",
+            r"
+            struct PgRepository;
+            impl PgRepository {
+                async fn load_rows(&self, txn: &DatabaseTransaction) {}
+            }
+            async fn generic_kernel<C: ConnectionTrait>(db: &C) {}
+            ",
+        )]);
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.rule != REPOSITORY_RULE)
+        );
+    }
+}

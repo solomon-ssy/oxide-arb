@@ -504,7 +504,7 @@ pub fn build_training_matrix(
 
 /// Build a matrix from an already ordered borrowed selection without cloning
 /// the underlying training examples.
-pub fn build_training_matrix_from_refs(
+pub fn build_borrowed_matrix(
     examples: &[&TrainingExample],
     spec: &FeatureMatrixSpec,
 ) -> QuantResult<TrainingMatrix> {
@@ -720,33 +720,35 @@ fn state_rates(rows: &RawInputMatrix, index: usize) -> QuantResult<InputStateRat
     })
 }
 
-fn validate_training_matrix(matrix: &TrainingMatrix) -> QuantResult<()> {
-    if matrix.cells.row_count() != matrix.labels.len()
-        || matrix.cells.row_count() != matrix.row_decision_at.len()
-        || matrix.cells.row_count() != matrix.row_label_horizon_end.len()
-    {
-        return Err(ResearchError::MatrixBuild {
-            detail: "training matrix row metadata lengths are inconsistent".to_owned(),
+impl TrainingMatrix {
+    fn validate_training_matrix(&self) -> QuantResult<()> {
+        if self.cells.row_count() != self.labels.len()
+            || self.cells.row_count() != self.row_decision_at.len()
+            || self.cells.row_count() != self.row_label_horizon_end.len()
+        {
+            return Err(ResearchError::MatrixBuild {
+                detail: "training matrix row metadata lengths are inconsistent".to_owned(),
+            }
+            .into());
         }
-        .into());
-    }
-    if matrix.cells.column_count() != matrix.columns.len() {
-        return Err(ResearchError::MatrixBuild {
-            detail: "training matrix raw row width does not match input contract".to_owned(),
+        if self.cells.column_count() != self.columns.len() {
+            return Err(ResearchError::MatrixBuild {
+                detail: "training matrix raw row width does not match input contract".to_owned(),
+            }
+            .into());
         }
-        .into());
-    }
-    if matrix.cells.row_count() < 2 || matrix.columns.is_empty() {
-        return Err(ResearchError::MatrixBuild {
-            detail: format!(
-                "classical transform needs >= 2 rows and >= 1 input, got {}x{}",
-                matrix.cells.row_count(),
-                matrix.columns.len()
-            ),
+        if self.cells.row_count() < 2 || self.columns.is_empty() {
+            return Err(ResearchError::MatrixBuild {
+                detail: format!(
+                    "classical transform needs >= 2 rows and >= 1 input, got {}x{}",
+                    self.cells.row_count(),
+                    self.columns.len()
+                ),
+            }
+            .into());
         }
-        .into());
+        Ok(())
     }
-    Ok(())
 }
 
 fn fit_input_column(
@@ -1095,7 +1097,7 @@ impl FittedInputTransform {
     /// Fit medians and standardization on exactly `matrix`'s rows, then apply
     /// the fitted transform to those rows.
     pub fn fit(matrix: &TrainingMatrix) -> QuantResult<(Self, DenseInputMatrix)> {
-        validate_training_matrix(matrix)?;
+        (matrix).validate_training_matrix()?;
         let fitted = matrix
             .columns
             .iter()
@@ -1431,15 +1433,17 @@ mod tests {
         }
     }
 
-    fn encoded_bits(rows: &DenseInputMatrix) -> Vec<Vec<u64>> {
-        rows.rows()
-            .map(|row| row.iter().map(|value| value.to_bits()).collect())
-            .collect()
+    impl DenseInputMatrix {
+        fn encoded_bits(&self) -> Vec<Vec<u64>> {
+            self.rows()
+                .map(|row| row.iter().map(|value| value.to_bits()).collect())
+                .collect()
+        }
     }
 
     proptest! {
         #[test]
-        fn frozen_transform_is_bit_identical_for_fit_reload_and_serving_apply(
+        fn frozen_transform_replays_identically(
             generated in strategy_vec((0_u8..4_u8, -10_000_i64..10_001_i64), 0..64),
         ) {
             let mut examples = vec![
@@ -1470,8 +1474,8 @@ mod tests {
                 .apply_matrix(&matrix.cells)
                 .expect("replay applies the reloaded frozen transform");
 
-            prop_assert_eq!(encoded_bits(&training_rows), encoded_bits(&serving_rows));
-            prop_assert_eq!(encoded_bits(&training_rows), encoded_bits(&replay_rows));
+            prop_assert_eq!(training_rows.encoded_bits(), serving_rows.encoded_bits());
+            prop_assert_eq!(training_rows.encoded_bits(), replay_rows.encoded_bits());
             prop_assert_eq!(
                 fitted.transform_hash().expect("fitted transform hash"),
                 reloaded.transform_hash().expect("reloaded transform hash"),
@@ -1480,7 +1484,7 @@ mod tests {
     }
 
     #[test]
-    fn bps_scale_and_median_are_shared_by_fit_and_apply() {
+    fn bps_scale_median_apply() {
         let examples = vec![
             example(FeatureValue::Bps(dec!(100)), false, 0),
             example(FeatureValue::Bps(dec!(300)), false, 1),
@@ -1523,7 +1527,7 @@ mod tests {
     }
 
     #[test]
-    fn substitution_is_a_distinct_state() {
+    fn substitution_distinct_state() {
         let examples = vec![
             example(FeatureValue::Bps(dec!(100)), false, 0),
             example(FeatureValue::Bps(dec!(300)), false, 1),
@@ -1537,7 +1541,7 @@ mod tests {
     }
 
     #[test]
-    fn required_missing_or_substituted_row_is_rejected() {
+    fn required_missing_substituted_rejected() {
         let examples = vec![
             example(FeatureValue::Bps(dec!(100)), false, 0),
             missing_example(1),
@@ -1549,7 +1553,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_contract_column_and_value_kind_mismatch_fail_closed() {
+    fn absent_contract_mismatch_rejects() {
         let mut absent = example(FeatureValue::Bps(dec!(100)), false, 0);
         absent.feature_vector.generic.clear();
         assert!(build_training_matrix(&[absent], &spec(false)).is_err());
@@ -1573,7 +1577,7 @@ mod tests {
     }
 
     #[test]
-    fn contiguous_matrix_preserves_hash_contract_and_cell_budget() {
+    fn contiguous_matrix_preserves_budget() {
         #[derive(Serialize)]
         struct LegacyTrainingInput<'a> {
             rows: &'a [Vec<f64>],
@@ -1600,7 +1604,7 @@ mod tests {
     }
 
     #[test]
-    fn category_vocabulary_is_frozen_and_unknown_is_explicit() {
+    fn category_vocabulary_unknown_explicit() {
         let examples = vec![
             example(FeatureValue::Category(MarketCategory::Sports), false, 0),
             example(FeatureValue::Category(MarketCategory::Politics), false, 1),

@@ -625,7 +625,7 @@ impl FactorComputer for NegRiskLegSumDriftFactor {
         // mispricing measure. Only applies to a scored (computed) drift.
         if matches!(raw.eligibility, RawFactorEligibility::Normalizable)
             && raw.raw_value.is_some()
-            && let Some(tightness) = leg_tightness(features)
+            && let Some(tightness) = (features).leg_tightness()
         {
             raw.confidence = Probability::new(raw.confidence.inner() * tightness);
         }
@@ -633,19 +633,21 @@ impl FactorComputer for NegRiskLegSumDriftFactor {
     }
 }
 
-/// Leg-tightness corroboration in `[0, 1]`: `1 − mean(ask−bid) per leg`, clamped.
-/// Tight two-sided legs (small ask/bid gap) ⇒ the leg-sum drift is a reliable
-/// mispricing measure; wide legs ⇒ discount confidence. `None` when the bid-sum
-/// or count is unavailable (confidence then keeps its data-quality base).
-fn leg_tightness(features: &FeatureVector) -> Option<Decimal> {
-    let ask_sum = read(features, &NEGRISK_LEG_ASK_SUM)?;
-    let bid_sum = read(features, &NEGRISK_LEG_BID_SUM)?;
-    let count = read(features, &NEGRISK_LEG_COUNT)?;
-    if count <= Decimal::ZERO {
-        return None;
+impl FeatureVector {
+    /// Leg-tightness corroboration in `[0, 1]`: `1 − mean(ask−bid) per leg`, clamped.
+    /// Tight two-sided legs (small ask/bid gap) ⇒ the leg-sum drift is a reliable
+    /// mispricing measure; wide legs ⇒ discount confidence. `None` when the bid-sum
+    /// or count is unavailable (confidence then keeps its data-quality base).
+    fn leg_tightness(&self) -> Option<Decimal> {
+        let ask_sum = read(self, &NEGRISK_LEG_ASK_SUM)?;
+        let bid_sum = read(self, &NEGRISK_LEG_BID_SUM)?;
+        let count = read(self, &NEGRISK_LEG_COUNT)?;
+        if count <= Decimal::ZERO {
+            return None;
+        }
+        let mean_gap = (ask_sum - bid_sum) / count;
+        Some((Decimal::ONE - mean_gap).clamp(Decimal::ZERO, Decimal::ONE))
     }
-    let mean_gap = (ask_sum - bid_sum) / count;
-    Some((Decimal::ONE - mean_gap).clamp(Decimal::ZERO, Decimal::ONE))
 }
 
 struct NegRiskConvertEdgeFactor {
@@ -807,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_market_gets_not_applicable_for_negrisk_factor() {
+    fn binary_market_not_factor() {
         let mut values = BTreeMap::new();
         values.insert(
             NEGRISK_LEG_ASK_SUM,
@@ -824,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn negrisk_factor_indeterminate_when_leg_book_missing() {
+    fn negrisk_factor_indeterminate_missing() {
         let mut values = BTreeMap::new();
         values.insert(
             NEGRISK_LEG_ASK_SUM,
@@ -841,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn negrisk_leg_sum_drift_computed_for_neg_risk_market() {
+    fn negrisk_leg_sum_market() {
         let mut values = BTreeMap::new();
         // Σ best-ask across 3 legs = 1.08 ⇒ drift = 0.08.
         values.insert(

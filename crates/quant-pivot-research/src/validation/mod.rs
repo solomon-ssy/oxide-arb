@@ -34,7 +34,7 @@ pub use cpcv::{
     DefaultCombinatorialPurgedBacktester, FoldModelSource, FoldRuntime, GroupEvaluation,
     GroupRowFilter, PolicyFoldRuntime, RankObservation, ReplayEngine,
 };
-pub use dsr::{DsrInput, DsrReport, deflated_sharpe_ratio, min_track_record_length};
+pub use dsr::{DsrInput, DsrReport, min_track_record_length};
 pub use pbo::{PboInput, TrialPerformanceMatrix, probability_of_backtest_overfitting};
 pub use purge::{DefaultPurgedSplitter, PurgeConfig, PurgedSplit, PurgedSplitter, TimelineGroup};
 pub use trials::{ClassicalTrialGrid, Trial, TrialGridSpec, WeightedFactorTrialGrid};

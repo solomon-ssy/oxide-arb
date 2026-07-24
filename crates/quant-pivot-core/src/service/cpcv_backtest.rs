@@ -70,8 +70,8 @@ use quant_pivot_research::{
         BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
         DefaultCombinatorialPurgedBacktester, DsrInput, DsrReport, FoldModelSource, FoldRuntime,
         GroupEvaluation, GroupRowFilter, PboInput, PurgeConfig, RankObservation, ReplayEngine,
-        TimelineGroup, Trial, TrialGridSpec, TrialPerformanceMatrix, deflated_sharpe_ratio,
-        min_track_record_length, probability_of_backtest_overfitting,
+        TimelineGroup, Trial, TrialGridSpec, TrialPerformanceMatrix, min_track_record_length,
+        probability_of_backtest_overfitting,
     },
 };
 use rayon::prelude::*;
@@ -2212,7 +2212,7 @@ fn compute_dsr_and_pbo(
         trial_count: trial_grid_count,
         trial_sharpe_variance: stats::variance(&trial_sharpes),
     };
-    let dsr = deflated_sharpe_ratio(&dsr_input)?;
+    let dsr = dsr_input.deflated_sharpe_ratio()?;
     let pbo = probability_of_backtest_overfitting(matrix, &config.pbo)?;
     Ok((dsr, pbo))
 }
@@ -2318,7 +2318,7 @@ mod tests {
     }
 
     #[test]
-    fn precomputed_group_indices_are_strictly_sorted_unique_and_bounded() {
+    fn precomputed_group_unique_bounded() {
         let ranges = [0..2, 2..5, 5..6];
         let filter = GroupRowFilter {
             group_indices: vec![0, 2],
@@ -2411,7 +2411,7 @@ mod tests {
     /// split across groups, or purge/embargo could put one lot's early
     /// decisions in train and its later decisions in test (same-lot leakage).
     #[test]
-    fn lot_timeline_groups_keep_one_lots_decisions_in_one_group() {
+    fn lot_timeline_keep_group() {
         let lot_a = PositionId::from_v7();
         let lot_b = PositionId::from_v7();
         let closed_a = ts(200);
@@ -2451,7 +2451,7 @@ mod tests {
     }
 
     #[test]
-    fn lot_timeline_groups_are_sorted_ascending_by_as_of() {
+    fn lot_timeline_groups_ascending() {
         let lot_a = PositionId::from_v7();
         let lot_b = PositionId::from_v7();
         let examples = vec![
@@ -2466,7 +2466,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_label_matured_at_returns_none_for_unlabeled_example() {
+    fn selected_label_returns_example() {
         let example = lot_decision(PositionId::from_v7(), ts(0), ts(100));
         let other = LabelSelector {
             name: LabelName::new("settlement_outcome"),
@@ -2476,20 +2476,20 @@ mod tests {
     }
 
     #[test]
-    fn validate_sell_examples_rejects_missing_position_state() {
+    fn validate_rejects_missing_state() {
         let mut example = lot_decision(PositionId::from_v7(), ts(0), ts(100));
         example.position_state = None;
         assert!(validate_sell_examples(&[example], &label()).is_err());
     }
 
     #[test]
-    fn validate_sell_examples_accepts_well_formed_rows() {
+    fn validate_sell_accepts_rows() {
         let example = lot_decision(PositionId::from_v7(), ts(0), ts(100));
         assert!(validate_sell_examples(&[example], &label()).is_ok());
     }
 
     #[test]
-    fn calendarize_sell_path_set_rewrites_lot_returns_and_diagnostics() {
+    fn calendarize_sell_returns_diagnostics() {
         let lot_a = PositionId::from_v7();
         let lot_b = PositionId::from_v7();
         // Spaced across two 60s buckets so Sharpe/DSR have ≥ 2 periods.
@@ -2547,7 +2547,7 @@ mod tests {
     }
 
     #[test]
-    fn calendarize_sell_path_set_rejects_single_bucket() {
+    fn calendarize_sell_rejects_bucket() {
         let lot_a = PositionId::from_v7();
         let lot_b = PositionId::from_v7();
         // Both lots land in the same 3600s bucket → Sharpe not estimable.
@@ -2686,7 +2686,7 @@ mod tests {
     /// → quality-gate input shape. Exercises the full algorithm path without
     /// `ClickHouse` / Postgres (those are covered by governance bind e2e).
     #[test]
-    fn sell_cpcv_pipeline_produces_calendarized_diagnostics_for_gates() {
+    fn sell_cpcv_pipeline_gates() {
         let examples = sell_cpcv_examples();
         validate_sell_examples(&examples, &label()).expect("validate");
         let (groups, sequences) = build_lot_timeline_groups(&examples, &label()).expect("groups");
@@ -2759,10 +2759,10 @@ mod tests {
         };
         calendarize_sell_path_set(&mut path_set, &groups_arc, sell_replay, 3_600)
             .expect("calendarize");
-        assert_sell_cpcv_gate_shape(&path_set, &groups_arc);
+        assert_sell_cpcv_shape(&path_set, &groups_arc);
     }
 
-    fn assert_sell_cpcv_gate_shape(path_set: &BacktestPathSet, groups_arc: &[TimelineGroup]) {
+    fn assert_sell_cpcv_shape(path_set: &BacktestPathSet, groups_arc: &[TimelineGroup]) {
         let dist = &path_set.sharpe_distribution;
         assert!(dist.median_max_drawdown.is_some());
         assert!(dist.median_tail_loss.is_some());

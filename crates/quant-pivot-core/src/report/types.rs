@@ -117,7 +117,7 @@ mod tests {
     use super::durable_report_error_summary;
 
     #[test]
-    fn durable_error_summary_does_not_persist_raw_diagnostic() {
+    fn error_never_persists_diagnostic() {
         let error = QuantError::from(ReportError::InvariantViolation {
             stage: "test",
             detail: "secret-token=must-not-persist".to_owned(),

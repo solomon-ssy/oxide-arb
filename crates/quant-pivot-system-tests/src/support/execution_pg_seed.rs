@@ -128,6 +128,8 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+use crate::postgres::PostgresClock;
+
 use super::{
     catalog_fixtures::{make_event, make_market},
     model_spec_fixtures::new_model_spec_fixture,
@@ -172,7 +174,7 @@ pub async fn ensure_fixture_execution_account(db: &DatabaseConnection) -> Execut
 
 /// Explicitly close the fail-closed kill switch for integration tests
 /// that exercise risk-increasing entry paths.
-pub async fn enable_entry_admission_for_test(db: &DatabaseConnection, actor: &str) {
+pub async fn enable_test_admission(db: &DatabaseConnection, actor: &str) {
     let repository = PgRuntimeControlRepository::new(db.clone());
     let current = repository
         .load()
@@ -324,18 +326,18 @@ impl ReportBuildOptions {
 
 /// Seed runtime config + model registry once; reuse for many reports.
 pub async fn seed_shared_demo_infra(db: &DatabaseConnection) -> SharedDemoInfra {
-    seed_shared_demo_infra_inner(db, None).await
+    seed_demo_inner(db, None).await
 }
 
 /// Seed execution UI lineage with a loadable, calibrated model artifact.
-pub async fn seed_shared_demo_infra_with_artifact_store(
+pub async fn seed_demo_with_store(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
 ) -> SharedDemoInfra {
-    seed_shared_demo_infra_inner(db, Some(artifact_store)).await
+    seed_demo_inner(db, Some(artifact_store)).await
 }
 
-async fn seed_shared_demo_infra_inner(
+async fn seed_demo_inner(
     db: &DatabaseConnection,
     artifact_store: Option<&Arc<dyn ArtifactStore>>,
 ) -> SharedDemoInfra {
@@ -363,7 +365,7 @@ async fn seed_shared_demo_infra_inner(
     )
     .await;
     SharedDemoInfra {
-        feature_parity_state_id: ensure_clear_feature_parity_state(db).await,
+        feature_parity_state_id: clear_parity_state(db).await,
         decision_policy_snapshot_id,
         model_version_id,
         model_run_id,
@@ -410,7 +412,7 @@ async fn find_existing_demo_infra(
         .ok()??;
     let cohort_key = artifact.payload_json.cohorts.first()?.key.clone();
     Some(SharedDemoInfra {
-        feature_parity_state_id: ensure_clear_feature_parity_state(db).await,
+        feature_parity_state_id: clear_parity_state(db).await,
         decision_policy_snapshot_id: run.decision_policy_snapshot_id,
         model_version_id: version.model_version_id,
         model_run_id: run.model_run_id,
@@ -423,7 +425,7 @@ async fn find_existing_demo_infra(
     })
 }
 
-async fn ensure_clear_feature_parity_state(db: &DatabaseConnection) -> FeatureParityStateId {
+async fn clear_parity_state(db: &DatabaseConnection) -> FeatureParityStateId {
     let repository = PgFeatureParityRepository::new(db.clone());
     if let Some(state) = repository
         .current_state()
@@ -466,33 +468,32 @@ pub async fn seed_report_on_infra(
     config: ReportSeedConfig,
 ) -> ExecutionTxnIds {
     let ids = prepare_report_seed(db, infra, &config).await;
-    persist_and_publish_report(db, build_report_transaction(&ids), &config.trigger_key, 10).await;
+    persist_and_publish_report(db, ids.build_report_transaction(), &config.trigger_key, 10).await;
     ids
 }
 
 /// Seed a report whose recommendation waits for a continuously satisfied
 /// executable-price condition. The artifact, recommendation reference, and
 /// durable instance are committed by the report transaction.
-pub async fn seed_conditional_price_report_on_infra(
+pub async fn seed_price_report(
     db: &DatabaseConnection,
     infra: &SharedDemoInfra,
     config: ReportSeedConfig,
 ) -> ExecutionTxnIds {
-    seed_conditional_price_report_with_mode(db, infra, config, QuantRuntimeMode::AutoExecution)
-        .await
+    seed_price_by_mode(db, infra, config, QuantRuntimeMode::AutoExecution).await
 }
 
 /// Seed the same durable conditional evidence graph under `ReportOnly`, where
 /// evaluation is active but intent creation and venue submission are forbidden.
-pub async fn seed_report_only_conditional_price_report_on_infra(
+pub async fn seed_report_price(
     db: &DatabaseConnection,
     infra: &SharedDemoInfra,
     config: ReportSeedConfig,
 ) -> ExecutionTxnIds {
-    seed_conditional_price_report_with_mode(db, infra, config, QuantRuntimeMode::ReportOnly).await
+    seed_price_by_mode(db, infra, config, QuantRuntimeMode::ReportOnly).await
 }
 
-async fn seed_conditional_price_report_with_mode(
+async fn seed_price_by_mode(
     db: &DatabaseConnection,
     infra: &SharedDemoInfra,
     config: ReportSeedConfig,
@@ -501,7 +502,7 @@ async fn seed_conditional_price_report_with_mode(
     let ids = prepare_report_seed(db, infra, &config).await;
     let mut options = ReportBuildOptions::published_single(&ids);
     options.runtime_mode = runtime_mode;
-    let artifact = price_condition_artifact(&ids);
+    let artifact = ids.price_condition_artifact();
     let recommendation = options
         .recommendations
         .first_mut()
@@ -658,7 +659,7 @@ pub fn demo_recommendation(
         model_score_percentile: Probability::new(dec!(0.75)),
         trade_plan: trade_plan(&ids.trade_policy),
         factor_breakdown: factor_breakdown(),
-        evidence_refs: evidence_refs(ids),
+        evidence_refs: (ids).evidence_refs(),
         execution_eligibility: execution_eligibility(),
         valid_from: Utc::now(),
         valid_until: Utc::now() + Duration::hours(1),
@@ -777,13 +778,13 @@ pub async fn fill_entry_lot(
 ) {
     claim_entry_for_test(db, submission, intent_id).await;
     let order = submission
-        .create_entry_order_and_lock_capital(
+        .create_entry_order(
             new_execution_order(intent_id, ids),
             &ids.feature_parity_state_id,
         )
         .await
         .expect("create entry order");
-    let filled_at = Utc::now();
+    let filled_at = db.statement_time().await;
     submission
         .record_submission_result(
             &order.execution_order_id,
@@ -835,7 +836,7 @@ pub async fn partial_exit_lot(
     let proceeds_usd = shares * average_price;
     let realized_pnl_usd = proceeds_usd - proportional_cost;
     let exit = submission
-        .create_exit_order_and_mark_closing(
+        .create_exit_order(
             exit_order(intent_id, ids, shares.inner(), average_price.inner()),
             ExitReason::PartialExit,
             Some(PendingScaleOut {
@@ -845,7 +846,7 @@ pub async fn partial_exit_lot(
         )
         .await
         .expect("create partial exit order");
-    let exited_at = Utc::now();
+    let exited_at = db.statement_time().await;
     submission
         .record_exit_result(
             &exit.execution_order_id,
@@ -895,13 +896,13 @@ pub async fn close_position_full(
 
     if let Some(peak) = peak_mark_price {
         submission
-            .touch_exit_monitor(intent_id, Utc::now(), Some(peak), None, None)
+            .touch_exit_monitor(intent_id, db.statement_time().await, Some(peak), None, None)
             .await
             .expect("seed peak mark price");
     }
 
     let exit = submission
-        .create_exit_order_and_mark_closing(
+        .create_exit_order(
             exit_order(intent_id, ids, ENTRY_FILLED_SHARES, dec!(0.55)),
             ExitReason::StopLoss,
             None,
@@ -909,7 +910,7 @@ pub async fn close_position_full(
         .await
         .expect("exit order");
 
-    let exited_at = Utc::now();
+    let exited_at = db.statement_time().await;
     submission
         .record_exit_result(
             &exit.execution_order_id,
@@ -955,30 +956,32 @@ pub fn empty_identity_refs() -> ExecutionIdentityRefs {
     }
 }
 
-pub fn report_operation_log(ids: &ExecutionTxnIds) -> NewOperationLog {
-    NewOperationLog {
-        id: OperationLogId::from_v7(),
-        request_id: format!("scheduled:test:{}", ids.report).into(),
-        actor_user_id: None,
-        actor_username: Some("system".to_owned()),
-        acting_role: Some("test".into()),
-        category: OperationCategory::QuantReport,
-        action: "publish".into(),
-        resource_type: Some(ResourceType::QuantReport),
-        resource_id: Some(ids.report.to_string()),
-        http_method: OperationHttpMethod::System,
-        http_path: "/test/quant/report".to_owned(),
-        http_status: 201,
-        outcome: OperationOutcome::Success,
-        client_ip: None,
-        user_agent: None,
-        latency_ms: 0,
-        detail: OperationDetailDocument::try_from(serde_json::json!({ "test": true }))
-            .expect("static operation detail"),
-        before_hash: None,
-        after_hash: None,
-        governance_audit_event_id: None,
-        governance_audit_sequence: None,
+impl ExecutionTxnIds {
+    pub fn report_operation_log(&self) -> NewOperationLog {
+        NewOperationLog {
+            id: OperationLogId::from_v7(),
+            request_id: format!("scheduled:test:{}", self.report).into(),
+            actor_user_id: None,
+            actor_username: Some("system".to_owned()),
+            acting_role: Some("test".into()),
+            category: OperationCategory::QuantReport,
+            action: "publish".into(),
+            resource_type: Some(ResourceType::QuantReport),
+            resource_id: Some(self.report.to_string()),
+            http_method: OperationHttpMethod::System,
+            http_path: "/test/quant/report".to_owned(),
+            http_status: 201,
+            outcome: OperationOutcome::Success,
+            client_ip: None,
+            user_agent: None,
+            latency_ms: 0,
+            detail: OperationDetailDocument::try_from(serde_json::json!({ "test": true }))
+                .expect("static operation detail"),
+            before_hash: None,
+            after_hash: None,
+            governance_audit_event_id: None,
+            governance_audit_sequence: None,
+        }
     }
 }
 
@@ -1651,7 +1654,7 @@ async fn seed_trade_policy_fixture(
 /// The production fitter remains the only non-test path that may construct a
 /// policy artifact. This helper exists to bind report fixtures to the same
 /// immutable policy contract enforced by serving.
-pub async fn seed_report_trade_policy_fixture(
+pub async fn seed_report_policy(
     db: &DatabaseConnection,
     decision_policy_snapshot_id: &DecisionPolicySnapshotId,
     category: MarketCategory,
@@ -1659,7 +1662,7 @@ pub async fn seed_report_trade_policy_fixture(
     seed_trade_policy_fixture(db, decision_policy_snapshot_id, category).await
 }
 
-async fn seed_executable_trade_policy_fixture(
+async fn seed_executable_policy(
     db: &DatabaseConnection,
     decision_policy_snapshot_id: &DecisionPolicySnapshotId,
 ) -> TradePolicyCohortProvenance {
@@ -1667,7 +1670,7 @@ async fn seed_executable_trade_policy_fixture(
 }
 
 /// Seed a coherent held-out score calibration for model/report integration tests.
-pub async fn seed_model_score_calibration_fixture(
+pub async fn seed_score_calibration(
     db: &DatabaseConnection,
     model_version_id: &ModelVersionId,
 ) -> CalibrationArtifactId {
@@ -1728,14 +1731,14 @@ pub async fn seed_model_score_calibration_fixture(
     calibration_id
 }
 
-async fn seed_calibrated_execution_model_artifact(
+async fn seed_execution_model(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
     model_version_id: &ModelVersionId,
     model_spec_definition_hash: &ContentHash,
     trade_policy: &TradePolicyCohortProvenance,
 ) -> ContentHash {
-    let calibration_id = seed_model_score_calibration_fixture(db, model_version_id).await;
+    let calibration_id = seed_score_calibration(db, model_version_id).await;
 
     let input_contract = ModelInputContract::single_required("book.mid");
     let input_contract_hash =
@@ -1811,7 +1814,7 @@ async fn seed_model_version_named(
         registry.create_model_spec(spec).await.expect("model spec");
         (model_spec_id, definition_hash)
     };
-    let trade_policy = seed_executable_trade_policy_fixture(db, rc_id).await;
+    let trade_policy = seed_executable_policy(db, rc_id).await;
     let version = registry
         .next_version_for_spec(&model_spec_id)
         .await
@@ -1819,7 +1822,7 @@ async fn seed_model_version_named(
     let model_version_id = ModelVersionId::from_v7();
     let artifact_hash = match artifact_store {
         Some(store) => {
-            seed_calibrated_execution_model_artifact(
+            seed_execution_model(
                 db,
                 store,
                 &model_version_id,
@@ -1898,8 +1901,10 @@ async fn seed_market_selection(
     id
 }
 
-fn build_report_transaction(ids: &ExecutionTxnIds) -> NewReportTransaction {
-    build_report_transaction_inner(ids, ReportBuildOptions::published_single(ids))
+impl ExecutionTxnIds {
+    fn build_report_transaction(&self) -> NewReportTransaction {
+        build_report_transaction_inner(self, ReportBuildOptions::published_single(self))
+    }
 }
 
 fn build_report_transaction_inner(
@@ -1923,7 +1928,7 @@ fn build_report_transaction_inner(
         feature_parity_state_id: Some(ids.feature_parity_state_id),
         account_snapshot: NewAccountSnapshot {
             account_snapshot_id: ids.account_snapshot,
-            ..new_account_snapshot(ids)
+            ..ids.new_account_snapshot()
         },
         equity_snapshot: NewEquitySnapshot {
             equity_snapshot_id,
@@ -1963,7 +1968,7 @@ fn build_report_transaction_inner(
         entry_condition_instances,
         sampled_feature_parity: Some(sampled_feature_parity),
         fact_delivery: Some(report_fixtures::pending_fact_delivery(&ids.report)),
-        operation_log: report_operation_log(ids),
+        operation_log: (ids).report_operation_log(),
     }
 }
 
@@ -2026,48 +2031,50 @@ fn fixture_condition_instance(
     }
 }
 
-fn price_condition_artifact(ids: &ExecutionTxnIds) -> NewEntryConditionArtifact {
-    let payload = EntryConditionArtifactV1 {
-        schema_version: ENTRY_CONDITION_SCHEMA_VERSION,
-        evaluator_version: ENTRY_CONDITION_EVALUATOR_VERSION,
-        binding: EntryConditionBinding {
-            recommendation_id: ids.recommendation,
-            market_id: MarketId::new(&ids.market),
-            token_id: TokenId::new(&ids.token),
-            outcome_side: OutcomeSide::Yes,
-            market_linkage_id: None,
-            market_linkage_hash: None,
-            catalog_snapshot_id: ids.market_selection,
-            catalog_snapshot_hash: content_hash('b'),
-            model_version_id: ids.model_version,
-            decision_policy_snapshot_id: ids.decision_policy_snapshot,
-            factor_bindings: Vec::new(),
-            source_bindings: Vec::new(),
-        },
-        confirmation: ConfirmationPolicy {
-            required_continuous_ms: 2_000,
-            max_observation_gap_ms: 1_000,
-        },
-        root: EntryConditionV1::Price(PriceCondition {
-            token_id: TokenId::new(&ids.token),
-            comparison: PriceComparison::AtOrBelow,
-            threshold: Price::new(dec!(0.62)),
-            max_input_age_ms: 2_000,
-        }),
-    }
-    .canonicalize()
-    .expect("canonical conditional price fixture");
-    let content_hash = payload
-        .canonical_content_hash()
-        .expect("conditional price fixture hash");
-    NewEntryConditionArtifact {
-        artifact_id: EntryConditionArtifactId::from_content_hash(&content_hash),
-        content_hash,
-        schema_version: i32::try_from(ENTRY_CONDITION_SCHEMA_VERSION)
-            .expect("entry-condition schema version fits i32"),
-        evaluator_version: i32::try_from(ENTRY_CONDITION_EVALUATOR_VERSION)
-            .expect("entry-condition evaluator version fits i32"),
-        payload_json: payload,
+impl ExecutionTxnIds {
+    fn price_condition_artifact(&self) -> NewEntryConditionArtifact {
+        let payload = EntryConditionArtifactV1 {
+            schema_version: ENTRY_CONDITION_SCHEMA_VERSION,
+            evaluator_version: ENTRY_CONDITION_EVALUATOR_VERSION,
+            binding: EntryConditionBinding {
+                recommendation_id: self.recommendation,
+                market_id: MarketId::new(&self.market),
+                token_id: TokenId::new(&self.token),
+                outcome_side: OutcomeSide::Yes,
+                market_linkage_id: None,
+                market_linkage_hash: None,
+                catalog_snapshot_id: self.market_selection,
+                catalog_snapshot_hash: content_hash('b'),
+                model_version_id: self.model_version,
+                decision_policy_snapshot_id: self.decision_policy_snapshot,
+                factor_bindings: Vec::new(),
+                source_bindings: Vec::new(),
+            },
+            confirmation: ConfirmationPolicy {
+                required_continuous_ms: 2_000,
+                max_observation_gap_ms: 1_000,
+            },
+            root: EntryConditionV1::Price(PriceCondition {
+                token_id: TokenId::new(&self.token),
+                comparison: PriceComparison::AtOrBelow,
+                threshold: Price::new(dec!(0.62)),
+                max_input_age_ms: 2_000,
+            }),
+        }
+        .canonicalize()
+        .expect("canonical conditional price fixture");
+        let content_hash = payload
+            .canonical_content_hash()
+            .expect("conditional price fixture hash");
+        NewEntryConditionArtifact {
+            artifact_id: EntryConditionArtifactId::from_content_hash(&content_hash),
+            content_hash,
+            schema_version: i32::try_from(ENTRY_CONDITION_SCHEMA_VERSION)
+                .expect("entry-condition schema version fits i32"),
+            evaluator_version: i32::try_from(ENTRY_CONDITION_EVALUATOR_VERSION)
+                .expect("entry-condition evaluator version fits i32"),
+            payload_json: payload,
+        }
     }
 }
 
@@ -2125,30 +2132,32 @@ pub fn source_slice_ref(seed: char) -> SourceSliceManifestRef {
     }
 }
 
-fn new_account_snapshot(ids: &ExecutionTxnIds) -> NewAccountSnapshot {
-    let positions = vec![PositionSnapshot {
-        token_id: TokenId::new(&ids.token),
-        market_id: MarketId::new(&ids.market),
-        event_id: Some(EventId::new(&ids.event)),
-        category: MarketCategory::Politics,
-        outcome: "Yes".to_owned(),
-        size: Shares::new(dec!(100)),
-        avg_price: Price::new(dec!(0.5)),
-        cur_price: Price::new(dec!(0.6)),
-        current_value: Usd::new(dec!(60)),
-        redeemable: false,
-    }];
-    NewAccountSnapshot {
-        account_snapshot_id: AccountSnapshotId::from_v7(),
-        execution_account_id: ids.execution_account,
-        as_of: Utc::now(),
-        source: AccountSource::Polymarket,
-        venue_net_liquidation_usd: Usd::new(dec!(10000)),
-        capital_base_usd: Usd::new(dec!(10000)),
-        available_usd: Usd::new(dec!(9000)),
-        reserved_usd: Usd::new(dec!(0)),
-        positions_json: AccountPositions(positions.clone()),
-        exposures_json: ExposureBreakdown::from_positions(&positions),
+impl ExecutionTxnIds {
+    fn new_account_snapshot(&self) -> NewAccountSnapshot {
+        let positions = vec![PositionSnapshot {
+            token_id: TokenId::new(&self.token),
+            market_id: MarketId::new(&self.market),
+            event_id: Some(EventId::new(&self.event)),
+            category: MarketCategory::Politics,
+            outcome: "Yes".to_owned(),
+            size: Shares::new(dec!(100)),
+            avg_price: Price::new(dec!(0.5)),
+            cur_price: Price::new(dec!(0.6)),
+            current_value: Usd::new(dec!(60)),
+            redeemable: false,
+        }];
+        NewAccountSnapshot {
+            account_snapshot_id: AccountSnapshotId::from_v7(),
+            execution_account_id: self.execution_account,
+            as_of: Utc::now(),
+            source: AccountSource::Polymarket,
+            venue_net_liquidation_usd: Usd::new(dec!(10000)),
+            capital_base_usd: Usd::new(dec!(10000)),
+            available_usd: Usd::new(dec!(9000)),
+            reserved_usd: Usd::new(dec!(0)),
+            positions_json: AccountPositions(positions.clone()),
+            exposures_json: ExposureBreakdown::from_positions(&positions),
+        }
     }
 }
 
@@ -2296,23 +2305,25 @@ const fn market_context() -> MarketContext {
     }
 }
 
-fn evidence_refs(ids: &ExecutionTxnIds) -> EvidenceRefs {
-    EvidenceRefs {
+impl ExecutionTxnIds {
+    fn evidence_refs(&self) -> EvidenceRefs {
+        EvidenceRefs {
         signal_candidate_id: SignalCandidateId::from_v7(),
         feature_vector_id: FeatureVectorId::from_v7(),
-        model_run_id: ids.model_run,
-        market_selection_id: ids.market_selection,
+        model_run_id: self.model_run,
+        market_selection_id: self.market_selection,
         book_snapshot_ref: BookSnapshotRef::from_str(&format!(
             "book:l2|{}|00000000-0000-0000-0000-000000000001|1|blake3:{}|1700000000|1700000000@blake3:{}",
-            ids.token,
+            self.token,
             "1".repeat(64),
             "0".repeat(64)
         ))
         .expect("book ref"),
-        decision_policy_snapshot_id: ids.decision_policy_snapshot,
-        model_version_id: ids.model_version,
+        decision_policy_snapshot_id: self.decision_policy_snapshot,
+        model_version_id: self.model_version,
         factor_definition_versions: Vec::new(),
-        data_quality_snapshot_ref: ids.data_quality_snapshot,
+        data_quality_snapshot_ref: self.data_quality_snapshot,
+    }
     }
 }
 

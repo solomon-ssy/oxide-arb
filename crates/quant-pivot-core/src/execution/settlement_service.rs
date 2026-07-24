@@ -511,12 +511,10 @@ impl SettlementService {
                 .ok_or_else(|| ExecutionError::SettlementRedeemInvariant {
                     reason: "recovery claim has no active durable submission".to_owned(),
                 })?;
-        self.metrics.observe_settlement_submission_age_ms(
-            "redeem",
-            elapsed_ms_since(now, submission.created_at),
-        );
+        self.metrics
+            .observe_submission_age_ms("redeem", elapsed_ms_since(now, submission.created_at));
         if submission.state == SettlementSubmissionState::AwaitingFinality {
-            self.metrics.observe_settlement_finality_lag_ms(
+            self.metrics.observe_finality_lag_ms(
                 "redeem",
                 elapsed_ms_since(
                     now,
@@ -609,7 +607,7 @@ impl SettlementService {
                 }
                 let positions = match self
                     .positions
-                    .find_open_by_market_account(&redeem.market_id, &redeem.execution_account_id)
+                    .find_open_position(&redeem.market_id, &redeem.execution_account_id)
                     .await
                 {
                     Ok(positions) => positions,
@@ -1198,7 +1196,7 @@ mod tests {
         evaluate_new_submission_admission,
     };
     #[test]
-    fn submission_admission_is_mode_write_policy_and_kill_switch_fail_closed() {
+    fn submission_admission_mode_rejects() {
         let now = timestamp(1_000);
         let redeem = ready_redeem(now);
 
@@ -1247,7 +1245,7 @@ mod tests {
     }
 
     #[test]
-    fn documentation_drift_is_advisory_and_semi_auto_requires_exact_authorization() {
+    fn documentation_drift_requires_authorization() {
         let now = timestamp(2_000);
         let mut redeem = ready_redeem(now);
         redeem.readiness_evidence_json.advisories.push(
@@ -1298,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_admission_ignores_only_terminal_stale_semi_auto_attempts() {
+    fn auto_ignores_stale_attempts() {
         let now = timestamp(3_000);
         let mut redeem = ready_redeem(now);
         for terminal in [
@@ -1340,7 +1338,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_only_inventory_blocks_every_system_created_redeem_submission() {
+    fn manual_only_blocks_submission() {
         let now = timestamp(4_000);
         let mut redeem = ready_redeem(now);
         redeem.effective_policy = SettlementEffectivePolicy::ManualOnly;

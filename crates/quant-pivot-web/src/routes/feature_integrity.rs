@@ -179,7 +179,7 @@ mod tests {
     use crate::auth::casbin::Rule;
 
     #[test]
-    fn route_manifest_is_complete_and_fail_closed_by_operation() {
+    fn route_manifest_rejects_operation() {
         let specs = route_specs();
         let expected = [
             (Method::GET, "/research/feature-integrity/summary", false),

@@ -11,8 +11,8 @@ use quant_pivot_models::{
     types::RuntimeControlTransitionId,
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, QuerySelect, TransactionTrait, sea_query::LockType,
+    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, IntoActiveModel, QuerySelect, TransactionTrait, sea_query::LockType,
 };
 
 use crate::{postgres::primitives, traits::RuntimeControlRepository};
@@ -30,13 +30,52 @@ impl PgRuntimeControlRepository {
     }
 }
 
-async fn locked_control(tx: &DatabaseTransaction) -> Result<Model, StorageError> {
-    Entity::find_by_id(SYSTEM_RUNTIME_CONTROL_ID)
-        .lock(LockType::Update)
-        .one(tx)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::not_found("system_runtime_control", SYSTEM_RUNTIME_CONTROL_ID))
+impl PgRuntimeControlRepository {
+    async fn locked_control(tx: &DatabaseTransaction) -> Result<Model, StorageError> {
+        Entity::find_by_id(SYSTEM_RUNTIME_CONTROL_ID)
+            .lock(LockType::Update)
+            .one(tx)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::not_found("system_runtime_control", SYSTEM_RUNTIME_CONTROL_ID)
+            })
+    }
+
+    pub(crate) async fn entry_allowed(db: &impl ConnectionTrait) -> Result<bool, StorageError> {
+        Ok(Entity::find_by_id(SYSTEM_RUNTIME_CONTROL_ID)
+            .lock_shared()
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .is_some_and(|row| row.kill_switch_state.allows_new_entry()))
+    }
+
+    pub(crate) async fn require_entry(db: &impl ConnectionTrait) -> Result<(), StorageError> {
+        let row = Entity::find_by_id(SYSTEM_RUNTIME_CONTROL_ID)
+            .lock_exclusive()
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::state_conflict(
+                    "system_runtime_control",
+                    Some(&SYSTEM_RUNTIME_CONTROL_ID),
+                    "runtime-control singleton is missing; new entry fails closed",
+                )
+            })?;
+        if !row.kill_switch_state.allows_new_entry() {
+            return Err(StorageError::state_conflict(
+                "system_runtime_control",
+                Some(&SYSTEM_RUNTIME_CONTROL_ID),
+                format!(
+                    "kill switch is {}; new entry is blocked",
+                    row.kill_switch_state.as_str()
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn validate_update(update: &RuntimeControlUpdate) -> Result<(), StorageError> {
@@ -83,7 +122,7 @@ impl RuntimeControlRepository for PgRuntimeControlRepository {
     ) -> Result<RuntimeControlInfo, StorageError> {
         validate_update(&update)?;
         let tx = self.db.begin().await.map_err(StorageError::from)?;
-        let current = locked_control(&tx).await?;
+        let current = Self::locked_control(&tx).await?;
         if current.revision != update.expected_revision {
             return Err(StorageError::state_conflict(
                 "system_runtime_control",

@@ -5,9 +5,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
         pagination::{PageWindow, Paginated},
-        quant::{
-            EquitySnapshotInfo, EquitySnapshotQuery, NewEquitySnapshot, capital_drawdown, hwm_merge,
-        },
+        quant::{EquitySnapshotInfo, EquitySnapshotQuery, NewEquitySnapshot},
     },
     entities::quant_equity_snapshot::{Column, Entity},
     types::EquitySnapshotId,
@@ -110,13 +108,13 @@ where
         .await
         .map_err(StorageError::from)?;
 
-    snapshot.high_water_mark_usd = hwm_merge(
+    snapshot.high_water_mark_usd = EquitySnapshotInfo::merge_high_water_mark(
         previous.map(|row| row.high_water_mark_usd),
         snapshot.high_water_mark_usd,
         snapshot.capital_base_usd,
     );
     snapshot.drawdown_pct =
-        capital_drawdown(snapshot.capital_base_usd, snapshot.high_water_mark_usd);
+        EquitySnapshotInfo::drawdown(snapshot.capital_base_usd, snapshot.high_water_mark_usd);
 
     Entity::insert(snapshot.into_active_model())
         .exec_with_returning(db)

@@ -88,7 +88,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_429_to_rate_limited() {
+    fn maps_429_rate_limited() {
         let err = SdkError::status(
             StatusCode::TOO_MANY_REQUESTS,
             Method::POST,

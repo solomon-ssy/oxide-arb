@@ -771,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn cpcv_path_count_matches_phi_formula() {
+    fn cpcv_count_matches_formula() {
         // phi(8, 2) = C(7, 1) = 7, NOT C(8,2) = 28 (the original doc's error).
         assert_eq!(
             CpcvConfig {
@@ -804,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn combinatorial_count_overflow_is_rejected_instead_of_saturated() {
+    fn combinatorial_count_rejected_saturated() {
         let config = CpcvConfig {
             n_groups: 100,
             k_test: 50,
@@ -814,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn cpcv_produces_phi_not_combination_count_paths() {
+    fn cpcv_produces_not_paths() {
         let groups = groups(80);
         let result = DefaultCombinatorialPurgedBacktester::new()
             .run(CpcvRequest {
@@ -838,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn cpcv_path_reconstruction_covers_every_group_exactly_once() {
+    fn cpcv_reconstruction_covers_once() {
         let groups = groups(80);
         let result = DefaultCombinatorialPurgedBacktester::new()
             .run(CpcvRequest {
@@ -863,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn cpcv_rejects_k_test_at_or_above_n_groups() {
+    fn cpcv_rejects_k_groups() {
         let groups = groups(40);
         let result = DefaultCombinatorialPurgedBacktester::new().run(CpcvRequest {
             path_set_id: BacktestPathSetId::from_v7(),
@@ -880,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn cpcv_never_calls_live_bookstore() {
+    fn cpcv_never_calls_bookstore() {
         // Structural guarantee: `FoldModelSource`/`ReplayEngine` take no
         // network/database handle, so a `DefaultCombinatorialPurgedBacktester`
         // literally cannot reach a live BookStore — enforced by the trait
@@ -906,7 +906,7 @@ mod tests {
     /// atomic unit to ever report a non-zero rank IC at all,
     /// and a strictly more robust estimator for a multi-candidate one too.
     #[test]
-    fn build_path_pools_rank_observations_across_groups_not_per_group_mean() {
+    fn build_pools_not_mean() {
         struct SingleObservationReplay;
         impl ReplayEngine for SingleObservationReplay {
             fn evaluate(
@@ -964,7 +964,7 @@ mod tests {
     /// concrete runtime is actually a Buy one — a configuration bug, not a
     /// data problem.
     #[test]
-    fn fold_runtime_as_sell_rejects_buy_runtime() {
+    fn fold_runtime_rejects_runtime() {
         let runtime = FoldRuntime::Buy(Box::new(StubRuntime));
         assert!(runtime.as_sell().is_err());
         assert!(runtime.as_buy().is_ok());
@@ -973,7 +973,7 @@ mod tests {
     /// Classical (and future Sell lot) families reuse the same φ-path CPCV
     /// engine via `FoldModelSource` — path count is independent of trainer kind.
     #[test]
-    fn cpcv_phi_paths_shared_by_classical_fold_source_contract() {
+    fn cpcv_phi_paths_contract() {
         let groups = groups(8);
         let path_set = DefaultCombinatorialPurgedBacktester::new()
             .run(CpcvRequest {

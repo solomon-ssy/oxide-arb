@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn excludes_past_deadline_and_selects_nearest_future_first() {
+    fn excludes_past_selects_first() {
         let now = Utc::now();
         let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         reg.register_market(sample_market("past", Some(now - Duration::hours(1))));
@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn no_end_date_markets_are_not_subscribed() {
+    fn no_end_not_subscribed() {
         let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         reg.register_market(sample_market("no-date", None));
 
@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn token_cap_truncates_to_nearest_deadlines() {
+    fn token_cap_truncates_deadlines() {
         let now = Utc::now();
         let reg = MarketRegistry::new(Arc::new(DataPlane::new()));
         for hour in [1_i64, 2, 3, 4, 5] {

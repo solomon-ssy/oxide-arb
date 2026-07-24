@@ -1016,7 +1016,7 @@ mod tests {
     };
 
     #[test]
-    fn token_partition_is_fixed_and_affine() {
+    fn token_partition_fixed_affine() {
         for value in 0..2_000_u32 {
             let event = PipelineEvent::StreamGap {
                 token: TokenKey::new(value),
@@ -1033,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_churn_bounds_mutable_books_by_the_active_window() {
+    fn catalog_churn_bounds_window() {
         const CATALOG_TOKENS: usize = 10_000;
         const ACTIVE_TOKENS: usize = 2_000;
 
@@ -1101,7 +1101,7 @@ mod tests {
     }
 
     #[test]
-    fn control_events_are_bounded_to_the_same_partition_set() {
+    fn control_events_bounded_set() {
         let event = PipelineEvent::ShardStatus {
             shard_id: usize::MAX,
             status: ShardConnectionStatus::Connected,
@@ -1110,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_batch_is_split_by_physical_session() {
+    fn normalized_batch_split_session() {
         let first =
             StreamSessionTicket::new(Uuid::from_u128(1), 1).expect("valid first session ticket");
         let second =
@@ -1152,7 +1152,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_barrier_waits_for_every_affected_partition() {
+    async fn session_barrier_waits_partition() {
         let barrier = Arc::new(PartitionBarrier::new(2));
         barrier.arrive();
         let waiter = {
@@ -1165,7 +1165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mailbox_reservation_failure_sends_no_partial_batch() {
+    async fn mailbox_failure_no_batch() {
         let (first_tx, mut first_rx) = mpsc::channel(1);
         let (second_tx, _second_rx) = mpsc::channel(1);
         second_tx
@@ -1213,7 +1213,7 @@ mod tests {
     }
 
     #[test]
-    fn partition_batch_caps_are_enforced_before_push() {
+    fn partition_batch_before_push() {
         assert!(partition_batch_would_overflow(
             MAX_PARTITION_BATCH_EVENTS,
             0,
@@ -1232,7 +1232,7 @@ mod tests {
     }
 
     #[test]
-    fn token_sequence_is_monotonic_and_resets_on_new_session() {
+    fn token_sequence_monotonic_session() {
         let token = TokenKey::new(7);
         let first_session = Uuid::new_v4();
         let second_session = Uuid::new_v4();

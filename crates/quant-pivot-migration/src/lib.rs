@@ -77,7 +77,7 @@ pub async fn inspect_preproduction_postgres(
 ) -> Result<PreproductionPostgresInventory, StorageError> {
     validate_preproduction_postgres_target(config)?;
     let maintenance_url = config
-        .try_connection_url_with_database("postgres")
+        .try_database_url("postgres")
         .map_err(|error| StorageError::Migration(format!("build PG maintenance URL: {error}")))?;
     let maintenance = PgPool::connect(&maintenance_url)
         .await
@@ -153,7 +153,7 @@ pub async fn reset_preproduction_postgres(
         )));
     }
     let maintenance_url = config
-        .try_connection_url_with_database("postgres")
+        .try_database_url("postgres")
         .map_err(|error| StorageError::Migration(format!("build PG maintenance URL: {error}")))?;
     let maintenance = PgPool::connect(&maintenance_url)
         .await
@@ -227,11 +227,9 @@ impl Drop for SchemaMutationLease {
 pub async fn acquire_schema_mutation_lease(
     config: &PostgresConfig,
 ) -> Result<SchemaMutationLease, StorageError> {
-    let maintenance_url = config
-        .try_connection_url_with_database("postgres")
-        .map_err(|error| {
-            StorageError::Migration(format!("build PostgreSQL coordination URL: {error}"))
-        })?;
+    let maintenance_url = config.try_database_url("postgres").map_err(|error| {
+        StorageError::Migration(format!("build PostgreSQL coordination URL: {error}"))
+    })?;
     let mut connection = PgConnection::connect(&maintenance_url).await.map_err(|_| {
         StorageError::Connection(
             "connect canonical PostgreSQL schema mutation coordination database failed".to_owned(),
@@ -300,42 +298,48 @@ pub async fn acquire_schema_mutation_lease(
     })
 }
 
-/// Release the canonical schema mutation lease after guarded work completes.
-pub async fn release_schema_mutation_lease(
-    mut lease: SchemaMutationLease,
-) -> Result<(), StorageError> {
-    lease.shutdown.cancel();
-    if let Some(heartbeat) = lease.heartbeat.take() {
-        heartbeat.await.map_err(|_| {
-            StorageError::Connection("PostgreSQL schema mutation heartbeat task failed".to_owned())
-        })?;
-    }
-    lease.ensure_active()?;
-    let connection = lease.connection.take().ok_or_else(|| {
-        StorageError::Migration("PostgreSQL schema mutation lease connection is absent".to_owned())
-    })?;
-    let connection = Arc::try_unwrap(connection).map_err(|_| {
-        StorageError::Migration("PostgreSQL schema mutation lease is still borrowed".to_owned())
-    })?;
-    let mut connection = connection.into_inner();
-    let released = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
-        .bind(SCHEMA_MUTATION_ADVISORY_LOCK_KEY)
-        .fetch_one(&mut connection)
-        .await
-        .map_err(|_| {
-            StorageError::Connection(
-                "release canonical PostgreSQL schema mutation lease failed".to_owned(),
+impl SchemaMutationLease {
+    /// Release the canonical schema mutation lease after guarded work completes.
+    pub async fn release_schema_mutation_lease(mut self) -> Result<(), StorageError> {
+        self.shutdown.cancel();
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.await.map_err(|_| {
+                StorageError::Connection(
+                    "PostgreSQL schema mutation heartbeat task failed".to_owned(),
+                )
+            })?;
+        }
+        self.ensure_active()?;
+        let connection = self.connection.take().ok_or_else(|| {
+            StorageError::Migration(
+                "PostgreSQL schema mutation lease connection is absent".to_owned(),
             )
         })?;
-    connection.close().await.map_err(|_| {
-        StorageError::Connection("close PostgreSQL schema mutation lease session failed".to_owned())
-    })?;
-    if released {
-        Ok(())
-    } else {
-        Err(StorageError::Migration(
-            "canonical PostgreSQL schema mutation lease was not held at release".to_owned(),
-        ))
+        let connection = Arc::try_unwrap(connection).map_err(|_| {
+            StorageError::Migration("PostgreSQL schema mutation lease is still borrowed".to_owned())
+        })?;
+        let mut connection = connection.into_inner();
+        let released = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
+            .bind(SCHEMA_MUTATION_ADVISORY_LOCK_KEY)
+            .fetch_one(&mut connection)
+            .await
+            .map_err(|_| {
+                StorageError::Connection(
+                    "release canonical PostgreSQL schema mutation lease failed".to_owned(),
+                )
+            })?;
+        connection.close().await.map_err(|_| {
+            StorageError::Connection(
+                "close PostgreSQL schema mutation lease session failed".to_owned(),
+            )
+        })?;
+        if released {
+            Ok(())
+        } else {
+            Err(StorageError::Migration(
+                "canonical PostgreSQL schema mutation lease was not held at release".to_owned(),
+            ))
+        }
     }
 }
 
@@ -378,12 +382,12 @@ pub async fn plan(db: &DatabaseConnection) -> Result<MigrationPlan, StorageError
 pub async fn apply(config: &PostgresConfig, db: &DatabaseConnection) -> Result<(), StorageError> {
     let lease = acquire_schema_mutation_lease(config).await?;
     let apply_result = tokio::select! {
-        result = apply_under_schema_mutation_lease(db, &lease) => result,
+        result = apply_under_lease(db, &lease) => result,
         () = lease.cancelled() => Err(StorageError::Migration(
             "canonical PostgreSQL schema mutation lease was lost during migration".to_owned(),
         )),
     };
-    let release_result = release_schema_mutation_lease(lease).await;
+    let release_result = lease.release_schema_mutation_lease().await;
     match (apply_result, release_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), _) | (Ok(()), Err(error)) => Err(error),
@@ -391,7 +395,7 @@ pub async fn apply(config: &PostgresConfig, db: &DatabaseConnection) -> Result<(
 }
 
 /// Apply `PostgreSQL` migrations while a caller-owned canonical lease is held.
-pub async fn apply_under_schema_mutation_lease(
+pub async fn apply_under_lease(
     db: &DatabaseConnection,
     lease: &SchemaMutationLease,
 ) -> Result<(), StorageError> {
@@ -598,7 +602,7 @@ mod tests {
     };
 
     #[test]
-    fn compiled_migration_artifacts_are_ordered_and_checksummed() {
+    fn compiled_migration_artifacts_checksummed() {
         let migrations = expected_migrations();
         assert_eq!(migrations.len(), 1);
         assert_eq!(
@@ -622,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_migration_manifest_matches_compiled_artifacts() {
+    fn checked_migration_matches_artifacts() {
         let rendered = render_manifest().expect("migration manifest must render");
 
         assert_eq!(rendered, CHECKED_MIGRATION_MANIFEST);

@@ -95,7 +95,7 @@ impl FeatureParityEventRepository for ChFeatureParityEventRepository {
         .await?;
         let items = rows
             .into_iter()
-            .map(row_to_view)
+            .map(Self::decode_row)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Paginated::from_window(items, count, window))
     }
@@ -288,86 +288,88 @@ fn bind_filters(query: Query, filters: &EventFilters) -> Query {
         .bind(filters.to_ms)
 }
 
-fn row_to_view(row: QuantFeatureParityEventRow) -> Result<FeatureParityEventView, StorageError> {
-    let status = FeatureParityEventStatus::from_str(&row.status).map_err(|error| {
-        StorageError::Codec(format!(
-            "invalid parity event status `{}`: {error}",
-            row.status
-        ))
-    })?;
-    if status != FeatureParityEventStatus::PendingMaterialization
-        && (row.online_fingerprint.is_empty() || row.replay_fingerprint.is_empty())
-    {
-        return Err(StorageError::Codec(format!(
-            "parity event {} has an empty audit fingerprint",
-            row.parity_event_id
-        )));
-    }
-    let feature_contract_hash = row.feature_contract_hash.parse().map_err(|error| {
-        StorageError::Codec(format!(
-            "invalid feature contract hash `{}` in parity event {}: {error}",
-            row.feature_contract_hash, row.parity_event_id
-        ))
-    })?;
-    let transform_hash = (!row.transform_hash.is_empty())
-        .then(|| row.transform_hash.parse())
-        .transpose()
-        .map_err(|error| {
+impl ChFeatureParityEventRepository {
+    fn decode_row(row: QuantFeatureParityEventRow) -> Result<FeatureParityEventView, StorageError> {
+        let status = FeatureParityEventStatus::from_str(&row.status).map_err(|error| {
             StorageError::Codec(format!(
-                "invalid transform hash `{}` in parity event {}: {error}",
-                row.transform_hash, row.parity_event_id
+                "invalid parity event status `{}`: {error}",
+                row.status
             ))
         })?;
-    let detail =
-        serde_json::from_str::<FeatureParityDetail>(&row.detail_json).map_err(|error| {
+        if status != FeatureParityEventStatus::PendingMaterialization
+            && (row.online_fingerprint.is_empty() || row.replay_fingerprint.is_empty())
+        {
+            return Err(StorageError::Codec(format!(
+                "parity event {} has an empty audit fingerprint",
+                row.parity_event_id
+            )));
+        }
+        let feature_contract_hash = row.feature_contract_hash.parse().map_err(|error| {
             StorageError::Codec(format!(
-                "invalid detail_json in parity event {}: {error}",
+                "invalid feature contract hash `{}` in parity event {}: {error}",
+                row.feature_contract_hash, row.parity_event_id
+            ))
+        })?;
+        let transform_hash = (!row.transform_hash.is_empty())
+            .then(|| row.transform_hash.parse())
+            .transpose()
+            .map_err(|error| {
+                StorageError::Codec(format!(
+                    "invalid transform hash `{}` in parity event {}: {error}",
+                    row.transform_hash, row.parity_event_id
+                ))
+            })?;
+        let detail =
+            serde_json::from_str::<FeatureParityDetail>(&row.detail_json).map_err(|error| {
+                StorageError::Codec(format!(
+                    "invalid detail_json in parity event {}: {error}",
+                    row.parity_event_id
+                ))
+            })?;
+        let stage = FeatureParityStage::from_str(&row.stage).map_err(|error| {
+            StorageError::Codec(format!("invalid parity stage `{}`: {error}", row.stage))
+        })?;
+        detail.validate_for(stage, status).map_err(|detail| {
+            StorageError::Codec(format!(
+                "invalid typed detail in parity event {}: {detail}",
                 row.parity_event_id
             ))
         })?;
-    let stage = FeatureParityStage::from_str(&row.stage).map_err(|error| {
-        StorageError::Codec(format!("invalid parity stage `{}`: {error}", row.stage))
-    })?;
-    detail.validate_for(stage, status).map_err(|detail| {
-        StorageError::Codec(format!(
-            "invalid typed detail in parity event {}: {detail}",
-            row.parity_event_id
-        ))
-    })?;
-    Ok(FeatureParityEventView {
-        parity_event_id: row.parity_event_id,
-        parity_run_id: row.parity_run_id,
-        status,
-        stage,
-        decision_at: required_time(row.decision_at, "decision_at")?,
-        report_id: row.report_id,
-        model_run_id: row.model_run_id,
-        model_version_id: row.model_version_id,
-        training_dataset_id: row.training_dataset_id,
-        market_id: row.market_id,
-        feature_name: row.feature_name,
-        reason: row.reason,
-        feature_contract_hash,
-        transform_hash,
-        online: FeatureParityEvidenceView {
-            state: parse_state(row.online_state.as_deref())?,
-            value: row.online_value,
-            effective_at: optional_time(row.online_effective_at, "online_effective_at")?,
-            available_at: optional_time(row.online_available_at, "online_available_at")?,
-            cutoff: optional_time(row.online_cutoff, "online_cutoff")?,
-            fingerprint: row.online_fingerprint,
-        },
-        replay: FeatureParityEvidenceView {
-            state: parse_state(row.replay_state.as_deref())?,
-            value: row.replay_value,
-            effective_at: optional_time(row.replay_effective_at, "replay_effective_at")?,
-            available_at: optional_time(row.replay_available_at, "replay_available_at")?,
-            cutoff: optional_time(row.replay_cutoff, "replay_cutoff")?,
-            fingerprint: row.replay_fingerprint,
-        },
-        detail,
-        created_at: required_time(row.ingestion_time, "ingestion_time")?,
-    })
+        Ok(FeatureParityEventView {
+            parity_event_id: row.parity_event_id,
+            parity_run_id: row.parity_run_id,
+            status,
+            stage,
+            decision_at: required_time(row.decision_at, "decision_at")?,
+            report_id: row.report_id,
+            model_run_id: row.model_run_id,
+            model_version_id: row.model_version_id,
+            training_dataset_id: row.training_dataset_id,
+            market_id: row.market_id,
+            feature_name: row.feature_name,
+            reason: row.reason,
+            feature_contract_hash,
+            transform_hash,
+            online: FeatureParityEvidenceView {
+                state: parse_state(row.online_state.as_deref())?,
+                value: row.online_value,
+                effective_at: optional_time(row.online_effective_at, "online_effective_at")?,
+                available_at: optional_time(row.online_available_at, "online_available_at")?,
+                cutoff: optional_time(row.online_cutoff, "online_cutoff")?,
+                fingerprint: row.online_fingerprint,
+            },
+            replay: FeatureParityEvidenceView {
+                state: parse_state(row.replay_state.as_deref())?,
+                value: row.replay_value,
+                effective_at: optional_time(row.replay_effective_at, "replay_effective_at")?,
+                available_at: optional_time(row.replay_available_at, "replay_available_at")?,
+                cutoff: optional_time(row.replay_cutoff, "replay_cutoff")?,
+                fingerprint: row.replay_fingerprint,
+            },
+            detail,
+            created_at: required_time(row.ingestion_time, "ingestion_time")?,
+        })
+    }
 }
 
 fn parse_state(raw: Option<&str>) -> Result<Option<FeatureCellState>, StorageError> {
@@ -399,7 +401,7 @@ mod tests {
         },
     };
 
-    use super::row_to_view;
+    use super::ChFeatureParityEventRepository;
 
     const HASH: &str = "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -438,8 +440,9 @@ mod tests {
     }
 
     #[test]
-    fn parity_event_view_preserves_contract_transform_and_structured_detail() {
-        let view = row_to_view(row()).expect("valid parity event view");
+    fn parity_event_preserves_detail() {
+        let view =
+            ChFeatureParityEventRepository::decode_row(row()).expect("valid parity event view");
         assert_eq!(view.feature_contract_hash.to_string(), HASH);
         assert_eq!(
             view.transform_hash.map(|hash| hash.to_string()).as_deref(),
@@ -460,18 +463,18 @@ mod tests {
     }
 
     #[test]
-    fn parity_event_view_rejects_malformed_audit_payloads() {
+    fn parity_rejects_malformed_payloads() {
         let mut malformed_hash = row();
         malformed_hash.feature_contract_hash = "not-a-hash".to_owned();
-        assert!(row_to_view(malformed_hash).is_err());
+        assert!(ChFeatureParityEventRepository::decode_row(malformed_hash).is_err());
 
         let mut malformed_detail = row();
         malformed_detail.detail_json = "{".to_owned();
-        assert!(row_to_view(malformed_detail).is_err());
+        assert!(ChFeatureParityEventRepository::decode_row(malformed_detail).is_err());
     }
 
     #[test]
-    fn parity_event_view_decodes_capture_and_data_quality_stages() {
+    fn parity_event_decodes_stages() {
         for (wire, expected, detail_json) in [
             (
                 "capture",
@@ -490,7 +493,9 @@ mod tests {
             event.stage = wire.to_owned();
             event.detail_json = detail_json;
             assert_eq!(
-                row_to_view(event).expect("valid parity event").stage,
+                ChFeatureParityEventRepository::decode_row(event)
+                    .expect("valid parity event")
+                    .stage,
                 expected
             );
         }

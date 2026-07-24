@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use support::registered_data_plane;
 
-fn bench_book_store_read_borrowed(c: &mut Criterion) {
+fn bench_book_store_borrowed(c: &mut Criterion) {
     let (data_plane, token) = registered_data_plane("999");
     let store = BookStore::new(data_plane, Arc::new(MetricsHub::new()));
     let session = StreamSessionTicket::new(Uuid::from_u128(1), 1).expect("valid benchmark session");
@@ -38,5 +38,5 @@ fn bench_book_store_read_borrowed(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_book_store_read_borrowed);
+criterion_group!(benches, bench_book_store_borrowed);
 criterion_main!(benches);

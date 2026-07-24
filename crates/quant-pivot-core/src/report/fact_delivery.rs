@@ -72,9 +72,7 @@ impl ReportFactDeliveryWorker {
             IDLE_POLL_INTERVAL,
             || self.process_one(),
             |error| {
-                self.deps
-                    .metrics
-                    .inc_report_fact_worker_error("process_one");
+                self.deps.metrics.inc_fact_worker_error("process_one");
                 self.deps.publisher.publish_fact_worker_error();
                 tracing::error!(%error, "report fact worker poll failed; retrying");
             },
@@ -85,9 +83,7 @@ impl ReportFactDeliveryWorker {
 
     fn observe_claim_lost(&self, operation: &'static str, delivery: &ReportFactDeliveryInfo) {
         let status = delivery.status.as_str();
-        self.deps
-            .metrics
-            .inc_report_fact_settlement_claim_lost(operation, status);
+        self.deps.metrics.inc_fact_claim_lost(operation, status);
         self.deps
             .publisher
             .publish_fact_claim_lost(operation, delivery);
@@ -600,7 +596,7 @@ mod tests {
     use super::{RowChainVerifier, run_poll_loop};
 
     #[tokio::test]
-    async fn report_fact_worker_continues_after_process_error() {
+    async fn report_fact_after_error() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let errors = Arc::new(AtomicUsize::new(0));
         let token = CancellationToken::new();
@@ -639,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_row_chain_matches_canonical_json_array() {
+    fn streaming_row_matches_array() {
         let rows = vec![
             serde_json::json!({"rank": 1, "market": "a"}),
             serde_json::json!({"rank": 2, "market": "b"}),
@@ -655,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_row_chain_rejects_tampering() {
+    fn streaming_row_rejects_tampering() {
         let expected_rows = vec![serde_json::json!({"rank": 1})];
         let expected = CanonicalDigest::content_hash_json(&expected_rows).expect("row-chain hash");
         let mut verifier = RowChainVerifier::new();

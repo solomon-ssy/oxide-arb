@@ -359,14 +359,14 @@ mod tests {
     use super::{ComputeExecutor, OFFLINE_MEMORY_BYTES, OfflineMemory};
 
     #[test]
-    fn memory_reservation_rejects_more_than_the_process_budget() {
+    fn memory_reservation_rejects_budget() {
         let error = OfflineMemory::try_bytes(OFFLINE_MEMORY_BYTES + 1)
             .expect_err("reservation must fail closed");
         assert!(error.to_string().contains("offline memory reservation"));
     }
 
     #[tokio::test]
-    async fn cancelled_waiter_never_starts_a_second_offline_job() -> QuantResult<()> {
+    async fn cancelled_waiter_never_job() -> QuantResult<()> {
         let executor = ComputeExecutor::new()?;
         let first = executor
             .spawn_offline(OfflineMemory::try_gib(1)?, || {
@@ -391,7 +391,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_panic_is_a_typed_error() -> QuantResult<()> {
+    async fn worker_panic_typed_error() -> QuantResult<()> {
         let executor = ComputeExecutor::new()?;
         let result = executor
             .run_serving(|| -> QuantResult<()> { panic!("boom") })
@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropped_join_keeps_offline_leases_until_worker_completion() -> QuantResult<()> {
+    async fn dropped_join_keeps_completion() -> QuantResult<()> {
         let executor = Arc::new(ComputeExecutor::new()?);
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serving_pool_remains_available_during_worst_offline_reservation() -> QuantResult<()> {
+    async fn serving_pool_remains_reservation() -> QuantResult<()> {
         let executor = ComputeExecutor::new()?;
         let (release_tx, release_rx) = mpsc::channel();
         let offline = executor

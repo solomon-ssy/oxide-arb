@@ -4,7 +4,7 @@
 //! order intent, capital allocation, position ledger, recommendation, and
 //! reconciliation tables, reusing the shared `&impl ConnectionTrait` helpers so
 //! a submission's money state can never partially apply. Venue network I/O
-//! happens between [`create_entry_order_and_lock_capital`] and
+//! happens between [`create_entry_order`] and
 //! [`record_submission_result`] — never inside a transaction.
 
 use std::collections::BTreeSet;
@@ -64,22 +64,16 @@ use crate::{
     postgres::{
         error,
         quant::{
-            capital_allocation::{
-                complete_exit_capital, lock_capital, reconcile_capital, release_capital,
-                settle_capital,
-            },
+            capital_allocation::PgCapitalAllocationRepository,
             entry_condition::{
                 claim_for_submission as claim_entry_condition, invalidate_for_intent_terminal,
                 require_consumed_for_intent, revert_consumed_for_intent,
             },
             execution_order::validate_execution_order_transition,
-            feature_parity::verify_clear_latch_generation,
-            order_intent::{
-                load_intent, load_intent_for_update, lock_terminal_graph,
-                validate_intent_transition,
-            },
-            position,
-            report_scope::acquire_report_scope_lock,
+            feature_parity::PgFeatureParityRepository,
+            order_intent::{PgOrderIntentRepository, validate_intent_transition},
+            position::PgPositionRepository,
+            report_scope::ReportScope,
         },
         write::insert_many_chunked,
     },
@@ -117,66 +111,71 @@ struct SubmissionReportScope {
     report_kind: ReportKind,
 }
 
-async fn insert_identity_refs(
-    db: &impl ConnectionTrait,
-    execution_order_id: ExecutionOrderId,
-    refs: ExecutionIdentityRefs,
-) -> Result<(), StorageError> {
-    let unique_trade_ids = refs.trade_ids.iter().cloned().collect::<BTreeSet<_>>();
-    if unique_trade_ids.len() != refs.trade_ids.len() {
-        return Err(error::invariant_violation(
-            Some(QUANT_EXECUTION_TRADE_REF),
-            "placement response contains duplicate venue trade ids",
-        ));
-    }
-    if !unique_trade_ids.is_empty() {
-        let trades = unique_trade_ids
-            .into_iter()
-            .map(|venue_trade_id| NewExecutionTradeRef {
-                execution_trade_ref_id: ExecutionTradeRefId::from_v7(),
-                execution_order_id,
-                venue_trade_id,
-                trade_status: None,
-                transaction_hash: None,
-                observed_at: refs.observed_at,
-            })
-            .collect();
-        insert_many_chunked::<QuantExecutionTradeRefEntity, NewExecutionTradeRef>(db, trades)
+impl PgExecutionSubmissionRepository {
+    async fn insert_identity_refs(
+        db: &impl ConnectionTrait,
+        execution_order_id: ExecutionOrderId,
+        refs: ExecutionIdentityRefs,
+    ) -> Result<(), StorageError> {
+        let unique_trade_ids = refs.trade_ids.iter().cloned().collect::<BTreeSet<_>>();
+        if unique_trade_ids.len() != refs.trade_ids.len() {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_EXECUTION_TRADE_REF),
+                "placement response contains duplicate venue trade ids",
+            ));
+        }
+        if !unique_trade_ids.is_empty() {
+            let trades = unique_trade_ids
+                .into_iter()
+                .map(|venue_trade_id| NewExecutionTradeRef {
+                    execution_trade_ref_id: ExecutionTradeRefId::from_v7(),
+                    execution_order_id,
+                    venue_trade_id,
+                    trade_status: None,
+                    transaction_hash: None,
+                    observed_at: refs.observed_at,
+                })
+                .collect();
+            insert_many_chunked::<QuantExecutionTradeRefEntity, NewExecutionTradeRef>(db, trades)
+                .await
+                .map_err(|storage_error| match storage_error {
+                    StorageError::Database(database_error) => error::map_unique(
+                        database_error,
+                        QUANT_EXECUTION_TRADE_REF,
+                        "venue_trade_id",
+                    ),
+                    other => other,
+                })?;
+        }
+
+        let unique_transaction_hashes =
+            refs.transaction_hashes.into_iter().collect::<BTreeSet<_>>();
+        if !unique_transaction_hashes.is_empty() {
+            let transactions = unique_transaction_hashes
+                .into_iter()
+                .map(|transaction_hash| NewExecutionTransactionRef {
+                    execution_transaction_ref_id: ExecutionTransactionRefId::from_v7(),
+                    execution_order_id,
+                    transaction_hash,
+                    observed_at: refs.observed_at,
+                })
+                .collect();
+            insert_many_chunked::<QuantExecutionTransactionRefEntity, NewExecutionTransactionRef>(
+                db,
+                transactions,
+            )
             .await
             .map_err(|storage_error| match storage_error {
-                StorageError::Database(database_error) => {
-                    error::map_unique(database_error, QUANT_EXECUTION_TRADE_REF, "venue_trade_id")
-                }
+                StorageError::Database(database_error) => error::map_unique(
+                    database_error,
+                    QUANT_EXECUTION_TRANSACTION_REF,
+                    "execution_order_id,transaction_hash",
+                ),
                 other => other,
             })?;
+        }
+        Ok(())
     }
-
-    let unique_transaction_hashes = refs.transaction_hashes.into_iter().collect::<BTreeSet<_>>();
-    if !unique_transaction_hashes.is_empty() {
-        let transactions = unique_transaction_hashes
-            .into_iter()
-            .map(|transaction_hash| NewExecutionTransactionRef {
-                execution_transaction_ref_id: ExecutionTransactionRefId::from_v7(),
-                execution_order_id,
-                transaction_hash,
-                observed_at: refs.observed_at,
-            })
-            .collect();
-        insert_many_chunked::<QuantExecutionTransactionRefEntity, NewExecutionTransactionRef>(
-            db,
-            transactions,
-        )
-        .await
-        .map_err(|storage_error| match storage_error {
-            StorageError::Database(database_error) => error::map_unique(
-                database_error,
-                QUANT_EXECUTION_TRANSACTION_REF,
-                "execution_order_id,transaction_hash",
-            ),
-            other => other,
-        })?;
-    }
-    Ok(())
 }
 
 fn validate_trade_status_transition(
@@ -197,7 +196,7 @@ fn validate_trade_status_transition(
     if allowed {
         Ok(())
     } else {
-        Err(error::illegal_transition(
+        Err(StorageError::illegal_transition(
             QUANT_EXECUTION_TRADE_REF,
             Some(&trade_ref.venue_trade_id),
             format!("{current:?}"),
@@ -206,118 +205,130 @@ fn validate_trade_status_transition(
     }
 }
 
-async fn insert_transaction_ref_if_missing(
-    db: &impl ConnectionTrait,
-    execution_order_id: ExecutionOrderId,
-    transaction_hash: EvmTransactionHash,
-    observed_at: DateTime<Utc>,
-) -> Result<(), StorageError> {
-    let exists = QuantExecutionTransactionRefEntity::find()
-        .filter(QuantExecutionTransactionRefColumn::ExecutionOrderId.eq(execution_order_id))
-        .filter(QuantExecutionTransactionRefColumn::TransactionHash.eq(transaction_hash.clone()))
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .is_some();
-    if exists {
-        return Ok(());
-    }
-    QuantExecutionTransactionRefEntity::insert(
-        NewExecutionTransactionRef {
-            execution_transaction_ref_id: ExecutionTransactionRefId::from_v7(),
-            execution_order_id,
-            transaction_hash,
-            observed_at,
+impl PgExecutionSubmissionRepository {
+    async fn insert_missing_tx_ref(
+        db: &impl ConnectionTrait,
+        execution_order_id: ExecutionOrderId,
+        transaction_hash: EvmTransactionHash,
+        observed_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let exists = QuantExecutionTransactionRefEntity::find()
+            .filter(QuantExecutionTransactionRefColumn::ExecutionOrderId.eq(execution_order_id))
+            .filter(
+                QuantExecutionTransactionRefColumn::TransactionHash.eq(transaction_hash.clone()),
+            )
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .is_some();
+        if exists {
+            return Ok(());
         }
-        .into_active_model(),
-    )
-    .exec(db)
-    .await
-    .map_err(|database_error| {
-        error::map_unique(
-            database_error,
-            QUANT_EXECUTION_TRANSACTION_REF,
-            "execution_order_id,transaction_hash",
+        QuantExecutionTransactionRefEntity::insert(
+            NewExecutionTransactionRef {
+                execution_transaction_ref_id: ExecutionTransactionRefId::from_v7(),
+                execution_order_id,
+                transaction_hash,
+                observed_at,
+            }
+            .into_active_model(),
         )
-    })?;
-    Ok(())
+        .exec(db)
+        .await
+        .map_err(|database_error| {
+            error::map_unique(
+                database_error,
+                QUANT_EXECUTION_TRANSACTION_REF,
+                "execution_order_id,transaction_hash",
+            )
+        })?;
+        Ok(())
+    }
 }
 
-async fn probe_submission_scope(
-    db: &impl ConnectionTrait,
-    intent_id: &OrderIntentId,
-) -> Result<SubmissionReportScope, StorageError> {
-    let intent = load_intent(db, intent_id).await?;
-    let recommendation = Entity::find_by_id(intent.recommendation_id)
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, intent.recommendation_id))?;
-    let report =
-        QuantRecommendationReportEntity::find_by_id(recommendation.recommendation_report_id)
+impl PgExecutionSubmissionRepository {
+    async fn probe_submission_scope(
+        db: &impl ConnectionTrait,
+        intent_id: &OrderIntentId,
+    ) -> Result<SubmissionReportScope, StorageError> {
+        let intent = PgOrderIntentRepository::load_intent(db, intent_id).await?;
+        let recommendation = Entity::find_by_id(intent.recommendation_id)
             .one(db)
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| {
-                error::not_found(
-                    QUANT_RECOMMENDATION_REPORT,
-                    recommendation.recommendation_report_id,
-                )
+                StorageError::not_found(QUANT_RECOMMENDATION, intent.recommendation_id)
             })?;
-    Ok(SubmissionReportScope {
-        report_id: report.recommendation_report_id,
-        recommendation_id: recommendation.recommendation_id,
-        profile_id: report.research_profile_artifact_id.profile_ref().id,
-        research_profile_artifact_id: report.research_profile_artifact_id,
-        report_kind: report.report_kind,
-    })
+        let report =
+            QuantRecommendationReportEntity::find_by_id(recommendation.recommendation_report_id)
+                .one(db)
+                .await
+                .map_err(StorageError::from)?
+                .ok_or_else(|| {
+                    StorageError::not_found(
+                        QUANT_RECOMMENDATION_REPORT,
+                        recommendation.recommendation_report_id,
+                    )
+                })?;
+        Ok(SubmissionReportScope {
+            report_id: report.recommendation_report_id,
+            recommendation_id: recommendation.recommendation_id,
+            profile_id: report.research_profile_artifact_id.profile_ref().id,
+            research_profile_artifact_id: report.research_profile_artifact_id,
+            report_kind: report.report_kind,
+        })
+    }
 }
 
-async fn lock_submission_graph(
-    db: &impl ConnectionTrait,
-    intent_id: &OrderIntentId,
-    scope: &SubmissionReportScope,
-) -> Result<Model, StorageError> {
-    let report = QuantRecommendationReportEntity::find_by_id(scope.report_id)
-        .lock_exclusive()
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION_REPORT, scope.report_id))?;
-    if report.research_profile_artifact_id != scope.research_profile_artifact_id
-        || report.report_kind != scope.report_kind
-        || report.status != RecommendationReportStatus::Published
-    {
-        return Err(error::state_conflict(
-            QUANT_RECOMMENDATION_REPORT,
-            Some(&scope.report_id),
-            "parent report is no longer the published entry authority",
-        ));
+impl PgExecutionSubmissionRepository {
+    async fn lock_submission_graph(
+        db: &impl ConnectionTrait,
+        intent_id: &OrderIntentId,
+        scope: &SubmissionReportScope,
+    ) -> Result<Model, StorageError> {
+        let report = QuantRecommendationReportEntity::find_by_id(scope.report_id)
+            .lock_exclusive()
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, scope.report_id))?;
+        if report.research_profile_artifact_id != scope.research_profile_artifact_id
+            || report.report_kind != scope.report_kind
+            || report.status != RecommendationReportStatus::Published
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_RECOMMENDATION_REPORT,
+                Some(&scope.report_id),
+                "parent report is no longer the published entry authority",
+            ));
+        }
+        let recommendation = Entity::find_by_id(scope.recommendation_id)
+            .lock_exclusive()
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::not_found(QUANT_RECOMMENDATION, scope.recommendation_id)
+            })?;
+        if recommendation.recommendation_report_id != scope.report_id
+            || !recommendation.status.allows_new_intent()
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_RECOMMENDATION,
+                Some(&scope.recommendation_id),
+                "recommendation is no longer actionable under its parent report",
+            ));
+        }
+        let intent = PgOrderIntentRepository::load_intent_for_update(db, intent_id).await?;
+        if intent.recommendation_id != scope.recommendation_id {
+            return Err(StorageError::state_conflict(
+                QUANT_ORDER_INTENT,
+                Some(intent_id),
+                "intent recommendation changed while acquiring submission graph locks",
+            ));
+        }
+        Ok(intent)
     }
-    let recommendation = Entity::find_by_id(scope.recommendation_id)
-        .lock_exclusive()
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_RECOMMENDATION, scope.recommendation_id))?;
-    if recommendation.recommendation_report_id != scope.report_id
-        || !recommendation.status.allows_new_intent()
-    {
-        return Err(error::state_conflict(
-            QUANT_RECOMMENDATION,
-            Some(&scope.recommendation_id),
-            "recommendation is no longer actionable under its parent report",
-        ));
-    }
-    let intent = load_intent_for_update(db, intent_id).await?;
-    if intent.recommendation_id != scope.recommendation_id {
-        return Err(error::state_conflict(
-            QUANT_ORDER_INTENT,
-            Some(intent_id),
-            "intent recommendation changed while acquiring submission graph locks",
-        ));
-    }
-    Ok(intent)
 }
 
 #[async_trait::async_trait]
@@ -328,28 +339,30 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     ) -> Result<(OrderIntentInfo, EntryConditionInstanceInfo), StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let intent_id = &claim.order_intent_id;
-        let scope = probe_submission_scope(&txn, intent_id).await?;
-        acquire_report_scope_lock(&txn, &scope.profile_id, scope.report_kind).await?;
-        let row = lock_submission_graph(&txn, intent_id, &scope).await?;
+        let scope = Self::probe_submission_scope(&txn, intent_id).await?;
+        ReportScope::new(&scope.profile_id, scope.report_kind)
+            .acquire(&txn)
+            .await?;
+        let row = Self::lock_submission_graph(&txn, intent_id, &scope).await?;
         if !matches!(
             row.status,
             OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy
         ) {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_ORDER_INTENT,
                 Some(intent_id),
                 format!("intent is not submittable from {}", row.status.as_str()),
             ));
         }
         if row.expires_at <= claim.claimed_at {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_ORDER_INTENT,
                 Some(intent_id),
                 "intent has expired and cannot be submitted",
             ));
         }
         if row.condition_instance_id != claim.condition_instance_id {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_ORDER_INTENT,
                 Some(intent_id),
                 "intent/condition pair changed before atomic claim",
@@ -357,7 +370,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         }
         let condition = claim_entry_condition(&txn, &claim).await?;
         if condition.recommendation_id != row.recommendation_id {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_ORDER_INTENT),
                 "condition recommendation does not match intent recommendation",
             ));
@@ -375,7 +388,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         intent_id: &OrderIntentId,
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = lock_terminal_graph(&txn, intent_id).await?;
+        let row = PgOrderIntentRepository::lock_terminal_graph(&txn, intent_id).await?;
         // No-op if the claim is already gone (e.g. report-cascade invalidation).
         if row.status != OrderIntentStatus::AdmissionPending {
             txn.commit().await.map_err(StorageError::from)?;
@@ -398,7 +411,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         admission_trace_ref: Option<String>,
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = lock_terminal_graph(&txn, intent_id).await?;
+        let row = PgOrderIntentRepository::lock_terminal_graph(&txn, intent_id).await?;
         validate_intent_transition(row.status, OrderIntentStatus::AdmissionRejected, intent_id)?;
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(OrderIntentStatus::AdmissionRejected);
@@ -413,7 +426,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             Utc::now(),
         )
         .await?;
-        release_capital(
+        PgCapitalAllocationRepository::release_capital(
             &txn,
             intent_id,
             format!("admission rejected: {status_reason}"),
@@ -423,7 +436,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         Ok(intent_model.into())
     }
 
-    async fn create_entry_order_and_lock_capital(
+    async fn create_entry_order(
         &self,
         order: NewExecutionOrder,
         feature_parity_state_id: &FeatureParityStateId,
@@ -434,12 +447,15 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         // Scope lock linearizes write-ahead submission against report supersession.
         // The read-only probe is never authoritative; every parent row is
         // re-locked and revalidated after the advisory lock is held.
-        let scope = probe_submission_scope(&txn, &intent_id).await?;
-        acquire_report_scope_lock(&txn, &scope.profile_id, scope.report_kind).await?;
-        let intent = lock_submission_graph(&txn, &intent_id, &scope).await?;
-        verify_clear_latch_generation(&txn, feature_parity_state_id).await?;
+        let scope = Self::probe_submission_scope(&txn, &intent_id).await?;
+        ReportScope::new(&scope.profile_id, scope.report_kind)
+            .acquire(&txn)
+            .await?;
+        let intent = Self::lock_submission_graph(&txn, &intent_id, &scope).await?;
+        PgFeatureParityRepository::verify_clear_latch_generation(&txn, feature_parity_state_id)
+            .await?;
         if intent.status != OrderIntentStatus::AdmissionPending {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_ORDER_INTENT,
                 Some(&intent_id),
                 format!(
@@ -458,7 +474,12 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .await
             .map_err(StorageError::from)?;
 
-        lock_capital(&txn, &intent_id, "locked for submission".to_owned()).await?;
+        PgCapitalAllocationRepository::lock_capital(
+            &txn,
+            &intent_id,
+            "locked for submission".to_owned(),
+        )
+        .await?;
 
         validate_intent_transition(intent.status, OrderIntentStatus::Submitted, &intent_id)?;
         let mut intent_active = intent.into_active_model();
@@ -468,7 +489,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .await
             .map_err(StorageError::from)?;
 
-        advance_recommendation_executed(&txn, &recommendation_id).await?;
+        Self::advance_recommendation_executed(&txn, &recommendation_id).await?;
 
         txn.commit().await.map_err(StorageError::from)?;
         Ok(execution_order.into())
@@ -486,13 +507,13 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
         validate_execution_order_transition(order.state, write.state, execution_order_id)?;
         let intent_id = order.order_intent_id;
         let entry_phase = order.order_phase == ExecutionOrderPhase::Entry;
 
         // Lock the intent so its status advances atomically with the ledger.
-        let intent = load_intent_for_update(&txn, &intent_id).await?;
+        let intent = PgOrderIntentRepository::load_intent_for_update(&txn, &intent_id).await?;
 
         let mut order_active = order.into_active_model();
         order_active.state = ActiveValue::Set(write.state);
@@ -507,9 +528,9 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .await
             .map_err(StorageError::from)?;
 
-        insert_identity_refs(&txn, *execution_order_id, write.identity_refs).await?;
+        Self::insert_identity_refs(&txn, *execution_order_id, write.identity_refs).await?;
 
-        settle_capital(
+        PgCapitalAllocationRepository::settle_capital(
             &txn,
             &intent_id,
             &write.capital,
@@ -524,7 +545,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         };
 
         if let Some(fill) = write.fill {
-            position::apply_fill(&txn, fill).await?;
+            PgPositionRepository::apply_fill(&txn, fill).await?;
         }
 
         // Entry fill freezes the denominator shared by every scale-out source.
@@ -575,7 +596,10 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .map_err(StorageError::from)?
             .is_some();
         if !exists {
-            return Err(error::not_found(QUANT_EXECUTION_ORDER, execution_order_id));
+            return Err(StorageError::not_found(
+                QUANT_EXECUTION_ORDER,
+                execution_order_id,
+            ));
         }
         let trades = QuantExecutionTradeRefEntity::find()
             .filter(QuantExecutionTradeRefColumn::ExecutionOrderId.eq(*execution_order_id))
@@ -612,7 +636,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .map(|trade| trade.venue_trade_id.clone())
             .collect::<BTreeSet<_>>();
         if unique_trade_ids.len() != enrichment.trades.len() {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_EXECUTION_TRADE_REF),
                 "identity enrichment contains duplicate venue trade ids",
             ));
@@ -624,14 +648,14 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
         if let Some(discovered_order_id) = enrichment.discovered_order_id {
             if order
                 .venue_order_id
                 .as_ref()
                 .is_some_and(|current| current != &discovered_order_id)
             {
-                return Err(error::state_conflict(
+                return Err(StorageError::state_conflict(
                     QUANT_EXECUTION_ORDER,
                     Some(execution_order_id),
                     "venue order identity cannot be replaced by reconciliation discovery",
@@ -650,7 +674,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
                 VenueTradeStatus::Mined | VenueTradeStatus::Confirmed
             ) && observation.transaction_hash.is_none()
             {
-                return Err(error::invariant_violation(
+                return Err(StorageError::invariant_violation(
                     Some(QUANT_EXECUTION_TRADE_REF),
                     format!(
                         "trade {} is {:?} without a transaction hash",
@@ -669,7 +693,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
                 .map_err(StorageError::from)?;
             if let Some(existing) = existing {
                 if existing.execution_order_id != *execution_order_id {
-                    return Err(error::duplicate(
+                    return Err(StorageError::duplicate(
                         QUANT_EXECUTION_TRADE_REF,
                         observation.venue_trade_id,
                     ));
@@ -679,7 +703,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
                 if trade_ref.trade_status == Some(VenueTradeStatus::Confirmed)
                     && trade_ref.transaction_hash != observation.transaction_hash
                 {
-                    return Err(error::state_conflict(
+                    return Err(StorageError::state_conflict(
                         QUANT_EXECUTION_TRADE_REF,
                         Some(&trade_ref.venue_trade_id),
                         "confirmed trade transaction hash is immutable",
@@ -695,7 +719,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
                 active.observed_at = ActiveValue::Set(enrichment.observed_at);
                 active.update(&txn).await.map_err(StorageError::from)?;
                 if let Some(transaction_hash) = transaction_hash {
-                    insert_transaction_ref_if_missing(
+                    Self::insert_missing_tx_ref(
                         &txn,
                         *execution_order_id,
                         transaction_hash,
@@ -722,7 +746,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
                     error::map_unique(database_error, QUANT_EXECUTION_TRADE_REF, "venue_trade_id")
                 })?;
                 if let Some(transaction_hash) = transaction_hash {
-                    insert_transaction_ref_if_missing(
+                    Self::insert_missing_tx_ref(
                         &txn,
                         *execution_order_id,
                         transaction_hash,
@@ -742,7 +766,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         reason: ExitReason,
     ) -> Result<(), StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let intent = load_intent_for_update(&txn, intent_id).await?;
+        let intent = PgOrderIntentRepository::load_intent_for_update(&txn, intent_id).await?;
         let mut active = intent.into_active_model();
         active.exit_state = ActiveValue::Set(ExitState::ManualRequired);
         active.exit_reason = ActiveValue::Set(Some(reason));
@@ -760,7 +784,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         latest_reinference: Option<ExitReinferenceObservation>,
     ) -> Result<(), StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let intent = load_intent_for_update(&txn, intent_id).await?;
+        let intent = PgOrderIntentRepository::load_intent_for_update(&txn, intent_id).await?;
         let promote = intent.exit_state == ExitState::NotStarted;
         let mut active = intent.into_active_model();
         if promote {
@@ -781,7 +805,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         Ok(())
     }
 
-    async fn create_exit_order_and_mark_closing(
+    async fn create_exit_order(
         &self,
         order: NewExecutionOrder,
         exit_reason: ExitReason,
@@ -793,7 +817,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
                 ExitReason::PartialExit | ExitReason::Opportunistic
             )
         {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_ORDER_INTENT),
                 format!(
                     "pending scale-out requires PartialExit or Opportunistic reason, got {}",
@@ -814,7 +838,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .await
             .map_err(StorageError::from)?;
         if inflight.is_some() {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_ORDER_INTENT,
                 Some(&intent_id),
                 "intent already has an in-flight exit order (Submitted/Ambiguous)",
@@ -829,8 +853,8 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .map_err(StorageError::from)?;
 
         // Mark the lot `Open -> Closing` and advance the intent exit FSM.
-        position::mark_closing(&txn, &intent_id).await?;
-        let intent = load_intent_for_update(&txn, &intent_id).await?;
+        PgPositionRepository::mark_closing(&txn, &intent_id).await?;
+        let intent = PgOrderIntentRepository::load_intent_for_update(&txn, &intent_id).await?;
         let mut scale_out_state = intent.scale_out_state.clone();
         scale_out_state.pending_target = pending_scale_out;
         let mut intent_active = intent.into_active_model();
@@ -858,7 +882,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
 
         // Idempotency guard: a terminal exit order already settled its position +
         // capital. Never re-apply.
@@ -884,24 +908,29 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .await
             .map_err(StorageError::from)?;
 
-        insert_identity_refs(&txn, *execution_order_id, write.identity_refs).await?;
+        Self::insert_identity_refs(&txn, *execution_order_id, write.identity_refs).await?;
 
         // Reduce/close the lot on a (partial) fill; complete capital on full exit.
         let exit_fill_shares = write.position_exit.as_ref().map(|exit| exit.shares);
         if let Some(exit) = write.position_exit {
-            position::apply_exit(&txn, &intent_id, exit).await?;
+            PgPositionRepository::apply_exit(&txn, &intent_id, exit).await?;
             if write.fully_exited {
-                complete_exit_capital(&txn, &intent_id, "exit settled".to_owned()).await?;
+                PgCapitalAllocationRepository::complete_exit_capital(
+                    &txn,
+                    &intent_id,
+                    "exit settled".to_owned(),
+                )
+                .await?;
             }
         }
 
         // Revert a failed/cancelled exit attempt so the lot is re-monitored.
         if write.revert_to_open {
-            position::revert_lot_to_open(&txn, &intent_id).await?;
+            PgPositionRepository::revert_lot_to_open(&txn, &intent_id).await?;
         }
 
         // Advance the intent's exit FSM (status is unchanged — entry already filled).
-        let intent = load_intent_for_update(&txn, &intent_id).await?;
+        let intent = PgOrderIntentRepository::load_intent_for_update(&txn, &intent_id).await?;
         let mut scale_out_state = intent.scale_out_state.clone();
         if write.revert_to_open {
             scale_out_state.pending_target = None;
@@ -953,7 +982,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| error::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
+            .ok_or_else(|| StorageError::not_found(QUANT_EXECUTION_ORDER, execution_order_id))?;
 
         // Idempotency guard: a terminal order has already had its capital and
         // position settled (at submit or by a prior reconciliation). Never
@@ -970,7 +999,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         let is_exit = order.order_phase == ExecutionOrderPhase::Exit;
 
         // Lock the intent so its status advances atomically with the ledger.
-        let intent = load_intent_for_update(&txn, &intent_id).await?;
+        let intent = PgOrderIntentRepository::load_intent_for_update(&txn, &intent_id).await?;
 
         let mut order_active = order.into_active_model();
         order_active.state = ActiveValue::Set(write.order_state);
@@ -992,14 +1021,18 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             let exit_fill_shares = write.exit.as_ref().map(|exit| exit.shares);
             let revert_lot = write.revert_lot;
             if let Some(exit) = write.exit.take() {
-                position::apply_exit(&txn, &intent_id, exit).await?;
+                PgPositionRepository::apply_exit(&txn, &intent_id, exit).await?;
                 if write.exit_fully {
-                    complete_exit_capital(&txn, &intent_id, "exit reconciliation".to_owned())
-                        .await?;
+                    PgCapitalAllocationRepository::complete_exit_capital(
+                        &txn,
+                        &intent_id,
+                        "exit reconciliation".to_owned(),
+                    )
+                    .await?;
                 }
             }
             if revert_lot {
-                position::revert_lot_to_open(&txn, &intent_id).await?;
+                PgPositionRepository::revert_lot_to_open(&txn, &intent_id).await?;
             }
             let mut scale_out_state = intent.scale_out_state.clone();
             if revert_lot {
@@ -1019,7 +1052,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
                 .await
                 .map_err(StorageError::from)?;
         } else {
-            reconcile_capital(
+            PgCapitalAllocationRepository::reconcile_capital(
                 &txn,
                 &intent_id,
                 &write.capital,
@@ -1028,7 +1061,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .await?;
 
             if let Some(fill) = write.fill.take() {
-                position::apply_fill(&txn, fill).await?;
+                PgPositionRepository::apply_fill(&txn, fill).await?;
             }
 
             if write.intent_status != intent.status {
@@ -1042,77 +1075,84 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             }
         }
 
-        upsert_reconciliation_summary(&txn, execution_order_id, &order_intent_id_for_recon, write)
-            .await?;
+        Self::upsert_reconciliation_summary(
+            &txn,
+            execution_order_id,
+            &order_intent_id_for_recon,
+            write,
+        )
+        .await?;
 
         txn.commit().await.map_err(StorageError::from)?;
         Ok(execution_order.into())
     }
 }
 
-/// Upsert the single reconciliation summary row for an execution order.
-///
-/// Updates the existing row in place (e.g. an `Ambiguous` order's submit-time
-/// `Pending` row), appending the freshly-collected evidence to the chain so the
-/// row stays append-only (WORM). Inserts a fresh row for an order that never
-/// had one (a resting `Open` order). The unique index on `execution_order_id`
-/// guarantees at most one summary per order.
-async fn upsert_reconciliation_summary(
-    db: &impl ConnectionTrait,
-    execution_order_id: &ExecutionOrderId,
-    order_intent_id: &OrderIntentId,
-    write: ReconciliationLedgerWrite,
-) -> Result<(), StorageError> {
-    let existing = QuantReconciliationEntity::find()
-        .filter(QuantReconciliationColumn::ExecutionOrderId.eq(*execution_order_id))
-        .one(db)
-        .await
-        .map_err(StorageError::from)?;
+impl PgExecutionSubmissionRepository {
+    /// Upsert the single reconciliation summary row for an execution order.
+    ///
+    /// Updates the existing row in place (e.g. an `Ambiguous` order's submit-time
+    /// `Pending` row), appending the freshly-collected evidence to the chain so the
+    /// row stays append-only (WORM). Inserts a fresh row for an order that never
+    /// had one (a resting `Open` order). The unique index on `execution_order_id`
+    /// guarantees at most one summary per order.
+    async fn upsert_reconciliation_summary(
+        db: &impl ConnectionTrait,
+        execution_order_id: &ExecutionOrderId,
+        order_intent_id: &OrderIntentId,
+        write: ReconciliationLedgerWrite,
+    ) -> Result<(), StorageError> {
+        let existing = QuantReconciliationEntity::find()
+            .filter(QuantReconciliationColumn::ExecutionOrderId.eq(*execution_order_id))
+            .one(db)
+            .await
+            .map_err(StorageError::from)?;
 
-    if let Some(row) = existing {
-        let mut chain = row.evidence_json.clone();
-        for evidence in write.evidence.into_inner() {
-            chain.push(evidence);
+        if let Some(row) = existing {
+            let mut chain = row.evidence_json.clone();
+            for evidence in write.evidence.into_inner() {
+                chain.push(evidence);
+            }
+            let mut active = row.into_active_model();
+            active.result = ActiveValue::Set(write.result);
+            active.evidence_json = ActiveValue::Set(chain);
+            active.venue_filled_shares = ActiveValue::Set(write.venue_filled_shares);
+            active.venue_avg_price = ActiveValue::Set(write.venue_avg_price);
+            active.expected_cash_delta_usd = ActiveValue::Set(write.expected_cash_delta_usd);
+            active.venue_cash_delta_usd = ActiveValue::Set(write.venue_cash_delta_usd);
+            active.realized_pnl_usd = ActiveValue::Set(write.realized_pnl_usd);
+            active.expected_fee_usd = ActiveValue::Set(write.expected_fee_usd);
+            active.observed_fee_usd = ActiveValue::Set(write.observed_fee_usd);
+            active.fee_delta_usd = ActiveValue::Set(write.fee_delta_usd);
+            active.resolved_by = ActiveValue::Set(write.resolved_by);
+            active.resolved_at = ActiveValue::Set(write.resolved_at);
+            active.update(db).await.map_err(StorageError::from)?;
+            return Ok(());
         }
-        let mut active = row.into_active_model();
-        active.result = ActiveValue::Set(write.result);
-        active.evidence_json = ActiveValue::Set(chain);
-        active.venue_filled_shares = ActiveValue::Set(write.venue_filled_shares);
-        active.venue_avg_price = ActiveValue::Set(write.venue_avg_price);
-        active.expected_cash_delta_usd = ActiveValue::Set(write.expected_cash_delta_usd);
-        active.venue_cash_delta_usd = ActiveValue::Set(write.venue_cash_delta_usd);
-        active.realized_pnl_usd = ActiveValue::Set(write.realized_pnl_usd);
-        active.expected_fee_usd = ActiveValue::Set(write.expected_fee_usd);
-        active.observed_fee_usd = ActiveValue::Set(write.observed_fee_usd);
-        active.fee_delta_usd = ActiveValue::Set(write.fee_delta_usd);
-        active.resolved_by = ActiveValue::Set(write.resolved_by);
-        active.resolved_at = ActiveValue::Set(write.resolved_at);
-        active.update(db).await.map_err(StorageError::from)?;
-        return Ok(());
-    }
 
-    let new = NewReconciliation {
-        reconciliation_id: ReconciliationId::from_v7(),
-        execution_order_id: *execution_order_id,
-        order_intent_id: *order_intent_id,
-        result: write.result,
-        evidence_json: write.evidence,
-        venue_filled_shares: write.venue_filled_shares,
-        venue_avg_price: write.venue_avg_price,
-        expected_cash_delta_usd: write.expected_cash_delta_usd,
-        venue_cash_delta_usd: write.venue_cash_delta_usd,
-        realized_pnl_usd: write.realized_pnl_usd,
-        expected_fee_usd: write.expected_fee_usd,
-        observed_fee_usd: write.observed_fee_usd,
-        fee_delta_usd: write.fee_delta_usd,
-        resolved_by: write.resolved_by,
-        resolved_at: write.resolved_at,
-    };
-    QuantReconciliationEntity::insert(new.into_active_model())
-        .exec(db)
-        .await
-        .map_err(StorageError::from)?;
-    Ok(())
+        let new = NewReconciliation {
+            reconciliation_id: ReconciliationId::from_v7(),
+            execution_order_id: *execution_order_id,
+            order_intent_id: *order_intent_id,
+            result: write.result,
+            evidence_json: write.evidence,
+            venue_filled_shares: write.venue_filled_shares,
+            venue_avg_price: write.venue_avg_price,
+            expected_cash_delta_usd: write.expected_cash_delta_usd,
+            venue_cash_delta_usd: write.venue_cash_delta_usd,
+            realized_pnl_usd: write.realized_pnl_usd,
+            expected_fee_usd: write.expected_fee_usd,
+            observed_fee_usd: write.observed_fee_usd,
+            fee_delta_usd: write.fee_delta_usd,
+            resolved_by: write.resolved_by,
+            resolved_at: write.resolved_at,
+        };
+        QuantReconciliationEntity::insert(new.into_active_model())
+            .exec(db)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(())
+    }
 }
 
 /// Restore the pre-claim approval status after a transient admission defer.
@@ -1127,24 +1167,26 @@ const fn revert_target_status(row: &Model) -> OrderIntentStatus {
     }
 }
 
-/// Advance a recommendation to `Executed` on submission (idempotent forward-only:
-/// terminal `Revoked`/`Expired` rows are left untouched).
-async fn advance_recommendation_executed(
-    db: &impl ConnectionTrait,
-    recommendation_id: &RecommendationId,
-) -> Result<(), StorageError> {
-    let row = Entity::find_by_id(*recommendation_id)
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "recommendation",
-            id: recommendation_id.to_string(),
-        })?;
-    if row.status.allows_new_intent() {
-        let mut active = row.into_active_model();
-        active.status = ActiveValue::Set(RecommendationStatus::Executed);
-        active.update(db).await.map_err(StorageError::from)?;
+impl PgExecutionSubmissionRepository {
+    /// Advance a recommendation to `Executed` on submission (idempotent forward-only:
+    /// terminal `Revoked`/`Expired` rows are left untouched).
+    async fn advance_recommendation_executed(
+        db: &impl ConnectionTrait,
+        recommendation_id: &RecommendationId,
+    ) -> Result<(), StorageError> {
+        let row = Entity::find_by_id(*recommendation_id)
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "recommendation",
+                id: recommendation_id.to_string(),
+            })?;
+        if row.status.allows_new_intent() {
+            let mut active = row.into_active_model();
+            active.status = ActiveValue::Set(RecommendationStatus::Executed);
+            active.update(db).await.map_err(StorageError::from)?;
+        }
+        Ok(())
     }
-    Ok(())
 }

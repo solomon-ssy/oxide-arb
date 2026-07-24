@@ -80,7 +80,7 @@ fn new_artifact(kind: CalibrationKind, seed: u8) -> NewCalibrationArtifact {
     }
 }
 
-pub async fn create_duplicate_content_hash_maps_to_storage_duplicate() {
+pub async fn create_duplicate_maps_duplicate() {
     let (pool, _container) = setup_pg().await;
     let repo = PgCalibrationArtifactRepository::new(pool.connection().clone());
 
@@ -106,7 +106,7 @@ pub async fn create_duplicate_content_hash_maps_to_storage_duplicate() {
     );
 }
 
-pub async fn mark_active_missing_artifact_is_not_found() {
+pub async fn mark_missing_not_found() {
     let (pool, _container) = setup_pg().await;
     let repo = PgCalibrationArtifactRepository::new(pool.connection().clone());
 
@@ -120,7 +120,7 @@ pub async fn mark_active_missing_artifact_is_not_found() {
     ));
 }
 
-pub async fn activate_market_price_bias_deactivates_previous_active() {
+pub async fn activate_market_price_active() {
     let (pool, _container) = setup_pg().await;
     let repo = PgCalibrationArtifactRepository::new(pool.connection().clone());
 
@@ -159,7 +159,7 @@ pub async fn activate_market_price_bias_deactivates_previous_active() {
     );
 }
 
-pub async fn activate_model_score_does_not_deactivate_other_model_score_artifacts() {
+pub async fn model_activation_isolated() {
     let (pool, _container) = setup_pg().await;
     let repo = PgCalibrationArtifactRepository::new(pool.connection().clone());
 
@@ -196,7 +196,7 @@ pub async fn activate_model_score_does_not_deactivate_other_model_score_artifact
     assert!(second_reloaded.active, "second model_score must be active");
 }
 
-pub async fn activate_model_score_does_not_deactivate_active_market_price_bias() {
+pub async fn bias_activation_isolated() {
     let (pool, _container) = setup_pg().await;
     let repo = PgCalibrationArtifactRepository::new(pool.connection().clone());
 

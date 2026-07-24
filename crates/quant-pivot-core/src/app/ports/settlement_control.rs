@@ -1025,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn canary_preflight_token_binds_route_wallet_deployment_case_limit_and_expiry() {
+    fn canary_preflight_binds_expiry() {
         let base = scope();
         let base_token = action_preflight_token(&base).expect("base preflight token");
 
@@ -1073,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn deployment_readiness_and_operator_approval_are_independent_gates() {
+    fn deployment_readiness_operator_gates() {
         assert_eq!(approval_state_reason(Some(true), false), None);
         assert_eq!(
             approval_state_reason(Some(true), true),
@@ -1087,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_recovery_requires_the_exact_runtime_policy_pair() {
+    fn automatic_recovery_requires_pair() {
         assert!(automatic_recovery_policy_matches(
             QuantRuntimeMode::SemiAuto,
             SettlementWritePolicy::SemiAuto,

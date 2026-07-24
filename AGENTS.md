@@ -111,6 +111,7 @@ normalized into columns/tables instead of JSONB.
 ```bash
 cargo fmt --all --
 cargo clippy --workspace --all-targets -- -D warnings
+cargo xtask architecture audit-functions
 cargo xtask architecture check
 cargo test --workspace
 ```
@@ -146,7 +147,28 @@ let result = tokio::task::spawn_blocking(work).await;
 let error = AnyhowError::from(source);
 ```
 
-## 7.2 Error layering
+## 7.2 Function design
+
+`cargo xtask architecture audit-functions` is the authoritative full-workspace AST audit and is
+also embedded in `cargo xtask architecture check`.
+
+| Rule | Required form |
+|------|---------------|
+| Zero-argument nominal factory | associated constructor on the returned type; `Default` when exactly equivalent |
+| Unary nominal behavior | inherent method on the semantic owner; a shared extension trait only when crate direction or orphan rules prevent ownership and the trait has genuine reuse |
+| Context-free conversion | `From`/`Into`, `TryFrom`/`TryInto`, `FromStr`, `Display`, or serde |
+| Multiple operands | receiver/associated function on the invariant owner; constructor on the result; named input value when the inputs jointly form a stable concept |
+| Repository I/O | method/associated operation on the concrete repository, store, or adapter that owns the transaction invariant; never choose a receiver merely because it is the first parameter |
+| Thin forwarding | delete and inline unless the layer adds validation, typed error semantics, transactionality, authorization, observability, or a real public boundary |
+| Function name | at most four non-empty `snake_case` words in production, tests, benchmarks, macros, and xtask |
+| API replacement | migrate every caller and delete the old path; no deprecated alias, compatibility wrapper, or forwarding re-export |
+
+Free functions remain valid only for ownerless pure algorithms, framework/trait/ABI-required
+entries, callbacks, and macro/proc-macro entry points. Multi-domain algorithms with policy, time,
+I/O, or strategy context are reviewed semantically rather than assigned to their first argument.
+Structural exceptions are derived from syntax; path and function-name allowlists are forbidden.
+
+## 7.3 Error layering
 
 Platform failures live in **`quant-pivot-error`** as typed sub-errors composed into
 [`QuantError`](crates/quant-pivot-error/src/lib.rs) via `#[from]`. Third-party errors
@@ -192,6 +214,10 @@ Idempotent writes (e.g. attribution final insert) return repository **outcome en
 | `unwrap()` in `src/` | `?` / structured errors |
 | `QuantError::Internal(` in production `src/` | typed `quant-pivot-error` sub-variant |
 | `fn *_error(` manual mappers | `From` + `?` |
+| Context-free `to_*` / `try_to_*` conversion | `From` / `TryFrom` on the destination |
+| Private exact forwarding function | inline at its callers |
+| More than four words in a function name | shorter owner-aware name; use nested test modules for context |
+| Repository transaction free helper | concrete repository/store/adapter method |
 | `f64` for money | `Usd` / `Price` / `Shares` |
 | I/O inside hot-path risk checks | pre-fetch into context |
 

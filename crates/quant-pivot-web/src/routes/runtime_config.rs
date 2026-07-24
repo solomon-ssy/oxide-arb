@@ -51,7 +51,6 @@ use quant_pivot_models::{
         DecisionPolicySnapshot, POLICY_RESOURCE_SCHEMA_VERSION, PolicyDocument,
         PolicyPreflightResult, PolicyRevisionBundle, PolicyValidationEvidence,
         PolicyValidationIssue, PolicyValidationSubject, preview_fire_times,
-        validate_runtime_config,
     },
     types::{
         AuditEventId, ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyApprovalId,
@@ -290,7 +289,9 @@ pub async fn create_draft(
             preflight_token_hash: None,
             preflight_expires_at: None,
             created_by_kind: PolicyActorKind::Operator,
-            created_by_user_id: Some(actor_user_id(&actor)?),
+            created_by_user_id: Some(actor.user_id().map_err(|error| {
+                WebError::Internal(format!("authenticated subject is invalid: {error}"))
+            })?),
             created_by_label: actor.claims.username.clone(),
             reason: body.reason,
         })
@@ -304,18 +305,15 @@ pub async fn create_draft(
         revision.policy_revision_id.to_string(),
     );
     op_ctx.set_state_hashes(None, Some(revision_hash));
-    set_audit_detail(
-        &op_ctx,
-        &ConfigAuditDetail {
-            resource_kind: kind,
-            policy_revision_id: &revision.policy_revision_id,
-            policy_approval_id: None,
-            policy_activation_id: None,
-            activation_kind: None,
-            acting_role: &acting_role.0,
-            request_id: &request_id.0,
-        },
-    )?;
+    op_ctx.set_detail(&ConfigAuditDetail {
+        resource_kind: kind,
+        policy_revision_id: &revision.policy_revision_id,
+        policy_approval_id: None,
+        policy_activation_id: None,
+        activation_kind: None,
+        acting_role: &acting_role.0,
+        request_id: &request_id.0,
+    })?;
     Ok(WebResponse::ok(revision.into()))
 }
 
@@ -385,18 +383,15 @@ pub async fn validate_draft(
         ResourceType::DecisionPolicySnapshot,
         revision_id.to_string(),
     );
-    set_audit_detail(
-        &op_ctx,
-        &ConfigAuditDetail {
-            resource_kind: kind,
-            policy_revision_id: &revision_id,
-            policy_approval_id: None,
-            policy_activation_id: None,
-            activation_kind: None,
-            acting_role: &acting_role.0,
-            request_id: &request_id.0,
-        },
-    )?;
+    op_ctx.set_detail(&ConfigAuditDetail {
+        resource_kind: kind,
+        policy_revision_id: &revision_id,
+        policy_approval_id: None,
+        policy_activation_id: None,
+        activation_kind: None,
+        acting_role: &acting_role.0,
+        request_id: &request_id.0,
+    })?;
     Ok(WebResponse::ok(PolicyValidationView {
         policy_revision_id: revision_id,
         resource_kind: kind,
@@ -433,7 +428,9 @@ pub async fn approve_draft(
             resource_kind: kind,
             decision: body.decision,
             decided_by_kind: PolicyActorKind::Operator,
-            decided_by_user_id: Some(actor_user_id(&actor)?),
+            decided_by_user_id: Some(actor.user_id().map_err(|error| {
+                WebError::Internal(format!("authenticated subject is invalid: {error}"))
+            })?),
             decided_by_label: actor.claims.username.clone(),
             reason: body.reason,
             decided_at: Utc::now(),
@@ -449,18 +446,15 @@ pub async fn approve_draft(
         revision_id.to_string(),
     );
     op_ctx.set_state_hashes(None, Some(approval.revision_hash));
-    set_audit_detail(
-        &op_ctx,
-        &ConfigAuditDetail {
-            resource_kind: kind,
-            policy_revision_id: &revision_id,
-            policy_approval_id: Some(&approval.policy_approval_id),
-            policy_activation_id: None,
-            activation_kind: None,
-            acting_role: &acting_role.0,
-            request_id: &request_id.0,
-        },
-    )?;
+    op_ctx.set_detail(&ConfigAuditDetail {
+        resource_kind: kind,
+        policy_revision_id: &revision_id,
+        policy_approval_id: Some(&approval.policy_approval_id),
+        policy_activation_id: None,
+        activation_kind: None,
+        acting_role: &acting_role.0,
+        request_id: &request_id.0,
+    })?;
     Ok(WebResponse::ok(approval.into()))
 }
 
@@ -782,10 +776,7 @@ fn deployment_credential_health(deploy: &DeployConfig) -> Vec<CredentialHealthVi
             CredentialKind::RedisRuntime,
             !deploy.cache.redis.password.is_empty(),
         ),
-        credential_health(
-            CredentialKind::JwtSigning,
-            deploy.web.jwt_signing_key_is_configured(),
-        ),
+        credential_health(CredentialKind::JwtSigning, deploy.web.has_jwt_signing_key()),
         credential_health(
             CredentialKind::PolymarketPrivateKey,
             deploy.keys.private_key_present(),
@@ -909,7 +900,9 @@ async fn transition_revision(
     )?;
     let snapshot_id = snapshot.decision_policy_snapshot_id;
     let preflight_token_hash = preflight_token_hash(&request.preflight_token);
-    let actor_user_id = actor_user_id(actor)?;
+    let actor_user_id = actor.user_id().map_err(|error| {
+        WebError::Internal(format!("authenticated subject is invalid: {error}"))
+    })?;
     let activation_request_hash = CanonicalDigest::content_hash_typed(
         POLICY_ACTIVATION_HASH_DOMAIN,
         1,
@@ -971,18 +964,15 @@ async fn transition_revision(
         revision_id.to_string(),
     );
     op_ctx.set_state_hashes(Some(before_hash), Some(revision.revision_hash));
-    set_audit_detail(
-        op_ctx,
-        &ConfigAuditDetail {
-            resource_kind: kind,
-            policy_revision_id: &revision_id,
-            policy_approval_id: Some(&commit.activation.policy_approval_id),
-            policy_activation_id: Some(&commit.activation.policy_activation_id),
-            activation_kind: Some(activation_kind),
-            acting_role: &acting_role.0,
-            request_id: &request_id.0,
-        },
-    )?;
+    op_ctx.set_detail(&ConfigAuditDetail {
+        resource_kind: kind,
+        policy_revision_id: &revision_id,
+        policy_approval_id: Some(&commit.activation.policy_approval_id),
+        policy_activation_id: Some(&commit.activation.policy_activation_id),
+        activation_kind: Some(activation_kind),
+        acting_role: &acting_role.0,
+        request_id: &request_id.0,
+    })?;
     op_ctx.link_governance(
         commit.activation.audit_event_id,
         commit.bundle.generation.get(),
@@ -1050,7 +1040,7 @@ async fn validate_and_prepare(
     candidate: DecisionPolicySnapshot,
     subject: PolicyValidationSubject,
 ) -> (PolicyValidationEvidence, Option<PreparedPolicySnapshot>) {
-    let report = validate_runtime_config(&candidate);
+    let report = candidate.validate_runtime_config();
     let mut evidence = validation_evidence(&report);
     evidence.subject = Some(subject);
     if report.has_errors() {
@@ -1178,7 +1168,7 @@ fn ensure_document_contract(
 }
 
 fn ensure_runtime_valid(candidate: &DecisionPolicySnapshot) -> Result<(), WebError> {
-    let report = validate_runtime_config(candidate);
+    let report = candidate.validate_runtime_config();
     if report.has_errors() {
         Err(WebError::BadRequest(report.to_string()))
     } else {
@@ -1218,7 +1208,9 @@ fn new_snapshot(
         snapshot: snapshot_document,
         source,
         created_by_kind: PolicyActorKind::Operator,
-        created_by_user_id: Some(actor_user_id(actor)?),
+        created_by_user_id: Some(actor.user_id().map_err(|error| {
+            WebError::Internal(format!("authenticated subject is invalid: {error}"))
+        })?),
         created_by_label: actor.claims.username.clone(),
         reason: reason.to_owned(),
     })
@@ -1238,18 +1230,6 @@ fn preflight_token_hash(token: &PolicyPreflightToken) -> ContentHash {
     CanonicalDigest::content_hash_bytes(token.as_str().as_bytes())
 }
 
-fn actor_user_id(actor: &AuthedActor) -> Result<UserId, WebError> {
-    actor
-        .claims
-        .sub
-        .parse()
-        .map_err(|error| WebError::Internal(format!("authenticated subject is invalid: {error}")))
-}
-
 fn bounded_limit(limit: Option<u64>) -> u64 {
     limit.unwrap_or(DEFAULT_LIST_LIMIT).min(MAX_LIST_LIMIT)
-}
-
-fn set_audit_detail<T: Serialize>(op_ctx: &OperationCtx, detail: &T) -> Result<(), WebError> {
-    op_ctx.set_detail(detail)
 }

@@ -13,81 +13,82 @@ use crate::{
     types::MarketId,
 };
 
-/// Map a [`CoreEvent`] to its fan-out [`SubscriptionKey`] and [`WsEnvelope`].
-#[must_use]
-pub fn event_envelope(event: &CoreEvent) -> Option<(SubscriptionKey, WsEnvelope)> {
-    let (channel, market, data): (WsChannel, Option<MarketId>, Value) = match event {
-        CoreEvent::SystemStatusChanged(status) => (
-            WsChannel::SystemStatus,
-            None,
-            serde_json::to_value(status).ok()?,
-        ),
-        CoreEvent::Alert(alert) => (
-            WsChannel::SystemAlert,
-            None,
-            serde_json::to_value(alert).ok()?,
-        ),
-        CoreEvent::MarketResolved { market_id, outcome } => (
-            WsChannel::MarketResolved,
-            None,
-            serde_json::json!({ "market_id": market_id, "outcome": outcome }),
-        ),
-        CoreEvent::MarketBookUpdate { market_id, view } => (
-            WsChannel::MarketBookUpdate,
-            Some(market_id.clone()),
-            serde_json::to_value(view.as_ref()).ok()?,
-        ),
-        CoreEvent::ConfigActivated { version_id } => (
-            WsChannel::ConfigActivated,
-            None,
-            serde_json::json!({ "version_id": version_id }),
-        ),
-        CoreEvent::Report(payload) => (
-            WsChannel::QuantReport,
-            None,
-            serde_json::to_value(payload).ok()?,
-        ),
-        CoreEvent::ReportRun(payload) => (
-            WsChannel::QuantReportRun,
-            None,
-            serde_json::to_value(payload).ok()?,
-        ),
-        CoreEvent::Intent(payload) => (
-            WsChannel::QuantIntent,
-            None,
-            serde_json::to_value(payload).ok()?,
-        ),
-        CoreEvent::Condition(payload) => (
-            WsChannel::QuantCondition,
-            None,
-            serde_json::to_value(payload).ok()?,
-        ),
-        CoreEvent::MaterializationRun(payload) => (
-            WsChannel::MaterializationRunUpdate,
-            None,
-            serde_json::to_value(payload).ok()?,
-        ),
-        CoreEvent::Reconciliation(payload) => (
-            WsChannel::QuantReconciliation,
-            None,
-            serde_json::to_value(payload).ok()?,
-        ),
-        CoreEvent::Settlement(payload) => (
-            WsChannel::QuantSettlement,
-            None,
-            serde_json::to_value(payload).ok()?,
-        ),
-    };
+impl CoreEvent {
+    /// Map a [`CoreEvent`] to its fan-out [`SubscriptionKey`] and [`WsEnvelope`].
+    #[must_use]
+    pub fn event_envelope(&self) -> Option<(SubscriptionKey, WsEnvelope)> {
+        let (channel, market, data): (WsChannel, Option<MarketId>, Value) = match self {
+            Self::SystemStatusChanged(status) => (
+                WsChannel::SystemStatus,
+                None,
+                serde_json::to_value(status).ok()?,
+            ),
+            Self::Alert(alert) => (
+                WsChannel::SystemAlert,
+                None,
+                serde_json::to_value(alert).ok()?,
+            ),
+            Self::MarketResolved { market_id, outcome } => (
+                WsChannel::MarketResolved,
+                None,
+                serde_json::json!({ "market_id": market_id, "outcome": outcome }),
+            ),
+            Self::MarketBookUpdate { market_id, view } => (
+                WsChannel::MarketBookUpdate,
+                Some(market_id.clone()),
+                serde_json::to_value(view.as_ref()).ok()?,
+            ),
+            Self::ConfigActivated { version_id } => (
+                WsChannel::ConfigActivated,
+                None,
+                serde_json::json!({ "version_id": version_id }),
+            ),
+            Self::Report(payload) => (
+                WsChannel::QuantReport,
+                None,
+                serde_json::to_value(payload).ok()?,
+            ),
+            Self::ReportRun(payload) => (
+                WsChannel::QuantReportRun,
+                None,
+                serde_json::to_value(payload).ok()?,
+            ),
+            Self::Intent(payload) => (
+                WsChannel::QuantIntent,
+                None,
+                serde_json::to_value(payload).ok()?,
+            ),
+            Self::Condition(payload) => (
+                WsChannel::QuantCondition,
+                None,
+                serde_json::to_value(payload).ok()?,
+            ),
+            Self::MaterializationRun(payload) => (
+                WsChannel::MaterializationRunUpdate,
+                None,
+                serde_json::to_value(payload).ok()?,
+            ),
+            Self::Reconciliation(payload) => (
+                WsChannel::QuantReconciliation,
+                None,
+                serde_json::to_value(payload).ok()?,
+            ),
+            Self::Settlement(payload) => (
+                WsChannel::QuantSettlement,
+                None,
+                serde_json::to_value(payload).ok()?,
+            ),
+        };
 
-    let key = SubscriptionKey::new(channel, market);
-    Some((key, WsEnvelope::channel(channel, data)))
+        let key = SubscriptionKey::new(channel, market);
+        Some((key, WsEnvelope::channel(channel, data)))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
 
-    use super::event_envelope;
     use crate::{
         domain::{
             api::{MarketBookView, SystemCapabilities, SystemStatusView},
@@ -112,7 +113,7 @@ mod tests {
     };
 
     #[test]
-    fn market_book_update_maps_to_market_scoped_key() {
+    fn market_book_maps_key() {
         let event = CoreEvent::MarketBookUpdate {
             market_id: MarketId::new("0xabc"),
             view: Box::new(MarketBookView {
@@ -121,7 +122,7 @@ mod tests {
                 no: None,
             }),
         };
-        let (key, envelope) = event_envelope(&event).expect("book update maps");
+        let (key, envelope) = event.event_envelope().expect("book update maps");
         assert_eq!(
             key,
             SubscriptionKey::scoped(WsChannel::MarketBookUpdate, MarketId::new("0xabc"))
@@ -130,18 +131,18 @@ mod tests {
     }
 
     #[test]
-    fn system_status_maps_to_global_key() {
+    fn system_status_maps_key() {
         let event = CoreEvent::SystemStatusChanged(Box::new(SystemStatusView {
             runtime: SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly),
             capabilities: SystemCapabilities::fail_closed(CapabilityReason::ControlPlaneNotReady),
         }));
-        let (key, envelope) = event_envelope(&event).expect("status maps");
+        let (key, envelope) = event.event_envelope().expect("status maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::SystemStatus));
         assert_eq!(envelope.kind.as_str(), "system.status");
     }
 
     #[test]
-    fn durable_report_revision_maps_to_report_channel() {
+    fn durable_report_maps_channel() {
         let event = CoreEvent::Report(ReportLifecycleEvent {
             event: ReportEventKind::Prepared,
             recommendation_report_id: "report-1".to_owned(),
@@ -156,7 +157,7 @@ mod tests {
             error_code: None,
             status_reason: None,
         });
-        let (key, envelope) = event_envelope(&event).expect("report revision maps");
+        let (key, envelope) = event.event_envelope().expect("report revision maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::QuantReport));
         assert_eq!(envelope.kind.as_str(), "quant.report");
         assert_eq!(envelope.data["event"], "prepared");
@@ -164,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_run_revision_maps_to_dedicated_run_channel() {
+    fn durable_run_maps_channel() {
         let run_id = ReportRunId::from_v7();
         let event = CoreEvent::ReportRun(ReportRunLifecycleEvent {
             report_run_id: run_id,
@@ -173,7 +174,7 @@ mod tests {
             output_report_id: None,
             occurred_at: Utc::now(),
         });
-        let (key, envelope) = event_envelope(&event).expect("report run revision maps");
+        let (key, envelope) = event.event_envelope().expect("report run revision maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::QuantReportRun));
         assert_eq!(envelope.kind.as_str(), "quant.report_run");
         assert_eq!(envelope.data["report_run_id"], run_id.to_string());
@@ -181,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn report_run_and_report_events_have_durable_backing() {
+    fn report_run_report_backing() {
         let report = CoreEvent::Report(ReportLifecycleEvent {
             event: ReportEventKind::Published,
             recommendation_report_id: "durable-report-id".to_owned(),
@@ -196,7 +197,7 @@ mod tests {
             error_code: None,
             status_reason: None,
         });
-        let (report_key, report_envelope) = event_envelope(&report).expect("map durable report");
+        let (report_key, report_envelope) = report.event_envelope().expect("map durable report");
         assert_eq!(report_key, SubscriptionKey::global(WsChannel::QuantReport));
         assert_eq!(
             report_envelope.data["recommendation_report_id"],
@@ -212,14 +213,14 @@ mod tests {
             output_report_id: Some(RecommendationReportId::from_v7()),
             occurred_at: Utc::now(),
         });
-        let (run_key, run_envelope) = event_envelope(&run).expect("map durable run");
+        let (run_key, run_envelope) = run.event_envelope().expect("map durable run");
         assert_eq!(run_key, SubscriptionKey::global(WsChannel::QuantReportRun));
         assert_eq!(run_envelope.data["report_run_id"], run_id.to_string());
         assert_eq!(run_envelope.data["status"], "succeeded");
     }
 
     #[test]
-    fn dataset_build_status_maps_to_materialization_run_status() {
+    fn dataset_build_maps_status() {
         assert_eq!(
             MaterializationRunStatus::from(TrainingDatasetStatus::Failed),
             MaterializationRunStatus::Failed
@@ -235,13 +236,13 @@ mod tests {
     }
 
     #[test]
-    fn materialization_run_maps_to_global_channel() {
+    fn materialization_run_maps_channel() {
         let event = CoreEvent::MaterializationRun(MaterializationRunEvent::revision(
             "run-1",
             MaterializationRunKind::Training,
             MaterializationRunStatus::Completed,
         ));
-        let (key, envelope) = event_envelope(&event).expect("materialization maps");
+        let (key, envelope) = event.event_envelope().expect("materialization maps");
         assert_eq!(
             key,
             SubscriptionKey::global(WsChannel::MaterializationRunUpdate)
@@ -250,26 +251,26 @@ mod tests {
     }
 
     #[test]
-    fn reconciliation_maps_to_global_channel() {
+    fn reconciliation_maps_global_channel() {
         let event = CoreEvent::Reconciliation(ReconciliationLifecycleEvent {
             execution_order_id: "eo-1".to_owned(),
             order_intent_id: "oi-1".to_owned(),
             result: ReconciliationResult::Filled,
             operator_resolved: true,
         });
-        let (key, envelope) = event_envelope(&event).expect("reconciliation maps");
+        let (key, envelope) = event.event_envelope().expect("reconciliation maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::QuantReconciliation));
         assert_eq!(envelope.kind.as_str(), "quant.reconciliation");
     }
 
     #[test]
-    fn settlement_maps_to_global_channel() {
+    fn settlement_maps_global_channel() {
         let event = CoreEvent::Settlement(SettlementRedeemLifecycleEvent {
             settlement_redeem_id: "sr-1".to_owned(),
             market_id: MarketId::new("0xabc"),
             state: SettlementCaseState::Confirmed,
         });
-        let (key, envelope) = event_envelope(&event).expect("settlement maps");
+        let (key, envelope) = event.event_envelope().expect("settlement maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::QuantSettlement));
         assert_eq!(envelope.kind.as_str(), "quant.settlement");
     }

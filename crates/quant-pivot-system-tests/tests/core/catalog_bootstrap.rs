@@ -38,7 +38,7 @@ fn actor() -> GovernanceActor {
     }
 }
 
-pub async fn model_spec_service_authors_draft_spec() {
+pub async fn model_spec_service_spec() {
     let (pool, _container) = setup_pg().await;
     let registry: Arc<dyn ModelRegistryRepository> =
         Arc::new(PgModelRegistryRepository::new(pool.connection().clone()));
@@ -91,7 +91,7 @@ pub async fn model_spec_service_authors_draft_spec() {
     assert_eq!(found.model_spec_id, created.model_spec_id);
 }
 
-pub async fn factor_register_then_publish_batch_seeds_catalog() {
+pub async fn factor_register_publish_catalog() {
     let (pool, _container) = setup_pg().await;
     let factor_repo: Arc<dyn FactorRepository> =
         Arc::new(PgFactorRepository::new(pool.connection().clone()));

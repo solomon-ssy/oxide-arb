@@ -81,7 +81,7 @@ fn resolution_fact_for_tokens(
     .expect("sealed resolution fact")
 }
 
-pub async fn reconcile_fact_is_idempotent_and_conflicting_content_fails_closed() {
+pub async fn reconcile_fact_idempotent_rejects() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_settlement_report_fixture(&db).await;
@@ -178,7 +178,7 @@ pub async fn reconcile_fact_is_idempotent_and_conflicting_content_fails_closed()
     );
 }
 
-pub async fn database_owned_availability_and_tampering_are_enforced() {
+pub async fn database_owned_availability_enforced() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_settlement_report_fixture(&db).await;
@@ -251,7 +251,7 @@ pub async fn database_owned_availability_and_tampering_are_enforced() {
     ));
 }
 
-pub async fn available_at_keyset_is_total_ordered_and_cutoff_bound() {
+pub async fn keyset_total_ordered_bound() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_resolution_recommendations(&db, 4).await;
@@ -346,7 +346,7 @@ pub async fn available_at_keyset_is_total_ordered_and_cutoff_bound() {
     assert_eq!(final_page.next_cursor, None);
 }
 
-pub async fn reconciliation_candidates_are_terminal_keyset_and_outcome_aware() {
+pub async fn reconciliation_candidates_terminal_aware() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let mut ids = seed_resolution_recommendations(&db, 3).await;

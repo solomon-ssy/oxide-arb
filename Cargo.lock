@@ -8186,6 +8186,7 @@ dependencies = [
  "clap",
  "hex",
  "polymarket_client_sdk_v2",
+ "proc-macro2",
  "quant-pivot-allocator",
  "quant-pivot-api",
  "quant-pivot-compute",

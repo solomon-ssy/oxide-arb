@@ -56,12 +56,12 @@ impl EvidenceAttestor {
             ));
         }
         let active_key = decode_key(active)?;
-        let active_key_id = attestation_key_id(&active_key)?;
+        let active_key_id = active_key.attestation_key_id()?;
         let mut keys = BTreeMap::new();
         keys.insert(active_key_id.clone(), active_key);
         for previous in &config.previous_signing_keys {
             let key = decode_key(previous.expose_secret())?;
-            let key_id = attestation_key_id(&key)?;
+            let key_id = key.attestation_key_id()?;
             if key_id == active_key_id {
                 return Err(methodology(
                     "research evidence active signing_key must not appear in previous_signing_keys",
@@ -764,12 +764,14 @@ fn decode_key(value: &str) -> QuantResult<AttestationKey> {
     Ok(key)
 }
 
-fn attestation_key_id(key: &AttestationKey) -> QuantResult<AttestationKeyId> {
-    let mut hasher =
-        Hasher::new_derive_key("quant-pivot/research-evidence-attestation-key-fingerprint/v1");
-    hasher.update(&key.0);
-    AttestationKeyId::parse(format!("b3k1:{}", hasher.finalize().to_hex()))
-        .map_err(|error| methodology(error.to_string()))
+impl AttestationKey {
+    fn attestation_key_id(&self) -> QuantResult<AttestationKeyId> {
+        let mut hasher =
+            Hasher::new_derive_key("quant-pivot/research-evidence-attestation-key-fingerprint/v1");
+        hasher.update(&self.0);
+        AttestationKeyId::parse(format!("b3k1:{}", hasher.finalize().to_hex()))
+            .map_err(|error| methodology(error.to_string()))
+    }
 }
 
 fn methodology(detail: impl Into<String>) -> QuantError {
@@ -791,7 +793,7 @@ mod tests {
     use super::{EvidenceAttestor, verify_kind_binding};
 
     #[test]
-    fn attestation_config_is_all_or_nothing() {
+    fn attestation_config_all_nothing() {
         assert!(
             EvidenceAttestor::from_config(&EvidenceAttestationConfig::default())
                 .expect("disabled attestor")
@@ -815,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn keyed_attestation_changes_with_content_and_retains_historical_keys() {
+    fn keyed_attestation_changes_keys() {
         let attestor = EvidenceAttestor::from_config(&EvidenceAttestationConfig {
             signing_key: "ab".repeat(32).into(),
             previous_signing_keys: vec!["cd".repeat(32).into()],
@@ -842,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn attestation_keys_reject_duplicates_and_uppercase_hex() {
+    fn attestation_keys_reject_hex() {
         assert!(
             EvidenceAttestor::from_config(&EvidenceAttestationConfig {
                 signing_key: "ab".repeat(32).into(),
@@ -860,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_kind_cannot_be_rebound_to_another_payload() {
+    fn evidence_kind_cannot_payload() {
         let observed_at = Utc
             .timestamp_opt(1_720_000_000, 0)
             .single()

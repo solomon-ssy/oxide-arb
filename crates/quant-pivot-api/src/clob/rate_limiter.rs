@@ -90,7 +90,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn acquire_unknown_endpoint_is_immediate() {
+    async fn acquire_unknown_endpoint_immediate() {
         let rl = RateLimiter::new();
         rl.acquire("UNKNOWN /endpoint").await;
     }

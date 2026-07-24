@@ -97,7 +97,7 @@ pub async fn login(
             pair.session_exp,
         )
         .await?;
-    Ok(token_response(pair))
+    Ok((pair).token_response())
 }
 
 /// `POST /api/auth/refresh` (`v1`) — rotate a refresh token into a fresh pair.
@@ -150,7 +150,7 @@ pub async fn refresh(
             return Err(AuthError::Blacklisted.into());
         }
     }
-    Ok(token_response(pair))
+    Ok((pair).token_response())
 }
 
 /// `POST /api/auth/logout` (`v1`) — revoke the access token (and refresh).
@@ -253,11 +253,13 @@ fn issue_pair(
     })
 }
 
-fn token_response(pair: IssuedPair) -> HttpResponse {
-    let cookie_max_age = (pair.refresh_exp - Utc::now().timestamp()).max(1);
-    HttpResponse::Ok()
-        .cookie(refresh_cookie(pair.refresh_token, cookie_max_age))
-        .json(WebResponse::ok(pair.response))
+impl IssuedPair {
+    fn token_response(self) -> HttpResponse {
+        let cookie_max_age = (self.refresh_exp - Utc::now().timestamp()).max(1);
+        HttpResponse::Ok()
+            .cookie(refresh_cookie(self.refresh_token, cookie_max_age))
+            .json(WebResponse::ok(self.response))
+    }
 }
 
 fn refresh_cookie(token: String, max_age_secs: i64) -> Cookie<'static> {

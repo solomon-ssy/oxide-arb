@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn exceedance_produces_an_alert_with_the_governed_threshold() {
+    fn exceedance_produces_alert_threshold() {
         let domain = DomainConfig::default(); // default max_basis_bps = 50
         let vec = vector(Some(FeatureValue::Bps(dec!(75))));
         let alerts = detect_basis_alerts(
@@ -219,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn negative_exceedance_also_alerts_on_magnitude() {
+    fn negative_exceedance_also_magnitude() {
         let domain = DomainConfig::default(); // default max_basis_bps = 50
         let vec = vector(Some(FeatureValue::Bps(dec!(-80))));
         let alerts = detect_basis_alerts(
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_basis_feature_never_alerts() {
+    fn missing_basis_never_alerts() {
         // Binance-settled markets carry no basis feature at all (NotApplicable).
         let domain = DomainConfig::default();
         let vec = vector(None);
@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_domain_inputs_fails_closed_not_panics() {
+    fn missing_domain_returns_error() {
         let domain = DomainConfig::default();
         let vec = vector(Some(FeatureValue::Bps(dec!(999))));
         let alerts = detect_basis_alerts(&[vec], &HashMap::new(), &domain);
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detect_record_acknowledge_closes_the_review_loop() {
+    async fn detect_acknowledge_closes_loop() {
         let domain = DomainConfig::default(); // default max_basis_bps = 50
         let vec = vector(Some(FeatureValue::Bps(dec!(75))));
         let alerts = detect_basis_alerts(

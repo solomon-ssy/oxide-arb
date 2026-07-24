@@ -95,7 +95,7 @@ async fn get_equity_snapshot(
 ) -> Result<WebResponse<EquitySnapshotView>, WebError> {
     let info = state
         .account_read
-        .find_equity_snapshot_by_id(&id)
+        .find_equity_snapshot(&id)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("equity snapshot not found: {id}")))?;
     Ok(WebResponse::ok(EquitySnapshotView::from(info)))

@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn reconstructs_entry_factor_plane_not_all_indeterminate() {
+    fn reconstructs_entry_not_indeterminate() {
         // The frozen breakdown replays the entry cross-section verbatim: scored
         // factors stay scored (the exit model sees the same plane it entered on),
         // never collapsing to indeterminate as a single-market recompute would.

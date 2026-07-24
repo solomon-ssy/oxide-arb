@@ -81,7 +81,7 @@ mod acceptance_tests {
 
     /// The default build must not link `Polars`, `SmartCore`, or `Argmin`.
     #[test]
-    fn research_default_build_excludes_heavy_deps() {
+    fn research_default_excludes_deps() {
         let output = Command::new("cargo")
             .args(["tree", "-p", "quant-pivot-research", "--depth", "1"])
             .output()
@@ -104,7 +104,7 @@ mod acceptance_tests {
     /// business layers (core / web / models). Inside this crate it may appear
     /// only behind the `ml-classical` adapter / runtime modules.
     #[test]
-    fn business_layer_has_no_smartcore_concrete_type() {
+    fn business_layer_no_type() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let crates = manifest_dir.parent().expect("crates dir");
         for crate_name in ["quant-pivot-core", "quant-pivot-web", "quant-pivot-models"] {
@@ -177,7 +177,7 @@ mod feature_guard_tests {
 
     #[cfg(not(any(feature = "optimize", feature = "ml-classical")))]
     #[test]
-    fn default_build_excludes_unlinked_heavy_features() {
+    fn default_build_excludes_features() {
         // `black_box` hides the cfg constants from const-eval so this stays a
         // runtime assertion rather than a (clippy-flagged) constant one.
         let heavy = hint::black_box(cfg!(feature = "optimize"))

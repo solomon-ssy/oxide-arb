@@ -128,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_overlay_to_active_and_shadow_versions() {
+    fn maps_overlay_active_versions() {
         let active = ModelVersionId::from_v7();
         let shadow = ModelVersionId::from_v7();
         let model = ModelConfig {
@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_overlay_falls_back_to_none() {
+    fn invalid_overlay_falls_none() {
         let active = ModelVersionId::from_v7();
         let model = ModelConfig {
             active_model_version_id: Some(ModelVersionRef::new(active)),
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_weights_have_no_overlay() {
+    fn empty_weights_no_overlay() {
         let applicator = WeightOverlayApplicator::new();
         applicator.reload(&FactorsConfig::default(), &ModelConfig::default());
         assert!(applicator.overlay_for(&ModelVersionId::from_v7()).is_none());

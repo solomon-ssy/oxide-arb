@@ -301,7 +301,7 @@ mod tests {
     use super::{GAIN_CANDIDATES, calibrate_alpha_scale, calibrate_logistic_gain};
 
     #[test]
-    fn alpha_scale_is_the_origin_ols_slope() {
+    fn alpha_scale_origin_slope() {
         // label = 200 · net exactly ⇒ slope 200.
         let pairs = vec![
             (dec!(0.10), dec!(20)),
@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn alpha_scale_rejects_degenerate_or_negative() {
+    fn alpha_scale_rejects_negative() {
         // No net variance is a hard calibration failure.
         let flat = vec![(dec!(0), dec!(50)), (dec!(0), dec!(-30))];
         assert!(calibrate_alpha_scale(&flat).is_err());
@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn alpha_scale_clamps_into_band() {
+    fn alpha_scale_clamps_band() {
         // Huge slope clamps to the 10_000 bps ceiling.
         let pairs = vec![(dec!(0.01), dec!(1000)), (dec!(0.02), dec!(2000))];
         assert_eq!(
@@ -335,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn logistic_gain_prefers_separating_gain() {
+    fn logistic_gain_prefers_gain() {
         // Positive nets ⇒ exit-better; negative nets ⇒ hold. A higher gain
         // maximizes the Bernoulli likelihood of the clean separation.
         let pairs = vec![
@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn logistic_gain_rejects_single_class() {
+    fn logistic_gain_rejects_class() {
         // Every label positive means there is no probability calibration signal.
         let pairs = vec![(dec!(0.5), dec!(10)), (dec!(-0.5), dec!(20))];
         assert!(calibrate_logistic_gain(&pairs).is_err());

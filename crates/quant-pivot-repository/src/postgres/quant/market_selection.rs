@@ -18,7 +18,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::{query::find_models_by_id_chunks, write::insert_many_chunked},
+    postgres::{query::find_id_chunks, write::insert_many_chunked},
     traits::MarketSelectionRepository,
 };
 
@@ -74,11 +74,11 @@ impl MarketSelectionRepository for PgMarketSelectionRepository {
             .map(|rows| rows.into_iter().map(Into::into).collect())
     }
 
-    async fn list_members_by_snapshot_ids(
+    async fn list_snapshot_members(
         &self,
         snapshot_ids: &[MarketSelectionId],
     ) -> Result<Vec<MarketSelectionMemberInfo>, StorageError> {
-        let mut rows = find_models_by_id_chunks::<QuantMarketSelectionMemberEntity, _, _>(
+        let mut rows = find_id_chunks::<QuantMarketSelectionMemberEntity, _, _>(
             &self.db,
             snapshot_ids,
             Column::MarketSelectionId,

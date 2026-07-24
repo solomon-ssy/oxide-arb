@@ -8,7 +8,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
 
-use crate::{postgres::query::list_by_fk_ordered_desc, traits::ModelGovernanceAuditRepository};
+use crate::{postgres::query::list_fk_desc, traits::ModelGovernanceAuditRepository};
 
 /// Postgres-backed model-governance audit ledger repository.
 pub struct PgModelGovernanceAuditRepository {
@@ -38,7 +38,7 @@ impl ModelGovernanceAuditRepository for PgModelGovernanceAuditRepository {
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<Vec<ModelGovernanceAuditInfo>, StorageError> {
-        list_by_fk_ordered_desc::<Entity, _, _, _>(
+        list_fk_desc::<Entity, _, _, _>(
             &self.db,
             Column::ModelVersionId,
             *model_version_id,

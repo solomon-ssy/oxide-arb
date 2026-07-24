@@ -120,18 +120,20 @@ fn evidence(window: &DomainObservationWindow, metric: DomainMetric) -> Option<Ev
     })
 }
 
-fn oracle_evidence(window: &CryptoPriceReportWindow) -> Option<EvidenceSourceRef> {
-    window.latest().map(|report| EvidenceSourceRef {
-        source_kind: EvidenceSourceKind::DomainExternal,
-        reference: format!(
-            "{}:price@{}#{}",
-            report.instrument_key,
-            report.event_time.timestamp_millis(),
-            report.report_hash
-        ),
-        effective_at: report.published_at,
-        available_at: Some(report.available_at),
-    })
+impl CryptoPriceReportWindow {
+    fn oracle_evidence(&self) -> Option<EvidenceSourceRef> {
+        self.latest().map(|report| EvidenceSourceRef {
+            source_kind: EvidenceSourceKind::DomainExternal,
+            reference: format!(
+                "{}:price@{}#{}",
+                report.instrument_key,
+                report.event_time.timestamp_millis(),
+                report.report_hash
+            ),
+            effective_at: report.published_at,
+            available_at: Some(report.available_at),
+        })
+    }
 }
 
 /// Signed relative distance from the underlying to the strike, oriented so
@@ -296,7 +298,7 @@ fn basis_vs_resolution_source(ctx: &CryptoComputeCtx<'_>, subject: &CryptoSubjec
             }
             let oracle_price = oracle.price.inner();
             let basis_bps = (close.value - oracle_price) / oracle_price * BPS_PER_UNIT;
-            match oracle_evidence(oracle_window) {
+            match (oracle_window).oracle_evidence() {
                 Some(evidence) => RawFeature::present(name, FeatureValue::Bps(basis_bps), evidence),
                 None => RawFeature::missing(name, NullReason::DomainSourceUnavailable),
             }
@@ -466,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn above_threshold_distance_is_signed_toward_yes() {
+    fn above_threshold_distance_yes() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(2, dec!(99000)), (1, dec!(101000))]);
         let binding = binding(
@@ -523,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn basis_measures_binance_vs_chainlink_divergence() {
+    fn basis_measures_binance_divergence() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(1, dec!(100500))]);
         let oracle = CryptoPriceReportWindow {
@@ -556,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn up_vs_reference_prefers_oracle_price_to_beat() {
+    fn up_vs_reference_beat() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         // Binance ref at window open would be 100000; the oracle says 100100.
         let primary = window(&[(3, dec!(100000)), (1, dec!(100100))]);
@@ -590,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn chainlink_ptb_fails_closed_without_oracle_window() {
+    fn chainlink_rejects_without_window() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         // Binance has a ref at window open — must not be used when oracle is Chainlink.
         let primary = window(&[(3, dec!(100000)), (1, dec!(100100))]);
@@ -617,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn binance_settled_ptb_reads_feature_source_without_oracle() {
+    fn binance_reads_without_oracle() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let reference_at = as_of - Duration::minutes(3);
         // PTB = Binance close at reference_at; latest close matches it.
@@ -657,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_chainlink_oracle_triggers_stale_beyond_policy() {
+    fn stale_chainlink_stale_policy() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(1, dec!(100500))]);
         let oracle = CryptoPriceReportWindow {
@@ -692,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn band_and_signed_helpers_reject_degenerate_anchors() {
+    fn band_signed_reject_anchors() {
         assert!(signed_relative(dec!(1), Decimal::ZERO, false).is_none());
         assert!(band_distance(dec!(1), Decimal::ZERO, dec!(2)).is_none());
         assert!(band_distance(dec!(1), dec!(2), dec!(2)).is_none());
@@ -704,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn time_to_observation_counts_down_without_fabricating_elapsed_zero() {
+    fn time_observation_without_zero() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(1, dec!(100000))]);
         let subject_binding = binding(PriceComparator::UpVsReference, None);
@@ -759,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn future_oracle_is_invalid_not_fresh_age_zero() {
+    fn future_invalid_not_zero() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(1, dec!(100500))]);
         let oracle = CryptoPriceReportWindow {
@@ -797,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn unrepresentable_feature_windows_are_explicitly_missing() {
+    fn unrepresentable_feature_windows_missing() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(1, dec!(100000))]);
         let binding = binding(

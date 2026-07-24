@@ -41,7 +41,7 @@ impl DomainSourceCursorRepository for PgDomainSourceCursorRepository {
             .one(&self.db)
             .await
             .map_err(StorageError::from)?;
-        row.map(validated_info).transpose()
+        row.map(Self::validated_info).transpose()
     }
 
     async fn upsert(
@@ -65,7 +65,7 @@ impl DomainSourceCursorRepository for PgDomainSourceCursorRepository {
             .exec_with_returning(&self.db)
             .await
             .map_err(StorageError::from)?;
-        validated_info(row)
+        Self::validated_info(row)
     }
 
     async fn compare_and_set(
@@ -115,7 +115,7 @@ impl DomainSourceCursorRepository for PgDomainSourceCursorRepository {
             }
         };
         if let Some(row) = advanced {
-            return validated_info(row).map(DomainSourceCursorCasOutcome::Advanced);
+            return Self::validated_info(row).map(DomainSourceCursorCasOutcome::Advanced);
         }
         self.find(&source_id, &instrument_key)
             .await?
@@ -136,7 +136,7 @@ impl DomainSourceCursorRepository for PgDomainSourceCursorRepository {
             .all(&self.db)
             .await
             .map_err(StorageError::from)?;
-        rows.into_iter().map(validated_info).collect()
+        rows.into_iter().map(Self::validated_info).collect()
     }
 }
 
@@ -146,13 +146,15 @@ fn validate_cursor(cursor: &UpsertDomainSourceCursor) -> Result<(), StorageError
     })
 }
 
-fn validated_info(row: Model) -> Result<DomainSourceCursorInfo, StorageError> {
-    let cursor: DomainSourceCursorInfo = row.into();
-    cursor.validate().map_err(|detail| {
-        StorageError::invariant_violation(
-            Some(QUANT_DOMAIN_SOURCE_CURSOR),
-            format!("stored cursor failed integrity validation: {detail}"),
-        )
-    })?;
-    Ok(cursor)
+impl PgDomainSourceCursorRepository {
+    fn validated_info(row: Model) -> Result<DomainSourceCursorInfo, StorageError> {
+        let cursor: DomainSourceCursorInfo = row.into();
+        cursor.validate().map_err(|detail| {
+            StorageError::invariant_violation(
+                Some(QUANT_DOMAIN_SOURCE_CURSOR),
+                format!("stored cursor failed integrity validation: {detail}"),
+            )
+        })?;
+        Ok(cursor)
+    }
 }

@@ -48,7 +48,7 @@ fn planner() -> DefaultPortfolioPlanner {
 /// Optimizer meta fields that must be identical across deterministic replays.
 /// `elapsed_ms` is wall-clock observability and is excluded (same contract as
 /// backtest `report_hash` omitting optimizer provenance).
-fn assert_optimizer_meta_replay_equal(a: &PortfolioOptimizerMeta, b: &PortfolioOptimizerMeta) {
+fn assert_optimizer_meta_equal(a: &PortfolioOptimizerMeta, b: &PortfolioOptimizerMeta) {
     assert_eq!(a.solver, b.solver);
     assert_eq!(a.solve_mode, b.solve_mode);
     assert_eq!(a.status, b.status);
@@ -210,7 +210,7 @@ fn position(market: &str, category: MarketCategory, value: Decimal) -> PositionS
 }
 
 #[test]
-fn planner_total_room_is_min_budget_available() {
+fn planner_total_room_available() {
     // Equity is large, but available cash is the true ceiling on total deploy.
     let caps = caps();
     let acct = account(dec!(100000), dec!(700), Usd::ZERO.inner(), Vec::new());
@@ -238,7 +238,7 @@ fn planner_total_room_is_min_budget_available() {
 }
 
 #[test]
-fn planner_respects_available_usd_after_reserved() {
+fn planner_respects_after_reserved() {
     // Reserved capital shrinks available below the budget; the second candidate
     // is starved and rejected with the cash reason.
     let caps = caps();
@@ -275,7 +275,7 @@ fn planner_respects_available_usd_after_reserved() {
 }
 
 #[test]
-fn exposure_after_includes_account_snapshot_positions() {
+fn exposure_after_includes_positions() {
     // A 900-USD existing position in 0xa leaves only 100 of the 1000 market cap.
     let caps = caps();
     let acct = account(
@@ -305,7 +305,7 @@ fn exposure_after_includes_account_snapshot_positions() {
 }
 
 #[test]
-fn planner_with_real_account_holding_no_positions_is_deterministic() {
+fn planner_real_no_deterministic() {
     // A brand-new real account (zero positions) is a valid state — no warnings,
     // fully deterministic.
     let caps = caps();
@@ -331,7 +331,7 @@ fn planner_with_real_account_holding_no_positions_is_deterministic() {
 }
 
 #[test]
-fn min_size_dropped_as_rejected() {
+fn min_size_dropped_rejected() {
     // Tiny equity → Kelly capped at max_position_pct·equity = 0.1·100 = 10 < min 50.
     let caps = caps();
     let acct = account(dec!(100), dec!(100), Usd::ZERO.inner(), Vec::new());
@@ -352,7 +352,7 @@ fn min_size_dropped_as_rejected() {
 }
 
 #[test]
-fn planner_stable_sort_matches_spec() {
+fn planner_stable_matches_spec() {
     // Equal risk-adjusted scores fall back to composite, then market id asc.
     let caps = caps();
     let acct = account(dec!(100000), dec!(100000), Usd::ZERO.inner(), Vec::new());
@@ -449,14 +449,14 @@ fn planner_deterministic_replay() {
     assert_eq!(a.planned, b.planned);
     assert_eq!(a.plan_row.allocated_usd, b.plan_row.allocated_usd);
     assert_eq!(a.plan_row.rejected_summary, b.plan_row.rejected_summary);
-    assert_optimizer_meta_replay_equal(
+    assert_optimizer_meta_equal(
         &a.plan_row.optimizer_meta_json,
         &b.plan_row.optimizer_meta_json,
     );
 }
 
 #[test]
-fn optimizer_meta_recorded_on_plan_row() {
+fn optimizer_meta_recorded_row() {
     let caps = caps();
     let acct = account(dec!(100000), dec!(100000), Usd::ZERO.inner(), Vec::new());
     let c1 = candidate("0xa", dec!(0.95), dec!(1), dec!(200), dec!(100));
@@ -486,7 +486,7 @@ fn optimizer_meta_recorded_on_plan_row() {
 }
 
 #[test]
-fn lp_top_n_exclusion_is_rejected() {
+fn lp_top_n_rejected() {
     let caps = caps();
     let acct = account(dec!(100000), dec!(100000), Usd::ZERO.inner(), Vec::new());
     let c1 = candidate("0xa", dec!(0.95), dec!(1), dec!(200), dec!(100));
@@ -514,7 +514,7 @@ fn lp_top_n_exclusion_is_rejected() {
 }
 
 #[test]
-fn planner_consumes_real_drawdown_state() {
+fn planner_consumes_real_state() {
     let caps = caps();
     let acct = account(dec!(10000), dec!(10000), Usd::ZERO.inner(), Vec::new());
     let candidate = candidate("0xa", dec!(0.9), dec!(1), dec!(200), dec!(100));
@@ -569,7 +569,7 @@ fn planner_consumes_real_drawdown_state() {
 }
 
 #[test]
-fn planner_deterministic_with_frozen_drawdown() {
+fn planner_deterministic_frozen_drawdown() {
     let caps = caps();
     let acct = account(dec!(10000), dec!(10000), Usd::ZERO.inner(), Vec::new());
     let candidate = candidate("0xa", dec!(0.85), dec!(1), dec!(200), dec!(100));
@@ -616,7 +616,7 @@ fn planner_deterministic_with_frozen_drawdown() {
         first.planned[0].sizing.suggested_usd,
         second.planned[0].sizing.suggested_usd
     );
-    assert_optimizer_meta_replay_equal(
+    assert_optimizer_meta_equal(
         &first.plan_row.optimizer_meta_json,
         &second.plan_row.optimizer_meta_json,
     );

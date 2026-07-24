@@ -429,7 +429,7 @@ mod tests {
     use crate::enums::quant::{FeatureParityEventStatus, FeatureParityStage};
 
     #[test]
-    fn feature_cell_validation_rejects_cross_field_corruption() {
+    fn feature_cell_rejects_corruption() {
         let cell: FeatureCell = serde_json::from_value(serde_json::json!({
             "state": "observed",
             "reason": "source_unavailable",
@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn parity_detail_rejects_stage_and_status_drift() {
+    fn parity_detail_rejects_drift() {
         let detail = FeatureParityDetail::Compared {
             sampling_key: "report/market".to_owned(),
             source: Box::new(FeatureParityDetailSource::Prediction { candidate_count: 3 }),

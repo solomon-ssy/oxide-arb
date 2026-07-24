@@ -36,7 +36,6 @@ pub use sections::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Error as SerdeJsonError, Value};
 use thiserror::Error;
-pub use validation::validate_runtime_config;
 pub use wire::{
     CapitalPolicy, ConfidenceSizeCurve, CorrelationConfig, DecimalValue, DrawdownMultiplierPolicy,
     EmergencyExitKind, EmergencyExitPolicy, EntryOrderPolicy, ExecutionBreakerConfig,
@@ -1090,7 +1089,7 @@ mod tests {
     use super::{DecisionPolicySnapshot, POLICY_RESOURCE_SCHEMA_VERSION, PolicySnapshotError};
 
     #[test]
-    fn default_document_uses_current_schema_version() {
+    fn default_document_uses_version() {
         assert_eq!(
             DecisionPolicySnapshot::default()
                 .recommendation
@@ -1100,7 +1099,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_current_schema_documents() {
+    fn rejects_non_schema_documents() {
         let mut document = DecisionPolicySnapshot::default().to_json();
         document["recommendation"]["schema_version"] = json!(2);
         let error =

@@ -329,7 +329,7 @@ mod tests {
 
     #[cfg(feature = "research-jobs")]
     #[test]
-    fn round_trip_preserves_typed_rows_and_semantic_chain() {
+    fn round_trip_preserves_chain() {
         let at = Utc
             .with_ymd_and_hms(2026, 7, 15, 0, 0, 0)
             .single()
@@ -354,7 +354,7 @@ mod tests {
 
     #[cfg(feature = "research-jobs")]
     #[test]
-    fn tampered_semantic_row_is_rejected() {
+    fn tampered_semantic_row_rejected() {
         let mut record =
             PolicyEvidenceRecord::from_typed("a", None, &Payload { value: 1 }).expect("record");
         record.payload = serde_json::json!({"value": 2});
@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_hash_text_never_enters_a_record() {
+    fn invalid_hash_never_record() {
         assert!(ContentHash::parse("not-a-hash").is_err());
     }
 }

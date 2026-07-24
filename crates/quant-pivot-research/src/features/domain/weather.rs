@@ -87,7 +87,7 @@ pub struct WeatherStationLeadBiasFit {
 ///
 /// One sample is one complete `(station, run, valid_time, lead)` ensemble mean
 /// paired with the matching latest-revision `GHCNh` interval extreme.
-pub fn fit_weather_station_lead_bias(
+pub fn fit_station_lead_bias(
     observations: &[WeatherObservationFact],
     forecasts: &[WeatherForecastPoint],
     fit_start: DateTime<Utc>,
@@ -107,7 +107,7 @@ pub fn fit_weather_station_lead_bias(
             "Weather calibration has no complete forecast/observation pairs",
         ));
     }
-    assemble_weather_bias_fit(samples)
+    (samples).assemble_weather_bias_fit()
 }
 
 fn latest_historical_observations(
@@ -297,31 +297,31 @@ fn station_biases(errors: BiasErrors) -> QuantResult<(Vec<WeatherStationBiasV1>,
     Ok((stations, sample_count))
 }
 
-fn assemble_weather_bias_fit(
-    mut samples: WeatherCalibrationSamples,
-) -> QuantResult<WeatherStationLeadBiasFit> {
-    let (stations, sample_count) = station_biases(samples.errors)?;
-    samples.sample_keys.sort();
-    let calibration_split_hash = CanonicalDigest::content_hash_json(&samples.sample_keys)?;
-    let observation_set_hash = CanonicalDigest::content_hash_json(&samples.observation_hashes)?;
-    let manifest_set_hash = CanonicalDigest::content_hash_json(&samples.manifest_hashes)?;
-    let mut source_hashes = vec![observation_set_hash, manifest_set_hash];
-    source_hashes.sort();
-    source_hashes.dedup();
-    let methodology = WEATHER_BIAS_METHODOLOGY.to_owned();
-    let methodology_hash = CanonicalDigest::content_hash_json(&methodology)?;
-    Ok(WeatherStationLeadBiasFit {
-        payload: WeatherStationLeadBiasArtifactV1 {
-            schema_version: 1,
-            methodology,
-            methodology_hash,
-            grid_hashes: samples.grid_hashes.into_iter().collect(),
-            source_hashes,
-            stations,
-        },
-        calibration_split_hash,
-        sample_count,
-    })
+impl WeatherCalibrationSamples {
+    fn assemble_weather_bias_fit(mut self) -> QuantResult<WeatherStationLeadBiasFit> {
+        let (stations, sample_count) = station_biases(self.errors)?;
+        self.sample_keys.sort();
+        let calibration_split_hash = CanonicalDigest::content_hash_json(&self.sample_keys)?;
+        let observation_set_hash = CanonicalDigest::content_hash_json(&self.observation_hashes)?;
+        let manifest_set_hash = CanonicalDigest::content_hash_json(&self.manifest_hashes)?;
+        let mut source_hashes = vec![observation_set_hash, manifest_set_hash];
+        source_hashes.sort();
+        source_hashes.dedup();
+        let methodology = WEATHER_BIAS_METHODOLOGY.to_owned();
+        let methodology_hash = CanonicalDigest::content_hash_json(&methodology)?;
+        Ok(WeatherStationLeadBiasFit {
+            payload: WeatherStationLeadBiasArtifactV1 {
+                schema_version: 1,
+                methodology,
+                methodology_hash,
+                grid_hashes: self.grid_hashes.into_iter().collect(),
+                source_hashes,
+                stations,
+            },
+            calibration_split_hash,
+            sample_count,
+        })
+    }
 }
 
 /// The Weather vertical's pure feature builder.
@@ -807,7 +807,7 @@ mod tests {
     };
     use rust_decimal_macros::dec;
 
-    use super::{decimal_sqrt, ensemble_standard_deviation, fit_weather_station_lead_bias};
+    use super::{decimal_sqrt, ensemble_standard_deviation, fit_station_lead_bias};
 
     fn hash(seed: char) -> ContentHash {
         ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
@@ -824,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn station_lead_fit_uses_latest_observation_revision_and_complete_ensemble() {
+    fn station_lead_uses_ensemble() {
         let station = IcaoStation::parse("KJFK").expect("station");
         let reference = Utc
             .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
@@ -873,7 +873,7 @@ mod tests {
             run_manifest_hash: hash('4'),
             report_hash: hash('5'),
         };
-        let fit = fit_weather_station_lead_bias(
+        let fit = fit_station_lead_bias(
             &observations,
             &[forecast(0, dec!(12)), forecast(1, dec!(14))],
             reference,

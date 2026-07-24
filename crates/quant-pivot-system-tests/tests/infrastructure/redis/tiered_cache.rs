@@ -35,7 +35,7 @@ struct CachedMarketStub {
     question: String,
 }
 
-pub async fn tiered_l2_hit_backfills_l1() {
+pub async fn tiered_l2_hit_l1() {
     let redis_cfg = setup_redis("tiered_backfill").await;
     let key = CacheKey::MarketInfo {
         market_id: MarketId::new("0xbackfill"),
@@ -69,7 +69,7 @@ pub async fn tiered_l2_hit_backfills_l1() {
     );
 }
 
-pub async fn tiered_both_miss_returns_none() {
+pub async fn tiered_both_returns_none() {
     let redis_cfg = setup_redis("tiered_miss").await;
     let key = CacheKey::EventInfo {
         event_id: EventId::new("evt-missing"),
@@ -81,7 +81,7 @@ pub async fn tiered_both_miss_returns_none() {
     assert!(missing.is_none());
 }
 
-pub async fn tiered_set_populates_both_levels() {
+pub async fn tiered_set_populates_levels() {
     let redis_cfg = setup_redis("tiered_set").await;
     let key = CacheKey::MarketMetadata {
         market_id: MarketId::new("fee-metadata-market"),

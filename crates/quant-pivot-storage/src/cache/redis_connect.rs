@@ -108,7 +108,7 @@ mod tests {
     use super::{CREATE_TIMEOUT, create_timeout, deadpool_config};
 
     #[test]
-    fn operation_and_startup_timeouts_are_independent() {
+    fn operation_startup_timeouts_independent() {
         let redis = RedisConfig {
             timeout_ms: 250,
             connect_timeout_ms: 9_000,
@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn create_timeout_is_clamped_to_the_startup_budget() {
+    fn create_timeout_clamped_budget() {
         let redis = RedisConfig {
             connect_timeout_ms: 1_200,
             ..RedisConfig::default()

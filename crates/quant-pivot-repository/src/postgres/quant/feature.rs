@@ -9,7 +9,7 @@ use quant_pivot_models::{
 use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel, TransactionTrait};
 
 use crate::{
-    postgres::{query::find_models_by_id_chunks, write::insert_many_returning_chunked},
+    postgres::{query::find_id_chunks, write::insert_many_returning_chunked},
     traits::FeatureRepository,
 };
 
@@ -64,7 +64,7 @@ impl FeatureRepository for PgFeatureRepository {
         &self,
         ids: &[FeatureVectorId],
     ) -> Result<Vec<FeatureVectorInfo>, StorageError> {
-        find_models_by_id_chunks::<Entity, _, _>(&self.db, ids, Column::FeatureVectorId)
+        find_id_chunks::<Entity, _, _>(&self.db, ids, Column::FeatureVectorId)
             .await
             .map(|rows| rows.into_iter().map(Into::into).collect())
     }

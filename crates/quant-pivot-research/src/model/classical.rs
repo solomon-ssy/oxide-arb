@@ -211,7 +211,7 @@ pub fn replay_training_matrix(
     let encoded = output
         .input_transform
         .apply_range(&matrix.cells, 0..matrix.row_count())?;
-    let predictions = model.predict(&dense_matrix(encoded)?)?;
+    let predictions = model.predict(&(encoded).dense_matrix()?)?;
     if predictions.len() != matrix.row_count()
         || predictions.iter().any(|prediction| !prediction.is_finite())
     {
@@ -284,7 +284,7 @@ impl ClassicalModelAdapter for SmartcoreAdapter {
     }
 
     fn train(&self, matrix: &TrainingMatrix) -> QuantResult<ClassicalTrainOutput> {
-        let rows = validate_matrix(matrix)?;
+        let rows = (matrix).validate_matrix()?;
         let input_contract = ModelInputContract {
             inputs: matrix
                 .columns
@@ -305,7 +305,7 @@ impl ClassicalModelAdapter for SmartcoreAdapter {
         let input_transform_hash = input_transform.transform_hash()?;
         let y: Vec<f64> = matrix.labels.to_vec();
         let training_input_hash = training_input_hash(&standardized, &matrix.labels)?;
-        let mut x = dense_matrix(standardized)?;
+        let mut x = (standardized).dense_matrix()?;
         let model = fit_kind(self.kind, &self.params, &x, &y)?;
 
         let predictions = model.predict(&x)?;
@@ -441,7 +441,7 @@ impl SmartcoreModel {
                 .into());
             }
         }
-        let probe = dense_matrix(DenseInputMatrix::from_rows(vec![vec![0.0; width]])?)?;
+        let probe = (DenseInputMatrix::from_rows(vec![vec![0.0; width]])?).dense_matrix()?;
         let predictions = self.predict(&probe)?;
         if predictions.len() != 1 || predictions.iter().any(|value| !value.is_finite()) {
             return Err(ResearchError::InvalidModelArtifact {
@@ -591,11 +591,11 @@ fn rolling_validation(
         }
         let train = select_rows(matrix, &train_indices)?;
         let (input_transform, std_train) = FittedInputTransform::fit(&train)?;
-        let x_train = dense_matrix(std_train)?;
+        let x_train = (std_train).dense_matrix()?;
         let model = fit_kind(kind, params, &x_train, &train.labels.to_vec())?;
 
         let std_val = input_transform.apply_range(&matrix.cells, val_start..val_end)?;
-        let x_val = dense_matrix(std_val)?;
+        let x_val = (std_val).dense_matrix()?;
         let predictions = model.predict(&x_val)?;
         let labels: Vec<f64> = (val_start..val_end).map(|i| matrix.labels[i]).collect();
         fold_objectives.push(rank_ic_f64(&predictions, &labels)?.round_dp(RESEARCH_DECIMAL_SCALE));
@@ -708,19 +708,21 @@ fn sigmoid(z: f64) -> f64 {
     }
 }
 
-/// Validate the matrix shape, returning `(rows, cols)`.
-fn validate_matrix(matrix: &TrainingMatrix) -> QuantResult<usize> {
-    let rows = matrix.row_count();
-    let cols = matrix.input_count();
-    if rows < 2 || cols == 0 {
-        return Err(ResearchError::MatrixBuild {
-            detail: format!(
-                "classical training needs >= 2 rows and >= 1 column, got {rows}x{cols}"
-            ),
+impl TrainingMatrix {
+    /// Validate the matrix shape, returning `(rows, cols)`.
+    fn validate_matrix(&self) -> QuantResult<usize> {
+        let rows = self.row_count();
+        let cols = self.input_count();
+        if rows < 2 || cols == 0 {
+            return Err(ResearchError::MatrixBuild {
+                detail: format!(
+                    "classical training needs >= 2 rows and >= 1 column, got {rows}x{cols}"
+                ),
+            }
+            .into());
         }
-        .into());
+        Ok(rows)
     }
-    Ok(rows)
 }
 
 /// Map a `smartcore` fit `Result` into our error domain.
@@ -750,15 +752,17 @@ fn extract_logistic(model: &Logistic) -> QuantResult<(Vec<f64>, f64)> {
     Ok((weights, intercept))
 }
 
-/// Build a `smartcore` dense matrix from standardized rows.
-fn dense_matrix(rows: DenseInputMatrix) -> QuantResult<DenseMatrix<f64>> {
-    let (row_count, column_count, values) = rows.into_parts();
-    DenseMatrix::new(row_count, column_count, values, false).map_err(|error| {
-        ResearchError::MatrixBuild {
-            detail: format!("dense matrix build failed: {error}"),
-        }
-        .into()
-    })
+impl DenseInputMatrix {
+    /// Build a `smartcore` dense matrix from standardized rows.
+    fn dense_matrix(self) -> QuantResult<DenseMatrix<f64>> {
+        let (row_count, column_count, values) = self.into_parts();
+        DenseMatrix::new(row_count, column_count, values, false).map_err(|error| {
+            ResearchError::MatrixBuild {
+                detail: format!("dense matrix build failed: {error}"),
+            }
+            .into()
+        })
+    }
 }
 
 /// Model-agnostic ablation feature importance: for each column, the mean
@@ -854,7 +858,6 @@ mod tests {
     use crate::{
         features::{FeatureName, FeatureUnit, FeatureValueKind},
         model::{
-            classical::dense_matrix,
             runtime::ClassicalKind,
             trainer::{CancellationProbe, ValidationSpec},
         },
@@ -875,45 +878,47 @@ mod tests {
     }
 
     /// A linearly separable matrix: label = 1 when feature-0 is high.
-    fn training_matrix() -> TrainingMatrix {
-        let rows = 60usize;
-        let mut labels = Array1::<f64>::zeros(rows);
-        let mut cells = Vec::with_capacity(rows);
-        for i in 0..rows {
-            let high = i % 2 == 0;
-            let f0 = if high { dec!(0.9) } else { dec!(0.1) };
-            let f1 = Decimal::from(i % 5) / Decimal::from(5);
-            cells.push(vec![
-                ModelInputCell::Observed(f0),
-                ModelInputCell::Observed(f1),
-            ]);
-            labels[i] = if high { 1.0 } else { 0.0 };
-        }
-        TrainingMatrix {
-            cells: RawInputMatrix::from_rows(cells).expect("raw input matrix"),
-            labels,
-            columns: vec![
-                FeatureColumnSpec {
-                    feature: FeatureName::new("f0"),
-                    unit: FeatureUnit::Ratio,
-                    value_kind: FeatureValueKind::Decimal,
-                    required: true,
-                },
-                FeatureColumnSpec {
-                    feature: FeatureName::new("f1"),
-                    unit: FeatureUnit::Ratio,
-                    value_kind: FeatureValueKind::Decimal,
-                    required: true,
-                },
-            ],
-            rejected_rows: 0,
-            row_decision_at: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
-            row_label_horizon_end: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
+    impl TrainingMatrix {
+        fn classical_fixture() -> Self {
+            let rows = 60usize;
+            let mut labels = Array1::<f64>::zeros(rows);
+            let mut cells = Vec::with_capacity(rows);
+            for i in 0..rows {
+                let high = i % 2 == 0;
+                let f0 = if high { dec!(0.9) } else { dec!(0.1) };
+                let f1 = Decimal::from(i % 5) / Decimal::from(5);
+                cells.push(vec![
+                    ModelInputCell::Observed(f0),
+                    ModelInputCell::Observed(f1),
+                ]);
+                labels[i] = if high { 1.0 } else { 0.0 };
+            }
+            Self {
+                cells: RawInputMatrix::from_rows(cells).expect("raw input matrix"),
+                labels,
+                columns: vec![
+                    FeatureColumnSpec {
+                        feature: FeatureName::new("f0"),
+                        unit: FeatureUnit::Ratio,
+                        value_kind: FeatureValueKind::Decimal,
+                        required: true,
+                    },
+                    FeatureColumnSpec {
+                        feature: FeatureName::new("f1"),
+                        unit: FeatureUnit::Ratio,
+                        value_kind: FeatureValueKind::Decimal,
+                        required: true,
+                    },
+                ],
+                rejected_rows: 0,
+                row_decision_at: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
+                row_label_horizon_end: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
+            }
         }
     }
 
     #[test]
-    fn walk_forward_train_indices_precede_validation_start() {
+    fn walk_forward_train_start() {
         let purged_train = [1usize, 5, 10, 20, 25];
         let val_start = 15usize;
         let train: Vec<_> = purged_train
@@ -924,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn rolling_validation_purges_overlapping_label_horizons() {
+    fn rolling_validation_purges_horizons() {
         // Long label horizons so expanding-prefix CV would leak; purged CV must
         // still produce a finite held-out objective (or skip thin folds).
         let rows = 40usize;
@@ -978,8 +983,8 @@ mod tests {
     }
 
     #[test]
-    fn rolling_validation_rejects_when_purge_leaves_no_evaluable_fold() {
-        let mut matrix = training_matrix();
+    fn rolling_rejects_no_fold() {
+        let mut matrix = TrainingMatrix::classical_fixture();
         let terminal = fixture_ts(1_000_000);
         matrix.row_label_horizon_end.fill(terminal);
         let error = rolling_validation(
@@ -999,8 +1004,8 @@ mod tests {
     /// Every supported kind trains, validates out-of-sample, serializes, and
     /// `bincode`-roundtrips into the expected estimator union variant.
     #[test]
-    fn every_classical_kind_trains_validates_and_roundtrips() {
-        let matrix = training_matrix();
+    fn classical_kind_validates_roundtrips() {
+        let matrix = TrainingMatrix::classical_fixture();
         for kind in [
             ClassicalKind::RandomForest,
             ClassicalKind::ExtraTrees,
@@ -1051,16 +1056,15 @@ mod tests {
     #[test]
     fn logistic_emits_probability_ranking() {
         let output = ClassicalAdapterRegistry::adapter_for(ClassicalKind::LogisticRegression)
-            .train(&training_matrix())
+            .train(&TrainingMatrix::classical_fixture())
             .expect("train logistic");
         let model: SmartcoreModel = bincode::deserialize(&output.model_bytes).expect("decode");
         let SmartcoreModel::Logistic { .. } = &model else {
             panic!("logistic variant");
         };
-        let x = dense_matrix(
-            DenseInputMatrix::from_rows(vec![vec![2.0, 0.0], vec![-2.0, 0.0]])
-                .expect("dense input"),
-        )
+        let x = (DenseInputMatrix::from_rows(vec![vec![2.0, 0.0], vec![-2.0, 0.0]])
+            .expect("dense input"))
+        .dense_matrix()
         .expect("matrix");
         let proba = model.predict(&x).expect("predict");
         assert!(

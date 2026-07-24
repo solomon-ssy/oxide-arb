@@ -171,7 +171,7 @@ impl ProductionSettlementExecutor {
                     "fresh governed-action deployment verification blocked: {readiness:?}"
                 ),
             })?;
-        verify_governed_action_deployment_scope(action, &deployment)?;
+        verify_action_scope(action, &deployment)?;
         match action.desired_approval {
             Some(true) => SettlementAdapterGateway
                 .prepare_operator_approval(&deployment)
@@ -623,7 +623,7 @@ fn verify_deployment_scope(
     Ok(())
 }
 
-fn verify_governed_action_deployment_scope(
+fn verify_action_scope(
     action: &SettlementGovernedActionInfo,
     deployment: &VerifiedSettlementDeployment,
 ) -> Result<(), SettlementExecutorError> {

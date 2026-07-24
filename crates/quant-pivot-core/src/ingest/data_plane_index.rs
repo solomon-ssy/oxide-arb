@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn token_keys_and_slots_stay_stable_across_snapshot_rebuilds() {
+    fn token_keys_slots_rebuilds() {
         let data_plane = DataPlane::new();
         let first = TokenId::new("42");
         data_plane.register_test_tokens(slice::from_ref(&first));
@@ -585,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn freshness_snapshot_is_coherent_and_invalidates() {
+    fn freshness_snapshot_coherent_invalidates() {
         let slot = Arc::new(TokenSlot::new());
         assert!(slot.publish_snapshot(
             Arc::new(BookSnapshot::new(Arc::from([]), Arc::from([]), 1, 0)),
@@ -612,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_freshness_reads_never_observe_torn_fields() {
+    fn concurrent_reads_never_fields() {
         let slot = Arc::new(TokenSlot::new());
         let writer_slot = Arc::clone(&slot);
         let writer = thread::spawn(move || {

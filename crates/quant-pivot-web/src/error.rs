@@ -305,13 +305,13 @@ mod tests {
     use super::WebError;
 
     #[test]
-    fn storage_duplicate_maps_to_409() {
+    fn storage_duplicate_maps_409() {
         let web = WebError::from(StorageError::duplicate(USER, "alice"));
         assert_eq!(web.status(), StatusCode::CONFLICT);
     }
 
     #[test]
-    fn storage_invariant_violation_maps_to_400() {
+    fn storage_invariant_maps_400() {
         let web = WebError::from(StorageError::invariant_violation(
             Some(QUANT_ORDER_INTENT),
             "invalid create payload",
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_conflict_maps_to_409() {
+    fn execution_conflict_maps_409() {
         let web = WebError::from(QuantError::from(ExecutionError::AdmissionDenied {
             reason: "spread too wide".to_owned(),
         }));
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn capital_recovery_maps_to_503() {
+    fn capital_recovery_maps_503() {
         let web = WebError::from(QuantError::from(ExecutionError::CapitalRecoveryFailed {
             reason: "allocation invariant broken".to_owned(),
         }));
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_deferred_maps_to_503() {
+    fn admission_deferred_maps_503() {
         let web = WebError::from(QuantError::from(ExecutionError::AdmissionDeferred {
             reason: "book snapshot stale".to_owned(),
         }));
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn outcome_reconciliation_source_maps_to_503() {
+    fn outcome_reconciliation_maps_503() {
         let web = WebError::from(QuantError::from(
             ExecutionError::OutcomeReconciliationSource {
                 reason: "finalized RPC unavailable".to_owned(),
@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn outcome_reconciliation_invariant_maps_to_500() {
+    fn outcome_reconciliation_maps_500() {
         let web = WebError::from(QuantError::from(
             ExecutionError::OutcomeReconciliationInvariant {
                 reason: "durable fact readback mismatch".to_owned(),

@@ -313,7 +313,7 @@ async fn apply_schema_migrations_locked(
         );
     }
 
-    verify_schema_client_during_deployment(client).await
+    verify_deploy_schema(client).await
 }
 
 async fn acquire_deployment_lock(client: &Client, owner: &str) -> Result<(), StorageError> {
@@ -501,16 +501,14 @@ fn validate_online_safe_statement(
 pub(super) async fn verify_schema_client(
     client: &Client,
 ) -> Result<ClickHouseSchemaStatus, StorageError> {
-    verify_schema_client_with_lock_policy(client, false).await
+    verify_locked_schema(client, false).await
 }
 
-async fn verify_schema_client_during_deployment(
-    client: &Client,
-) -> Result<ClickHouseSchemaStatus, StorageError> {
-    verify_schema_client_with_lock_policy(client, true).await
+async fn verify_deploy_schema(client: &Client) -> Result<ClickHouseSchemaStatus, StorageError> {
+    verify_locked_schema(client, true).await
 }
 
-async fn verify_schema_client_with_lock_policy(
+async fn verify_locked_schema(
     client: &Client,
     deployment_lock_owned: bool,
 ) -> Result<ClickHouseSchemaStatus, StorageError> {
@@ -1067,12 +1065,12 @@ mod tests {
         &["ALTER TABLE events MODIFY TTL event_time + INTERVAL 30 DAY DELETE"];
 
     #[test]
-    fn compiled_migration_registry_is_contiguous_and_valid() {
+    fn compiled_migration_registry_valid() {
         validate_migration_registry().expect("compiled migration registry should be valid");
     }
 
     #[test]
-    fn clickhouse_version_parser_accepts_release_build_components() {
+    fn clickhouse_version_accepts_components() {
         assert_eq!(
             parse_clickhouse_version("26.5.1.882").expect("valid ClickHouse release"),
             (26, 5)
@@ -1080,14 +1078,14 @@ mod tests {
     }
 
     #[test]
-    fn clickhouse_version_parser_rejects_incomplete_versions() {
+    fn clickhouse_version_rejects_versions() {
         let error = parse_clickhouse_version("26")
             .expect_err("minor version is required for the deduplication contract");
         assert!(error.to_string().contains("invalid version string"));
     }
 
     #[test]
-    fn clickhouse_version_contract_rejects_pre_26_1_servers() {
+    fn clickhouse_version_rejects_servers() {
         let error = ensure_supported_clickhouse_version("25.12.9.1")
             .expect_err("dependent materialized-view deduplication is not end-to-end");
         assert!(error.to_string().contains("26.1 or newer"));
@@ -1096,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn online_safe_accepts_resumable_add_column() {
+    fn online_safe_accepts_column() {
         let migration = MigrationSpec {
             version: 2,
             name: "add_source",
@@ -1110,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn online_safe_rejects_ttl_and_destructive_ddl() {
+    fn online_safe_rejects_ddl() {
         let migration = MigrationSpec {
             version: 2,
             name: "ttl_delete",

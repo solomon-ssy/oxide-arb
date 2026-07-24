@@ -539,16 +539,18 @@ mod tests {
         ResearchHasher::canonical(&"calibration-split").unwrap()
     }
 
-    fn config() -> BiasFitConfig {
-        BiasFitConfig {
-            bins: 4,
-            // Single unbounded ttr bucket keeps these unit tests focused on the
-            // price-bucket + significance logic.
-            ttr_bucket_bounds_secs: Vec::new(),
-            min_bin_samples: 10,
-            min_curve_samples: 20,
-            ci_confidence: Decimal::new(95, 2),
-            ic_significance_min: Decimal::new(1, 2),
+    impl BiasFitConfig {
+        fn test_fixture() -> Self {
+            Self {
+                bins: 4,
+                // Single unbounded ttr bucket keeps these unit tests focused on the
+                // price-bucket + significance logic.
+                ttr_bucket_bounds_secs: Vec::new(),
+                min_bin_samples: 10,
+                min_curve_samples: 20,
+                ci_confidence: Decimal::new(95, 2),
+                ic_significance_min: Decimal::new(1, 2),
+            }
         }
     }
 
@@ -573,7 +575,7 @@ mod tests {
 
     /// Below the curve sample gate → no artifact (fail-closed greenfield).
     #[test]
-    fn fit_fail_closed_when_insufficient_samples() {
+    fn fit_rejects_insufficient_samples() {
         let samples = (0..5)
             .map(|i| {
                 sample(
@@ -585,15 +587,20 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let table =
-            FavoriteLongshotBiasTable::fit(&samples, window(), split_hash(), &config()).unwrap();
+        let table = FavoriteLongshotBiasTable::fit(
+            &samples,
+            window(),
+            split_hash(),
+            &BiasFitConfig::test_fixture(),
+        )
+        .unwrap();
         assert!(table.is_none(), "thin data must produce no artifact");
     }
 
     /// A favorite-longshot skew (low-price tokens over-priced) yields a signed,
     /// price-varying bias — never a constant.
     #[test]
-    fn fit_produces_non_constant_signed_bias() {
+    fn fit_produces_non_bias() {
         let mut samples = Vec::new();
         // Low-price bucket: implied ~0.125 but settles YES far less often (skew).
         for i in 0..200 {
@@ -615,9 +622,14 @@ mod tests {
                 i % 20 != 0,
             ));
         }
-        let table = FavoriteLongshotBiasTable::fit(&samples, window(), split_hash(), &config())
-            .unwrap()
-            .expect("qualifying category yields a table");
+        let table = FavoriteLongshotBiasTable::fit(
+            &samples,
+            window(),
+            split_hash(),
+            &BiasFitConfig::test_fixture(),
+        )
+        .unwrap()
+        .expect("qualifying category yields a table");
         let low = table
             .bias_for(
                 MarketCategory::Crypto,
@@ -644,7 +656,7 @@ mod tests {
 
     /// An unmapped category / uncovered bucket returns no bias (inert factor).
     #[test]
-    fn bias_absent_for_unfit_category() {
+    fn bias_absent_unfit_category() {
         let samples = (0..50)
             .map(|i| {
                 sample(
@@ -656,8 +668,13 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let table =
-            FavoriteLongshotBiasTable::fit(&samples, window(), split_hash(), &config()).unwrap();
+        let table = FavoriteLongshotBiasTable::fit(
+            &samples,
+            window(),
+            split_hash(),
+            &BiasFitConfig::test_fixture(),
+        )
+        .unwrap();
         // A single price bucket with a 50/50-ish skew at implied 0.5 may or may
         // not clear the Wilson gate; either way, an unfit category has no bias.
         if let Some(table) = table {
@@ -702,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn favorite_longshot_governance_unified_under_calibration_artifact() {
+    fn favorite_longshot_governance_artifact() {
         // closed-loop: `MarketPriceBias` shares the same `active`
         // lifecycle gate as `model_score` calibrators — a superseded bias table
         // must fail closed at resolve time, not only at activate time.
@@ -714,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn from_persisted_rejects_inactive_bias_table() {
+    fn persisted_rejects_inactive_table() {
         // Unified with `CoreCalibrationArtifactLoader`: a superseded or
         // never-activated bias table must never
         // resolve, even though `MarketPriceBias` previously had no such gate.
@@ -726,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn from_persisted_accepts_active_bias_table() {
+    fn persisted_accepts_active_table() {
         let info = persisted_info(true);
         assert!(
             FavoriteLongshotBiasTable::from_persisted(&info).is_ok(),

@@ -188,7 +188,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn report_only_never_creates_intent() {
+    async fn report_never_creates_intent() {
         let gate = gate(DecisionPolicySnapshot::default());
         let mut rec = rec();
         rec.execution_eligibility.eligible_modes =
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn semi_auto_eligible_requires_approval() {
+    async fn semi_auto_requires_approval() {
         let gate = gate(DecisionPolicySnapshot::default());
         let mut rec = rec();
         rec.execution_eligibility.eligible_modes = vec![QuantRuntimeMode::SemiAuto];
@@ -218,7 +218,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn semi_auto_ineligible_is_denied() {
+    async fn semi_auto_ineligible_denied() {
         let gate = gate(DecisionPolicySnapshot::default());
         let mut rec = rec();
         rec.execution_eligibility.eligible_modes = vec![QuantRuntimeMode::ReportOnly];
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_active_policy_allows_auto_execution() {
+    async fn exact_active_allows_execution() {
         let config = DecisionPolicySnapshot::default();
         let mut rec = rec();
         let policy_id = rec.evidence_refs.decision_policy_snapshot_id;
@@ -255,7 +255,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_execution_denied_when_envelope_disallows() {
+    async fn auto_execution_denied_disallows() {
         let config = DecisionPolicySnapshot::default();
         let mut rec = rec();
         let policy_id = rec.evidence_refs.decision_policy_snapshot_id;

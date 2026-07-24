@@ -14,11 +14,13 @@ use alloy::{
     sol_types::SolCall,
     transports::http::Http,
 };
+#[cfg(test)]
+use quant_pivot_models::types::EvmUint256;
 use quant_pivot_models::{
     config::OnchainConfig,
     enums::settlement::{SettlementRoute, SettlementSubmissionPurpose},
     types::{
-        ContentHash, EvmAddress, EvmBlockHash, EvmCalldataHash, EvmCodeHash, EvmUint256, MarketId,
+        ContentHash, EvmAddress, EvmBlockHash, EvmCalldataHash, EvmCodeHash, MarketId,
         SettlementEvidenceVersion, Shares, TokenId,
         settlement_payload::{
             SettlementBalanceEvidence, SettlementPayoutVector, SettlementTokenBalance,
@@ -30,7 +32,10 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use self::SettlementAdapterWrite::redeemPositionsCall;
-use super::contracts::VerifiedSettlementDeployment;
+use super::{
+    contracts::VerifiedSettlementDeployment,
+    typed::{IntoEvmUint, SettlementValueError},
+};
 
 const POLYGON_CHAIN_ID: u64 = 137;
 const OUTCOME_TOKEN_DECIMALS: u32 = 6;
@@ -346,6 +351,14 @@ pub enum SettlementAdapterError {
     SimulationReverted { detail: String },
 }
 
+impl From<SettlementValueError> for SettlementAdapterError {
+    fn from(error: SettlementValueError) -> Self {
+        Self::NumericEvidence {
+            detail: error.detail().to_owned(),
+        }
+    }
+}
+
 /// Stateless V2 adapter gateway. Raw target addresses are never accepted by
 /// its construction methods.
 #[derive(Debug, Default, Clone, Copy)]
@@ -579,7 +592,7 @@ impl AlloySettlementAdapterReader {
             return Err(SettlementAdapterError::MissingOperatorApproval);
         }
         let usdce = capability_address("verified USDC.e", capability.usdce())?;
-        self.verify_adapter_state_and_simulate(adapter, usdce, funder, block, &call)
+        self.verify_adapter_simulation(adapter, usdce, funder, block, &call)
             .await?;
         self.recheck_canonical_block(capability).await?;
 
@@ -587,9 +600,9 @@ impl AlloySettlementAdapterReader {
             block_number: capability.verified_block(),
             block_hash: capability.verified_block_hash().clone(),
             payout_vector: SettlementPayoutVector {
-                denominator: typed_uint256(denominator)?,
-                yes: typed_uint256(yes_payout)?,
-                no: typed_uint256(no_payout)?,
+                denominator: (denominator).into_evm_uint()?,
+                yes: (yes_payout).into_evm_uint()?,
+                no: (no_payout).into_evm_uint()?,
             },
             balances: SettlementBalanceEvidence {
                 yes: token_balance(tokens.yes.clone(), yes_balance)?,
@@ -603,7 +616,7 @@ impl AlloySettlementAdapterReader {
         })
     }
 
-    async fn verify_adapter_state_and_simulate(
+    async fn verify_adapter_simulation(
         &self,
         adapter: Address,
         usdce: Address,
@@ -755,12 +768,6 @@ fn validate_payout_vector(
     Ok(())
 }
 
-fn typed_uint256(value: U256) -> Result<EvmUint256, SettlementAdapterError> {
-    EvmUint256::parse(value.to_string()).map_err(|error| SettlementAdapterError::NumericEvidence {
-        detail: error.to_string(),
-    })
-}
-
 fn token_balance(
     token_id: TokenId,
     raw_balance: U256,
@@ -773,7 +780,7 @@ fn token_balance(
     let divisor = Decimal::from(10_u64.pow(OUTCOME_TOKEN_DECIMALS));
     Ok(SettlementTokenBalance {
         token_id,
-        raw_balance: typed_uint256(raw_balance)?,
+        raw_balance: (raw_balance).into_evm_uint()?,
         shares: Shares::new(raw / divisor),
     })
 }
@@ -901,7 +908,7 @@ mod tests {
     );
 
     #[test]
-    fn local_chain_fixture_lock_matches_every_consumed_input() {
+    fn local_chain_matches_input() {
         let lock = include_str!("../../tests/fixtures/settlement-local-chain/artifact.lock");
         assert_fixture_hash(
             lock,
@@ -972,18 +979,20 @@ mod tests {
         }
     }
 
-    async fn test_reader(scenario: RpcScenario) -> (MockServer, AlloySettlementAdapterReader) {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(move |request: &Request| rpc_response(request, scenario))
-            .mount(&server)
-            .await;
-        let reader = AlloySettlementAdapterReader::connect(&OnchainConfig {
-            rpc_endpoint: PolygonRpcEndpoint::Public { url: server.uri() },
-            rpc_timeout_ms: 5_000,
-        })
-        .expect("test RPC client");
-        (server, reader)
+    impl RpcScenario {
+        async fn test_reader(self) -> (MockServer, AlloySettlementAdapterReader) {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(move |request: &Request| rpc_response(request, self))
+                .mount(&server)
+                .await;
+            let reader = AlloySettlementAdapterReader::connect(&OnchainConfig {
+                rpc_endpoint: PolygonRpcEndpoint::Public { url: server.uri() },
+                rpc_timeout_ms: 5_000,
+            })
+            .expect("test RPC client");
+            (server, reader)
+        }
     }
 
     fn rpc_response(request: &Request, scenario: RpcScenario) -> ResponseTemplate {
@@ -1071,10 +1080,12 @@ mod tests {
         uint_result(u64::from(value))
     }
 
-    fn binary_tokens() -> SettlementBinaryTokenPair {
-        SettlementBinaryTokenPair {
-            yes: TokenId::new("11"),
-            no: TokenId::new("22"),
+    impl SettlementBinaryTokenPair {
+        fn fixture() -> Self {
+            Self {
+                yes: TokenId::new("11"),
+                no: TokenId::new("22"),
+            }
         }
     }
 
@@ -1117,79 +1128,79 @@ mod tests {
         (container, reader)
     }
 
-    async fn initialize_local_chain(
-        reader: &AlloySettlementAdapterReader,
-    ) -> (Address, Address, Address) {
-        let catalog =
-            SettlementDeploymentCatalog::official_current().expect("built-in settlement catalog");
-        let harness_address = Address::from_str(HARNESS_ADDRESS).expect("harness address");
-        let harness = LocalSettlementHarnessView::new(harness_address, &reader.provider);
-        let ctf_template = harness
-            .CTF_TEMPLATE()
-            .call()
-            .await
-            .expect("CTF template address");
-        let pusd_template = harness
-            .PUSD_TEMPLATE()
-            .call()
-            .await
-            .expect("pUSD template address");
-        let usdce_template = harness
-            .USDCE_TEMPLATE()
-            .call()
-            .await
-            .expect("USDC.e template address");
-        let ctf =
-            Address::from_str(catalog.conditional_tokens.as_str()).expect("catalog CTF address");
-        let pusd =
-            Address::from_str(catalog.collateral_token.as_str()).expect("catalog pUSD address");
-        let usdce = Address::from_str(catalog.usdce.as_str()).expect("catalog USDC.e address");
-        let ctf_code = reader
-            .provider
-            .get_code_at(ctf_template)
-            .await
-            .expect("CTF fixture runtime");
-        let pusd_code = reader
-            .provider
-            .get_code_at(pusd_template)
-            .await
-            .expect("pUSD fixture runtime");
-        let usdce_code = reader
-            .provider
-            .get_code_at(usdce_template)
-            .await
-            .expect("USDC.e fixture runtime");
-        let ctf_set: Value = reader
-            .provider
-            .raw_request("anvil_setCode".into(), (ctf, ctf_code))
-            .await
-            .expect("etch CTF fixture at official target");
-        let pusd_set: Value = reader
-            .provider
-            .raw_request("anvil_setCode".into(), (pusd, pusd_code))
-            .await
-            .expect("etch pUSD fixture at official target");
-        let usdce_set: Value = reader
-            .provider
-            .raw_request("anvil_setCode".into(), (usdce, usdce_code))
-            .await
-            .expect("etch USDC.e fixture at official target");
-        assert!(ctf_set.is_null() && pusd_set.is_null() && usdce_set.is_null());
+    impl AlloySettlementAdapterReader {
+        async fn initialize_local_chain(&self) -> (Address, Address, Address) {
+            let catalog = SettlementDeploymentCatalog::official_current()
+                .expect("built-in settlement catalog");
+            let harness_address = Address::from_str(HARNESS_ADDRESS).expect("harness address");
+            let harness = LocalSettlementHarnessView::new(harness_address, &self.provider);
+            let ctf_template = harness
+                .CTF_TEMPLATE()
+                .call()
+                .await
+                .expect("CTF template address");
+            let pusd_template = harness
+                .PUSD_TEMPLATE()
+                .call()
+                .await
+                .expect("pUSD template address");
+            let usdce_template = harness
+                .USDCE_TEMPLATE()
+                .call()
+                .await
+                .expect("USDC.e template address");
+            let ctf = Address::from_str(catalog.conditional_tokens.as_str())
+                .expect("catalog CTF address");
+            let pusd =
+                Address::from_str(catalog.collateral_token.as_str()).expect("catalog pUSD address");
+            let usdce = Address::from_str(catalog.usdce.as_str()).expect("catalog USDC.e address");
+            let ctf_code = self
+                .provider
+                .get_code_at(ctf_template)
+                .await
+                .expect("CTF fixture runtime");
+            let pusd_code = self
+                .provider
+                .get_code_at(pusd_template)
+                .await
+                .expect("pUSD fixture runtime");
+            let usdce_code = self
+                .provider
+                .get_code_at(usdce_template)
+                .await
+                .expect("USDC.e fixture runtime");
+            let ctf_set: Value = self
+                .provider
+                .raw_request("anvil_setCode".into(), (ctf, ctf_code))
+                .await
+                .expect("etch CTF fixture at official target");
+            let pusd_set: Value = self
+                .provider
+                .raw_request("anvil_setCode".into(), (pusd, pusd_code))
+                .await
+                .expect("etch pUSD fixture at official target");
+            let usdce_set: Value = self
+                .provider
+                .raw_request("anvil_setCode".into(), (usdce, usdce_code))
+                .await
+                .expect("etch USDC.e fixture at official target");
+            assert!(ctf_set.is_null() && pusd_set.is_null() && usdce_set.is_null());
 
-        let funder = Address::from_str(ANVIL_FUNDER).expect("Anvil funder");
-        let initialize = LocalSettlementHarnessView::initializeCall {
-            funder,
-            ctf,
-            pusd,
-            usdce,
+            let funder = Address::from_str(ANVIL_FUNDER).expect("Anvil funder");
+            let initialize = LocalSettlementHarnessView::initializeCall {
+                funder,
+                ctf,
+                pusd,
+                usdce,
+            }
+            .abi_encode();
+            send_local_call(self, funder, harness_address, initialize).await;
+            (
+                harness.standard().call().await.expect("standard adapter"),
+                harness.negRisk().call().await.expect("Neg Risk adapter"),
+                harness_address,
+            )
         }
-        .abi_encode();
-        send_local_call(reader, funder, harness_address, initialize).await;
-        (
-            harness.standard().call().await.expect("standard adapter"),
-            harness.negRisk().call().await.expect("Neg Risk adapter"),
-            harness_address,
-        )
     }
 
     async fn send_local_call(
@@ -1240,7 +1251,7 @@ mod tests {
     }
 
     #[test]
-    fn redeem_calldata_matches_official_full_balance_abi_for_both_routes() {
+    fn redeem_calldata_matches_routes() {
         for route in [SettlementRoute::StandardV2, SettlementRoute::NegRiskV2] {
             let capability = verified_deployment_fixture(route);
             let call =
@@ -1259,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_and_revocation_target_ctf_and_bind_the_verified_adapter() {
+    fn approval_revocation_target_adapter() {
         let capability = verified_deployment_fixture(SettlementRoute::NegRiskV2);
         let approval = SettlementAdapterGateway
             .prepare_operator_approval(&capability)
@@ -1290,7 +1301,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_market_identity_cannot_reach_calldata() {
+    fn invalid_identity_blocks_calldata() {
         let capability = verified_deployment_fixture(SettlementRoute::StandardV2);
         assert!(
             SettlementAdapterGateway::build_redeem_call(
@@ -1302,11 +1313,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_only_preflight_freezes_balances_payout_and_canonical_block() {
-        let (_server, reader) = test_reader(RpcScenario::default()).await;
+    async fn read_only_freezes_block() {
+        let (_server, reader) = (RpcScenario::default()).test_reader().await;
         let capability = verified_deployment_fixture(SettlementRoute::StandardV2);
         let route = reader
-            .verify_redeem_route(&capability, &MarketId::new(CONDITION), &binary_tokens())
+            .verify_redeem_route(
+                &capability,
+                &MarketId::new(CONDITION),
+                &SettlementBinaryTokenPair::fixture(),
+            )
             .await
             .expect("read-only preflight succeeds");
         let preflight = route.preflight();
@@ -1321,7 +1336,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preflight_fails_closed_on_pause_missing_approval_residual_or_revert() {
+    async fn preflight_rejects_missing_revert() {
         for (scenario, expected) in [
             (
                 RpcScenario {
@@ -1352,10 +1367,14 @@ mod tests {
                 "simulation",
             ),
         ] {
-            let (_server, reader) = test_reader(scenario).await;
+            let (_server, reader) = (scenario).test_reader().await;
             let capability = verified_deployment_fixture(SettlementRoute::NegRiskV2);
             let error = reader
-                .verify_redeem_route(&capability, &MarketId::new(CONDITION), &binary_tokens())
+                .verify_redeem_route(
+                    &capability,
+                    &MarketId::new(CONDITION),
+                    &SettlementBinaryTokenPair::fixture(),
+                )
                 .await
                 .expect_err("unsafe preflight must fail");
             match (expected, error) {
@@ -1369,9 +1388,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_chain_sweeps_full_balances_for_both_routes_and_enforces_safety_gates() {
+    async fn local_routes_enforces_gates() {
         let (container, reader) = start_local_chain().await;
-        let (standard, neg_risk, harness_address) = initialize_local_chain(&reader).await;
+        let (standard, neg_risk, harness_address) = reader.initialize_local_chain().await;
         let funder = Address::from_str(ANVIL_FUNDER).expect("Anvil funder");
         let capability = verified_deployment_fixture(SettlementRoute::StandardV2);
         let ctf = Address::from_str(capability.conditional_tokens().as_str())
@@ -1394,7 +1413,11 @@ mod tests {
             send_local_call(&reader, funder, harness_address, seed).await;
             let capability = local_capability(&reader, route, adapter).await;
             let redeem_route = reader
-                .verify_redeem_route(&capability, &MarketId::new(CONDITION), &binary_tokens())
+                .verify_redeem_route(
+                    &capability,
+                    &MarketId::new(CONDITION),
+                    &SettlementBinaryTokenPair::fixture(),
+                )
                 .await
                 .expect("local route preflight");
             let preflight = redeem_route.preflight();
@@ -1451,7 +1474,7 @@ mod tests {
                 .verify_redeem_route(
                     &paused_capability,
                     &MarketId::new(CONDITION),
-                    &binary_tokens(),
+                    &SettlementBinaryTokenPair::fixture(),
                 )
                 .await,
             Err(SettlementAdapterError::AdapterPaused)
@@ -1477,7 +1500,7 @@ mod tests {
                 .verify_redeem_route(
                     &revoked_capability,
                     &MarketId::new(CONDITION),
-                    &binary_tokens(),
+                    &SettlementBinaryTokenPair::fixture(),
                 )
                 .await,
             Err(SettlementAdapterError::MissingOperatorApproval)

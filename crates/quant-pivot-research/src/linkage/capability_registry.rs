@@ -105,7 +105,7 @@ pub fn domain_capability_registry(
                 instrument_template: "BINANCE_USDM_FUTURES:{symbol}:1m",
             },
             CryptoLiveBinding {
-                source_id: DomainSourceId::binance_usdm_futures_agg_trade(),
+                source_id: DomainSourceId::binance_futures_trade(),
                 instrument_template: "BINANCE_USDM_FUTURES_AGG_TRADE:{symbol}",
             },
             CryptoResolutionBinding {
@@ -214,7 +214,7 @@ fn crypto_binance_futures_contract(
             ),
             source(
                 LinkageSourceRole::LiveEvent,
-                DomainSourceId::binance_usdm_futures_agg_trade(),
+                DomainSourceId::binance_futures_trade(),
                 "BINANCE_USDM_FUTURES_AGG_TRADE:{symbol}",
                 SourceCredentialPolicy::Public,
                 30,
@@ -318,7 +318,7 @@ fn crypto_contract(
 
 fn weather_contracts(profile: &ResearchProfileRef) -> Vec<DomainContractCapability> {
     let mut contracts = weather_observation_contracts(profile);
-    contracts.extend(weather_extreme_and_climate_contracts(profile));
+    contracts.extend(weather_climate_contracts(profile));
     for contract in &mut contracts {
         if contract.contract_family != DomainContractFamily::WeatherDailyTemperature
             && matches!(contract.eligibility, CapabilityEligibility::Supported)
@@ -467,9 +467,7 @@ fn weather_observation_contracts(profile: &ResearchProfileRef) -> Vec<DomainCont
     ]
 }
 
-fn weather_extreme_and_climate_contracts(
-    profile: &ResearchProfileRef,
-) -> Vec<DomainContractCapability> {
+fn weather_climate_contracts(profile: &ResearchProfileRef) -> Vec<DomainContractCapability> {
     vec![
         weather_contract(
             DomainContractFamily::WeatherTropicalCyclone,
@@ -655,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_is_valid_and_covers_every_supported_family() {
+    fn registry_valid_covers_family() {
         let registry = registry();
         assert!(registry.validate().is_ok());
         for family in [
@@ -682,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_only_crypto_assets_never_serve_as_public_chainlink() {
+    fn credential_only_never_chainlink() {
         let registry = registry();
         for asset in CREDENTIAL_CHAINLINK_ASSETS {
             let chainlink_contracts = registry
@@ -710,7 +708,7 @@ mod tests {
                 } else {
                     assert!(contract.source_bindings.iter().any(|binding| {
                         binding.role == LinkageSourceRole::LiveEvent
-                            && binding.source_id == DomainSourceId::binance_usdm_futures_agg_trade()
+                            && binding.source_id == DomainSourceId::binance_futures_trade()
                     }));
                 }
                 assert!(contract.source_bindings.iter().all(|binding| {
@@ -742,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn every_ruleset_asset_is_classified_by_the_registry() {
+    fn ruleset_asset_classified_registry() {
         let registry = registry();
         for rule in rules() {
             assert!(registry.contracts.iter().any(|contract| {
@@ -755,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn weather_station_registry_hash_is_a_capability_dependency() {
+    fn weather_station_registry_dependency() {
         let first_station_hash =
             ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("first station hash");
         let second_station_hash =
@@ -777,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn weather_vertical_bindings_hash_is_a_capability_dependency() {
+    fn weather_vertical_bindings_dependency() {
         let stations = WeatherStationRegistry::try_new(builtin_weather_station_profiles())
             .expect("station registry");
         let station_hash = stations.registry_hash().expect("station registry hash");

@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn published_active_is_exempt_from_staleness() {
+    fn published_active_exempt_staleness() {
         let now = Utc::now();
         let stale = now - Duration::seconds(90_000);
         assert!(
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn shadow_rejects_failed_gate_report() {
+    fn shadow_rejects_failed_report() {
         assert!(
             quality_gate_passed_ok(&version(
                 PublicationStatus::Candidate,
@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn shadow_must_be_candidate_or_shadow() {
+    fn shadow_candidate_shadow() {
         assert!(
             shadow_publication_status_ok(&version(PublicationStatus::Published, None,),).is_err()
         );

@@ -41,7 +41,7 @@ impl RootSpanBuilder for HttpRootSpanBuilder {
             http.host = %connection_info.host(),
             http.client_ip = %connection_info.realip_remote_addr().unwrap_or(""),
             http.user_agent = %user_agent,
-            http.target = %request_target(request),
+            http.target = %request.path(),
             http.status_code = tracing::field::Empty,
             otel.name = %format!("{http_method} {http_route}"),
             otel.kind = "server",
@@ -78,10 +78,6 @@ impl RootSpanBuilder for HttpRootSpanBuilder {
     }
 }
 
-fn request_target(request: &ServiceRequest) -> &str {
-    request.path()
-}
-
 const fn http_flavor(version: Version) -> &'static str {
     match version {
         Version::HTTP_09 => "0.9",
@@ -97,15 +93,13 @@ const fn http_flavor(version: Version) -> &'static str {
 mod tests {
     use actix_web::test::TestRequest;
 
-    use super::request_target;
-
     #[test]
-    fn request_path_excludes_query_values() {
+    fn request_excludes_query_values() {
         let request = TestRequest::get()
             .uri("/api/markets?search=operator-input")
             .to_srv_request();
 
-        assert_eq!(request_target(&request), "/api/markets");
-        assert!(!request_target(&request).contains("operator-input"));
+        assert_eq!(request.path(), "/api/markets");
+        assert!(!request.path().contains("operator-input"));
     }
 }

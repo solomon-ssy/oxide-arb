@@ -312,35 +312,13 @@ fn validate_publication_timeline(
                 recommendation_status: recommendation.status,
             });
         }
-    } else if report_status_requires_publication(report.status)
-        || recommendation_status_requires_publication(recommendation.status)
-    {
+    } else if report.status.requires_publication() || recommendation.status.requires_publication() {
         return Err(FeedbackCohortContractError::InvalidPublicationState {
             report_status: report.status,
             recommendation_status: recommendation.status,
         });
     }
     Ok(())
-}
-
-const fn report_status_requires_publication(status: RecommendationReportStatus) -> bool {
-    matches!(
-        status,
-        RecommendationReportStatus::Published
-            | RecommendationReportStatus::Superseded
-            | RecommendationReportStatus::Expired
-    )
-}
-
-const fn recommendation_status_requires_publication(status: RecommendationStatus) -> bool {
-    matches!(
-        status,
-        RecommendationStatus::Published
-            | RecommendationStatus::Superseded
-            | RecommendationStatus::Expired
-            | RecommendationStatus::IntentCreated
-            | RecommendationStatus::Executed
-    )
 }
 
 /// Submitted entry evidence visible to an execution-learning scan.
@@ -795,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_window_round_trips_and_rejects_invalid_or_unknown_content() {
+    fn frozen_rejects_invalid_unknown() {
         let profile_ref = builtin_research_profiles()
             .expect("research profiles")
             .into_iter()
@@ -834,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn decision_wire_shape_preserves_stable_exclusion_and_censor_codes() {
+    fn decision_wire_preserves_codes() {
         assert_eq!(
             serde_json::to_value(FeedbackCohortDecision::Excluded(
                 CohortExclusionReason::ReportOnlyNoExecutionAuthority,
@@ -858,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn page_query_bounds_limit_and_cursor_to_the_frozen_window() {
+    fn page_query_bounds_window() {
         let profile_ref = builtin_research_profiles()
             .expect("research profiles")
             .into_iter()
@@ -928,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_truth_plane_is_closed_by_cohort() {
+    fn candidate_truth_plane_cohort() {
         let available_at = Utc
             .with_ymd_and_hms(2026, 7, 1, 0, 1, 0)
             .single()
@@ -995,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn page_requires_one_cohort_strict_order_and_nonempty_continuation() {
+    fn page_requires_one_continuation() {
         let first_at = Utc
             .with_ymd_and_hms(2026, 7, 1, 0, 1, 0)
             .single()

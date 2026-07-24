@@ -96,7 +96,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gamma_5xx_and_429_are_retryable() {
+    fn gamma_5xx_429_retryable() {
         assert!(
             ApiError::Gamma {
                 endpoint: "/events".into(),
@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn upstream_payload_retryability_is_explicit() {
+    fn upstream_payload_retryability_explicit() {
         let payload = |retryable| ApiError::UpstreamPayload {
             context: "gamma keyset".into(),
             content_type: "application/json".into(),

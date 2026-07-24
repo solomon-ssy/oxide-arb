@@ -49,7 +49,7 @@ pub trait ModelRegistryRepository: Send + Sync {
 
     /// Look up a model spec by id (used by governance pointer sync to route the
     /// published version onto the Buy vs Sell/exit runtime-config pointer).
-    async fn find_model_spec_by_id(
+    async fn find_model_spec(
         &self,
         model_spec_id: &ModelSpecId,
     ) -> Result<Option<ModelSpecInfo>, StorageError>;
@@ -66,7 +66,7 @@ pub trait ModelRegistryRepository: Send + Sync {
 
     /// Look up a model version by id (used by the runtime factory to resolve the
     /// active / shadow artifact for a round).
-    async fn find_model_version_by_id(
+    async fn find_model_version(
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<Option<ModelVersionInfo>, StorageError>;
@@ -134,7 +134,7 @@ pub trait ModelRegistryRepository: Send + Sync {
     /// Bind (or clear) the CPCV path set that publish/promote quality gates
     /// must evaluate. Does not change publication status. Ownership of the
     /// path set is enforced by the governance layer before calling this.
-    async fn set_publish_path_set_id(
+    async fn set_publish_path(
         &self,
         model_version_id: &ModelVersionId,
         publish_path_set_id: Option<BacktestPathSetId>,

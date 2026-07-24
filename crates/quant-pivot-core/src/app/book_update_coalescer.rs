@@ -38,15 +38,16 @@ type SideEmissionStamp = (u64, Option<TokenFreshness>, Result<(), BookUnavailabl
 /// Last emitted coherent version/availability pair per watched market.
 type EmittedVersions = HashMap<MarketId, (SideEmissionStamp, SideEmissionStamp)>;
 
-fn emission_stamp(last_known: &LastKnownBook) -> SideEmissionStamp {
-    (
-        last_known
-            .snapshot
-            .as_ref()
-            .map_or(0, |snapshot| snapshot.version),
-        last_known.freshness,
-        last_known.availability,
-    )
+impl LastKnownBook {
+    fn emission_stamp(&self) -> SideEmissionStamp {
+        (
+            self.snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.version),
+            self.freshness,
+            self.availability,
+        )
+    }
 }
 
 /// Samples watched markets from the [`BookStore`] and publishes throttled
@@ -107,8 +108,8 @@ impl BookUpdateCoalescer {
                 let yes_last_known = book_store.load_last_known(pair.yes);
                 let no_last_known = book_store.load_last_known(pair.no);
                 let versions = (
-                    emission_stamp(&yes_last_known),
-                    emission_stamp(&no_last_known),
+                    yes_last_known.emission_stamp(),
+                    no_last_known.emission_stamp(),
                 );
                 if versions.0.0 == 0 && versions.1.0 == 0 && !emitted.contains_key(market_id) {
                     // No published book on either side yet — nothing to emit.
@@ -351,7 +352,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emits_only_for_subscribed_markets_with_published_books() {
+    async fn emits_only_subscribed_books() {
         let (mut coalescer, rx, shutdown, hub_task) = build(&["m1", "m2"], &["m1"]).await;
         apply_book(&coalescer.book_store, "m1-yes");
         apply_book(&coalescer.book_store, "m2-yes");
@@ -363,7 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skips_markets_without_any_published_side() {
+    async fn skips_markets_without_side() {
         let (mut coalescer, rx, shutdown, hub_task) = build(&["m1"], &["m1"]).await;
         assert_eq!(coalescer.tick(), 0);
         assert!(drain_book_updates(&rx).is_empty());
@@ -372,7 +373,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dedupes_unchanged_versions_and_reemits_on_change() {
+    async fn dedupes_unchanged_versions_change() {
         let (mut coalescer, rx, shutdown, hub_task) = build(&["m1"], &["m1"]).await;
         apply_book(&coalescer.book_store, "m1-yes");
 
@@ -387,7 +388,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalidation_emits_an_unavailable_tombstone() {
+    async fn invalidation_emits_unavailable_tombstone() {
         let (mut coalescer, rx, shutdown, hub_task) = build(&["m1"], &["m1"]).await;
         apply_book(&coalescer.book_store, "m1-yes");
         assert_eq!(coalescer.tick(), 1);
@@ -408,7 +409,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skips_markets_unknown_to_the_registry() {
+    async fn skips_markets_unknown_registry() {
         let (mut coalescer, rx, shutdown, hub_task) = build(&[], &["m1"]).await;
         assert_eq!(coalescer.tick(), 0);
         assert!(drain_book_updates(&rx).is_empty());
@@ -417,7 +418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emitted_state_resets_after_unsubscribe() {
+    async fn emitted_state_after_unsubscribe() {
         let (mut coalescer, rx, shutdown, hub_task) = build(&["m1"], &["m1"]).await;
         apply_book(&coalescer.book_store, "m1-yes");
         assert_eq!(coalescer.tick(), 1);

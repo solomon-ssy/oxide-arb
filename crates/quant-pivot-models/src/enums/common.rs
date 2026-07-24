@@ -453,7 +453,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn postgres_enum_array_value_preserves_native_type_identity() {
+    fn postgres_enum_preserves_identity() {
         let value = Value::from(vec![MarketCategory::Sports, MarketCategory::Crypto]);
         let Value::Array(ArrayType::Enum(type_name), Some(values)) = value else {
             panic!("MarketCategory array must bind as a PostgreSQL enum array");
@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn category_set_from_slugs_collects_every_match_and_ignores_unknowns() {
+    fn category_set_ignores_unknowns() {
         let set = CategorySet::from_slugs(["politics", "geopolitics", "world", "trump", "earn-4"]);
         assert!(set.contains(MarketCategory::Politics));
         assert!(set.contains(MarketCategory::Geopolitics));
@@ -472,14 +472,14 @@ mod tests {
     }
 
     #[test]
-    fn category_set_from_empty_slugs_is_empty() {
+    fn category_set_empty_empty() {
         let set = CategorySet::from_slugs([] as [&str; 0]);
         assert!(set.is_empty());
         assert_eq!(set.primary_category(), MarketCategory::Other);
     }
 
     #[test]
-    fn primary_category_uses_stable_precedence() {
+    fn primary_category_uses_precedence() {
         let set = CategorySet::from_slugs(["politics", "crypto", "geopolitics"]);
         assert_eq!(set.primary_category(), MarketCategory::Crypto);
 
@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn tick_size_parses_polymarket_labels_including_half_and_quarter_cent() {
+    fn tick_size_parses_cent() {
         assert_eq!(TickSize::from_str("0.1").expect("tenth"), TickSize::Tenth);
         assert_eq!(
             TickSize::from_str("0.01").expect("hundredth"),
@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn tick_size_try_from_decimal_and_as_decimal_round_trip() {
+    fn tick_size_try_trip() {
         for tick in [
             TickSize::Tenth,
             TickSize::Hundredth,
@@ -537,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_rank_is_a_total_order_over_all_variants() {
+    fn primary_rank_total_variants() {
         let mut ranks: Vec<u8> = MarketCategory::ALL_VARIANTS
             .iter()
             .map(|category| category.primary_rank())
@@ -548,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn category_set_intersects_any_membership() {
+    fn category_set_intersects_membership() {
         let multi = CategorySet::from_slugs(["politics", "geopolitics"]);
         assert!(multi.intersects(CategorySet::from(MarketCategory::Geopolitics)));
         assert!(!multi.intersects(CategorySet::from(MarketCategory::Sports)));
@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn category_set_serde_round_trips_as_name_array() {
+    fn category_set_serde_array() {
         let set = CategorySet::from_slugs(["crypto", "sports"]);
         let json = serde_json::to_string(&set).expect("serialize");
         assert_eq!(json, r#"["sports","crypto"]"#);
@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn tag_slug_mapping_covers_aliases() {
+    fn tag_slug_mapping_aliases() {
         assert_eq!(
             MarketCategory::from_gamma_tag_slug("pop-culture"),
             Some(MarketCategory::Culture)

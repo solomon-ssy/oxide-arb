@@ -12,10 +12,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait, TransactionTrait};
 
-use crate::{
-    postgres::{error, rbac::casbin::sync},
-    traits::rbac::RolePermissionRepository,
-};
+use crate::{postgres::rbac::casbin::CasbinPolicyStore, traits::rbac::RolePermissionRepository};
 
 /// Role→permission assignment repository backed by Postgres.
 pub struct PgRolePermissionRepository {
@@ -27,55 +24,19 @@ impl PgRolePermissionRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
-}
 
-/// Resolve a role's immutable `code` by id, or `NotFound`.
-async fn role_code_of(conn: &impl ConnectionTrait, id: &RoleId) -> Result<RoleCode, StorageError> {
-    Entity::find_by_id(*id)
-        .one(conn)
-        .await
-        .map_err(StorageError::from)?
-        .map(|model| model.code)
-        .ok_or_else(|| error::not_found(ROLE, id))
-}
-
-async fn do_set_permissions(
-    db: &DatabaseConnection,
-    assignment: AssignPermissions,
-) -> Result<(), StorageError> {
-    let AssignPermissions {
-        role_id,
-        permissions,
-    } = assignment;
-
-    // Defense-in-depth: reject any pair outside the permission catalog before
-    // touching the database. The web layer rejects these earlier as a 400.
-    if let Some(invalid) = permissions.iter().find(|perm| !perm.is_valid()) {
-        return Err(error::invariant_violation(
-            Some(ROLE),
-            format!(
-                "invalid permission for role `{role_id}`: {}:{}",
-                invalid.resource.as_str(),
-                invalid.operation.as_str()
-            ),
-        ));
+    /// Resolve a role's immutable code inside the caller's transaction scope.
+    async fn role_code(
+        connection: &impl ConnectionTrait,
+        id: &RoleId,
+    ) -> Result<RoleCode, StorageError> {
+        Entity::find_by_id(*id)
+            .one(connection)
+            .await
+            .map_err(StorageError::from)?
+            .map(|model| model.code)
+            .ok_or_else(|| StorageError::not_found(ROLE, id))
     }
-
-    let txn = db.begin().await.map_err(StorageError::from)?;
-
-    let role_code = role_code_of(&txn, &role_id).await?;
-    sync::do_replace_role_policies(&txn, &role_code, &permissions).await?;
-
-    txn.commit().await.map_err(StorageError::from)?;
-    Ok(())
-}
-
-async fn do_list_permissions(
-    db: &impl ConnectionTrait,
-    role_id: &RoleId,
-) -> Result<Vec<Permission>, StorageError> {
-    let role_code = role_code_of(db, role_id).await?;
-    sync::do_list_role_policies(db, &role_code).await
 }
 
 #[async_trait::async_trait]
@@ -84,10 +45,37 @@ impl RolePermissionRepository for PgRolePermissionRepository {
         &self,
         assignment: AssignPermissions,
     ) -> Result<(), StorageError> {
-        do_set_permissions(&self.db, assignment).await
+        let AssignPermissions {
+            role_id,
+            permissions,
+        } = assignment;
+
+        // Defense-in-depth: reject any pair outside the permission catalog before
+        // touching the database. The web layer rejects these earlier as a 400.
+        if let Some(invalid) = permissions.iter().find(|permission| !permission.is_valid()) {
+            return Err(StorageError::invariant_violation(
+                Some(ROLE),
+                format!(
+                    "invalid permission for role `{role_id}`: {}:{}",
+                    invalid.resource.as_str(),
+                    invalid.operation.as_str()
+                ),
+            ));
+        }
+
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let role_code = Self::role_code(&txn, &role_id).await?;
+        CasbinPolicyStore::new(&txn)
+            .replace_role_policies(&role_code, &permissions)
+            .await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(())
     }
 
     async fn list_permissions(&self, role_id: &RoleId) -> Result<Vec<Permission>, StorageError> {
-        do_list_permissions(&self.db, role_id).await
+        let role_code = Self::role_code(&self.db, role_id).await?;
+        CasbinPolicyStore::new(&self.db)
+            .list_role_policies(&role_code)
+            .await
     }
 }

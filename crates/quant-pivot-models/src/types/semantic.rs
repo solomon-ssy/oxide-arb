@@ -367,7 +367,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn semantic_values_reject_blank_or_non_canonical_input() {
+    fn semantic_values_non_input() {
         assert!(ReportTriggerKey::parse("").is_err());
         assert!(ReportTriggerKey::parse("ad_hoc:request 1").is_err());
         assert!(ReportTriggerKey::parse("ad_hoc:\\request").is_err());
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn serde_and_seaorm_decode_revalidate_semantic_values() {
+    fn serde_seaorm_decode_values() {
         let address = EvmAddress::parse(format!("0x{}", "a".repeat(40))).expect("EVM address");
         let encoded = serde_json::to_string(&address).expect("serialize EVM address");
         assert_eq!(

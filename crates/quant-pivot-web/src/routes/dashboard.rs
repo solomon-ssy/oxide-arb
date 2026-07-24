@@ -355,13 +355,14 @@ async fn load_authority(
         async {
             let runtime = state.control.system_status();
             let capabilities = state.capabilities.capabilities(&runtime).await?;
-            let (primary_action, primary_action_enabled) = primary_action(PrimaryActionContext {
+            let (primary_action, primary_action_enabled) = (PrimaryActionContext {
                 has_unresolvable_reconciliation: runtime
                     .execution_recovery
                     .has_unresolvable_reconciliation,
                 report_capability: capabilities.report_generation_eligible.enabled,
                 permissions,
-            });
+            })
+            .primary_action();
             let observed_at = runtime.checked_at;
             Ok(Some((
                 observed_at,
@@ -379,25 +380,24 @@ async fn load_authority(
     .await
 }
 
-const fn primary_action(context: PrimaryActionContext) -> (DashboardPrimaryAction, bool) {
-    if context.has_unresolvable_reconciliation {
-        return (
-            DashboardPrimaryAction::ResolveReconciliation,
-            context
-                .permissions
-                .allows(DashboardPermission::ReadReconciliation),
-        );
+impl PrimaryActionContext {
+    const fn primary_action(self) -> (DashboardPrimaryAction, bool) {
+        if self.has_unresolvable_reconciliation {
+            return (
+                DashboardPrimaryAction::ResolveReconciliation,
+                self.permissions
+                    .allows(DashboardPermission::ReadReconciliation),
+            );
+        }
+        if self.report_capability {
+            return (
+                DashboardPrimaryAction::RunReport,
+                self.permissions.allows(DashboardPermission::EnqueueReport)
+                    && self.report_capability,
+            );
+        }
+        (DashboardPrimaryAction::ViewBlockers, true)
     }
-    if context.report_capability {
-        return (
-            DashboardPrimaryAction::RunReport,
-            context
-                .permissions
-                .allows(DashboardPermission::EnqueueReport)
-                && context.report_capability,
-        );
-    }
-    (DashboardPrimaryAction::ViewBlockers, true)
 }
 
 async fn load_account(state: &AppState, allowed: bool) -> DashboardSection<DashboardAccountView> {
@@ -781,45 +781,46 @@ mod tests {
         DashboardPrimaryAction, DashboardReasonCode, DashboardSection,
     };
 
-    use super::{
-        DashboardPermission, DashboardPermissions, PrimaryActionContext, guarded, primary_action,
-    };
+    use super::{DashboardPermission, DashboardPermissions, PrimaryActionContext, guarded};
 
     #[test]
-    fn primary_action_is_unique_and_safety_ordered() {
+    fn primary_action_unique_ordered() {
         let permissions = DashboardPermissions::from_decisions([
             (DashboardPermission::ReadConfig, true),
             (DashboardPermission::ReadReconciliation, true),
             (DashboardPermission::EnqueueReport, true),
         ]);
         assert_eq!(
-            primary_action(PrimaryActionContext {
+            (PrimaryActionContext {
                 has_unresolvable_reconciliation: true,
                 report_capability: true,
                 permissions,
-            }),
+            })
+            .primary_action(),
             (DashboardPrimaryAction::ResolveReconciliation, true)
         );
         assert_eq!(
-            primary_action(PrimaryActionContext {
+            (PrimaryActionContext {
                 has_unresolvable_reconciliation: false,
                 report_capability: true,
                 permissions,
-            }),
+            })
+            .primary_action(),
             (DashboardPrimaryAction::RunReport, true)
         );
         assert_eq!(
-            primary_action(PrimaryActionContext {
+            (PrimaryActionContext {
                 has_unresolvable_reconciliation: false,
                 report_capability: false,
                 permissions,
-            }),
+            })
+            .primary_action(),
             (DashboardPrimaryAction::ViewBlockers, true)
         );
     }
 
     #[actix_web::test]
-    async fn guarded_sections_fail_independently_and_mark_stale_snapshots() {
+    async fn guarded_sections_stale_snapshots() {
         let forbidden = guarded(false, DashboardReasonCode::NoSamples, None, async {
             Ok::<_, QuantError>(Some((Utc::now(), 1_u8)))
         })

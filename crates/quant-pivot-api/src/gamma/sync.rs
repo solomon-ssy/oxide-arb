@@ -380,7 +380,7 @@ mod tests {
     use crate::gamma::wire::GAMMA_EVENTS_KEYSET_MAX_PAGE_SIZE;
 
     #[test]
-    fn keyset_page_size_is_clamped_to_gamma_max() {
+    fn keyset_page_size_max() {
         assert_eq!(effective_keyset_page_size(0), 1);
         assert_eq!(effective_keyset_page_size(100), 100);
         assert_eq!(
@@ -390,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn keyset_url_encodes_closed_filter_and_cursor() {
+    fn keyset_url_encodes_cursor() {
         let url = events_keyset_url("https://gamma-api.polymarket.com", 100, Some("cursor-1"))
             .expect("url");
         let query = url.query().expect("query");
@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn keyset_first_page_omits_after_cursor() {
+    fn keyset_omits_after_cursor() {
         let url = events_keyset_url("https://gamma-api.polymarket.com", 50, None).expect("url");
         let query = url.query().expect("query");
         assert!(!query.contains("after_cursor"));

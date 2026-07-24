@@ -39,7 +39,7 @@ pub trait BacktestPort: Send + Sync {
     ) -> QuantResult<Option<BacktestReportView>>;
 
     /// Batch-resolve comparison ids for catalog list enrichment.
-    async fn comparison_ids_for_backtest_reports(
+    async fn backtest_comparison_ids(
         &self,
         backtest_report_ids: &[BacktestReportId],
     ) -> QuantResult<HashMap<BacktestReportId, ModelComparisonReportId>>;

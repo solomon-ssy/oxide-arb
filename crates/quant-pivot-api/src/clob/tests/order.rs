@@ -20,9 +20,8 @@ use wiremock::{
 };
 
 use super::support::{
-    mount_clob_requirements, mount_derive_api_key, mount_post_order, test_clob_client,
-    test_clob_client_with_order_timeout, test_deposit_wallet_clob_client, test_order_request,
-    test_token_id,
+    clob_client_order_timeout, deposit_wallet_clob_client, mount_clob_requirements,
+    mount_derive_api_key, mount_post_order, test_clob_client, test_order_request, test_token_id,
 };
 use crate::clob::OrderSubmissionStage;
 
@@ -105,7 +104,7 @@ fn order_payload(order_id: &str, status: &str, trade_ids: &[&str]) -> Value {
 }
 
 #[tokio::test]
-async fn sdk_metadata_matches_tick_and_negrisk_endpoints() {
+async fn sdk_metadata_matches_endpoints() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     let token_id = test_token_id();
@@ -119,7 +118,7 @@ async fn sdk_metadata_matches_tick_and_negrisk_endpoints() {
 }
 
 #[tokio::test]
-async fn market_info_capture_sdk_validates_one_http_observation() {
+async fn market_info_validates_observation() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     Mock::given(method("GET"))
@@ -143,7 +142,7 @@ async fn market_info_capture_sdk_validates_one_http_observation() {
 }
 
 #[tokio::test]
-async fn missing_market_info_fee_details_never_falls_back_to_zero() {
+async fn missing_fee_never_defaults() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     let mut payload = complete_market_info_payload();
@@ -165,7 +164,7 @@ async fn missing_market_info_fee_details_never_falls_back_to_zero() {
 }
 
 #[tokio::test]
-async fn fak_buy_uses_usd_amount_and_is_never_retried() {
+async fn fak_uses_never_retried() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     let token_id = test_token_id();
@@ -202,7 +201,7 @@ async fn fak_buy_uses_usd_amount_and_is_never_retried() {
 }
 
 #[tokio::test]
-async fn deposit_wallet_order_uses_poly1271_maker_and_signer_wire_identity() {
+async fn deposit_wallet_uses_identity() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     let token_id = test_token_id();
@@ -222,7 +221,7 @@ async fn deposit_wallet_order_uses_poly1271_maker_and_signer_wire_identity() {
     )
     .await;
     let deposit_wallet = Address::repeat_byte(0x42);
-    let client = test_deposit_wallet_clob_client(&server, deposit_wallet).await;
+    let client = deposit_wallet_clob_client(&server, deposit_wallet).await;
 
     client
         .place_order(&test_order_request(OrderType::Fak))
@@ -249,7 +248,7 @@ async fn deposit_wallet_order_uses_poly1271_maker_and_signer_wire_identity() {
 }
 
 #[tokio::test]
-async fn post_order_preserves_all_immediate_trade_and_transaction_identities() {
+async fn post_order_preserves_identities() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     let token_id = test_token_id();
@@ -296,7 +295,7 @@ async fn post_order_preserves_all_immediate_trade_and_transaction_identities() {
 }
 
 #[tokio::test]
-async fn post_order_preserves_trade_ids_and_sdk_backfilled_hashes() {
+async fn post_order_preserves_hashes() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     let token_id = test_token_id();
@@ -358,7 +357,7 @@ async fn post_order_preserves_trade_ids_and_sdk_backfilled_hashes() {
 }
 
 #[tokio::test]
-async fn exact_order_and_trade_reads_preserve_restart_identity_and_status() {
+async fn exact_reads_preserve_status() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     Mock::given(method("GET"))
@@ -413,7 +412,7 @@ async fn exact_order_and_trade_reads_preserve_restart_identity_and_status() {
 }
 
 #[tokio::test]
-async fn unresolved_exact_trade_keeps_zero_hash_absent() {
+async fn unresolved_keeps_zero_absent() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     Mock::given(method("GET"))
@@ -442,7 +441,7 @@ async fn unresolved_exact_trade_keeps_zero_hash_absent() {
 }
 
 #[tokio::test]
-async fn sdk_poll_exhaustion_returns_durable_trade_identity_without_hash() {
+async fn sdk_returns_without_hash() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     let token_id = test_token_id();
@@ -467,7 +466,7 @@ async fn sdk_poll_exhaustion_returns_durable_trade_identity_without_hash() {
         .respond_with(ResponseTemplate::new(200).set_body_json(trades_page(&[])))
         .mount(&server)
         .await;
-    let client = test_clob_client_with_order_timeout(&server, Duration::from_secs(35)).await;
+    let client = clob_client_order_timeout(&server, Duration::from_secs(35)).await;
 
     let response = client
         .place_order(&test_order_request(OrderType::Fak))
@@ -479,7 +478,7 @@ async fn sdk_poll_exhaustion_returns_durable_trade_identity_without_hash() {
 }
 
 #[tokio::test]
-async fn every_order_type_is_attempted_once_on_ambiguous_http_failure() {
+async fn order_type_attempted_failure() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     let token_id = test_token_id();
@@ -509,7 +508,7 @@ async fn every_order_type_is_attempted_once_on_ambiguous_http_failure() {
 }
 
 #[tokio::test]
-async fn every_order_type_is_attempted_once_on_post_timeout() {
+async fn order_type_attempted_timeout() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     let token_id = test_token_id();
@@ -524,7 +523,7 @@ async fn every_order_type_is_attempted_once_on_post_timeout() {
         .expect(4)
         .mount(&server)
         .await;
-    let client = test_clob_client_with_order_timeout(&server, Duration::from_millis(25)).await;
+    let client = clob_client_order_timeout(&server, Duration::from_millis(25)).await;
 
     let expiration = u64::try_from(Utc::now().timestamp()).expect("positive timestamp") + 300;
     for order_type in [

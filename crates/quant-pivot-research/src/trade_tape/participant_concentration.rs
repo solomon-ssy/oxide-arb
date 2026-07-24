@@ -288,11 +288,13 @@ mod tests {
         compute_concentration, cr1_share, gini, hhi,
     };
 
-    fn gate() -> ParticipantConcentrationGate {
-        ParticipantConcentrationGate {
-            min_unique_participants: 2,
-            min_notional_usd: dec!(10),
-            min_coverage_ratio: dec!(0.5),
+    impl ParticipantConcentrationGate {
+        fn test_fixture() -> Self {
+            Self {
+                min_unique_participants: 2,
+                min_notional_usd: dec!(10),
+                min_coverage_ratio: dec!(0.5),
+            }
         }
     }
 
@@ -321,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn concentration_metrics_cover_empty_and_single_participant() {
+    fn concentration_metrics_empty_participant() {
         assert_eq!(gini(Vec::<Decimal>::new()), None);
         assert_eq!(hhi(Vec::<Decimal>::new()), None);
         assert_eq!(cr1_share(Vec::<Decimal>::new()), None);
@@ -345,13 +347,15 @@ mod tests {
     }
 
     #[test]
-    fn compute_concentration_scores_maker_whale_window() {
+    fn compute_concentration_scores_window() {
         let prints = vec![
             print("a", TradeParticipantRole::Maker, dec!(90)),
             print("b", TradeParticipantRole::Maker, dec!(10)),
             print("c", TradeParticipantRole::Taker, dec!(50)),
         ];
-        let snapshot = compute_concentration(&prints, true, &gate()).expect("scored");
+        let snapshot =
+            compute_concentration(&prints, true, &ParticipantConcentrationGate::test_fixture())
+                .expect("scored");
         assert_eq!(snapshot.unique_participants, 2);
         assert_metric(Some(snapshot.cr1_share), dec!(0.900000000000));
     }

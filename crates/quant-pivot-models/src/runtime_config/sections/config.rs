@@ -870,7 +870,7 @@ impl Default for TrainingConfig {
 
 impl TrainingConfig {
     /// Resolve [`TrainingConfig::min_exit_depth_usd`] into a typed [`Usd`] value.
-    pub const fn min_exit_depth_usd_typed(&self) -> Usd {
+    pub const fn min_exit_depth(&self) -> Usd {
         Usd::new(self.min_exit_depth_usd.value)
     }
 }

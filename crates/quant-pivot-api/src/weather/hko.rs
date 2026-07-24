@@ -512,7 +512,7 @@ mod tests {
     use super::HkoOpenDataSource;
 
     #[tokio::test]
-    async fn preserves_hko_window_and_district_range_provenance() {
+    async fn preserves_hko_window_provenance() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/weather.php"))
@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_non_monotonic_or_invalid_rainfall() {
+    async fn rejects_nonmonotonic_rainfall() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(
@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preserves_complete_hko_daily_temperature_and_skips_non_serving_rows() {
+    async fn preserves_skips_non_rows() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/opendata.php"))

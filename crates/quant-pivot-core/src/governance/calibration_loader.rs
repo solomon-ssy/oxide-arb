@@ -399,14 +399,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_fails_closed_when_artifact_missing() {
+    async fn load_rejects_artifact_missing() {
         let loader = loader(None);
         let result = loader.load(&CalibrationArtifactId::from_v7()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn load_fails_closed_on_wrong_kind() {
+    async fn load_rejects_wrong_kind() {
         let mut row = valid_row(true);
         row.kind = CalibrationKind::MarketPriceBias;
         let artifact_id = row.artifact_id;
@@ -428,7 +428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_rejects_hash_valid_but_empty_mapping() {
+    async fn load_rejects_empty_mapping() {
         let mut row = valid_row(true);
         let CalibrationArtifactPayload::ModelScore(mut payload) = row.payload else {
             panic!("model-score payload")
@@ -446,7 +446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_rejects_content_hash_mismatch() {
+    async fn load_rejects_content_mismatch() {
         let mut row = valid_row(true);
         // Tamper with the payload after the hash was computed.
         let CalibrationArtifactPayload::ModelScore(mut payload) = row.payload else {
@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_succeeds_for_active_valid_artifact() {
+    async fn load_succeeds_active_artifact() {
         let row = valid_row(true);
         let artifact_id = row.artifact_id;
         let loader = loader(Some(row));

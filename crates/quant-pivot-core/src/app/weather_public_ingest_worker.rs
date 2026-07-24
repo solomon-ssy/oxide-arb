@@ -335,12 +335,12 @@ impl WeatherPublicIngestWorker {
         }
         tokio::join!(
             Arc::clone(&self).run_hko_rainfall_loop(shutdown.child_token()),
-            Arc::clone(&self).run_hko_daily_temperature_loop(shutdown.child_token()),
+            Arc::clone(&self).run_hko_temperature_loop(shutdown.child_token()),
             Arc::clone(&self).run_airnow_loop(shutdown.child_token()),
             Arc::clone(&self).run_spc_loop(shutdown.child_token()),
             Arc::clone(&self).run_ncei_loop(shutdown.child_token()),
             Arc::clone(&self).run_nhc_advisory_loop(shutdown.child_token()),
-            Arc::clone(&self).run_nhc_best_track_loop(shutdown.child_token()),
+            Arc::clone(&self).run_nhc_track_loop(shutdown.child_token()),
             Arc::clone(&self).run_gistemp_loop(shutdown.child_token()),
             Arc::clone(&self).run_nsidc_loop(shutdown.child_token()),
             Arc::clone(&self).run_nws_loop(shutdown.child_token()),
@@ -372,7 +372,7 @@ impl WeatherPublicIngestWorker {
         }
     }
 
-    async fn run_hko_daily_temperature_loop(self: Arc<Self>, shutdown: CancellationToken) {
+    async fn run_hko_temperature_loop(self: Arc<Self>, shutdown: CancellationToken) {
         loop {
             for binding in &self.bindings.hko_daily_temperature {
                 let station = match HkoStation::parse(&binding.station) {
@@ -910,7 +910,7 @@ impl WeatherPublicIngestWorker {
         Ok(())
     }
 
-    async fn run_nhc_best_track_loop(self: Arc<Self>, shutdown: CancellationToken) {
+    async fn run_nhc_track_loop(self: Arc<Self>, shutdown: CancellationToken) {
         loop {
             for binding in &self.bindings.nhc_historical_storms {
                 let instrument =
@@ -1353,7 +1353,7 @@ mod tests {
     use super::{airnow_scan_window, hko_latest_publishable_date, hko_partition_date};
 
     #[test]
-    fn airnow_correction_scan_is_bounded_resumable_and_wraps() {
+    fn airnow_correction_scan_wraps() {
         let now = Utc.with_ymd_and_hms(2026, 7, 18, 12, 0, 0).unwrap();
         let (first_start, first_end) =
             airnow_scan_window(None, now, 72).expect("first correction batch");
@@ -1371,7 +1371,7 @@ mod tests {
     }
 
     #[test]
-    fn hko_daily_temperature_waits_for_documented_next_day_publication() {
+    fn hko_daily_temperature_publication() {
         let before_publication = Utc.with_ymd_and_hms(2025, 7, 4, 17, 29, 0).unwrap();
         let at_publication = Utc.with_ymd_and_hms(2025, 7, 4, 17, 30, 0).unwrap();
 
@@ -1386,7 +1386,7 @@ mod tests {
     }
 
     #[test]
-    fn hko_partition_scan_crosses_year_boundary_newest_first() {
+    fn hko_partition_scan_first() {
         let target = NaiveDate::from_ymd_opt(2026, 1, 18).expect("date");
         assert_eq!(
             hko_partition_date(target, 0).expect("current partition"),

@@ -130,18 +130,20 @@ mod tests {
         types::{TradePolicyArtifactId, TradePolicyValidationRunId, UserId},
     };
 
-    fn params() -> ResearchJobParams {
-        ResearchJobParams::TradePolicyValidation(TradePolicyValidationJobParams {
-            validation_run_id: TradePolicyValidationRunId::from_v7(),
-            artifact_id: TradePolicyArtifactId::from_v7(),
-            actor_id: UserId::from_v7(),
-            reason: "typed round trip".to_owned(),
-        })
+    impl ResearchJobParams {
+        fn test_fixture() -> Self {
+            Self::TradePolicyValidation(TradePolicyValidationJobParams {
+                validation_run_id: TradePolicyValidationRunId::from_v7(),
+                artifact_id: TradePolicyArtifactId::from_v7(),
+                actor_id: UserId::from_v7(),
+                reason: "typed round trip".to_owned(),
+            })
+        }
     }
 
     #[test]
-    fn tagged_params_reject_wrong_kind_and_unknown_fields() {
-        let params = params();
+    fn tagged_params_reject_unknown() {
+        let params = ResearchJobParams::test_fixture();
         assert_eq!(params.kind(), ResearchJobKind::TradePolicyValidation);
         let encoded = serde_json::to_value(&params).expect("serialize typed params");
         let decoded: ResearchJobParams =

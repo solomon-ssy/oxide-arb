@@ -33,7 +33,7 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     model::{
         LotStateInput, ModelRuntimeFactoryBuilder, SellScore, SellScoreInput, SellSignalPolicy,
-        position_state_features, sell_signal_fires, sell_signal_target,
+        sell_signal_fires, sell_signal_target,
     },
     pit::PointInTimeSnapshotSource,
     selection::ModelFeatureRequirements,
@@ -122,7 +122,7 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
         let Some(version) = self
             .deps
             .model_registry
-            .find_model_version_by_id(&version_id)
+            .find_model_version(&version_id)
             .await
             .map_err(QuantError::from)?
         else {
@@ -203,7 +203,7 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
             .iter()
             .map(|scored| scored.value.clone())
             .collect();
-        let position_state = position_state_features(LotStateInput {
+        let position_state = LotStateInput {
             avg_price: lot.avg_price.inner(),
             mark: mark_price.map(Price::inner),
             opened_at: lot.opened_at,
@@ -213,7 +213,8 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
                 .max_hold_secs
                 .unwrap_or(DEFAULT_HOLD_HORIZON_SECS),
             peak_mark: intent.peak_mark_price.map(Price::inner),
-        })?;
+        }
+        .position_state_features()?;
         let score = runtime.score(&SellScoreInput {
             market_factors,
             position_state,

@@ -126,7 +126,7 @@ impl SubjectValidator for DefaultSubjectValidator {
         // audited pseudo-grounding hole: a whole-slug span used to satisfy
         // "has any span" for every field regardless of kind.
         let MarketSubject::Crypto(subject) = &candidate.subject else {
-            return validate_weather_candidate(candidate);
+            return (candidate).validate_weather_candidate();
         };
         if !has_span_of_kind(candidate, "asset", GroundingKind::LiteralSpan) {
             return ValidationOutcome::Rejected {
@@ -180,69 +180,71 @@ impl SubjectValidator for DefaultSubjectValidator {
     }
 }
 
-fn validate_weather_candidate(candidate: &ExtractedCandidate) -> ValidationOutcome {
-    let MarketSubject::Weather(subject) = &candidate.subject else {
-        return ValidationOutcome::Rejected {
-            reason: LinkageValidationFailure::UnsupportedSubject,
-        };
-    };
-    for field in [
-        "decision_group.station",
-        "decision_group.settlement_rule_url",
-        "outcome_band",
-        "decision_group.market_unit",
-        "decision_group.local_date",
-        "decision_group.temperature_statistic",
-        "decision_group.finalization_policy",
-    ] {
-        if !has_span_of_kind(candidate, field, GroundingKind::LiteralSpan) {
+impl ExtractedCandidate {
+    fn validate_weather_candidate(&self) -> ValidationOutcome {
+        let MarketSubject::Weather(subject) = &self.subject else {
             return ValidationOutcome::Rejected {
-                reason: LinkageValidationFailure::MissingLiteralGrounding {
-                    subject_field: field.to_owned(),
+                reason: LinkageValidationFailure::UnsupportedSubject,
+            };
+        };
+        for field in [
+            "decision_group.station",
+            "decision_group.settlement_rule_url",
+            "outcome_band",
+            "decision_group.market_unit",
+            "decision_group.local_date",
+            "decision_group.temperature_statistic",
+            "decision_group.finalization_policy",
+        ] {
+            if !has_span_of_kind(self, field, GroundingKind::LiteralSpan) {
+                return ValidationOutcome::Rejected {
+                    reason: LinkageValidationFailure::MissingLiteralGrounding {
+                        subject_field: field.to_owned(),
+                    },
+                };
+            }
+        }
+        if !subject.has_valid_decision_group() {
+            return ValidationOutcome::Rejected {
+                reason: LinkageValidationFailure::InvalidWeatherDecisionGroupId,
+            };
+        }
+        if !subject.outcome_band.is_valid() {
+            return ValidationOutcome::Rejected {
+                reason: LinkageValidationFailure::InvalidWeatherOutcomeBand,
+            };
+        }
+        if subject
+            .outcome_band
+            .lower_inclusive
+            .is_some_and(|value| !value.fract().is_zero())
+            || subject
+                .outcome_band
+                .upper_inclusive
+                .is_some_and(|value| !value.fract().is_zero())
+        {
+            return ValidationOutcome::Rejected {
+                reason: LinkageValidationFailure::FractionalWeatherOutcomeBand,
+            };
+        }
+        if subject.decision_group.timezone.parse::<Tz>().is_err() {
+            return ValidationOutcome::Rejected {
+                reason: LinkageValidationFailure::InvalidWeatherTimezone {
+                    timezone: subject.decision_group.timezone.clone(),
                 },
             };
         }
+        let expected = DomainInstrumentKey::aviation_weather(&subject.decision_group.station);
+        if self.instrument_key != expected {
+            return ValidationOutcome::Rejected {
+                reason: LinkageValidationFailure::WeatherInstrumentMismatch {
+                    expected,
+                    actual: self.instrument_key.clone(),
+                },
+            };
+        }
+        ValidationOutcome::Accepted
     }
-    if !subject.has_valid_decision_group_id() {
-        return ValidationOutcome::Rejected {
-            reason: LinkageValidationFailure::InvalidWeatherDecisionGroupId,
-        };
-    }
-    if !subject.outcome_band.is_valid() {
-        return ValidationOutcome::Rejected {
-            reason: LinkageValidationFailure::InvalidWeatherOutcomeBand,
-        };
-    }
-    if subject
-        .outcome_band
-        .lower_inclusive
-        .is_some_and(|value| !value.fract().is_zero())
-        || subject
-            .outcome_band
-            .upper_inclusive
-            .is_some_and(|value| !value.fract().is_zero())
-    {
-        return ValidationOutcome::Rejected {
-            reason: LinkageValidationFailure::FractionalWeatherOutcomeBand,
-        };
-    }
-    if subject.decision_group.timezone.parse::<Tz>().is_err() {
-        return ValidationOutcome::Rejected {
-            reason: LinkageValidationFailure::InvalidWeatherTimezone {
-                timezone: subject.decision_group.timezone.clone(),
-            },
-        };
-    }
-    let expected = DomainInstrumentKey::aviation_weather(&subject.decision_group.station);
-    if candidate.instrument_key != expected {
-        return ValidationOutcome::Rejected {
-            reason: LinkageValidationFailure::WeatherInstrumentMismatch {
-                expected,
-                actual: candidate.instrument_key.clone(),
-            },
-        };
-    }
-    ValidationOutcome::Accepted
 }
 
 /// Ruleset-consistency checks shared by every candidate regardless of how it was produced.

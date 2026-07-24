@@ -16,7 +16,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::query::{list_by_fk_ordered_desc, paginate_mapped},
+    postgres::query::{list_fk_desc, paginate_mapped},
     traits::BacktestPathSetRepository,
 };
 
@@ -59,7 +59,7 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<Vec<BacktestPathSetInfo>, StorageError> {
-        list_by_fk_ordered_desc::<Entity, _, _, _>(
+        list_fk_desc::<Entity, _, _, _>(
             &self.db,
             Column::ModelVersionId,
             *model_version_id,

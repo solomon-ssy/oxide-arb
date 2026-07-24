@@ -47,7 +47,7 @@ mod tests {
     use crate::{enums::execution::ReconciliationEvidenceKind, types::Shares};
 
     #[test]
-    fn evidence_chain_round_trips_as_json_array() {
+    fn evidence_chain_round_array() {
         let chain = ReconciliationEvidenceChain(vec![ReconciliationEvidence {
             kind: ReconciliationEvidenceKind::ClobOrderStatus,
             observed_at: chrono::Utc

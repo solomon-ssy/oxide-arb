@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cooldown_suppresses_duplicate_alert_recordings() {
+    async fn cooldown_suppresses_duplicate_recordings() {
         let recordings = Arc::new(Mutex::new(Vec::new()));
         let dispatcher = AlertDispatcher::with_recordings_and_cooldown(
             Arc::clone(&recordings),

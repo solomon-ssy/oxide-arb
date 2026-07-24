@@ -160,7 +160,7 @@ pub trait FeatureParityRepository: Send + Sync {
     /// Atomically append a failed integrity incident derived from an existing
     /// parity proof and open the global latch. Used when governance cannot
     /// restore consistent registry/live/durable state after a model switch.
-    async fn record_integrity_failure_and_open_latch(
+    async fn record_integrity_failure(
         &self,
         _source_run_id: &FeatureParityRunId,
         _reason: String,

@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::{Receiver, Sender};
 use zip::ZipArchive;
 
-use crate::infra::{http::get_optional_bytes_with_retry, retry::RetryPolicy};
+use crate::infra::{http::get_optional_bytes, retry::RetryPolicy};
 
 /// Bounded bridge from blocking ZIP/CSV decoding into async persistence.
 ///
@@ -58,8 +58,8 @@ pub(super) async fn download_verified_archive(
 ) -> QuantResult<Option<Vec<u8>>> {
     let checksum_url = format!("{url}.CHECKSUM");
     let (archive, checksum) = tokio::try_join!(
-        get_optional_bytes_with_retry(http, retry_policy, url),
-        get_optional_bytes_with_retry(http, retry_policy, &checksum_url),
+        get_optional_bytes(http, retry_policy, url),
+        get_optional_bytes(http, retry_policy, &checksum_url),
     )?;
     let Some(archive) = archive else {
         if checksum.is_some() {

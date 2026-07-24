@@ -86,7 +86,7 @@ use quant_pivot_system_tests::{
         pit::InMemoryDecisionSnapshotSource,
         publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
-        trade_tape_fixtures::live_trade_tape_block_cursor_repo,
+        trade_tape_fixtures::live_tape_cursor_repo,
     },
 };
 use rust_decimal::Decimal;
@@ -107,44 +107,46 @@ const CATALOG: Catalog = Catalog {
     no_token: "66666",
 };
 
-fn registry_market(catalog: &Catalog) -> MarketRegistryInfo {
-    MarketRegistryInfo {
-        market_id: MarketId::new(catalog.market_id),
-        event_id: EventId::new(catalog.event_id),
-        token_yes: TokenId::new(catalog.yes_token),
-        token_no: TokenId::new(catalog.no_token),
-        question: "Factor E2E?".into(),
-        slug: "factor-e2e".into(),
-        description: None,
-        categories: CategorySet::from(MarketCategory::Sports),
-        status: MarketStatus::Active,
-        filter_reasons: CatalogFilterReasonSet::default(),
-        outcome: None,
-        neg_risk: false,
-        tick_size: TickSize::Hundredth,
-        tokens: vec![
-            TokenInfo {
-                token_id: TokenId::new(catalog.yes_token),
-                outcome: "Yes".into(),
-                neg_risk: false,
-            },
-            TokenInfo {
-                token_id: TokenId::new(catalog.no_token),
-                outcome: "No".into(),
-                neg_risk: false,
-            },
-        ],
-        best_bid: None,
-        best_ask: None,
-        depth_usd: None,
-        min_order_size: Decimal::ONE,
-        liquidity_usd: Some(Usd::new(Decimal::from(25_000))),
-        volume_24h: Some(Usd::new(Decimal::from(9_000))),
-        start_date: Some(Utc::now() - ChronoDuration::days(2)),
-        end_date: Some(Utc::now() + ChronoDuration::days(5)),
-        resolved_at: None,
-        created_at: Some(Utc::now() - ChronoDuration::days(2)),
-        updated_at: Utc::now(),
+impl Catalog {
+    fn registry_market(&self) -> MarketRegistryInfo {
+        MarketRegistryInfo {
+            market_id: MarketId::new(self.market_id),
+            event_id: EventId::new(self.event_id),
+            token_yes: TokenId::new(self.yes_token),
+            token_no: TokenId::new(self.no_token),
+            question: "Factor E2E?".into(),
+            slug: "factor-e2e".into(),
+            description: None,
+            categories: CategorySet::from(MarketCategory::Sports),
+            status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
+            outcome: None,
+            neg_risk: false,
+            tick_size: TickSize::Hundredth,
+            tokens: vec![
+                TokenInfo {
+                    token_id: TokenId::new(self.yes_token),
+                    outcome: "Yes".into(),
+                    neg_risk: false,
+                },
+                TokenInfo {
+                    token_id: TokenId::new(self.no_token),
+                    outcome: "No".into(),
+                    neg_risk: false,
+                },
+            ],
+            best_bid: None,
+            best_ask: None,
+            depth_usd: None,
+            min_order_size: Decimal::ONE,
+            liquidity_usd: Some(Usd::new(Decimal::from(25_000))),
+            volume_24h: Some(Usd::new(Decimal::from(9_000))),
+            start_date: Some(Utc::now() - ChronoDuration::days(2)),
+            end_date: Some(Utc::now() + ChronoDuration::days(5)),
+            resolved_at: None,
+            created_at: Some(Utc::now() - ChronoDuration::days(2)),
+            updated_at: Utc::now(),
+        }
     }
 }
 
@@ -174,7 +176,7 @@ async fn seed_catalog(db: &DatabaseConnection, catalog: &Catalog) {
 }
 
 fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &Catalog) {
-    let market = registry_market(catalog);
+    let market = (catalog).registry_market();
     registry.register_event(EventRegistryInfo {
         event_id: market.event_id.clone(),
         title: "Factor E2E".to_owned(),
@@ -237,7 +239,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
-    async fn trade_tape_window_by_market(
+    async fn market_tape_window(
         &self,
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
@@ -382,7 +384,7 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
         feature_repo,
         event_writer: noop_feature_writer(),
         market_registry: Arc::clone(&registry),
-        block_cursor_repo: live_trade_tape_block_cursor_repo(),
+        block_cursor_repo: live_tape_cursor_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
         calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
@@ -418,7 +420,7 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
     (result.accepted, ids)
 }
 
-pub async fn create_definition_and_values_then_list_for_run() {
+pub async fn create_definition_values_run() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db, &CATALOG).await;
@@ -524,7 +526,7 @@ pub async fn create_definition_and_values_then_list_for_run() {
     assert_eq!(definition.scope, FactorDefinitionScope::Generic);
 }
 
-pub async fn unpublished_factor_definitions_block_pipeline() {
+pub async fn unpublished_factor_definitions_pipeline() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db, &CATALOG).await;

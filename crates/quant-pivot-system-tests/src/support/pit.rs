@@ -53,10 +53,7 @@ impl InMemoryDecisionSnapshotSource {
 
     /// Freeze a test venue whose catalog explicitly proves that fees are disabled.
     #[must_use]
-    pub fn freeze_with_zero_fee_schedule(
-        registry: &MarketRegistry,
-        book_store: &BookStore,
-    ) -> Self {
+    pub fn freeze_zero_fee(registry: &MarketRegistry, book_store: &BookStore) -> Self {
         Self::freeze_inner(registry, book_store, true)
     }
 

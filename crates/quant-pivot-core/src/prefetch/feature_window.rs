@@ -15,18 +15,19 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    clickhouse::{BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd},
+    clickhouse::BookMicrostructureRow,
     domain::data_plane::{
         CryptoPriceReport, DecisionBoundary, DecisionSource, DomainObservation, TradeTapePrint,
         WeatherForecastPoint, WeatherObservationFact,
     },
-    types::{DomainInstrumentKey, IcaoStation, MarketId, TokenId},
+    types::{Bps, DomainInstrumentKey, IcaoStation, MarketId, Price, TokenId, Usd},
 };
 use quant_pivot_repository::traits::QuantFactReadRepository;
 use quant_pivot_research::{
     features::{MarketWindowSnapshot, MicrostructureBucket, TradeTapeWindowSnapshot},
     selection::SelectedMarket,
 };
+use rust_decimal::Decimal;
 
 /// Pre-fetches and decodes microstructure windows for a selected-market set.
 pub struct FeatureWindowProvider {
@@ -399,7 +400,7 @@ impl FeatureWindowProvider {
         let from = window_start(cutoff, lookback, "trade-tape lookback")?;
         let rows = self
             .fact_read
-            .trade_tape_window_by_market(
+            .market_tape_window(
                 market_ids,
                 from.timestamp_millis(),
                 cutoff.timestamp_millis(),
@@ -485,11 +486,11 @@ fn decode_bucket(row: &BookMicrostructureRow) -> QuantResult<MicrostructureBucke
     Ok(MicrostructureBucket {
         bucket_time: timestamp_millis(row.bucket_time, "microstructure bucket_time")?,
         available_at: timestamp_millis(row.available_at, "microstructure available_at")?,
-        mid_close: row.mid_price_close.map(ChPrice::to_price),
-        spread_bps_avg: row.spread_bps_avg.map(ChBps::to_bps),
-        top1_depth_usd_avg: row.top1_depth_usd_avg.map(ChUsd::to_usd),
-        top5_depth_usd_avg: row.top5_depth_usd_avg.map(ChUsd::to_usd),
-        imbalance_avg: row.imbalance_avg.map(ChDecimal64::to_decimal),
+        mid_close: row.mid_price_close.map(Price::from),
+        spread_bps_avg: row.spread_bps_avg.map(Bps::from),
+        top1_depth_usd_avg: row.top1_depth_usd_avg.map(Usd::from),
+        top5_depth_usd_avg: row.top5_depth_usd_avg.map(Usd::from),
+        imbalance_avg: row.imbalance_avg.map(Decimal::from),
         update_count: row.update_count,
         snapshot_count: row.snapshot_count,
         delta_count: row.delta_count,
@@ -509,7 +510,7 @@ mod tests {
     use super::window_start;
 
     #[test]
-    fn report_lag_is_applied_once_to_window_end() {
+    fn report_lag_applied_end() {
         let decision_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let boundary = DecisionClock::new(120)
             .boundary(decision_at)

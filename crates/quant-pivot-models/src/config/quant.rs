@@ -178,10 +178,10 @@ impl Default for QuantWorkersConfig {
             report_run_heartbeat_secs: 30,
             report_ad_hoc_queue_capacity: 64,
             report_ad_hoc_queue_ttl_secs: 300,
-            report_expire_sweep_secs: default_report_expire_sweep_secs(),
-            intent_expire_sweep_secs: default_intent_expire_sweep_secs(),
+            report_expire_sweep_secs: default_report_sweep_secs(),
+            intent_expire_sweep_secs: default_intent_sweep_secs(),
             execution_dispatch_secs: default_execution_dispatch_secs(),
-            execution_breaker_tick_secs: default_execution_breaker_tick_secs(),
+            execution_breaker_tick_secs: default_breaker_tick_secs(),
             equity_snapshot_secs: default_equity_snapshot_secs(),
         }
     }
@@ -204,11 +204,11 @@ pub struct QuantAccountDeployConfig {
     pub wallet_kind: ExecutionWalletKind,
 }
 
-const fn default_report_expire_sweep_secs() -> u64 {
+const fn default_report_sweep_secs() -> u64 {
     300
 }
 
-const fn default_intent_expire_sweep_secs() -> u64 {
+const fn default_intent_sweep_secs() -> u64 {
     60
 }
 
@@ -216,7 +216,7 @@ const fn default_execution_dispatch_secs() -> u64 {
     10
 }
 
-const fn default_execution_breaker_tick_secs() -> u64 {
+const fn default_breaker_tick_secs() -> u64 {
     5
 }
 

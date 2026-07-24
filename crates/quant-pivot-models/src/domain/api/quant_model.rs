@@ -45,10 +45,10 @@ pub struct CreateModelSpecRequest {
     #[validate(range(min = 1))]
     pub prediction_horizon_secs: i64,
     /// Feature schema version the spec targets (defaults to the first version).
-    #[serde(default = "default_feature_schema_version")]
+    #[serde(default)]
     pub feature_schema_version: SchemaVersion,
     /// Label schema version the spec targets (defaults to the first version).
-    #[serde(default = "default_schema_version")]
+    #[serde(default)]
     pub label_schema_version: SchemaVersion,
     /// Closed, human-authored research thesis. This cannot carry executable
     /// parameters or arbitrary metadata keys.
@@ -61,14 +61,6 @@ pub struct CreateModelSpecRequest {
     /// Operator reason recorded on the operation log (UI should require non-empty).
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
-}
-
-const fn default_schema_version() -> SchemaVersion {
-    SchemaVersion::FIRST
-}
-
-const fn default_feature_schema_version() -> SchemaVersion {
-    SchemaVersion::FIRST
 }
 
 /// Outbound projection for a model specification row (the training entry point:
@@ -179,12 +171,12 @@ mod tests {
     }
 
     #[test]
-    fn input_contract_is_mandatory_on_the_wire() {
+    fn input_contract_mandatory_wire() {
         assert!(serde_json::from_value::<CreateModelSpecRequest>(base_request()).is_err());
     }
 
     #[test]
-    fn request_decodes_typed_contract_and_boot_feature_default() {
+    fn request_decodes_typed_default() {
         let mut request = base_request();
         request["input_contract"] = serde_json::json!({
             "inputs": [{
@@ -200,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn request_rejects_retired_opaque_feature_requirements() {
+    fn request_rejects_retired_requirements() {
         let mut request = base_request();
         request["input_contract"] = serde_json::json!({
             "inputs": [{

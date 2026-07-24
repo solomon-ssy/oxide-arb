@@ -12,7 +12,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::{DataQualityStatus, FillRequirement, OutcomeSide},
     types::{
@@ -417,7 +417,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
         pnl_curve: m.pnl_curve.to_vec(),
     };
 
-    let report_hash = hash_report(&ReportHashInput {
+    let report_hash = ContentHash::try_from(&ReportHashInput {
         backtest_report_id: &request.backtest_report_id,
         model_version_id: &request.model_version_id,
         decision_policy_snapshot_id: &request.decision_policy_snapshot_id,
@@ -484,9 +484,12 @@ struct ReportHashInput<'a> {
     report_pnl_simulation: &'a PnlSimulation,
 }
 
-/// Canonical blake3 hash of the report content.
-fn hash_report(input: &ReportHashInput<'_>) -> QuantResult<ContentHash> {
-    ResearchHasher::canonical(input)
+impl TryFrom<&ReportHashInput<'_>> for ContentHash {
+    type Error = QuantError;
+
+    fn try_from(input: &ReportHashInput<'_>) -> Result<Self, Self::Error> {
+        ResearchHasher::canonical(input)
+    }
 }
 
 #[cfg(test)]
@@ -536,46 +539,48 @@ mod tests {
         test_support::content_hash as hash,
     };
 
-    fn runtime() -> WeightedFactorRuntime {
-        let input_contract = ModelInputContract::single_required("book.mid");
-        let input_contract_hash =
-            model_input_contract_hash(&input_contract).expect("input contract hash");
-        WeightedFactorRuntime::new(
-            WeightedFactorModelArtifact {
-                header: ModelArtifactHeader {
-                    model_version_id: ModelVersionId::from_v7(),
-                    model_spec_definition_hash: hash("spec"),
-                    profile_ref: builtin_research_profiles()
-                        .expect("built-in profiles")
-                        .remove(0)
-                        .profile_ref,
-                    model_family: ModelFamily::WeightedFactor,
-                    feature_schema_hash: hash("aa"),
-                    factor_schema_hash: hash("bb"),
-                    trade_policy_artifact_id: None,
-                    trade_policy_hash: None,
+    impl WeightedFactorRuntime {
+        fn backtest_fixture() -> Self {
+            let input_contract = ModelInputContract::single_required("book.mid");
+            let input_contract_hash =
+                model_input_contract_hash(&input_contract).expect("input contract hash");
+            Self::new(
+                WeightedFactorModelArtifact {
+                    header: ModelArtifactHeader {
+                        model_version_id: ModelVersionId::from_v7(),
+                        model_spec_definition_hash: hash("spec"),
+                        profile_ref: builtin_research_profiles()
+                            .expect("built-in profiles")
+                            .remove(0)
+                            .profile_ref,
+                        model_family: ModelFamily::WeightedFactor,
+                        feature_schema_hash: hash("aa"),
+                        factor_schema_hash: hash("bb"),
+                        trade_policy_artifact_id: None,
+                        trade_policy_hash: None,
+                    },
+                    training_dataset_hash: hash("cc"),
+                    training_input_hash: hash("dd"),
+                    input_contract,
+                    input_contract_hash,
+                    weights: vec![FactorWeight {
+                        factor: MOMENTUM_ROC,
+                        weight: dec!(1),
+                    }],
+                    prediction_horizon_secs: 86_400,
+                    multipliers: ScoreMultiplierSpec::conservative(),
+                    substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+                    return_model: ReturnModelSpec::heuristic_default(),
+                    factor_cross_section: FactorCrossSectionConfig::default(),
+                    frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
+                    objective_report: None,
+                    category_scope: None,
                 },
-                training_dataset_hash: hash("cc"),
-                training_input_hash: hash("dd"),
-                input_contract,
-                input_contract_hash,
-                weights: vec![FactorWeight {
-                    factor: MOMENTUM_ROC,
-                    weight: dec!(1),
-                }],
-                prediction_horizon_secs: 86_400,
-                multipliers: ScoreMultiplierSpec::conservative(),
-                substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-                return_model: ReturnModelSpec::heuristic_default(),
-                factor_cross_section: FactorCrossSectionConfig::default(),
-                frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
-                objective_report: None,
-                category_scope: None,
-            },
-            None,
-            None,
-        )
-        .expect("runtime")
+                None,
+                None,
+            )
+            .expect("runtime")
+        }
     }
 
     fn row(market: &str, bullish: bool) -> FactorInferenceRow {
@@ -687,40 +692,44 @@ mod tests {
         }
     }
 
-    fn caps() -> PortfolioCaps {
-        PortfolioCaps {
-            total_budget_usd: dec!(1000),
-            max_single_recommendation_usd: dec!(200),
-            min_recommendation_usd: dec!(10),
-            max_market_exposure_usd: dec!(0),
-            max_event_exposure_usd: dec!(0),
-            max_category_exposure_usd: dec!(0),
-            liquidity_usage_cap_pct: dec!(0.1),
-            max_aggregate_exposure_pct: dec!(0),
+    impl PortfolioCaps {
+        fn backtest_fixture() -> Self {
+            Self {
+                total_budget_usd: dec!(1000),
+                max_single_recommendation_usd: dec!(200),
+                min_recommendation_usd: dec!(10),
+                max_market_exposure_usd: dec!(0),
+                max_event_exposure_usd: dec!(0),
+                max_category_exposure_usd: dec!(0),
+                liquidity_usage_cap_pct: dec!(0.1),
+                max_aggregate_exposure_pct: dec!(0),
+            }
         }
     }
 
-    fn request() -> BacktestRequest {
-        BacktestRequest {
-            backtest_report_id: BacktestReportId::from_v7(),
-            model_version_id: ModelVersionId::from_v7(),
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            window_start: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-            window_end: Utc.timestamp_opt(1_700_100_000, 0).unwrap(),
+    impl BacktestRequest {
+        fn test_fixture() -> Self {
+            Self {
+                backtest_report_id: BacktestReportId::from_v7(),
+                model_version_id: ModelVersionId::from_v7(),
+                decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+                window_start: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+                window_end: Utc.timestamp_opt(1_700_100_000, 0).unwrap(),
+            }
         }
     }
 
     #[tokio::test]
     async fn backtest_report_metrics_complete() {
-        let model = runtime();
+        let model = WeightedFactorRuntime::backtest_fixture();
         let run_id = ModelRunId::from_v7();
         let ticks = vec![tick(0, &run_id), tick(1, &run_id)];
         let result = PortfolioReplayBacktester::new()
             .run(BacktestInputs {
-                request: request(),
+                request: BacktestRequest::test_fixture(),
                 model: &model,
                 ticks,
-                caps: caps(),
+                caps: PortfolioCaps::backtest_fixture(),
             })
             .await
             .expect("backtest");
@@ -752,10 +761,10 @@ mod tests {
     /// The same inputs must produce a byte-identical report hash (the report id /
     /// version are fixed here), proving deterministic replay.
     #[tokio::test]
-    async fn backtest_report_hash_is_deterministic() {
-        let model = runtime();
+    async fn backtest_report_hash_deterministic() {
+        let model = WeightedFactorRuntime::backtest_fixture();
         let run_id = ModelRunId::from_v7();
-        let req = request();
+        let req = BacktestRequest::test_fixture();
         let ticks_a = vec![tick(0, &run_id), tick(1, &run_id)];
         let ticks_b = vec![tick(0, &run_id), tick(1, &run_id)];
         let a = PortfolioReplayBacktester::new()
@@ -763,7 +772,7 @@ mod tests {
                 request: req.clone(),
                 model: &model,
                 ticks: ticks_a,
-                caps: caps(),
+                caps: PortfolioCaps::backtest_fixture(),
             })
             .await
             .expect("a");
@@ -772,7 +781,7 @@ mod tests {
                 request: req,
                 model: &model,
                 ticks: ticks_b,
-                caps: caps(),
+                caps: PortfolioCaps::backtest_fixture(),
             })
             .await
             .expect("b");

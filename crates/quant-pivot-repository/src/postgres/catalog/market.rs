@@ -18,14 +18,15 @@ use quant_pivot_models::{
     types::{MarketId, TokenId},
 };
 use sea_orm::{
-    ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
+    ActiveValue, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter, QueryOrder,
     sea_query::{Condition, Expr, OnConflict, extension::postgres::PgExpr},
 };
 
 use crate::{
     postgres::{
-        catalog::ingest::{find_existing_str_id_chunks, find_models_by_str_id_chunks},
+        catalog::ingest::{find_existing_chunks, find_str_id_chunks},
+        connection::RepositoryConnection,
         primitives,
         query::{non_empty, paginate_mapped},
         write::upsert_many_chunked,
@@ -33,8 +34,8 @@ use crate::{
     traits::MarketRepository,
 };
 
-pub struct PgMarketRepository {
-    db: DatabaseConnection,
+pub struct PgMarketRepository<C = DatabaseConnection> {
+    db: C,
 }
 
 impl PgMarketRepository {
@@ -42,273 +43,206 @@ impl PgMarketRepository {
         Self { db }
     }
 
-    pub const fn with_txn(txn: &DatabaseTransaction) -> PgMarketRepositoryTxn<'_> {
-        PgMarketRepositoryTxn { txn }
+    pub(crate) const fn with_txn(
+        txn: &DatabaseTransaction,
+    ) -> PgMarketRepository<&'_ DatabaseTransaction> {
+        PgMarketRepository { db: txn }
     }
 }
 
-pub struct PgMarketRepositoryTxn<'a> {
-    txn: &'a DatabaseTransaction,
+impl<C> PgMarketRepository<C> {
+    fn upsert_conflict() -> OnConflict {
+        OnConflict::column(MarketColumn::MarketId)
+            .update_columns([
+                MarketColumn::EventId,
+                MarketColumn::Question,
+                MarketColumn::Slug,
+                MarketColumn::Description,
+                MarketColumn::YesTokenId,
+                MarketColumn::NoTokenId,
+                MarketColumn::NegRisk,
+                MarketColumn::Outcome,
+                MarketColumn::StartDate,
+                MarketColumn::EndDate,
+                MarketColumn::ResolvedAt,
+                MarketColumn::ContentHash,
+            ])
+            .values([
+                (
+                    MarketColumn::Categories,
+                    primitives::excluded_enum_array::<MarketCategory>(MarketColumn::Categories),
+                ),
+                (
+                    MarketColumn::Status,
+                    primitives::excluded_enum::<MarketStatus>(MarketColumn::Status),
+                ),
+                (
+                    MarketColumn::FilterReasons,
+                    primitives::excluded_enum_array::<CatalogFilterReason>(
+                        MarketColumn::FilterReasons,
+                    ),
+                ),
+                (
+                    MarketColumn::TickSize,
+                    primitives::excluded_enum::<TickSize>(MarketColumn::TickSize),
+                ),
+            ])
+            .to_owned()
+    }
+
+    fn page_condition(query: &MarketPageQuery) -> Condition {
+        let mut condition = Condition::all()
+            .add_option(query.status.map(|status| MarketColumn::Status.eq(status)))
+            .add_option(
+                query
+                    .event_id
+                    .as_ref()
+                    .map(|event_id| MarketColumn::EventId.eq(event_id.clone())),
+            );
+
+        if query.category_unknown == Some(true) {
+            condition = condition.add(primitives::enum_array_is_empty::<MarketCategory>((
+                MarketEntity,
+                MarketColumn::Categories,
+            )));
+        } else {
+            condition = condition.add_option(query.category.map(|category| {
+                primitives::enum_array_contains((MarketEntity, MarketColumn::Categories), &category)
+            }));
+        }
+
+        if let (Some(want_subscribed), Some(tokens)) =
+            (query.subscribed, query.resolved_subscribed_tokens.as_ref())
+        {
+            if want_subscribed {
+                if tokens.is_empty() {
+                    condition = condition.add(Expr::value(false));
+                } else {
+                    let token_ids: Vec<TokenId> = tokens.iter().cloned().collect();
+                    condition = condition
+                        .add(MarketColumn::YesTokenId.is_in(token_ids.clone()))
+                        .add(MarketColumn::NoTokenId.is_in(token_ids));
+                }
+            } else if !tokens.is_empty() {
+                let token_ids: Vec<TokenId> = tokens.iter().cloned().collect();
+                condition = condition.add(
+                    Condition::any()
+                        .add(MarketColumn::YesTokenId.is_not_in(token_ids.clone()))
+                        .add(MarketColumn::NoTokenId.is_not_in(token_ids)),
+                );
+            }
+        }
+
+        if let Some(search) = non_empty(query.keyword.as_deref()) {
+            let pattern = format!("%{}%", search.replace('%', "\\%").replace('_', "\\_"));
+            condition = condition.add(
+                Condition::any()
+                    .add(Expr::col(MarketColumn::Question).ilike(pattern.clone()))
+                    .add(Expr::col(MarketColumn::Slug).ilike(pattern)),
+            );
+        }
+
+        condition
+    }
 }
 
-async fn do_find_by_id(
-    db: &impl ConnectionTrait,
-    id: &MarketId,
-) -> Result<Option<Arc<MarketInfo>>, StorageError> {
-    MarketEntity::find_by_id(id.clone())
-        .one(db)
+#[async_trait::async_trait]
+impl<C> MarketRepository for PgMarketRepository<C>
+where
+    C: RepositoryConnection,
+{
+    async fn find_by_id(&self, id: &MarketId) -> Result<Option<Arc<MarketInfo>>, StorageError> {
+        MarketEntity::find_by_id(id.clone())
+            .one(self.db.connection())
+            .await
+            .map_err(StorageError::from)
+            .map(|market| market.map(|model| Arc::new(model.into())))
+    }
+
+    async fn find_by_ids(&self, ids: &[MarketId]) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
+        find_str_id_chunks::<MarketEntity, _, _, _>(
+            self.db.connection(),
+            ids,
+            MarketColumn::MarketId,
+            MarketId::as_str,
+        )
         .await
-        .map_err(StorageError::from)
-        .map(|opt| opt.map(|model| Arc::new(model.into())))
-}
-
-async fn do_find_by_ids(
-    db: &impl ConnectionTrait,
-    ids: &[MarketId],
-) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
-    find_models_by_str_id_chunks::<MarketEntity, _, _, _>(
-        db,
-        ids,
-        MarketColumn::MarketId,
-        MarketId::as_str,
-    )
-    .await
-    .map(|rows| {
-        rows.into_iter()
-            .map(|model| Arc::new(model.into()))
-            .collect()
-    })
-}
-
-async fn do_find_active(db: &impl ConnectionTrait) -> Result<Arc<[MarketInfo]>, StorageError> {
-    MarketEntity::find()
-        .filter(MarketColumn::Status.eq(MarketStatus::Active))
-        .all(db)
-        .await
-        .map_err(StorageError::from)
-        .map(|rows| rows.into_iter().map(Into::into).collect::<Vec<_>>().into())
-}
-
-async fn do_find_by_event(
-    db: &impl ConnectionTrait,
-    event_id: &str,
-) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
-    MarketEntity::find()
-        .filter(MarketColumn::EventId.eq(event_id))
-        .all(db)
-        .await
-        .map_err(StorageError::from)
-        .map(|rows| {
-            rows.into_iter()
+        .map(|markets| {
+            markets
+                .into_iter()
                 .map(|model| Arc::new(model.into()))
                 .collect()
         })
-}
+    }
 
-async fn do_find_existing_ids(
-    db: &impl ConnectionTrait,
-    ids: &[MarketId],
-) -> Result<HashSet<String>, StorageError> {
-    find_existing_str_id_chunks::<MarketEntity, _, _, _>(
-        db,
-        ids,
-        MarketColumn::MarketId,
-        MarketId::as_str,
-    )
-    .await
-}
-
-fn market_upsert_on_conflict() -> OnConflict {
-    OnConflict::column(MarketColumn::MarketId)
-        .update_columns([
-            MarketColumn::EventId,
-            MarketColumn::Question,
-            MarketColumn::Slug,
-            MarketColumn::Description,
-            MarketColumn::YesTokenId,
-            MarketColumn::NoTokenId,
-            MarketColumn::NegRisk,
-            MarketColumn::Outcome,
-            MarketColumn::StartDate,
-            MarketColumn::EndDate,
-            MarketColumn::ResolvedAt,
-            MarketColumn::ContentHash,
-        ])
-        .values([
-            (
-                MarketColumn::Categories,
-                primitives::excluded_enum_array::<MarketCategory>(MarketColumn::Categories),
-            ),
-            (
-                MarketColumn::Status,
-                primitives::excluded_enum::<MarketStatus>(MarketColumn::Status),
-            ),
-            (
-                MarketColumn::FilterReasons,
-                primitives::excluded_enum_array::<CatalogFilterReason>(MarketColumn::FilterReasons),
-            ),
-            (
-                MarketColumn::TickSize,
-                primitives::excluded_enum::<TickSize>(MarketColumn::TickSize),
-            ),
-        ])
-        .to_owned()
-}
-
-async fn do_upsert(
-    db: &impl ConnectionTrait,
-    dto: UpsertMarket,
-) -> Result<Arc<MarketInfo>, StorageError> {
-    let model = MarketEntity::insert(dto.into_active_model())
-        .on_conflict(market_upsert_on_conflict())
-        .exec_with_returning(db)
+    async fn page(&self, query: MarketPageQuery) -> Result<Paginated<MarketInfo>, StorageError> {
+        paginate_mapped(
+            MarketEntity::find()
+                .filter(Self::page_condition(&query))
+                .order_by_desc(MarketColumn::UpdatedAt)
+                .order_by_asc(MarketColumn::MarketId),
+            self.db.connection(),
+            PageWindow::from_query(&query),
+            Into::into,
+        )
         .await
-        .map_err(StorageError::from)?;
-    Ok(Arc::new(model.into()))
-}
-
-async fn do_upsert_batch(
-    db: &impl ConnectionTrait,
-    dtos: Vec<UpsertMarket>,
-) -> Result<u64, StorageError> {
-    upsert_many_chunked::<MarketEntity, UpsertMarket>(db, dtos, market_upsert_on_conflict()).await
-}
-
-async fn do_update_status(
-    db: &impl ConnectionTrait,
-    id: &MarketId,
-    status: MarketStatus,
-    outcome: Option<&str>,
-) -> Result<(), StorageError> {
-    let current = MarketEntity::find_by_id(id.clone())
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::not_found(MARKET, id))?;
-    if status == MarketStatus::Active && !current.filter_reasons.is_empty() {
-        return Err(StorageError::state_conflict(
-            MARKET,
-            Some(id),
-            "an upstream-filtered market cannot be activated until filter reasons clear",
-        ));
-    }
-    let mut model = MarketActiveModel {
-        market_id: ActiveValue::Set(id.clone()),
-        status: ActiveValue::Set(status),
-        outcome: ActiveValue::Set(outcome.map(str::to_owned)),
-        ..Default::default()
-    };
-    model.updated_at = ActiveValue::NotSet;
-    MarketEntity::update(model)
-        .exec(db)
-        .await
-        .map_err(StorageError::from)?;
-    Ok(())
-}
-
-fn page_condition(query: &MarketPageQuery) -> Condition {
-    let mut condition = Condition::all()
-        .add_option(query.status.map(|status| MarketColumn::Status.eq(status)))
-        .add_option(
-            query
-                .event_id
-                .as_ref()
-                .map(|event_id| MarketColumn::EventId.eq(event_id.clone())),
-        );
-
-    if query.category_unknown == Some(true) {
-        condition = condition.add(primitives::enum_array_is_empty::<MarketCategory>((
-            MarketEntity,
-            MarketColumn::Categories,
-        )));
-    } else {
-        condition = condition.add_option(query.category.map(|category| {
-            primitives::enum_array_contains((MarketEntity, MarketColumn::Categories), &category)
-        }));
     }
 
-    if let (Some(want_subscribed), Some(tokens)) =
-        (query.subscribed, query.resolved_subscribed_tokens.as_ref())
-    {
-        if want_subscribed {
-            if tokens.is_empty() {
-                condition = condition.add(Expr::value(false));
-            } else {
-                let token_ids: Vec<TokenId> = tokens.iter().cloned().collect();
-                condition = condition
-                    .add(MarketColumn::YesTokenId.is_in(token_ids.clone()))
-                    .add(MarketColumn::NoTokenId.is_in(token_ids));
-            }
-        } else if !tokens.is_empty() {
-            let token_ids: Vec<TokenId> = tokens.iter().cloned().collect();
-            condition = condition.add(
-                Condition::any()
-                    .add(MarketColumn::YesTokenId.is_not_in(token_ids.clone()))
-                    .add(MarketColumn::NoTokenId.is_not_in(token_ids)),
-            );
-        }
-    }
-
-    if let Some(search) = non_empty(query.keyword.as_deref()) {
-        let pattern = format!("%{}%", search.replace('%', "\\%").replace('_', "\\_"));
-        condition = condition.add(
-            Condition::any()
-                .add(Expr::col(MarketColumn::Question).ilike(pattern.clone()))
-                .add(Expr::col(MarketColumn::Slug).ilike(pattern)),
-        );
-    }
-
-    condition
-}
-
-async fn do_page(
-    db: &impl ConnectionTrait,
-    query: MarketPageQuery,
-) -> Result<Paginated<MarketInfo>, StorageError> {
-    paginate_mapped(
+    async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError> {
         MarketEntity::find()
-            .filter(page_condition(&query))
-            .order_by_desc(MarketColumn::UpdatedAt)
-            .order_by_asc(MarketColumn::MarketId),
-        db,
-        PageWindow::from_query(&query),
-        Into::into,
-    )
-    .await
-}
-
-#[async_trait::async_trait]
-impl MarketRepository for PgMarketRepository {
-    async fn find_by_id(&self, id: &MarketId) -> Result<Option<Arc<MarketInfo>>, StorageError> {
-        do_find_by_id(&self.db, id).await
-    }
-
-    async fn find_by_ids(&self, ids: &[MarketId]) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
-        do_find_by_ids(&self.db, ids).await
-    }
-
-    async fn page(&self, query: MarketPageQuery) -> Result<Paginated<MarketInfo>, StorageError> {
-        do_page(&self.db, query).await
-    }
-
-    async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError> {
-        do_find_active(&self.db).await
+            .filter(MarketColumn::Status.eq(MarketStatus::Active))
+            .all(self.db.connection())
+            .await
+            .map_err(StorageError::from)
+            .map(|markets| {
+                markets
+                    .into_iter()
+                    .map(Into::into)
+                    .collect::<Vec<_>>()
+                    .into()
+            })
     }
 
     async fn find_by_event(&self, event_id: &str) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
-        do_find_by_event(&self.db, event_id).await
+        MarketEntity::find()
+            .filter(MarketColumn::EventId.eq(event_id))
+            .all(self.db.connection())
+            .await
+            .map_err(StorageError::from)
+            .map(|markets| {
+                markets
+                    .into_iter()
+                    .map(|model| Arc::new(model.into()))
+                    .collect()
+            })
     }
 
     async fn find_existing_ids(&self, ids: &[MarketId]) -> Result<HashSet<String>, StorageError> {
-        do_find_existing_ids(&self.db, ids).await
+        find_existing_chunks::<MarketEntity, _, _, _>(
+            self.db.connection(),
+            ids,
+            MarketColumn::MarketId,
+            MarketId::as_str,
+        )
+        .await
     }
 
     async fn upsert(&self, market: UpsertMarket) -> Result<Arc<MarketInfo>, StorageError> {
-        do_upsert(&self.db, market).await
+        let model = MarketEntity::insert(market.into_active_model())
+            .on_conflict(Self::upsert_conflict())
+            .exec_with_returning(self.db.connection())
+            .await
+            .map_err(StorageError::from)?;
+        Ok(Arc::new(model.into()))
     }
 
     async fn upsert_batch(&self, markets: Vec<UpsertMarket>) -> Result<u64, StorageError> {
-        do_upsert_batch(&self.db, markets).await
+        upsert_many_chunked::<MarketEntity, UpsertMarket>(
+            self.db.connection(),
+            markets,
+            Self::upsert_conflict(),
+        )
+        .await
     }
 
     async fn update_status(
@@ -317,51 +251,30 @@ impl MarketRepository for PgMarketRepository {
         status: MarketStatus,
         outcome: Option<&str>,
     ) -> Result<(), StorageError> {
-        do_update_status(&self.db, id, status, outcome).await
-    }
-}
-
-#[async_trait::async_trait]
-impl MarketRepository for PgMarketRepositoryTxn<'_> {
-    async fn find_by_id(&self, id: &MarketId) -> Result<Option<Arc<MarketInfo>>, StorageError> {
-        do_find_by_id(self.txn, id).await
-    }
-
-    async fn find_by_ids(&self, ids: &[MarketId]) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
-        do_find_by_ids(self.txn, ids).await
-    }
-
-    async fn page(&self, query: MarketPageQuery) -> Result<Paginated<MarketInfo>, StorageError> {
-        do_page(self.txn, query).await
-    }
-
-    async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError> {
-        do_find_active(self.txn).await
-    }
-
-    async fn find_by_event(&self, event_id: &str) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
-        do_find_by_event(self.txn, event_id).await
-    }
-
-    async fn find_existing_ids(&self, ids: &[MarketId]) -> Result<HashSet<String>, StorageError> {
-        do_find_existing_ids(self.txn, ids).await
-    }
-
-    async fn upsert(&self, market: UpsertMarket) -> Result<Arc<MarketInfo>, StorageError> {
-        do_upsert(self.txn, market).await
-    }
-
-    async fn upsert_batch(&self, markets: Vec<UpsertMarket>) -> Result<u64, StorageError> {
-        do_upsert_batch(self.txn, markets).await
-    }
-
-    async fn update_status(
-        &self,
-        id: &MarketId,
-        status: MarketStatus,
-        outcome: Option<&str>,
-    ) -> Result<(), StorageError> {
-        do_update_status(self.txn, id, status, outcome).await
+        let current = MarketEntity::find_by_id(id.clone())
+            .one(self.db.connection())
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(MARKET, id))?;
+        if status == MarketStatus::Active && !current.filter_reasons.is_empty() {
+            return Err(StorageError::state_conflict(
+                MARKET,
+                Some(id),
+                "an upstream-filtered market cannot be activated until filter reasons clear",
+            ));
+        }
+        let mut model = MarketActiveModel {
+            market_id: ActiveValue::Set(id.clone()),
+            status: ActiveValue::Set(status),
+            outcome: ActiveValue::Set(outcome.map(str::to_owned)),
+            ..Default::default()
+        };
+        model.updated_at = ActiveValue::NotSet;
+        MarketEntity::update(model)
+            .exec(self.db.connection())
+            .await
+            .map_err(StorageError::from)?;
+        Ok(())
     }
 }
 
@@ -374,12 +287,12 @@ mod tests {
         enums::{common::MarketCategory, market::MarketStatus},
         types::{EventId, TokenId},
     };
-    use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
+    use sea_orm::{DatabaseConnection, DbBackend, EntityTrait, QueryFilter, QueryTrait};
 
-    use super::{MarketEntity, page_condition};
+    use super::{MarketEntity, PgMarketRepository};
 
     #[test]
-    fn page_condition_adds_optional_filters_to_sql() {
+    fn page_adds_optional_sql() {
         let query = MarketPageQuery {
             keyword: Some("election".into()),
             status: Some(MarketStatus::Active),
@@ -390,7 +303,9 @@ mod tests {
         };
 
         let sql = MarketEntity::find()
-            .filter(page_condition(&query))
+            .filter(PgMarketRepository::<DatabaseConnection>::page_condition(
+                &query,
+            ))
             .build(DbBackend::Postgres)
             .to_string();
 
@@ -403,10 +318,12 @@ mod tests {
     }
 
     #[test]
-    fn page_condition_empty_matches_all_rows() {
+    fn page_empty_matches_rows() {
         let query = MarketPageQuery::default();
         let sql = MarketEntity::find()
-            .filter(page_condition(&query))
+            .filter(PgMarketRepository::<DatabaseConnection>::page_condition(
+                &query,
+            ))
             .build(DbBackend::Postgres)
             .to_string();
 
@@ -417,13 +334,15 @@ mod tests {
     }
 
     #[test]
-    fn page_condition_ignores_blank_keyword() {
+    fn page_condition_ignores_keyword() {
         let query = MarketPageQuery {
             keyword: Some(String::new()),
             ..Default::default()
         };
         let sql = MarketEntity::find()
-            .filter(page_condition(&query))
+            .filter(PgMarketRepository::<DatabaseConnection>::page_condition(
+                &query,
+            ))
             .build(DbBackend::Postgres)
             .to_string();
 
@@ -431,14 +350,16 @@ mod tests {
     }
 
     #[test]
-    fn page_condition_subscribed_true_requires_both_tokens_in_union() {
+    fn page_condition_requires_union() {
         let query = MarketPageQuery {
             subscribed: Some(true),
             resolved_subscribed_tokens: Some([TokenId::new("tok-yes")].into()),
             ..Default::default()
         };
         let sql = MarketEntity::find()
-            .filter(page_condition(&query))
+            .filter(PgMarketRepository::<DatabaseConnection>::page_condition(
+                &query,
+            ))
             .build(DbBackend::Postgres)
             .to_string();
 
@@ -447,13 +368,15 @@ mod tests {
     }
 
     #[test]
-    fn page_condition_category_unknown_matches_empty_array() {
+    fn page_unknown_empty_array() {
         let query = MarketPageQuery {
             category_unknown: Some(true),
             ..Default::default()
         };
         let sql = MarketEntity::find()
-            .filter(page_condition(&query))
+            .filter(PgMarketRepository::<DatabaseConnection>::page_condition(
+                &query,
+            ))
             .build(DbBackend::Postgres)
             .to_string();
 
@@ -464,14 +387,16 @@ mod tests {
     }
 
     #[test]
-    fn page_condition_subscribed_true_with_empty_union_matches_nothing() {
+    fn page_empty_matches_nothing() {
         let query = MarketPageQuery {
             subscribed: Some(true),
             resolved_subscribed_tokens: Some(HashSet::new()),
             ..Default::default()
         };
         let sql = MarketEntity::find()
-            .filter(page_condition(&query))
+            .filter(PgMarketRepository::<DatabaseConnection>::page_condition(
+                &query,
+            ))
             .build(DbBackend::Postgres)
             .to_string();
 
@@ -479,14 +404,16 @@ mod tests {
     }
 
     #[test]
-    fn page_condition_subscribed_false_excludes_fully_subscribed_pairs() {
+    fn page_condition_excludes_pairs() {
         let query = MarketPageQuery {
             subscribed: Some(false),
             resolved_subscribed_tokens: Some([TokenId::new("tok-a"), TokenId::new("tok-b")].into()),
             ..Default::default()
         };
         let sql = MarketEntity::find()
-            .filter(page_condition(&query))
+            .filter(PgMarketRepository::<DatabaseConnection>::page_condition(
+                &query,
+            ))
             .build(DbBackend::Postgres)
             .to_string();
 

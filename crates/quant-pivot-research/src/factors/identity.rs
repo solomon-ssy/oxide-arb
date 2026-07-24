@@ -82,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_changes_with_definition_or_feature_contract() {
+    fn identity_changes_definition_contract() {
         let first = factor_definition_identity(&definition(), &hash('a')).expect("first");
         let same = factor_definition_identity(&definition(), &hash('a')).expect("same");
         let new_contract = factor_definition_identity(&definition(), &hash('b')).expect("new");

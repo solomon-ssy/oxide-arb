@@ -93,7 +93,7 @@ use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
         execution_pg_seed,
-        execution_pg_seed::{fixture_profile_ref, seed_model_score_calibration_fixture},
+        execution_pg_seed::{fixture_profile_ref, seed_score_calibration},
         fact_sink::DiscardFactWriter,
         model_spec_fixtures,
         policy_fixtures::{bootstrap_default_policy_bundle, bootstrap_policy_bundle},
@@ -413,7 +413,7 @@ async fn seed_dataset(
 ) -> TrainingDatasetId {
     let _ = dataset_hash_seed;
     let model_spec_definition_hash = PgModelRegistryRepository::new(db.clone())
-        .find_model_spec_by_id(spec)
+        .find_model_spec(spec)
         .await
         .expect("model spec lookup")
         .expect("model spec")
@@ -473,7 +473,7 @@ async fn seed_version(
 ) -> ModelVersionId {
     let id = ModelVersionId::from_v7();
     let calibrator_ref = if calibrated {
-        Some(seed_model_score_calibration_fixture(db, &id).await)
+        Some(seed_score_calibration(db, &id).await)
     } else {
         None
     };
@@ -523,7 +523,7 @@ async fn seed_version(
         artifact_store,
         &id,
         &PgModelRegistryRepository::new(db.clone())
-            .find_model_spec_by_id(spec)
+            .find_model_spec(spec)
             .await
             .expect("model spec lookup")
             .expect("model spec")
@@ -673,7 +673,7 @@ async fn seed_sell_version(
     let input_contract_hash =
         model_input_contract_hash(&input_contract).expect("input contract hash");
     let model_spec_definition_hash = PgModelRegistryRepository::new(db.clone())
-        .find_model_spec_by_id(spec)
+        .find_model_spec(spec)
         .await
         .expect("sell model spec lookup")
         .expect("sell model spec")
@@ -840,7 +840,7 @@ async fn seed_shadow_window(
     }
 }
 
-pub async fn publish_requires_quality_gate_pass() {
+pub async fn publish_requires_quality_pass() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -883,7 +883,7 @@ pub async fn publish_requires_quality_gate_pass() {
 
     let registry = PgModelRegistryRepository::new(db.clone());
     let row = registry
-        .find_model_version_by_id(&candidate)
+        .find_model_version(&candidate)
         .await
         .expect("find")
         .expect("row");
@@ -901,7 +901,7 @@ pub async fn publish_requires_quality_gate_pass() {
     );
 }
 
-pub async fn publish_without_training_dataset_is_illegal_transition() {
+pub async fn publish_without_training_transition() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let _rc_id = seed_runtime_config(&db).await;
@@ -931,7 +931,7 @@ pub async fn publish_without_training_dataset_is_illegal_transition() {
 
     let registry = PgModelRegistryRepository::new(db.clone());
     let row = registry
-        .find_model_version_by_id(&candidate)
+        .find_model_version(&candidate)
         .await
         .expect("find")
         .expect("row");
@@ -1037,7 +1037,7 @@ pub async fn publish_requires_shadow_stability() {
     );
 }
 
-pub async fn publish_succeeds_without_mutating_routing_then_version_is_immutable() {
+pub async fn publish_succeeds_without_immutable() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1207,7 +1207,7 @@ async fn seed_path_set(
     // to this version when present, otherwise mint a synthetic id that the
     // path-set row alone references (no FK to training_dataset in schema).
     let training_dataset_id = PgModelRegistryRepository::new(db.clone())
-        .find_model_version_by_id(version)
+        .find_model_version(version)
         .await
         .expect("version")
         .and_then(|v| v.training_dataset_id)
@@ -1253,12 +1253,12 @@ async fn seed_path_set(
         .expect("path set");
     // Publish gates require an explicit bind — never implicit "latest".
     PgModelRegistryRepository::new(db.clone())
-        .set_publish_path_set_id(version, Some(path_set_id))
+        .set_publish_path(version, Some(path_set_id))
         .await
         .expect("bind publish path set");
 }
 
-pub async fn retire_unrouted_published_version_audits_without_mutating_routing() {
+pub async fn retire_unrouted_without_routing() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1330,7 +1330,7 @@ pub async fn retire_unrouted_published_version_audits_without_mutating_routing()
     );
 }
 
-pub async fn retire_routed_published_version_is_rejected_fail_closed() {
+pub async fn rejects_routed_model_retirement() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1427,14 +1427,14 @@ pub async fn retire_routed_published_version_is_rejected_fail_closed() {
         "failed retirement must preserve the governed category route"
     );
     let row = PgModelRegistryRepository::new(db)
-        .find_model_version_by_id(&version)
+        .find_model_version(&version)
         .await
         .expect("model lookup")
         .expect("model version");
     assert_eq!(row.publication_status, PublicationStatus::Published);
 }
 
-pub async fn uncalibrated_return_model_cannot_publish() {
+pub async fn uncalibrated_return_cannot_publish() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1477,7 +1477,7 @@ pub async fn uncalibrated_return_model_cannot_publish() {
     assert!(result.is_err(), "heuristic return model must block publish");
     let registry = PgModelRegistryRepository::new(db.clone());
     let row = registry
-        .find_model_version_by_id(&candidate)
+        .find_model_version(&candidate)
         .await
         .expect("find")
         .expect("row");
@@ -1493,7 +1493,7 @@ pub async fn uncalibrated_return_model_cannot_publish() {
     );
 }
 
-pub async fn bind_calibration_creates_candidate_version_with_calibrated_return_model() {
+pub async fn bind_calibration_creates_model() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1519,7 +1519,7 @@ pub async fn bind_calibration_creates_candidate_version_with_calibrated_return_m
         false,
     )
     .await;
-    let calibrator = seed_model_score_calibration_fixture(&db, &candidate).await;
+    let calibrator = seed_score_calibration(&db, &candidate).await;
 
     let bound = harness
         .service
@@ -1552,7 +1552,7 @@ pub async fn bind_calibration_creates_candidate_version_with_calibrated_return_m
     assert_eq!(calibrated.calibrator_ref, calibrator);
 }
 
-pub async fn publish_rescans_leakage_not_default_findings() {
+pub async fn publish_rescans_not_findings() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1590,7 +1590,7 @@ pub async fn publish_rescans_leakage_not_default_findings() {
     );
 
     let row = PgModelRegistryRepository::new(db.clone())
-        .find_model_version_by_id(&candidate)
+        .find_model_version(&candidate)
         .await
         .expect("find")
         .expect("row");
@@ -1691,7 +1691,7 @@ async fn seed_leaking_dataset(
     )
     .expect("semantic dataset hash");
     let model_spec_definition_hash = PgModelRegistryRepository::new(db.clone())
-        .find_model_spec_by_id(spec)
+        .find_model_spec(spec)
         .await
         .expect("model spec lookup")
         .expect("model spec")
@@ -1774,7 +1774,7 @@ async fn seed_leaking_dataset(
 /// Sell (`HoldVsExitWeighted`) publish requires a bound CPCV
 /// path set exactly like Buy — `bound_path_set` is family-agnostic, and
 /// `evaluate_gate` no longer excludes exit scorers from it.
-pub async fn sell_publish_requires_bound_cpcv_path_set() {
+pub async fn sell_publish_requires_set() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1815,7 +1815,7 @@ pub async fn sell_publish_requires_bound_cpcv_path_set() {
     );
 
     let row = PgModelRegistryRepository::new(db.clone())
-        .find_model_version_by_id(&candidate)
+        .find_model_version(&candidate)
         .await
         .expect("find")
         .expect("row");
@@ -1830,7 +1830,7 @@ pub async fn sell_publish_requires_bound_cpcv_path_set() {
 /// significance hard gates is explicitly bound, Sell publish succeeds
 /// through the same governance closure Buy uses (no calibrator needed —
 /// `CalibrationRequired` is `NotApplicable` for exit scorers).
-pub async fn sell_publish_succeeds_with_bound_cpcv_path_set() {
+pub async fn sell_publish_succeeds_set() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -1867,7 +1867,7 @@ pub async fn sell_publish_succeeds_with_bound_cpcv_path_set() {
         .expect("sell publish with bound path set should succeed");
 
     let row = PgModelRegistryRepository::new(db.clone())
-        .find_model_version_by_id(&candidate)
+        .find_model_version(&candidate)
         .await
         .expect("find")
         .expect("row");

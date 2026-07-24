@@ -68,7 +68,7 @@ mod trade_policy_trial;
 
 pub use account::{
     AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery, LiveAccountSnapshot,
-    NewAccountSnapshot, NewEquitySnapshot, capital_drawdown, capital_hwm, hwm_merge,
+    NewAccountSnapshot, NewEquitySnapshot,
 };
 pub use backtest::{BacktestReportInfo, NewBacktestReport};
 pub use backtest_path_set::{BacktestPathSetInfo, NewBacktestPathSet};
@@ -94,7 +94,7 @@ pub use execution::{
     ExecutionIdentityRefs, ExecutionOrderIdentityRefs, ExecutionOrderInfo, ExecutionOrderPatch,
     ExecutionTradeObservation, ExecutionTradeRef, ExecutionTransactionRef, ExitLedgerWrite,
     NewExecutionOrder, NewExecutionTradeRef, NewExecutionTransactionRef, NewOrderIntent,
-    OrderIntentInfo, SubmissionLedgerWrite, evaluate_intent_approval_invalidation,
+    OrderIntentInfo, SubmissionLedgerWrite,
 };
 pub use execution_account::{ExecutionAccountInfo, NewExecutionAccount};
 pub use exit_training::{ExitTrainingLotRow, LotExitEventRow};
@@ -106,9 +106,8 @@ pub use feature::{FeatureVectorInfo, FeatureVectorModel, NewFeatureVector};
 pub use feature_parity::{
     CompleteFeatureParityRun, FeatureParityRunInfo, FeatureParityStateInfo,
     FrozenFeatureParityCandidate, FrozenFeatureParitySubject, FrozenFeatureParitySubjectId,
-    ModelVersionParityEvidence, NewFeatureParityRun, NewFeatureParityState,
-    NewFrozenModelParitySubject, model_run_parity_evidence_hash,
-    model_version_parity_evidence_hash, parity_candidate_membership_hash, parity_selection_hash,
+    ModelRunParityEvidence, ModelVersionParityEvidence, NewFeatureParityRun, NewFeatureParityState,
+    NewFrozenModelParitySubject, parity_candidate_membership_hash, parity_selection_hash,
     report_parity_evidence_hash, report_parity_generation_hash,
 };
 pub use feedback_cohort::{
@@ -160,7 +159,7 @@ pub use reconciliation::{
 pub use report_data_quality::{NewReportDataQualitySnapshot, ReportDataQualitySnapshotInfo};
 pub use report_diff::{
     EligibilityShift, RecommendationChangedField, RecommendationDelta, RecommendationDiffSnapshot,
-    ReportDiff, compute_report_diff,
+    ReportDiff,
 };
 pub use report_fact_delivery::{NewReportFactDelivery, ReportFactDeliveryInfo};
 pub use report_run::{

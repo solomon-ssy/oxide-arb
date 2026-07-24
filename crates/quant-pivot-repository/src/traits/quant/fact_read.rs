@@ -58,7 +58,7 @@ pub trait QuantFactReadRepository: Send + Sync {
 
     /// Latest authoritative applied evaluation, explicitly deduplicated by
     /// deterministic `evaluation_id` rather than `MergeTree` background merges.
-    async fn latest_applied_entry_condition_evaluation(
+    async fn latest_entry_evaluation(
         &self,
         _instance_id: &EntryConditionInstanceId,
     ) -> Result<Option<EntryConditionEvaluationEventRow>, StorageError> {
@@ -96,7 +96,7 @@ pub trait QuantFactReadRepository: Send + Sync {
     /// it includes late corrections whose economic event time predates the
     /// current evaluator cursor. Exact writer retries are removed explicitly;
     /// this never relies on a background `ReplacingMergeTree` merge.
-    async fn crypto_price_reports_available_between(
+    async fn crypto_reports_between(
         &self,
         _instrument_keys: Vec<DomainInstrumentKey>,
         _available_from_ms: i64,
@@ -171,7 +171,7 @@ pub trait QuantFactReadRepository: Send + Sync {
     /// Trade-tape participant rows for `market_ids` with `event_time` in
     /// `[from_ms, to_ms)` (epoch milliseconds), ordered by market then event time.
     /// Used by structural participant-concentration features and the operator UI.
-    async fn trade_tape_window_by_market(
+    async fn market_tape_window(
         &self,
         market_ids: Vec<MarketId>,
         from_ms: i64,

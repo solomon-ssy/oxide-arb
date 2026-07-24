@@ -199,7 +199,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deserializes_position_with_numeric_and_lossless_decimals() {
+    fn deserializes_position_numeric_decimals() {
         let json = serde_json::json!({
             "proxyWallet": "0x56687bf447db6ffa42ffe2204a05edaa20f55839",
             "asset": "123456",
@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_position_evidence_is_rejected_instead_of_defaulted() {
+    fn missing_evidence_is_rejected() {
         let json = serde_json::json!({
             "asset": "1",
             "conditionId": "0x1"

@@ -109,18 +109,20 @@ mod tests {
         types::{ModelInputContract, ModelTrainingContract, SchemaVersion},
     };
 
-    fn thesis() -> ModelSpecThesis {
-        ModelSpecThesis {
-            summary: "Buy-side weighted-factor baseline".to_owned(),
-            hypothesis: "Governed factor ranks predict positive forward net returns".to_owned(),
-            limitations: vec![
-                "Evaluate only on Polymarket markets covered by the frozen profile".to_owned(),
-            ],
+    impl ModelSpecThesis {
+        fn test_fixture() -> Self {
+            Self {
+                summary: "Buy-side weighted-factor baseline".to_owned(),
+                hypothesis: "Governed factor ranks predict positive forward net returns".to_owned(),
+                limitations: vec![
+                    "Evaluate only on Polymarket markets covered by the frozen profile".to_owned(),
+                ],
+            }
         }
     }
 
     #[test]
-    fn thesis_rejects_unknown_fields_and_invalid_text() {
+    fn thesis_rejects_unknown_invalid() {
         let unknown = serde_json::json!({
             "summary": "summary",
             "hypothesis": "hypothesis",
@@ -129,14 +131,14 @@ mod tests {
         });
         assert!(serde_json::from_value::<ModelSpecThesis>(unknown).is_err());
 
-        let mut invalid = thesis();
+        let mut invalid = ModelSpecThesis::test_fixture();
         invalid.limitations.push(invalid.limitations[0].clone());
         assert!(invalid.validate().is_err());
     }
 
     #[test]
-    fn semantic_changes_change_the_definition_hash() {
-        let thesis = thesis();
+    fn semantic_changes_change_hash() {
+        let thesis = ModelSpecThesis::test_fixture();
         let input = ModelInputContract::single_required("book.mid");
         let training = ModelTrainingContract::settlement_default();
         let definition = ModelSpecDefinition {

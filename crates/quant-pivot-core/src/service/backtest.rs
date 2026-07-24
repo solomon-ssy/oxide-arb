@@ -45,7 +45,6 @@ use quant_pivot_research::{
         BacktestExecutionSnapshot, BacktestInputs, BacktestMarketMeta, BacktestReport,
         BacktestRequest, BacktestRunResult, BacktestTick, Backtester, MarketOutcome,
         ModelComparisonReport, PortfolioCaps, PortfolioReplayBacktester, SampleOutcome,
-        compare_reports,
     },
     execution_semantics::{PitFeeSchedule, aggressive_buy_limit},
     model::{
@@ -180,7 +179,7 @@ impl BacktestService {
             )
             .await?;
 
-        let comparison = compare_reports(&baseline.result, &candidate.result)?;
+        let comparison = baseline.result.compare(&candidate.result)?;
         let info = self
             .persist_comparison(&candidate, &baseline, &comparison)
             .await?;
@@ -217,7 +216,7 @@ impl BacktestService {
     ) -> QuantResult<ModelVersionInfo> {
         self.deps
             .model_registry_repo
-            .find_model_version_by_id(model_version_id)
+            .find_model_version(model_version_id)
             .await?
             .ok_or_else(|| {
                 StorageError::NotFound {
@@ -392,7 +391,7 @@ impl BacktestService {
             .compute
             .run_offline_cancellable(OfflineMemory::try_gib(4)?, cancel, move || {
                 let _runtime = runtime.enter();
-                run_backtest_replay_blocking(inputs)
+                (inputs).run_backtest_replay_blocking()
             })
             .await?;
         let Some(result) = result else {
@@ -616,47 +615,47 @@ struct BacktestReplayInputs {
     entry_max_slippage_bps: Bps,
 }
 
-/// Run the backtest replay on an offline Rayon worker.
-///
-/// Frozen tick assembly is synchronous; `block_on` drives only the pure async
-/// portfolio replay without occupying an async runtime worker.
-/// Returns `None` when cancelled at a cross-section boundary.
-fn run_backtest_replay_blocking(
-    inputs: BacktestReplayInputs,
-) -> QuantResult<Option<BacktestRunResult>> {
-    Handle::current().block_on(run_backtest_replay(inputs))
+impl BacktestReplayInputs {
+    /// Run the backtest replay on an offline Rayon worker.
+    ///
+    /// Frozen tick assembly is synchronous; `block_on` drives only the pure async
+    /// portfolio replay without occupying an async runtime worker.
+    /// Returns `None` when cancelled at a cross-section boundary.
+    fn run_backtest_replay_blocking(self) -> QuantResult<Option<BacktestRunResult>> {
+        Handle::current().block_on((self).run_backtest_replay())
+    }
 }
 
-/// Assemble exact frozen runtime inputs and run the portfolio replay.
-async fn run_backtest_replay(
-    inputs: BacktestReplayInputs,
-) -> QuantResult<Option<BacktestRunResult>> {
-    let Some(ticks) = frozen_ticks(
-        &inputs.examples,
-        &inputs.frozen_source,
-        inputs.entry_max_slippage_bps,
-        inputs.model.as_ref(),
-        &inputs.model_run_id,
-        &inputs.cancel,
-        inputs.sink.as_ref(),
-    )?
-    else {
-        return Ok(None);
-    };
+impl BacktestReplayInputs {
+    /// Assemble exact frozen runtime inputs and run the portfolio replay.
+    async fn run_backtest_replay(self) -> QuantResult<Option<BacktestRunResult>> {
+        let Some(ticks) = frozen_ticks(
+            &self.examples,
+            &self.frozen_source,
+            self.entry_max_slippage_bps,
+            self.model.as_ref(),
+            &self.model_run_id,
+            &self.cancel,
+            self.sink.as_ref(),
+        )?
+        else {
+            return Ok(None);
+        };
 
-    inputs.sink.report(ResearchJobProgress::indeterminate(
-        "replay",
-        ticks.len() as u64,
-    ));
-    let result = PortfolioReplayBacktester::new()
-        .run(BacktestInputs {
-            request: inputs.request,
-            model: inputs.model.as_ref(),
-            ticks,
-            caps: inputs.caps,
-        })
-        .await?;
-    Ok(Some(result))
+        self.sink.report(ResearchJobProgress::indeterminate(
+            "replay",
+            ticks.len() as u64,
+        ));
+        let result = PortfolioReplayBacktester::new()
+            .run(BacktestInputs {
+                request: self.request,
+                model: self.model.as_ref(),
+                ticks,
+                caps: self.caps,
+            })
+            .await?;
+        Ok(Some(result))
+    }
 }
 
 /// Assemble replay ticks from immutable v1 Parquet examples and Source Slice.

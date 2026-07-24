@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_collects_every_violation_without_aborting() {
+    fn scan_collects_without_aborting() {
         let findings = scan_future_leakage(&[example(5), example(-5), example(10)]).expect("scan");
         assert_eq!(findings.scanned, 3);
         assert_eq!(findings.violation_count(), 2);
@@ -258,14 +258,14 @@ mod tests {
     }
 
     #[test]
-    fn scan_clean_dataset_has_no_violations() {
+    fn scan_clean_no_violations() {
         let findings = scan_future_leakage(&[example(-5), example(-1)]).expect("scan");
         assert!(findings.is_clean());
         assert_eq!(findings.scanned, 2);
     }
 
     #[test]
-    fn scan_rejects_label_matured_before_as_of() {
+    fn scan_rejects_label_before() {
         let mut ex = example(-5);
         ex.labels.push(TrainingLabel {
             label_name: LabelName::from_static("settlement_outcome"),

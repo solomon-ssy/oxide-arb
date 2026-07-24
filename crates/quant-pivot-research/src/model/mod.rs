@@ -55,7 +55,7 @@ pub use classical::{
 };
 #[cfg(feature = "ml-classical")]
 pub use classical_runtime::ClassicalRuntime;
-pub use degrade::{DegradeAction, InferenceStage, degrade_action};
+pub use degrade::{DegradeAction, InferenceStage};
 pub use factory::{
     ActiveSchemaBinding, DefaultModelRuntimeFactory, DefaultModelRuntimeFactoryBuilder,
     ModelRuntimeFactoryBuilder, load_hash_verified_artifact,
@@ -76,7 +76,7 @@ pub use score_percentile::annotate;
 pub use sell_scorer::{
     LotStateInput, PositionStateFeatures, SellScore, SellScoreInput, SellScorerRuntime,
     SellScorerTrainer, SellSignalPolicy, TrainSellScorerRequest, WeightedSellScorerRuntime,
-    position_state_features, position_state_signed, sell_signal_fires, sell_signal_target,
+    sell_signal_fires, sell_signal_target,
 };
 pub use signal::{
     FactorContribution, ModelExplanation, SignalCandidate, SignalWarning,

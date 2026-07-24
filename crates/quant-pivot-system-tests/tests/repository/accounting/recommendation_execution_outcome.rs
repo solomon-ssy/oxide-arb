@@ -121,8 +121,8 @@ fn hash(seed: char) -> ContentHash {
     ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("valid hash")
 }
 
-pub async fn terminal_shapes_preserve_real_zero_and_null_semantics() {
-    let unfilled = persist_shape(SourceShape::Unfilled).await;
+pub async fn terminal_preserve_zero_semantics() {
+    let unfilled = (SourceShape::Unfilled).persist_shape().await;
     assert_eq!(
         unfilled.terminal_state,
         RecommendationExecutionTerminalState::Unfilled
@@ -138,7 +138,7 @@ pub async fn terminal_shapes_preserve_real_zero_and_null_semantics() {
     assert_eq!(unfilled.max_favorable_excursion_bps, None);
     assert_eq!(unfilled.position_id, None);
 
-    let partial = persist_shape(SourceShape::PartiallyFilled).await;
+    let partial = (SourceShape::PartiallyFilled).persist_shape().await;
     assert_eq!(
         partial.terminal_state,
         RecommendationExecutionTerminalState::PartiallyFilled
@@ -154,7 +154,7 @@ pub async fn terminal_shapes_preserve_real_zero_and_null_semantics() {
     assert_eq!(partial.max_adverse_excursion_bps, None);
     assert_eq!(partial.max_favorable_excursion_bps, None);
 
-    let full = persist_shape(SourceShape::FullyFilled).await;
+    let full = (SourceShape::FullyFilled).persist_shape().await;
     assert_eq!(
         full.terminal_state,
         RecommendationExecutionTerminalState::FullyFilled
@@ -168,7 +168,7 @@ pub async fn terminal_shapes_preserve_real_zero_and_null_semantics() {
     assert_eq!(full.max_favorable_excursion_bps, Some(Bps::ZERO));
 }
 
-pub async fn invalid_state_and_report_only_fail_closed() {
+pub async fn invalid_state_report_rejects() {
     let (pool, database) = setup_pg().await;
     let db = pool.connection().clone();
     let source = seed_execution_source(&db, SourceShape::Unfilled).await;
@@ -215,7 +215,7 @@ pub async fn invalid_state_and_report_only_fail_closed() {
     );
 }
 
-pub async fn reconcile_is_idempotent_worm_and_tamper_evident() {
+pub async fn reconcile_idempotent_worm_evident() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let source = seed_execution_source(&db, SourceShape::FullyFilled).await;
@@ -311,7 +311,7 @@ pub async fn reconcile_is_idempotent_worm_and_tamper_evident() {
     ));
 }
 
-pub async fn reconciliation_candidates_require_submitted_terminal_source() {
+pub async fn reconciliation_candidates_require_source() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let terminal = seed_execution_source(&db, SourceShape::Unfilled).await;
@@ -352,21 +352,23 @@ pub async fn reconciliation_candidates_require_submitted_terminal_source() {
     );
 }
 
-async fn persist_shape(shape: SourceShape) -> RecommendationExecutionOutcomeInfo {
-    let (pool, _database) = setup_pg().await;
-    let db = pool.connection().clone();
-    let source = seed_execution_source(&db, shape).await;
-    let inserted = PgRecommendationExecutionOutcomeRepository::new(db)
-        .reconcile_intent(&source.order_intent_id)
-        .await
-        .expect("reconcile execution outcome");
-    match inserted {
-        ExecutionOutcomeReconciliationResult::Inserted(outcome) => outcome,
-        ExecutionOutcomeReconciliationResult::AlreadyPresent(_) => {
-            panic!("isolated fixture must insert a new outcome")
-        }
-        ExecutionOutcomeReconciliationResult::Deferred(reason) => {
-            panic!("terminal source fixture must not defer: {reason:?}")
+impl SourceShape {
+    async fn persist_shape(self) -> RecommendationExecutionOutcomeInfo {
+        let (pool, _database) = setup_pg().await;
+        let db = pool.connection().clone();
+        let source = seed_execution_source(&db, self).await;
+        let inserted = PgRecommendationExecutionOutcomeRepository::new(db)
+            .reconcile_intent(&source.order_intent_id)
+            .await
+            .expect("reconcile execution outcome");
+        match inserted {
+            ExecutionOutcomeReconciliationResult::Inserted(outcome) => outcome,
+            ExecutionOutcomeReconciliationResult::AlreadyPresent(_) => {
+                panic!("isolated fixture must insert a new outcome")
+            }
+            ExecutionOutcomeReconciliationResult::Deferred(reason) => {
+                panic!("terminal source fixture must not defer: {reason:?}")
+            }
         }
     }
 }

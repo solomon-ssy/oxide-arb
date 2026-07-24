@@ -6,7 +6,7 @@ use quant_pivot_api::infra::retry::{ErrorKind, RetryPolicy, retry_with_policy};
 use quant_pivot_error::api::ApiError;
 
 #[tokio::test]
-async fn rate_limited_error_retries_then_succeeds() {
+async fn rate_error_retries_succeeds() {
     let attempts = AtomicU32::new(0);
     let policy = RetryPolicy::clob_default();
 

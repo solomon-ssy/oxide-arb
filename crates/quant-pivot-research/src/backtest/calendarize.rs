@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn calendarize_sums_lots_in_same_active_bucket() {
+    fn calendarize_sums_lots_bucket() {
         let series = calendarize_lot_returns(
             &[
                 outcome(ts(0), dec!(0.01)),
@@ -134,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn calendarize_omits_empty_buckets_never_zero_pads() {
+    fn omits_empty_never_zero() {
         let series = calendarize_lot_returns(
             &[outcome(ts(0), dec!(0.01)), outcome(ts(7200), dec!(0.02))],
             3600,
@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn period_zero_is_identity_per_lot() {
+    fn period_zero_identity_lot() {
         let series = calendarize_lot_returns(
             &[outcome(ts(10), dec!(0.01)), outcome(ts(5), dec!(0.02))],
             0,

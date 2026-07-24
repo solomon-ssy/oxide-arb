@@ -57,10 +57,9 @@ use quant_pivot_models::{
     },
     runtime_config::MAX_REPORT_TOP_N,
     types::{
-        EntryConditionArtifactId, EntryConditionAuditId, EntryConditionPlan, FeatureParityStateId,
-        ModelRunId, OperationDetailDocument, OperationLogId, RecommendationReportId,
-        RecommendationTradePlan, ReportDataQualitySnapshotId, ResearchJobParams, ResearchProfileId,
-        WorkerId,
+        EntryConditionArtifactId, EntryConditionAuditId, EntryConditionPlan, ModelRunId,
+        OperationDetailDocument, OperationLogId, RecommendationReportId, RecommendationTradePlan,
+        ReportDataQualitySnapshotId, ResearchJobParams, ResearchProfileId, WorkerId,
     },
 };
 use sea_orm::{
@@ -75,8 +74,8 @@ use crate::{
     postgres::{
         error, primitives,
         quant::{
-            feature_parity, order_intent::invalidate_pre_submission_for_recommendation,
-            report_scope::acquire_report_scope_lock, research_profile,
+            feature_parity::PgFeatureParityRepository, model_registry::PgModelRegistryRepository,
+            order_intent::PgOrderIntentRepository, report_scope::ReportScope,
         },
         query::paginate_mapped,
         state_hash,
@@ -120,25 +119,27 @@ enum FactDeliveryClaim {
     Lost(Model),
 }
 
-async fn fact_delivery_claim(
-    txn: &DatabaseTransaction,
-    report_id: &RecommendationReportId,
-    worker_id: WorkerId,
-    now: DateTime<Utc>,
-) -> Result<FactDeliveryClaim, StorageError> {
-    let row = Entity::find_by_id(*report_id)
-        .lock_exclusive()
-        .one(txn)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
-    if row.status != ReportFactDeliveryStatus::Delivering
-        || row.claim_owner != Some(worker_id)
-        || row.lease_expires_at.is_none_or(|expires| expires <= now)
-    {
-        return Ok(FactDeliveryClaim::Lost(row));
+impl PgRecommendationReportRepository {
+    async fn fact_delivery_claim(
+        txn: &DatabaseTransaction,
+        report_id: &RecommendationReportId,
+        worker_id: WorkerId,
+        now: DateTime<Utc>,
+    ) -> Result<FactDeliveryClaim, StorageError> {
+        let row = Entity::find_by_id(*report_id)
+            .lock_exclusive()
+            .one(txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
+        if row.status != ReportFactDeliveryStatus::Delivering
+            || row.claim_owner != Some(worker_id)
+            || row.lease_expires_at.is_none_or(|expires| expires <= now)
+        {
+            return Ok(FactDeliveryClaim::Lost(row));
+        }
+        Ok(FactDeliveryClaim::Held(row))
     }
-    Ok(FactDeliveryClaim::Held(row))
 }
 
 fn publication_operation_log(
@@ -174,36 +175,31 @@ fn publication_operation_log(
     })
 }
 
-async fn insert_report_transition_log(
-    txn: &DatabaseTransaction,
-    action: &str,
-    before: &QuantRecommendationReportModel,
-    after: &QuantRecommendationReportModel,
-    successor_report_id: Option<&RecommendationReportId>,
-) -> Result<(), StorageError> {
-    let before_info: RecommendationReportInfo = before.clone().into();
-    let after_info: RecommendationReportInfo = after.clone().into();
-    let log = state_hash::apply_transition_hashes(
-        publication_operation_log(
-            action,
-            &before.recommendation_report_id,
-            successor_report_id,
-        )?,
-        &before_info,
-        &after_info,
-    )?;
-    OperationLogEntity::insert(log.into_active_model())
-        .exec(txn)
-        .await
-        .map_err(StorageError::from)?;
-    Ok(())
-}
-
-async fn verify_feature_parity_commit(
-    txn: &DatabaseTransaction,
-    expected_state_id: &FeatureParityStateId,
-) -> Result<(), StorageError> {
-    feature_parity::verify_clear_latch_generation(txn, expected_state_id).await
+impl PgRecommendationReportRepository {
+    async fn insert_report_transition_log(
+        txn: &DatabaseTransaction,
+        action: &str,
+        before: &QuantRecommendationReportModel,
+        after: &QuantRecommendationReportModel,
+        successor_report_id: Option<&RecommendationReportId>,
+    ) -> Result<(), StorageError> {
+        let before_info: RecommendationReportInfo = before.clone().into();
+        let after_info: RecommendationReportInfo = after.clone().into();
+        let log = state_hash::apply_transition_hashes(
+            publication_operation_log(
+                action,
+                &before.recommendation_report_id,
+                successor_report_id,
+            )?,
+            &before_info,
+            &after_info,
+        )?;
+        OperationLogEntity::insert(log.into_active_model())
+            .exec(txn)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(())
+    }
 }
 
 fn validate_sampled_feature_parity(
@@ -447,26 +443,28 @@ fn new_condition_audit(
     }
 }
 
-async fn insert_sampled_feature_parity(
-    txn: &DatabaseTransaction,
-    parity: Option<NewReportFeatureParity>,
-    report: &QuantRecommendationReportModel,
-) -> Result<(), StorageError> {
-    let Some(parity) = parity else {
-        return Ok(());
-    };
-    let parity_key = report.recommendation_report_id.to_string();
-    let run_id = parity.run.run_id;
-    QuantFeatureParityRunEntity::insert(parity.run.into_active_model())
-        .exec(txn)
-        .await
-        .map_err(|error| error::map_unique(error, QUANT_FEATURE_PARITY_RUN, &parity_key))?;
-    feature_parity::insert_frozen_report_subject(txn, &run_id, report).await?;
-    QuantResearchJobEntity::insert(parity.job.into_active_model())
-        .exec(txn)
-        .await
-        .map_err(StorageError::from)?;
-    Ok(())
+impl PgRecommendationReportRepository {
+    async fn insert_sampled_feature_parity(
+        txn: &DatabaseTransaction,
+        parity: Option<NewReportFeatureParity>,
+        report: &QuantRecommendationReportModel,
+    ) -> Result<(), StorageError> {
+        let Some(parity) = parity else {
+            return Ok(());
+        };
+        let parity_key = report.recommendation_report_id.to_string();
+        let run_id = parity.run.run_id;
+        QuantFeatureParityRunEntity::insert(parity.run.into_active_model())
+            .exec(txn)
+            .await
+            .map_err(|error| error::map_unique(error, QUANT_FEATURE_PARITY_RUN, &parity_key))?;
+        PgFeatureParityRepository::insert_frozen_report_subject(txn, &run_id, report).await?;
+        QuantResearchJobEntity::insert(parity.job.into_active_model())
+            .exec(txn)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(())
+    }
 }
 
 fn validate_report_transaction(
@@ -549,257 +547,275 @@ fn validate_fact_delivery(
     Ok(())
 }
 
-async fn transition_recommendations_for_report(
-    db: &impl ConnectionTrait,
-    report_id: &RecommendationReportId,
-    from: &[RecommendationStatus],
-    to: RecommendationStatus,
-) -> Result<u64, StorageError> {
-    if from.is_empty() {
-        return Ok(0);
-    }
-    QuantRecommendationEntity::update_many()
-        .col_expr(Column::Status, Expr::value(to))
-        .filter(Column::RecommendationReportId.eq(*report_id))
-        .filter(Column::Status.is_in(from.iter().copied()))
-        .exec(db)
-        .await
-        .map(|result| result.rows_affected)
-        .map_err(StorageError::from)
-}
-
-async fn obsolete_stale_candidate(
-    txn: &DatabaseTransaction,
-    candidate: QuantRecommendationReportModel,
-    delivery: Model,
-    current: &QuantRecommendationReportModel,
-    now: DateTime<Utc>,
-) -> Result<PublishReportOutcome, StorageError> {
-    transition_recommendations_for_report(
-        txn,
-        &candidate.recommendation_report_id,
-        &[RecommendationStatus::Prepared],
-        RecommendationStatus::Obsolete,
-    )
-    .await?;
-
-    let mut report_active = candidate.clone().into_active_model();
-    report_active.status = ActiveValue::Set(RecommendationReportStatus::Obsolete);
-    report_active.successor_report_id = ActiveValue::Set(Some(current.recommendation_report_id));
-    report_active.obsoleted_at = ActiveValue::Set(Some(now));
-    report_active.status_reason = ActiveValue::Set(Some("not_newer_than_current".to_owned()));
-    let obsolete = report_active
-        .update(txn)
-        .await
-        .map_err(StorageError::from)?;
-
-    let mut delivery_active = delivery.into_active_model();
-    delivery_active.status = ActiveValue::Set(ReportFactDeliveryStatus::Cancelled);
-    delivery_active.claim_owner = ActiveValue::Set(None);
-    delivery_active.lease_expires_at = ActiveValue::Set(None);
-    delivery_active.next_attempt_at = ActiveValue::Set(None);
-    delivery_active.last_error = ActiveValue::Set(None);
-    delivery_active.updated_at = ActiveValue::Set(now);
-    let cancelled = delivery_active
-        .update(txn)
-        .await
-        .map_err(StorageError::from)?;
-    insert_report_transition_log(
-        txn,
-        "obsolete",
-        &candidate,
-        &obsolete,
-        Some(&current.recommendation_report_id),
-    )
-    .await?;
-
-    Ok(PublishReportOutcome {
-        report: obsolete.into(),
-        delivery: cancelled.into(),
-        superseded_reports: Vec::new(),
-        obsoleted_reports: Vec::new(),
-        invalidated_intents: Vec::new(),
-    })
-}
-
-async fn publish_candidate_recommendations(
-    txn: &DatabaseTransaction,
-    report_id: &RecommendationReportId,
-) -> Result<(), StorageError> {
-    transition_recommendations_for_report(
-        txn,
-        report_id,
-        &[RecommendationStatus::Prepared],
-        RecommendationStatus::Published,
-    )
-    .await?;
-    Ok(())
-}
-
-async fn supersede_current_report(
-    txn: &DatabaseTransaction,
-    current: QuantRecommendationReportModel,
-    successor_report_id: &RecommendationReportId,
-    now: DateTime<Utc>,
-) -> Result<(RecommendationReportInfo, Vec<OrderIntentInfo>), StorageError> {
-    let parent_log = publication_operation_log(
-        "supersede",
-        &current.recommendation_report_id,
-        Some(successor_report_id),
-    )?;
-    let recommendations = QuantRecommendationEntity::find()
-        .filter(Column::RecommendationReportId.eq(current.recommendation_report_id))
-        .filter(Column::Status.is_in([
-            RecommendationStatus::Published,
-            RecommendationStatus::IntentCreated,
-        ]))
-        .order_by_asc(Column::RecommendationId)
-        .lock_exclusive()
-        .all(txn)
-        .await
-        .map_err(StorageError::from)?;
-    let mut invalidated_intents = Vec::new();
-    for recommendation in &recommendations {
-        invalidated_intents.extend(
-            invalidate_pre_submission_for_recommendation(
-                txn,
-                &recommendation.recommendation_id,
-                ApprovalInvalidation::ReportSuperseded,
-                now,
-                &parent_log,
-            )
-            .await?,
-        );
-    }
-    transition_recommendations_for_report(
-        txn,
-        &current.recommendation_report_id,
-        &[
-            RecommendationStatus::Published,
-            RecommendationStatus::IntentCreated,
-        ],
-        RecommendationStatus::Superseded,
-    )
-    .await?;
-
-    let mut current_active = current.clone().into_active_model();
-    current_active.status = ActiveValue::Set(RecommendationReportStatus::Superseded);
-    current_active.successor_report_id = ActiveValue::Set(Some(*successor_report_id));
-    current_active.superseded_at = ActiveValue::Set(Some(now));
-    current_active.status_reason = ActiveValue::Set(Some("newer_report_published".to_owned()));
-    let superseded = current_active
-        .update(txn)
-        .await
-        .map_err(StorageError::from)?;
-    insert_report_transition_log(
-        txn,
-        "supersede",
-        &current,
-        &superseded,
-        Some(successor_report_id),
-    )
-    .await?;
-    Ok((superseded.into(), invalidated_intents))
-}
-
-async fn obsolete_older_prepared_reports(
-    txn: &DatabaseTransaction,
-    published: &QuantRecommendationReportModel,
-    now: DateTime<Utc>,
-) -> Result<Vec<RecommendationReportInfo>, StorageError> {
-    let older_prepared = QuantRecommendationReportEntity::find()
-        .filter(
-            QuantRecommendationReportColumn::ResearchProfileArtifactId
-                .eq(published.research_profile_artifact_id.clone()),
-        )
-        .filter(QuantRecommendationReportColumn::ReportKind.eq(published.report_kind))
-        .filter(QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Prepared))
-        .filter(
-            QuantRecommendationReportColumn::RecommendationReportId
-                .ne(published.recommendation_report_id),
-        )
-        .filter(QuantRecommendationReportColumn::DecisionAt.lte(published.decision_at))
-        .order_by_asc(QuantRecommendationReportColumn::DecisionAt)
-        .order_by_asc(QuantRecommendationReportColumn::RecommendationReportId)
-        .lock_exclusive()
-        .all(txn)
-        .await
-        .map_err(StorageError::from)?;
-    let mut obsoleted_reports = Vec::with_capacity(older_prepared.len());
-    for older in older_prepared {
-        obsolete_prepared_report(txn, older, &published.recommendation_report_id, now)
+impl PgRecommendationReportRepository {
+    async fn transition_recommendations_for_report(
+        db: &impl ConnectionTrait,
+        report_id: &RecommendationReportId,
+        from: &[RecommendationStatus],
+        to: RecommendationStatus,
+    ) -> Result<u64, StorageError> {
+        if from.is_empty() {
+            return Ok(0);
+        }
+        QuantRecommendationEntity::update_many()
+            .col_expr(Column::Status, Expr::value(to))
+            .filter(Column::RecommendationReportId.eq(*report_id))
+            .filter(Column::Status.is_in(from.iter().copied()))
+            .exec(db)
             .await
-            .map(|report| obsoleted_reports.push(report))?;
+            .map(|result| result.rows_affected)
+            .map_err(StorageError::from)
     }
-    Ok(obsoleted_reports)
 }
 
-async fn obsolete_prepared_report(
-    txn: &DatabaseTransaction,
-    older: QuantRecommendationReportModel,
-    successor_report_id: &RecommendationReportId,
-    now: DateTime<Utc>,
-) -> Result<RecommendationReportInfo, StorageError> {
-    transition_recommendations_for_report(
-        txn,
-        &older.recommendation_report_id,
-        &[RecommendationStatus::Prepared],
-        RecommendationStatus::Obsolete,
-    )
-    .await?;
-    if let Some(older_delivery) = Entity::find_by_id(older.recommendation_report_id)
-        .lock_exclusive()
-        .one(txn)
-        .await
-        .map_err(StorageError::from)?
-        && !matches!(
-            older_delivery.status,
-            ReportFactDeliveryStatus::Verified | ReportFactDeliveryStatus::Cancelled
+impl PgRecommendationReportRepository {
+    async fn obsolete_stale_candidate(
+        txn: &DatabaseTransaction,
+        candidate: QuantRecommendationReportModel,
+        delivery: Model,
+        current: &QuantRecommendationReportModel,
+        now: DateTime<Utc>,
+    ) -> Result<PublishReportOutcome, StorageError> {
+        Self::transition_recommendations_for_report(
+            txn,
+            &candidate.recommendation_report_id,
+            &[RecommendationStatus::Prepared],
+            RecommendationStatus::Obsolete,
         )
-    {
-        let mut active = older_delivery.into_active_model();
-        active.status = ActiveValue::Set(ReportFactDeliveryStatus::Cancelled);
-        active.claim_owner = ActiveValue::Set(None);
-        active.lease_expires_at = ActiveValue::Set(None);
-        active.next_attempt_at = ActiveValue::Set(None);
-        active.updated_at = ActiveValue::Set(now);
-        active.update(txn).await.map_err(StorageError::from)?;
+        .await?;
+
+        let mut report_active = candidate.clone().into_active_model();
+        report_active.status = ActiveValue::Set(RecommendationReportStatus::Obsolete);
+        report_active.successor_report_id =
+            ActiveValue::Set(Some(current.recommendation_report_id));
+        report_active.obsoleted_at = ActiveValue::Set(Some(now));
+        report_active.status_reason = ActiveValue::Set(Some("not_newer_than_current".to_owned()));
+        let obsolete = report_active
+            .update(txn)
+            .await
+            .map_err(StorageError::from)?;
+
+        let mut delivery_active = delivery.into_active_model();
+        delivery_active.status = ActiveValue::Set(ReportFactDeliveryStatus::Cancelled);
+        delivery_active.claim_owner = ActiveValue::Set(None);
+        delivery_active.lease_expires_at = ActiveValue::Set(None);
+        delivery_active.next_attempt_at = ActiveValue::Set(None);
+        delivery_active.last_error = ActiveValue::Set(None);
+        delivery_active.updated_at = ActiveValue::Set(now);
+        let cancelled = delivery_active
+            .update(txn)
+            .await
+            .map_err(StorageError::from)?;
+        Self::insert_report_transition_log(
+            txn,
+            "obsolete",
+            &candidate,
+            &obsolete,
+            Some(&current.recommendation_report_id),
+        )
+        .await?;
+
+        Ok(PublishReportOutcome {
+            report: obsolete.into(),
+            delivery: cancelled.into(),
+            superseded_reports: Vec::new(),
+            obsoleted_reports: Vec::new(),
+            invalidated_intents: Vec::new(),
+        })
     }
-    let mut older_active = older.clone().into_active_model();
-    older_active.status = ActiveValue::Set(RecommendationReportStatus::Obsolete);
-    older_active.successor_report_id = ActiveValue::Set(Some(*successor_report_id));
-    older_active.obsoleted_at = ActiveValue::Set(Some(now));
-    older_active.status_reason = ActiveValue::Set(Some("newer_report_published_first".to_owned()));
-    let obsolete = older_active.update(txn).await.map_err(StorageError::from)?;
-    insert_report_transition_log(
-        txn,
-        "obsolete",
-        &older,
-        &obsolete,
-        Some(successor_report_id),
-    )
-    .await?;
-    Ok(obsolete.into())
 }
 
-async fn verify_delivery(
-    txn: &DatabaseTransaction,
-    delivery: Model,
-    now: DateTime<Utc>,
-) -> Result<ReportFactDeliveryInfo, StorageError> {
-    let mut delivery_active = delivery.into_active_model();
-    delivery_active.status = ActiveValue::Set(ReportFactDeliveryStatus::Verified);
-    delivery_active.claim_owner = ActiveValue::Set(None);
-    delivery_active.lease_expires_at = ActiveValue::Set(None);
-    delivery_active.next_attempt_at = ActiveValue::Set(None);
-    delivery_active.last_error = ActiveValue::Set(None);
-    delivery_active.verified_at = ActiveValue::Set(Some(now));
-    delivery_active.updated_at = ActiveValue::Set(now);
-    delivery_active
-        .update(txn)
-        .await
-        .map(Into::into)
-        .map_err(StorageError::from)
+impl PgRecommendationReportRepository {
+    async fn publish_candidate_recommendations(
+        txn: &DatabaseTransaction,
+        report_id: &RecommendationReportId,
+    ) -> Result<(), StorageError> {
+        Self::transition_recommendations_for_report(
+            txn,
+            report_id,
+            &[RecommendationStatus::Prepared],
+            RecommendationStatus::Published,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+impl PgRecommendationReportRepository {
+    async fn supersede_current_report(
+        txn: &DatabaseTransaction,
+        current: QuantRecommendationReportModel,
+        successor_report_id: &RecommendationReportId,
+        now: DateTime<Utc>,
+    ) -> Result<(RecommendationReportInfo, Vec<OrderIntentInfo>), StorageError> {
+        let parent_log = publication_operation_log(
+            "supersede",
+            &current.recommendation_report_id,
+            Some(successor_report_id),
+        )?;
+        let recommendations = QuantRecommendationEntity::find()
+            .filter(Column::RecommendationReportId.eq(current.recommendation_report_id))
+            .filter(Column::Status.is_in([
+                RecommendationStatus::Published,
+                RecommendationStatus::IntentCreated,
+            ]))
+            .order_by_asc(Column::RecommendationId)
+            .lock_exclusive()
+            .all(txn)
+            .await
+            .map_err(StorageError::from)?;
+        let mut invalidated_intents = Vec::new();
+        for recommendation in &recommendations {
+            invalidated_intents.extend(
+                PgOrderIntentRepository::invalidate_pre_submission(
+                    txn,
+                    &recommendation.recommendation_id,
+                    ApprovalInvalidation::ReportSuperseded,
+                    now,
+                    &parent_log,
+                )
+                .await?,
+            );
+        }
+        Self::transition_recommendations_for_report(
+            txn,
+            &current.recommendation_report_id,
+            &[
+                RecommendationStatus::Published,
+                RecommendationStatus::IntentCreated,
+            ],
+            RecommendationStatus::Superseded,
+        )
+        .await?;
+
+        let mut current_active = current.clone().into_active_model();
+        current_active.status = ActiveValue::Set(RecommendationReportStatus::Superseded);
+        current_active.successor_report_id = ActiveValue::Set(Some(*successor_report_id));
+        current_active.superseded_at = ActiveValue::Set(Some(now));
+        current_active.status_reason = ActiveValue::Set(Some("newer_report_published".to_owned()));
+        let superseded = current_active
+            .update(txn)
+            .await
+            .map_err(StorageError::from)?;
+        Self::insert_report_transition_log(
+            txn,
+            "supersede",
+            &current,
+            &superseded,
+            Some(successor_report_id),
+        )
+        .await?;
+        Ok((superseded.into(), invalidated_intents))
+    }
+}
+
+impl PgRecommendationReportRepository {
+    async fn obsolete_older_prepared_reports(
+        txn: &DatabaseTransaction,
+        published: &QuantRecommendationReportModel,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<RecommendationReportInfo>, StorageError> {
+        let older_prepared = QuantRecommendationReportEntity::find()
+            .filter(
+                QuantRecommendationReportColumn::ResearchProfileArtifactId
+                    .eq(published.research_profile_artifact_id.clone()),
+            )
+            .filter(QuantRecommendationReportColumn::ReportKind.eq(published.report_kind))
+            .filter(
+                QuantRecommendationReportColumn::Status.eq(RecommendationReportStatus::Prepared),
+            )
+            .filter(
+                QuantRecommendationReportColumn::RecommendationReportId
+                    .ne(published.recommendation_report_id),
+            )
+            .filter(QuantRecommendationReportColumn::DecisionAt.lte(published.decision_at))
+            .order_by_asc(QuantRecommendationReportColumn::DecisionAt)
+            .order_by_asc(QuantRecommendationReportColumn::RecommendationReportId)
+            .lock_exclusive()
+            .all(txn)
+            .await
+            .map_err(StorageError::from)?;
+        let mut obsoleted_reports = Vec::with_capacity(older_prepared.len());
+        for older in older_prepared {
+            Self::obsolete_prepared_report(txn, older, &published.recommendation_report_id, now)
+                .await
+                .map(|report| obsoleted_reports.push(report))?;
+        }
+        Ok(obsoleted_reports)
+    }
+}
+
+impl PgRecommendationReportRepository {
+    async fn obsolete_prepared_report(
+        txn: &DatabaseTransaction,
+        older: QuantRecommendationReportModel,
+        successor_report_id: &RecommendationReportId,
+        now: DateTime<Utc>,
+    ) -> Result<RecommendationReportInfo, StorageError> {
+        Self::transition_recommendations_for_report(
+            txn,
+            &older.recommendation_report_id,
+            &[RecommendationStatus::Prepared],
+            RecommendationStatus::Obsolete,
+        )
+        .await?;
+        if let Some(older_delivery) = Entity::find_by_id(older.recommendation_report_id)
+            .lock_exclusive()
+            .one(txn)
+            .await
+            .map_err(StorageError::from)?
+            && !matches!(
+                older_delivery.status,
+                ReportFactDeliveryStatus::Verified | ReportFactDeliveryStatus::Cancelled
+            )
+        {
+            let mut active = older_delivery.into_active_model();
+            active.status = ActiveValue::Set(ReportFactDeliveryStatus::Cancelled);
+            active.claim_owner = ActiveValue::Set(None);
+            active.lease_expires_at = ActiveValue::Set(None);
+            active.next_attempt_at = ActiveValue::Set(None);
+            active.updated_at = ActiveValue::Set(now);
+            active.update(txn).await.map_err(StorageError::from)?;
+        }
+        let mut older_active = older.clone().into_active_model();
+        older_active.status = ActiveValue::Set(RecommendationReportStatus::Obsolete);
+        older_active.successor_report_id = ActiveValue::Set(Some(*successor_report_id));
+        older_active.obsoleted_at = ActiveValue::Set(Some(now));
+        older_active.status_reason =
+            ActiveValue::Set(Some("newer_report_published_first".to_owned()));
+        let obsolete = older_active.update(txn).await.map_err(StorageError::from)?;
+        Self::insert_report_transition_log(
+            txn,
+            "obsolete",
+            &older,
+            &obsolete,
+            Some(successor_report_id),
+        )
+        .await?;
+        Ok(obsolete.into())
+    }
+}
+
+impl PgRecommendationReportRepository {
+    async fn verify_delivery(
+        txn: &DatabaseTransaction,
+        delivery: Model,
+        now: DateTime<Utc>,
+    ) -> Result<ReportFactDeliveryInfo, StorageError> {
+        let mut delivery_active = delivery.into_active_model();
+        delivery_active.status = ActiveValue::Set(ReportFactDeliveryStatus::Verified);
+        delivery_active.claim_owner = ActiveValue::Set(None);
+        delivery_active.lease_expires_at = ActiveValue::Set(None);
+        delivery_active.next_attempt_at = ActiveValue::Set(None);
+        delivery_active.last_error = ActiveValue::Set(None);
+        delivery_active.verified_at = ActiveValue::Set(Some(now));
+        delivery_active.updated_at = ActiveValue::Set(now);
+        delivery_active
+            .update(txn)
+            .await
+            .map(Into::into)
+            .map_err(StorageError::from)
+    }
 }
 
 #[async_trait::async_trait]
@@ -855,9 +871,11 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
                 "report prepare commit lost its exact running lease or frozen inputs",
             ));
         }
-        verify_feature_parity_commit(&txn, &feature_parity_state_id).await?;
+        PgFeatureParityRepository::verify_clear_latch_generation(&txn, &feature_parity_state_id)
+            .await?;
         let profile_ref = report.research_profile_artifact_id.profile_ref();
-        let profile_artifact_id = research_profile::ensure(&txn, &profile_ref).await?;
+        let profile_artifact_id =
+            PgModelRegistryRepository::ensure_profile(&txn, &profile_ref).await?;
         if profile_artifact_id != report.research_profile_artifact_id {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_RECOMMENDATION_REPORT),
@@ -898,7 +916,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             entry_condition_artifacts,
         )
         .await?;
-        insert_sampled_feature_parity(&txn, sampled_feature_parity, &report_model).await?;
+        Self::insert_sampled_feature_parity(&txn, sampled_feature_parity, &report_model).await?;
         insert_many_chunked::<QuantRecommendationEntity, _>(&txn, recommendations).await?;
         if !entry_condition_instances.is_empty() {
             insert_many_chunked::<QuantEntryConditionInstanceEntity, _>(
@@ -1057,7 +1075,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let now = primitives::statement_timestamp(&txn).await?;
-        let row = match fact_delivery_claim(&txn, report_id, worker_id, now).await? {
+        let row = match Self::fact_delivery_claim(&txn, report_id, worker_id, now).await? {
             FactDeliveryClaim::Held(row) => row,
             FactDeliveryClaim::Lost(row) => {
                 txn.commit().await.map_err(StorageError::from)?;
@@ -1094,11 +1112,11 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
-        acquire_report_scope_lock(
-            &txn,
+        ReportScope::new(
             &report_probe.research_profile_artifact_id.profile_ref().id,
             report_probe.report_kind,
         )
+        .acquire(&txn)
         .await?;
         let now = primitives::statement_timestamp(&txn).await?;
         if occurred_at > now + Duration::seconds(5) {
@@ -1159,14 +1177,14 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
-        acquire_report_scope_lock(
-            &txn,
+        ReportScope::new(
             &candidate_probe
                 .research_profile_artifact_id
                 .profile_ref()
                 .id,
             candidate_probe.report_kind,
         )
+        .acquire(&txn)
         .await?;
         let now = primitives::statement_timestamp(&txn).await?;
         if occurred_at > now + Duration::seconds(5) {
@@ -1175,7 +1193,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
                 "publication occurrence time cannot be in the future",
             ));
         }
-        let delivery = match fact_delivery_claim(&txn, report_id, worker_id, now).await? {
+        let delivery = match Self::fact_delivery_claim(&txn, report_id, worker_id, now).await? {
             FactDeliveryClaim::Held(row) => row,
             FactDeliveryClaim::Lost(row) => {
                 txn.commit().await.map_err(StorageError::from)?;
@@ -1224,17 +1242,18 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .as_ref()
             .filter(|row| row.decision_at >= candidate.decision_at)
         {
-            let outcome = obsolete_stale_candidate(&txn, candidate, delivery, current, now).await?;
+            let outcome =
+                Self::obsolete_stale_candidate(&txn, candidate, delivery, current, now).await?;
             txn.commit().await.map_err(StorageError::from)?;
             return Ok(FactDeliverySettlement::Applied(outcome));
         }
 
-        publish_candidate_recommendations(&txn, report_id).await?;
+        Self::publish_candidate_recommendations(&txn, report_id).await?;
         let mut invalidated_intents = Vec::new();
         let mut superseded_reports = Vec::new();
         if let Some(current) = current {
             let (superseded, invalidated) =
-                supersede_current_report(&txn, current, report_id, now).await?;
+                Self::supersede_current_report(&txn, current, report_id, now).await?;
             superseded_reports.push(superseded);
             invalidated_intents = invalidated;
         }
@@ -1249,10 +1268,11 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .update(&txn)
             .await
             .map_err(StorageError::from)?;
-        insert_report_transition_log(&txn, "publish", &candidate, &published, None).await?;
+        Self::insert_report_transition_log(&txn, "publish", &candidate, &published, None).await?;
 
-        let obsoleted_reports = obsolete_older_prepared_reports(&txn, &published, now).await?;
-        let verified = verify_delivery(&txn, delivery, now).await?;
+        let obsoleted_reports =
+            Self::obsolete_older_prepared_reports(&txn, &published, now).await?;
+        let verified = Self::verify_delivery(&txn, delivery, now).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(FactDeliverySettlement::Applied(PublishReportOutcome {
             report: published.into(),
@@ -1332,7 +1352,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         Ok(updated.into())
     }
 
-    async fn find_by_model_run_id(
+    async fn find_by_model_run(
         &self,
         model_run_id: &ModelRunId,
     ) -> Result<Option<RecommendationReportInfo>, StorageError> {
@@ -1489,11 +1509,11 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
-        acquire_report_scope_lock(
-            &txn,
+        ReportScope::new(
             &probe.research_profile_artifact_id.profile_ref().id,
             probe.report_kind,
         )
+        .acquire(&txn)
         .await?;
         let now = primitives::statement_timestamp(&txn).await?;
         if expired_at > now + Duration::seconds(5) {
@@ -1509,7 +1529,10 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(QUANT_RECOMMENDATION_REPORT, report_id));
+            return Err(StorageError::not_found(
+                QUANT_RECOMMENDATION_REPORT,
+                report_id,
+            ));
         };
         if report.research_profile_artifact_id != probe.research_profile_artifact_id
             || report.report_kind != probe.report_kind
@@ -1564,7 +1587,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         revoked_at: DateTime<Utc>,
         operation_log: NewOperationLog,
     ) -> Result<(RecommendationReportInfo, Vec<OrderIntentInfo>), StorageError> {
-        Box::pin(transition_report_status(
+        Box::pin(Self::transition_report_status(
             &self.db,
             report_id,
             RecommendationReportStatus::Revoked,
@@ -1618,150 +1641,155 @@ fn page_condition(query: &QuantReportListQuery) -> Condition {
         )
 }
 
-async fn transition_report_status(
-    db: &DatabaseConnection,
-    report_id: &RecommendationReportId,
-    report_status: RecommendationReportStatus,
-    recommendation_status: RecommendationStatus,
-    reason: &str,
-    occurred_at: DateTime<Utc>,
-    operation_log: NewOperationLog,
-) -> Result<(RecommendationReportInfo, Vec<OrderIntentInfo>), StorageError> {
-    let txn = db.begin().await.map_err(StorageError::from)?;
-    let probe = QuantRecommendationReportEntity::find_by_id(*report_id)
-        .one(&txn)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
-    acquire_report_scope_lock(
-        &txn,
-        &probe.research_profile_artifact_id.profile_ref().id,
-        probe.report_kind,
-    )
-    .await?;
-    let now = primitives::statement_timestamp(&txn).await?;
-    if occurred_at > now + Duration::seconds(5) {
-        return Err(StorageError::invariant_violation(
-            Some(QUANT_RECOMMENDATION_REPORT),
-            "report lifecycle occurrence time cannot be in the future",
-        ));
-    }
-
-    let Some(row) = QuantRecommendationReportEntity::find_by_id(*report_id)
-        .lock_exclusive()
-        .one(&txn)
-        .await
-        .map_err(StorageError::from)?
-    else {
-        return Err(error::not_found(QUANT_RECOMMENDATION_REPORT, report_id));
-    };
-    if row.research_profile_artifact_id != probe.research_profile_artifact_id
-        || row.report_kind != probe.report_kind
-    {
-        return Err(StorageError::state_conflict(
-            QUANT_RECOMMENDATION_REPORT,
-            Some(report_id),
-            "report scope changed while acquiring lifecycle lock",
-        ));
-    }
-    let idempotent = row.status == report_status;
-    if !idempotent && !row.status.allows_transition_to(report_status) {
-        return Err(error::illegal_transition(
-            QUANT_RECOMMENDATION_REPORT,
-            Some(report_id),
-            row.status,
-            report_status,
-        ));
-    }
-
-    let recommendations = QuantRecommendationEntity::find()
-        .filter(Column::RecommendationReportId.eq(*report_id))
-        .filter(Column::Status.is_in([
-            RecommendationStatus::Prepared,
-            RecommendationStatus::Published,
-            RecommendationStatus::IntentCreated,
-        ]))
-        .order_by_asc(Column::RecommendationId)
-        .lock_exclusive()
-        .all(&txn)
-        .await
-        .map_err(StorageError::from)?;
-    let invalidation = match report_status {
-        RecommendationReportStatus::Revoked => ApprovalInvalidation::ReportRevoked,
-        _ => {
-            return Err(error::invariant_violation(
+impl PgRecommendationReportRepository {
+    async fn transition_report_status(
+        db: &DatabaseConnection,
+        report_id: &RecommendationReportId,
+        report_status: RecommendationReportStatus,
+        recommendation_status: RecommendationStatus,
+        reason: &str,
+        occurred_at: DateTime<Utc>,
+        operation_log: NewOperationLog,
+    ) -> Result<(RecommendationReportInfo, Vec<OrderIntentInfo>), StorageError> {
+        let txn = db.begin().await.map_err(StorageError::from)?;
+        let probe = QuantRecommendationReportEntity::find_by_id(*report_id)
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_RECOMMENDATION_REPORT, report_id))?;
+        ReportScope::new(
+            &probe.research_profile_artifact_id.profile_ref().id,
+            probe.report_kind,
+        )
+        .acquire(&txn)
+        .await?;
+        let now = primitives::statement_timestamp(&txn).await?;
+        if occurred_at > now + Duration::seconds(5) {
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_RECOMMENDATION_REPORT),
-                "composite report terminal command only supports revoke",
+                "report lifecycle occurrence time cannot be in the future",
             ));
         }
-    };
-    let mut invalidated_intents = Vec::new();
-    for recommendation in &recommendations {
-        invalidated_intents.extend(
-            invalidate_pre_submission_for_recommendation(
-                &txn,
-                &recommendation.recommendation_id,
-                invalidation,
-                now,
-                &operation_log,
-            )
-            .await?,
-        );
-    }
-    transition_recommendations_for_report(
-        &txn,
-        report_id,
-        &[
-            RecommendationStatus::Prepared,
-            RecommendationStatus::Published,
-            RecommendationStatus::IntentCreated,
-        ],
-        recommendation_status,
-    )
-    .await?;
 
-    if idempotent {
-        let info = row.into();
-        txn.commit().await.map_err(StorageError::from)?;
-        return Ok((info, invalidated_intents));
-    }
+        let Some(row) = QuantRecommendationReportEntity::find_by_id(*report_id)
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Err(StorageError::not_found(
+                QUANT_RECOMMENDATION_REPORT,
+                report_id,
+            ));
+        };
+        if row.research_profile_artifact_id != probe.research_profile_artifact_id
+            || row.report_kind != probe.report_kind
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_RECOMMENDATION_REPORT,
+                Some(report_id),
+                "report scope changed while acquiring lifecycle lock",
+            ));
+        }
+        let idempotent = row.status == report_status;
+        if !idempotent && !row.status.allows_transition_to(report_status) {
+            return Err(StorageError::illegal_transition(
+                QUANT_RECOMMENDATION_REPORT,
+                Some(report_id),
+                row.status,
+                report_status,
+            ));
+        }
 
-    if let Some(delivery) = Entity::find_by_id(*report_id)
-        .lock_exclusive()
-        .one(&txn)
-        .await
-        .map_err(StorageError::from)?
-        && !matches!(
-            delivery.status,
-            ReportFactDeliveryStatus::Verified | ReportFactDeliveryStatus::Cancelled
+        let recommendations = QuantRecommendationEntity::find()
+            .filter(Column::RecommendationReportId.eq(*report_id))
+            .filter(Column::Status.is_in([
+                RecommendationStatus::Prepared,
+                RecommendationStatus::Published,
+                RecommendationStatus::IntentCreated,
+            ]))
+            .order_by_asc(Column::RecommendationId)
+            .lock_exclusive()
+            .all(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        let invalidation = match report_status {
+            RecommendationReportStatus::Revoked => ApprovalInvalidation::ReportRevoked,
+            _ => {
+                return Err(StorageError::invariant_violation(
+                    Some(QUANT_RECOMMENDATION_REPORT),
+                    "composite report terminal command only supports revoke",
+                ));
+            }
+        };
+        let mut invalidated_intents = Vec::new();
+        for recommendation in &recommendations {
+            invalidated_intents.extend(
+                PgOrderIntentRepository::invalidate_pre_submission(
+                    &txn,
+                    &recommendation.recommendation_id,
+                    invalidation,
+                    now,
+                    &operation_log,
+                )
+                .await?,
+            );
+        }
+        Self::transition_recommendations_for_report(
+            &txn,
+            report_id,
+            &[
+                RecommendationStatus::Prepared,
+                RecommendationStatus::Published,
+                RecommendationStatus::IntentCreated,
+            ],
+            recommendation_status,
         )
-    {
-        let mut active = delivery.into_active_model();
-        active.status = ActiveValue::Set(ReportFactDeliveryStatus::Cancelled);
-        active.claim_owner = ActiveValue::Set(None);
-        active.lease_expires_at = ActiveValue::Set(None);
-        active.next_attempt_at = ActiveValue::Set(None);
-        active.updated_at = ActiveValue::Set(now);
-        active.update(&txn).await.map_err(StorageError::from)?;
+        .await?;
+
+        if idempotent {
+            let info = row.into();
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok((info, invalidated_intents));
+        }
+
+        if let Some(delivery) = Entity::find_by_id(*report_id)
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            && !matches!(
+                delivery.status,
+                ReportFactDeliveryStatus::Verified | ReportFactDeliveryStatus::Cancelled
+            )
+        {
+            let mut active = delivery.into_active_model();
+            active.status = ActiveValue::Set(ReportFactDeliveryStatus::Cancelled);
+            active.claim_owner = ActiveValue::Set(None);
+            active.lease_expires_at = ActiveValue::Set(None);
+            active.next_attempt_at = ActiveValue::Set(None);
+            active.updated_at = ActiveValue::Set(now);
+            active.update(&txn).await.map_err(StorageError::from)?;
+        }
+
+        let before_info: RecommendationReportInfo = row.clone().into();
+        let mut active = row.into_active_model();
+        active.status = ActiveValue::Set(report_status);
+        active.status_reason = ActiveValue::Set(Some(reason.to_owned()));
+        active.revoked_at = ActiveValue::Set(Some(now));
+        let report_model = active.update(&txn).await.map_err(StorageError::from)?;
+        let after_info: RecommendationReportInfo = report_model.clone().into();
+
+        let operation_log =
+            state_hash::apply_transition_hashes(operation_log, &before_info, &after_info)?;
+        OperationLogEntity::insert(operation_log.into_active_model())
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
+
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok((report_model.into(), invalidated_intents))
     }
-
-    let before_info: RecommendationReportInfo = row.clone().into();
-    let mut active = row.into_active_model();
-    active.status = ActiveValue::Set(report_status);
-    active.status_reason = ActiveValue::Set(Some(reason.to_owned()));
-    active.revoked_at = ActiveValue::Set(Some(now));
-    let report_model = active.update(&txn).await.map_err(StorageError::from)?;
-    let after_info: RecommendationReportInfo = report_model.clone().into();
-
-    let operation_log =
-        state_hash::apply_transition_hashes(operation_log, &before_info, &after_info)?;
-    OperationLogEntity::insert(operation_log.into_active_model())
-        .exec(&txn)
-        .await
-        .map_err(StorageError::from)?;
-
-    txn.commit().await.map_err(StorageError::from)?;
-    Ok((report_model.into(), invalidated_intents))
 }
 
 #[cfg(test)]
@@ -1780,7 +1808,7 @@ mod tests {
     use super::{REPORT_FACT_RETRY_MAX_SECS, page_condition, report_fact_retry_delay};
 
     #[test]
-    fn page_condition_adds_optional_filters_to_sql() {
+    fn page_adds_optional_sql() {
         let query = QuantReportListQuery {
             kind: Some(ReportKind::TopN),
             status: Some(RecommendationReportStatus::Published),
@@ -1804,7 +1832,7 @@ mod tests {
     }
 
     #[test]
-    fn report_fact_retry_backoff_is_bounded() {
+    fn report_fact_retry_bounded() {
         assert_eq!(report_fact_retry_delay(1).num_seconds(), 1);
         assert_eq!(report_fact_retry_delay(4).num_seconds(), 8);
         assert_eq!(

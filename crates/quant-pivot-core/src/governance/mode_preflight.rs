@@ -21,7 +21,7 @@ use quant_pivot_models::{
         execution::KillSwitchState,
         quant::{ExecutionWalletKind, QuantRuntimeMode},
     },
-    runtime_config::{DecisionPolicySnapshot, ModelVersionRef, validate_runtime_config},
+    runtime_config::{DecisionPolicySnapshot, ModelVersionRef},
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ModelRegistryRepository, ReconciliationRepository,
@@ -149,7 +149,7 @@ impl DefaultModePreflight {
     }
 
     fn check_jwt(&self, target: QuantRuntimeMode) -> PreflightCheck {
-        let configured = self.deps.deploy.web.jwt_signing_key_is_configured();
+        let configured = self.deps.deploy.web.has_jwt_signing_key();
         let detail = if configured {
             "web.jwt HS256 signing key is configured".to_owned()
         } else {
@@ -223,7 +223,7 @@ impl DefaultModePreflight {
     }
 
     fn check_runtime_config_valid(config: &DecisionPolicySnapshot) -> PreflightCheck {
-        let report = validate_runtime_config(config);
+        let report = config.validate_runtime_config();
         let passed = !report.has_errors();
         let detail = if passed {
             "portfolio / execution / risk envelope config valid".to_owned()
@@ -283,12 +283,7 @@ impl DefaultModePreflight {
             ));
         };
         let id = reference.id;
-        let Some(version) = self
-            .deps
-            .model_registry
-            .find_model_version_by_id(&id)
-            .await?
-        else {
+        let Some(version) = self.deps.model_registry.find_model_version(&id).await? else {
             return Ok(PreflightCheck::hard(
                 "published_model",
                 false,
@@ -391,12 +386,7 @@ impl DefaultModePreflight {
         now: DateTime<Utc>,
     ) -> QuantResult<Result<(), String>> {
         let id = reference.id;
-        let Some(version) = self
-            .deps
-            .model_registry
-            .find_model_version_by_id(&id)
-            .await?
-        else {
+        let Some(version) = self.deps.model_registry.find_model_version(&id).await? else {
             return Ok(Err(format!("active model {id} not found")));
         };
         Ok(active_load_ok(&version, min_age, now))
@@ -409,12 +399,7 @@ impl DefaultModePreflight {
         now: DateTime<Utc>,
     ) -> QuantResult<Result<(), String>> {
         let id = reference.id;
-        let Some(version) = self
-            .deps
-            .model_registry
-            .find_model_version_by_id(&id)
-            .await?
-        else {
+        let Some(version) = self.deps.model_registry.find_model_version(&id).await? else {
             return Ok(Err(format!("shadow model {id} not found")));
         };
         Ok(shadow_load_ok(&version, min_age, now))

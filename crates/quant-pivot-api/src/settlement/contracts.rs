@@ -36,9 +36,10 @@ use quant_pivot_models::{
 };
 use reqwest::{Client, Url};
 
+use super::typed::{IntoAlloyAddress, IntoEvmAddress, IntoEvmBlockHash, SettlementValueError};
 use crate::wallet::{
     DepositWalletVerificationCatalog, WalletTopology, deposit_wallet_runtime_code,
-    deposit_wallet_verification_catalog, derive_deposit_wallet_address,
+    derive_deposit_wallet_address,
 };
 
 const POLYGON_CHAIN_ID: u64 = 137;
@@ -556,6 +557,39 @@ pub struct SettlementCodeFingerprint {
     pub size: u64,
 }
 
+impl SettlementCodeFingerprint {
+    fn check_expected(
+        &self,
+        expected: &Self,
+        reasons: &mut Vec<SettlementReadinessReason>,
+        contract: &str,
+        address: &EvmAddress,
+    ) {
+        if self.size == 0 {
+            reasons.push(SettlementReadinessReason::CodeMissing {
+                contract: contract.to_owned(),
+                address: address.clone(),
+            });
+        }
+        if self.size != expected.size {
+            reasons.push(SettlementReadinessReason::CodeSizeMismatch {
+                contract: contract.to_owned(),
+                address: address.clone(),
+                expected: expected.size,
+                actual: self.size,
+            });
+        }
+        if self.hash != expected.hash {
+            reasons.push(SettlementReadinessReason::CodeHashMismatch {
+                contract: contract.to_owned(),
+                address: address.clone(),
+                expected: expected.hash.clone(),
+                actual: self.hash.clone(),
+            });
+        }
+    }
+}
+
 /// Complete read-only Polygon observation consumed by the verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettlementChainSnapshot {
@@ -637,6 +671,12 @@ pub enum SettlementChainReadError {
     },
     #[error(transparent)]
     Rpc(#[from] RpcError),
+}
+
+impl From<SettlementValueError> for SettlementChainReadError {
+    fn from(error: SettlementValueError) -> Self {
+        Self::Rpc(error.into())
+    }
 }
 
 /// Non-serializable current-deployment capability required by every
@@ -897,11 +937,11 @@ where
                 ));
             }
         };
-        let funder = typed_address(topology.funder).map_err(|reason| {
+        let funder = (topology.funder).into_evm_address().map_err(|reason| {
             SettlementReadiness::blocked(
                 route,
                 topology.kind,
-                vec![reason],
+                vec![reason.into()],
                 Some(snapshot.block_number),
                 Some(snapshot.block_hash.clone()),
                 checked_at,
@@ -1150,7 +1190,7 @@ fn check_deposit_wallet(
         });
         return;
     };
-    let expected = deposit_wallet_verification_catalog();
+    let expected = DepositWalletVerificationCatalog::current();
     let Ok(owner) = Address::from_str(observed.owner.as_str()) else {
         reasons.push(SettlementReadinessReason::WalletTopologyMismatch {
             wallet_kind: topology.kind,
@@ -1175,12 +1215,11 @@ fn check_deposit_wallet_identity(
     expected: &DepositWalletVerificationCatalog,
 ) {
     match code_fingerprint(&snapshot.funder_code) {
-        Ok(funder_code) => check_observed_fingerprint(
+        Ok(funder_code) => observed.wallet_code.check_expected(
+            &funder_code,
             reasons,
             "deposit_wallet_snapshot",
             funder,
-            &funder_code,
-            &observed.wallet_code,
         ),
         Err(error) => reasons.push(SettlementReadinessReason::RpcUnavailable {
             operation: "deposit_wallet_funder_code_hash".to_owned(),
@@ -1262,19 +1301,18 @@ fn check_deposit_wallet_code(
     expected: &DepositWalletVerificationCatalog,
 ) {
     match code_fingerprint(&deposit_wallet_runtime_code(owner)) {
-        Ok(expected_wallet_code) => check_observed_fingerprint(
+        Ok(expected_wallet_code) => observed.wallet_code.check_expected(
+            &expected_wallet_code,
             reasons,
             "deposit_wallet",
             funder,
-            &expected_wallet_code,
-            &observed.wallet_code,
         ),
         Err(error) => reasons.push(SettlementReadinessReason::CatalogIncomplete {
             route: request.route,
             field: format!("deposit_wallet.runtime_code: {error}"),
         }),
     }
-    let Ok(factory) = typed_address(expected.factory) else {
+    let Ok(factory) = (expected.factory).into_evm_address() else {
         reasons.push(SettlementReadinessReason::CatalogIncomplete {
             route: request.route,
             field: "deposit_wallet.factory".to_owned(),
@@ -1290,7 +1328,7 @@ fn check_deposit_wallet_code(
         expected.factory_code_size,
         &observed.factory_code,
     );
-    let Ok(factory_implementation) = typed_address(expected.factory_implementation) else {
+    let Ok(factory_implementation) = (expected.factory_implementation).into_evm_address() else {
         reasons.push(SettlementReadinessReason::CatalogIncomplete {
             route: request.route,
             field: "deposit_wallet.factory_implementation".to_owned(),
@@ -1306,7 +1344,7 @@ fn check_deposit_wallet_code(
         expected.factory_implementation_code_size,
         &observed.factory_implementation_code,
     );
-    let Ok(beacon) = typed_address(expected.beacon) else {
+    let Ok(beacon) = (expected.beacon).into_evm_address() else {
         reasons.push(SettlementReadinessReason::CatalogIncomplete {
             route: request.route,
             field: "deposit_wallet.beacon".to_owned(),
@@ -1329,7 +1367,7 @@ fn check_deposit_wallet_code(
         expected.beacon_code_size,
         beacon_code,
     );
-    let Ok(wallet_implementation) = typed_address(expected.wallet_implementation) else {
+    let Ok(wallet_implementation) = (expected.wallet_implementation).into_evm_address() else {
         reasons.push(SettlementReadinessReason::CatalogIncomplete {
             route: request.route,
             field: "deposit_wallet.wallet_implementation".to_owned(),
@@ -1353,9 +1391,9 @@ fn check_address_binding(
     expected: Address,
     actual: &EvmAddress,
 ) {
-    match typed_address(expected) {
+    match (expected).into_evm_address() {
         Ok(expected) => check_binding(reasons, binding, &expected, actual),
-        Err(reason) => reasons.push(reason),
+        Err(reason) => reasons.push(reason.into()),
     }
 }
 
@@ -1397,37 +1435,6 @@ fn check_catalog_code(
             route: request.route,
             field: format!("{contract}.code_hash"),
         }),
-    }
-}
-
-fn check_observed_fingerprint(
-    reasons: &mut Vec<SettlementReadinessReason>,
-    contract: &str,
-    address: &EvmAddress,
-    expected: &SettlementCodeFingerprint,
-    actual: &SettlementCodeFingerprint,
-) {
-    if actual.size == 0 {
-        reasons.push(SettlementReadinessReason::CodeMissing {
-            contract: contract.to_owned(),
-            address: address.clone(),
-        });
-    }
-    if actual.size != expected.size {
-        reasons.push(SettlementReadinessReason::CodeSizeMismatch {
-            contract: contract.to_owned(),
-            address: address.clone(),
-            expected: expected.size,
-            actual: actual.size,
-        });
-    }
-    if actual.hash != expected.hash {
-        reasons.push(SettlementReadinessReason::CodeHashMismatch {
-            contract: contract.to_owned(),
-            address: address.clone(),
-            expected: expected.hash.clone(),
-            actual: actual.hash.clone(),
-        });
     }
 }
 
@@ -1738,27 +1745,35 @@ fn extend_fingerprint(bytes: &mut Vec<u8>, fingerprint: &SettlementCodeFingerpri
     bytes.extend_from_slice(&fingerprint.size.to_be_bytes());
 }
 
-fn typed_address(address: Address) -> Result<EvmAddress, SettlementReadinessReason> {
-    EvmAddress::parse(format!("{address:#x}")).map_err(|error| {
-        SettlementReadinessReason::RpcUnavailable {
+impl From<SettlementValueError> for SettlementReadinessReason {
+    fn from(error: SettlementValueError) -> Self {
+        Self::RpcUnavailable {
             operation: "evm_address_decode".to_owned(),
-            detail: error.to_string(),
+            detail: error.detail().to_owned(),
         }
-    })
+    }
 }
 
-fn typed_block_hash(block_hash: B256) -> Result<EvmBlockHash, RpcError> {
-    EvmBlockHash::parse(format!("{block_hash:#x}")).map_err(|error| RpcError::AbiDecode {
-        contract: "polygon_block_header".to_owned(),
-        reason: error.to_string(),
-    })
+impl From<SettlementValueError> for RpcError {
+    fn from(error: SettlementValueError) -> Self {
+        Self::AbiDecode {
+            contract: "polygon_block_header".to_owned(),
+            reason: error.detail().to_owned(),
+        }
+    }
 }
 
-fn alloy_address(address: &EvmAddress) -> Result<Address, RpcError> {
-    Address::from_str(address.as_str()).map_err(|error| RpcError::CallFailed {
-        method: "settlement_address_parse".to_owned(),
-        reason: error.to_string(),
-    })
+impl SettlementValueError {
+    fn address_rpc_error(self) -> RpcError {
+        RpcError::CallFailed {
+            method: "settlement_address_parse".to_owned(),
+            reason: self.detail().to_owned(),
+        }
+    }
+
+    fn value_rpc_error(self) -> RpcError {
+        readiness_to_rpc(&self.into())
+    }
 }
 
 fn rpc_call_error(method: &'static str, error: &impl ToString) -> RpcError {
@@ -1812,10 +1827,18 @@ impl SettlementChainReader for AlloySettlementChainReader {
         topology: &WalletTopology,
     ) -> Result<SettlementChainSnapshot, SettlementChainReadError> {
         let head = self.read_chain_head(request.chain_id).await?;
-        let adapter = alloy_address(&request.adapter)?;
-        let conditional_tokens = alloy_address(&request.conditional_tokens)?;
-        let collateral_token = alloy_address(&request.collateral_token)?;
-        let usdce = alloy_address(&request.usdce)?;
+        let adapter = (&request.adapter)
+            .into_alloy_address()
+            .map_err(SettlementValueError::address_rpc_error)?;
+        let conditional_tokens = (&request.conditional_tokens)
+            .into_alloy_address()
+            .map_err(SettlementValueError::address_rpc_error)?;
+        let collateral_token = (&request.collateral_token)
+            .into_alloy_address()
+            .map_err(SettlementValueError::address_rpc_error)?;
+        let usdce = (&request.usdce)
+            .into_alloy_address()
+            .map_err(SettlementValueError::address_rpc_error)?;
         let adapter_view = CtfCollateralAdapterView::new(adapter, &self.provider);
         let bindings = self
             .read_adapter_bindings(request, adapter, head.block)
@@ -1826,7 +1849,9 @@ impl SettlementChainReader for AlloySettlementChainReader {
         let legacy_neg_risk_adapter_code = match request.legacy_neg_risk_adapter.as_ref() {
             Some(address) => Some(
                 self.read_code(
-                    alloy_address(address)?,
+                    (address)
+                        .into_alloy_address()
+                        .map_err(SettlementValueError::address_rpc_error)?,
                     head.block,
                     "eth_getCode(legacy_neg_risk_adapter)",
                 )
@@ -1864,14 +1889,18 @@ impl SettlementChainReader for AlloySettlementChainReader {
                 .await?,
             collateral_token_implementation_code: self
                 .read_code(
-                    alloy_address(&request.collateral_token_implementation)?,
+                    (&request.collateral_token_implementation)
+                        .into_alloy_address()
+                        .map_err(SettlementValueError::address_rpc_error)?,
                     head.block,
                     "eth_getCode(collateral_token_implementation)",
                 )
                 .await?,
             usdc_code: self
                 .read_code(
-                    alloy_address(&request.usdc)?,
+                    (&request.usdc)
+                        .into_alloy_address()
+                        .map_err(SettlementValueError::address_rpc_error)?,
                     head.block,
                     "eth_getCode(usdc)",
                 )
@@ -1881,7 +1910,9 @@ impl SettlementChainReader for AlloySettlementChainReader {
                 .await?,
             collateral_vault_code: self
                 .read_code(
-                    alloy_address(&request.collateral_vault)?,
+                    (&request.collateral_vault)
+                        .into_alloy_address()
+                        .map_err(SettlementValueError::address_rpc_error)?,
                     head.block,
                     "eth_getCode(collateral_vault)",
                 )
@@ -1931,7 +1962,7 @@ impl SettlementChainReader for AlloySettlementChainReader {
             .get_block_by_number(BlockNumberOrTag::Number(block_number))
             .await
             .map_err(|error| rpc_call_error("eth_getBlockByNumber(settlement canonical)", &error))?
-            .map(|block| typed_block_hash(block.hash()))
+            .map(|block| (block.hash()).into_evm_block_hash())
             .transpose()
             .map_err(Into::into)
     }
@@ -1948,7 +1979,7 @@ impl SettlementChainReader for AlloySettlementChainReader {
             })?;
         Ok(SettlementFinalizedHead {
             block_number: block.header.number,
-            block_hash: typed_block_hash(block.hash())?,
+            block_hash: (block.hash()).into_evm_block_hash()?,
         })
     }
 }
@@ -1984,7 +2015,7 @@ impl AlloySettlementChainReader {
                 reason: "latest block is missing".to_owned(),
             })?;
         let observed_block_hash = observed_block.hash();
-        let block_hash = typed_block_hash(observed_block_hash)?;
+        let block_hash = (observed_block_hash).into_evm_block_hash()?;
         let block_timestamp = i64::try_from(observed_block.header.timestamp)
             .ok()
             .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
@@ -2008,7 +2039,9 @@ impl AlloySettlementChainReader {
         block: BlockId,
     ) -> Result<SettlementAdapterBindings, RpcError> {
         let view = CtfCollateralAdapterView::new(adapter, &self.provider);
-        let collateral_token = alloy_address(&request.collateral_token)?;
+        let collateral_token = (&request.collateral_token)
+            .into_alloy_address()
+            .map_err(SettlementValueError::address_rpc_error)?;
         let collateral_view = CollateralTokenView::new(collateral_token, &self.provider);
         let implementation_word = self
             .provider
@@ -2019,76 +2052,73 @@ impl AlloySettlementChainReader {
         let implementation =
             Address::from_word(B256::from(implementation_word.to_be_bytes::<32>()));
         Ok(SettlementAdapterBindings {
-            owner: typed_address(
-                view.owner()
-                    .block(block)
-                    .call()
-                    .await
-                    .map_err(|error| rpc_call_error("adapter.owner", &error))?,
-            )
-            .map_err(|reason| readiness_to_rpc(&reason))?,
-            conditional_tokens: typed_address(
-                view.CONDITIONAL_TOKENS()
-                    .block(block)
-                    .call()
-                    .await
-                    .map_err(|error| rpc_call_error("adapter.CONDITIONAL_TOKENS", &error))?,
-            )
-            .map_err(|reason| readiness_to_rpc(&reason))?,
-            collateral_token: typed_address(
-                view.COLLATERAL_TOKEN()
-                    .block(block)
-                    .call()
-                    .await
-                    .map_err(|error| rpc_call_error("adapter.COLLATERAL_TOKEN", &error))?,
-            )
-            .map_err(|reason| readiness_to_rpc(&reason))?,
-            collateral_token_implementation: typed_address(implementation)
-                .map_err(|reason| readiness_to_rpc(&reason))?,
-            collateral_token_owner: typed_address(
-                collateral_view
-                    .owner()
-                    .block(block)
-                    .call()
-                    .await
-                    .map_err(|error| rpc_call_error("pusd.owner", &error))?,
-            )
-            .map_err(|reason| readiness_to_rpc(&reason))?,
-            usdc: typed_address(
-                collateral_view
-                    .USDC()
-                    .block(block)
-                    .call()
-                    .await
-                    .map_err(|error| rpc_call_error("pusd.USDC", &error))?,
-            )
-            .map_err(|reason| readiness_to_rpc(&reason))?,
-            usdce: typed_address(
-                view.USDCE()
-                    .block(block)
-                    .call()
-                    .await
-                    .map_err(|error| rpc_call_error("adapter.USDCE", &error))?,
-            )
-            .map_err(|reason| readiness_to_rpc(&reason))?,
-            collateral_token_usdce: typed_address(
-                collateral_view
-                    .USDCE()
-                    .block(block)
-                    .call()
-                    .await
-                    .map_err(|error| rpc_call_error("pusd.USDCE", &error))?,
-            )
-            .map_err(|reason| readiness_to_rpc(&reason))?,
-            collateral_vault: typed_address(
-                collateral_view
-                    .VAULT()
-                    .block(block)
-                    .call()
-                    .await
-                    .map_err(|error| rpc_call_error("pusd.VAULT", &error))?,
-            )
-            .map_err(|reason| readiness_to_rpc(&reason))?,
+            owner: (view
+                .owner()
+                .block(block)
+                .call()
+                .await
+                .map_err(|error| rpc_call_error("adapter.owner", &error))?)
+            .into_evm_address()
+            .map_err(SettlementValueError::value_rpc_error)?,
+            conditional_tokens: (view
+                .CONDITIONAL_TOKENS()
+                .block(block)
+                .call()
+                .await
+                .map_err(|error| rpc_call_error("adapter.CONDITIONAL_TOKENS", &error))?)
+            .into_evm_address()
+            .map_err(SettlementValueError::value_rpc_error)?,
+            collateral_token: (view
+                .COLLATERAL_TOKEN()
+                .block(block)
+                .call()
+                .await
+                .map_err(|error| rpc_call_error("adapter.COLLATERAL_TOKEN", &error))?)
+            .into_evm_address()
+            .map_err(SettlementValueError::value_rpc_error)?,
+            collateral_token_implementation: (implementation)
+                .into_evm_address()
+                .map_err(SettlementValueError::value_rpc_error)?,
+            collateral_token_owner: (collateral_view
+                .owner()
+                .block(block)
+                .call()
+                .await
+                .map_err(|error| rpc_call_error("pusd.owner", &error))?)
+            .into_evm_address()
+            .map_err(SettlementValueError::value_rpc_error)?,
+            usdc: (collateral_view
+                .USDC()
+                .block(block)
+                .call()
+                .await
+                .map_err(|error| rpc_call_error("pusd.USDC", &error))?)
+            .into_evm_address()
+            .map_err(SettlementValueError::value_rpc_error)?,
+            usdce: (view
+                .USDCE()
+                .block(block)
+                .call()
+                .await
+                .map_err(|error| rpc_call_error("adapter.USDCE", &error))?)
+            .into_evm_address()
+            .map_err(SettlementValueError::value_rpc_error)?,
+            collateral_token_usdce: (collateral_view
+                .USDCE()
+                .block(block)
+                .call()
+                .await
+                .map_err(|error| rpc_call_error("pusd.USDCE", &error))?)
+            .into_evm_address()
+            .map_err(SettlementValueError::value_rpc_error)?,
+            collateral_vault: (collateral_view
+                .VAULT()
+                .block(block)
+                .call()
+                .await
+                .map_err(|error| rpc_call_error("pusd.VAULT", &error))?)
+            .into_evm_address()
+            .map_err(SettlementValueError::value_rpc_error)?,
             adapter_has_wrapper_role: collateral_view
                 .hasAnyRole(adapter, U256::from(WRAPPER_ROLE))
                 .block(block)
@@ -2169,7 +2199,7 @@ impl AlloySettlementChainReader {
         let beacon_code = self
             .read_code(beacon, block, "eth_getCode(deposit_wallet_beacon)")
             .await?;
-        let expected = deposit_wallet_verification_catalog();
+        let expected = DepositWalletVerificationCatalog::current();
         let factory_implementation = self
             .read_storage_address(
                 expected.factory,
@@ -2179,19 +2209,27 @@ impl AlloySettlementChainReader {
             )
             .await?;
         Ok(Some(SettlementDepositWalletSnapshot {
-            owner: typed_address(owner).map_err(|reason| readiness_to_rpc(&reason))?,
+            owner: (owner)
+                .into_evm_address()
+                .map_err(SettlementValueError::value_rpc_error)?,
             session_signer_valid_until: EvmUint256::parse(session_signer_valid_until.to_string())
                 .map_err(|error| RpcError::AbiDecode {
                 contract: "deposit_wallet.session_signer_valid_until".to_owned(),
                 reason: error.to_string(),
             })?,
-            factory: typed_address(factory).map_err(|reason| readiness_to_rpc(&reason))?,
+            factory: (factory)
+                .into_evm_address()
+                .map_err(SettlementValueError::value_rpc_error)?,
             wallet_id,
-            beacon: typed_address(beacon).map_err(|reason| readiness_to_rpc(&reason))?,
-            wallet_implementation: typed_address(wallet_implementation)
-                .map_err(|reason| readiness_to_rpc(&reason))?,
-            factory_implementation: typed_address(factory_implementation)
-                .map_err(|reason| readiness_to_rpc(&reason))?,
+            beacon: (beacon)
+                .into_evm_address()
+                .map_err(SettlementValueError::value_rpc_error)?,
+            wallet_implementation: (wallet_implementation)
+                .into_evm_address()
+                .map_err(SettlementValueError::value_rpc_error)?,
+            factory_implementation: (factory_implementation)
+                .into_evm_address()
+                .map_err(SettlementValueError::value_rpc_error)?,
             wallet_code: code_fingerprint(&wallet_code)?,
             factory_code: code_fingerprint(
                 &self
@@ -2249,7 +2287,7 @@ impl AlloySettlementChainReader {
             .get_block_by_number(BlockNumberOrTag::Number(block_number))
             .await
             .map_err(|error| rpc_call_error("eth_getBlockByNumber(canonical_recheck)", &error))?
-            .map(|current| typed_block_hash(current.hash()))
+            .map(|current| (current.hash()).into_evm_block_hash())
             .transpose()?;
         if current_hash.as_ref() != Some(&observed_hash) {
             return Err(SettlementChainReadError::CanonicalBlockChanged {
@@ -2272,37 +2310,38 @@ impl AlloySettlementChainReader {
             return Ok(bindings);
         };
         let view = NegRiskCtfCollateralAdapterView::new(adapter, &self.provider);
-        let legacy = alloy_address(legacy_address)?;
+        let legacy = (legacy_address)
+            .into_alloy_address()
+            .map_err(SettlementValueError::address_rpc_error)?;
         bindings.neg_risk_adapter = Some(
-            typed_address(
-                view.NEG_RISK_ADAPTER()
-                    .block(block)
-                    .call()
-                    .await
-                    .map_err(|error| rpc_call_error("adapter.NEG_RISK_ADAPTER", &error))?,
-            )
-            .map_err(|reason| readiness_to_rpc(&reason))?,
+            (view
+                .NEG_RISK_ADAPTER()
+                .block(block)
+                .call()
+                .await
+                .map_err(|error| rpc_call_error("adapter.NEG_RISK_ADAPTER", &error))?)
+            .into_evm_address()
+            .map_err(SettlementValueError::value_rpc_error)?,
         );
         bindings.wrapped_collateral = Some(
-            typed_address(
-                view.WRAPPED_COLLATERAL()
-                    .block(block)
-                    .call()
-                    .await
-                    .map_err(|error| rpc_call_error("adapter.WRAPPED_COLLATERAL", &error))?,
-            )
-            .map_err(|reason| readiness_to_rpc(&reason))?,
+            (view
+                .WRAPPED_COLLATERAL()
+                .block(block)
+                .call()
+                .await
+                .map_err(|error| rpc_call_error("adapter.WRAPPED_COLLATERAL", &error))?)
+            .into_evm_address()
+            .map_err(SettlementValueError::value_rpc_error)?,
         );
         bindings.legacy_wrapped_collateral = Some(
-            typed_address(
-                LegacyNegRiskAdapterView::new(legacy, &self.provider)
-                    .wcol()
-                    .block(block)
-                    .call()
-                    .await
-                    .map_err(|error| rpc_call_error("legacy_neg_risk.wcol", &error))?,
-            )
-            .map_err(|reason| readiness_to_rpc(&reason))?,
+            (LegacyNegRiskAdapterView::new(legacy, &self.provider)
+                .wcol()
+                .block(block)
+                .call()
+                .await
+                .map_err(|error| rpc_call_error("legacy_neg_risk.wcol", &error))?)
+            .into_evm_address()
+            .map_err(SettlementValueError::value_rpc_error)?,
         );
         Ok(bindings)
     }
@@ -2513,16 +2552,18 @@ mod tests {
         }
     }
 
-    fn deposit_topology() -> WalletTopology {
-        WalletTopology {
-            kind: ExecutionWalletKind::DepositWallet,
-            signer: Address::from_str("0x26db8f3ab13163ebb41bab241c0eede026a8fc8a")
-                .expect("fixture Deposit Wallet owner"),
-            owner: Address::from_str("0x26db8f3ab13163ebb41bab241c0eede026a8fc8a")
-                .expect("fixture Deposit Wallet owner"),
-            funder: Address::from_str("0x4875924fbcac87a14b429b0af06e1c595ed3757c")
-                .expect("fixture Deposit Wallet"),
-            signature_type: SignatureType::Poly1271,
+    impl WalletTopology {
+        fn deposit_fixture() -> Self {
+            Self {
+                kind: ExecutionWalletKind::DepositWallet,
+                signer: Address::from_str("0x26db8f3ab13163ebb41bab241c0eede026a8fc8a")
+                    .expect("fixture Deposit Wallet owner"),
+                owner: Address::from_str("0x26db8f3ab13163ebb41bab241c0eede026a8fc8a")
+                    .expect("fixture Deposit Wallet owner"),
+                funder: Address::from_str("0x4875924fbcac87a14b429b0af06e1c595ed3757c")
+                    .expect("fixture Deposit Wallet"),
+                signature_type: SignatureType::Poly1271,
+            }
         }
     }
 
@@ -2533,43 +2574,49 @@ mod tests {
         }
     }
 
-    fn current_deposit_wallet_snapshot() -> SettlementDepositWalletSnapshot {
-        let owner =
-            Address::from_str("0x26db8f3ab13163ebb41bab241c0eede026a8fc8a").expect("fixture owner");
-        let mut wallet_id = [0_u8; 32];
-        wallet_id[12..].copy_from_slice(owner.as_slice());
-        SettlementDepositWalletSnapshot {
-            owner: EvmAddress::parse(format!("{owner:#x}")).expect("typed fixture owner"),
-            session_signer_valid_until: EvmUint256::parse("0").expect("fixture session expiry"),
-            factory: EvmAddress::parse("0x00000000000fb5c9adea0298d729a0cb3823cc07")
-                .expect("fixture factory"),
-            wallet_id: B256::from(wallet_id),
-            beacon: EvmAddress::parse("0x7a18edfe055488a3128f01f563e5b479d92ffc3a")
-                .expect("fixture beacon"),
-            wallet_implementation: EvmAddress::parse("0xf7f27c29e60fe6325bef8da7f93250353d2e3294")
+    impl SettlementDepositWalletSnapshot {
+        fn current_fixture() -> Self {
+            let owner = Address::from_str("0x26db8f3ab13163ebb41bab241c0eede026a8fc8a")
+                .expect("fixture owner");
+            let mut wallet_id = [0_u8; 32];
+            wallet_id[12..].copy_from_slice(owner.as_slice());
+            Self {
+                owner: EvmAddress::parse(format!("{owner:#x}")).expect("typed fixture owner"),
+                session_signer_valid_until: EvmUint256::parse("0").expect("fixture session expiry"),
+                factory: EvmAddress::parse("0x00000000000fb5c9adea0298d729a0cb3823cc07")
+                    .expect("fixture factory"),
+                wallet_id: B256::from(wallet_id),
+                beacon: EvmAddress::parse("0x7a18edfe055488a3128f01f563e5b479d92ffc3a")
+                    .expect("fixture beacon"),
+                wallet_implementation: EvmAddress::parse(
+                    "0xf7f27c29e60fe6325bef8da7f93250353d2e3294",
+                )
                 .expect("fixture wallet implementation"),
-            factory_implementation: EvmAddress::parse("0x528cc05efac2b0d255e423272187efd41248abd7")
+                factory_implementation: EvmAddress::parse(
+                    "0x528cc05efac2b0d255e423272187efd41248abd7",
+                )
                 .expect("fixture factory implementation"),
-            wallet_code: fingerprint(
-                "0x7c0d9aef3e7fcb57d58361e7d022587542f27b5f0c0f693a3874f4476d443b82",
-                146,
-            ),
-            factory_code: fingerprint(
-                "0xaaa52c8cc8a0e3fd27ce756cc6b4e70c51423e9b597b11f32d3e49f8b1fc890d",
-                61,
-            ),
-            factory_implementation_code: fingerprint(
-                "0xe6424f1008e46b4b657efacf9500ea7747cbbf3055d9d76459253ac2884793d2",
-                9_250,
-            ),
-            beacon_code: Some(fingerprint(
-                "0xf87b06a1302051471df08ff79a938757509569e16b7a7efa55a3ea7b29b0b9d1",
-                1_540,
-            )),
-            wallet_implementation_code: fingerprint(
-                "0xf5c1072460e64902af84d35f5bb1d0a15d80a88c5827b831a977fbc5a0684b96",
-                20_858,
-            ),
+                wallet_code: fingerprint(
+                    "0x7c0d9aef3e7fcb57d58361e7d022587542f27b5f0c0f693a3874f4476d443b82",
+                    146,
+                ),
+                factory_code: fingerprint(
+                    "0xaaa52c8cc8a0e3fd27ce756cc6b4e70c51423e9b597b11f32d3e49f8b1fc890d",
+                    61,
+                ),
+                factory_implementation_code: fingerprint(
+                    "0xe6424f1008e46b4b657efacf9500ea7747cbbf3055d9d76459253ac2884793d2",
+                    9_250,
+                ),
+                beacon_code: Some(fingerprint(
+                    "0xf87b06a1302051471df08ff79a938757509569e16b7a7efa55a3ea7b29b0b9d1",
+                    1_540,
+                )),
+                wallet_implementation_code: fingerprint(
+                    "0xf5c1072460e64902af84d35f5bb1d0a15d80a88c5827b831a977fbc5a0684b96",
+                    20_858,
+                ),
+            }
         }
     }
 
@@ -2578,30 +2625,31 @@ mod tests {
             .expect("canonical block hash")
     }
 
-    fn resolved_catalog() -> SettlementDeploymentCatalog {
-        let mut catalog = SettlementDeploymentCatalog::official_current()
-            .expect("built-in addresses are canonical");
-        let code_hash =
-            EvmCodeHash::parse(format!("{:#x}", alloy::primitives::keccak256(ADAPTER_CODE)))
-                .expect("keccak hash is canonical");
-        catalog.standard_adapter_code_hash = Some(code_hash.clone());
-        catalog.neg_risk_adapter_code_hash = Some(code_hash);
-        catalog.standard_adapter_code_size = Some(ADAPTER_CODE.len() as u64);
-        catalog.neg_risk_adapter_code_size = Some(ADAPTER_CODE.len() as u64);
-        catalog.collateral_token_proxy_code_hash = EvmCodeHash::parse(format!(
-            "{:#x}",
-            alloy::primitives::keccak256(COLLATERAL_PROXY_CODE)
-        ))
-        .expect("keccak hash is canonical");
-        catalog.collateral_token_implementation_code_hash = EvmCodeHash::parse(format!(
-            "{:#x}",
-            alloy::primitives::keccak256(COLLATERAL_IMPLEMENTATION_CODE)
-        ))
-        .expect("keccak hash is canonical");
-        catalog.collateral_token_proxy_code_size = COLLATERAL_PROXY_CODE.len() as u64;
-        catalog.collateral_token_implementation_code_size =
-            COLLATERAL_IMPLEMENTATION_CODE.len() as u64;
-        catalog
+    impl SettlementDeploymentCatalog {
+        fn resolved_fixture() -> Self {
+            let mut catalog = Self::official_current().expect("built-in addresses are canonical");
+            let code_hash =
+                EvmCodeHash::parse(format!("{:#x}", alloy::primitives::keccak256(ADAPTER_CODE)))
+                    .expect("keccak hash is canonical");
+            catalog.standard_adapter_code_hash = Some(code_hash.clone());
+            catalog.neg_risk_adapter_code_hash = Some(code_hash);
+            catalog.standard_adapter_code_size = Some(ADAPTER_CODE.len() as u64);
+            catalog.neg_risk_adapter_code_size = Some(ADAPTER_CODE.len() as u64);
+            catalog.collateral_token_proxy_code_hash = EvmCodeHash::parse(format!(
+                "{:#x}",
+                alloy::primitives::keccak256(COLLATERAL_PROXY_CODE)
+            ))
+            .expect("keccak hash is canonical");
+            catalog.collateral_token_implementation_code_hash = EvmCodeHash::parse(format!(
+                "{:#x}",
+                alloy::primitives::keccak256(COLLATERAL_IMPLEMENTATION_CODE)
+            ))
+            .expect("keccak hash is canonical");
+            catalog.collateral_token_proxy_code_size = COLLATERAL_PROXY_CODE.len() as u64;
+            catalog.collateral_token_implementation_code_size =
+                COLLATERAL_IMPLEMENTATION_CODE.len() as u64;
+            catalog
+        }
     }
 
     fn valid_snapshot(
@@ -2699,8 +2747,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repository_drift_is_typed_evidence_and_does_not_select_or_block_target() {
-        let catalog = resolved_catalog();
+    async fn drift_never_selects_target() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
         let snapshot = valid_snapshot(
             &catalog,
             SettlementRoute::StandardV2,
@@ -2733,9 +2781,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verified_capability_requires_complete_standard_and_neg_risk_evidence() {
+    async fn verified_capability_requires_evidence() {
         for route in [SettlementRoute::StandardV2, SettlementRoute::NegRiskV2] {
-            let catalog = resolved_catalog();
+            let catalog = SettlementDeploymentCatalog::resolved_fixture();
             let snapshot = valid_snapshot(&catalog, route, ExecutionWalletKind::Eoa);
             let (reader, calls) = MockChainReader::snapshot(snapshot);
             let capability = ContractDeploymentVerifier::new(catalog.clone(), reader)
@@ -2754,8 +2802,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_operator_approval_does_not_block_deployment_capability() {
-        let catalog = resolved_catalog();
+    async fn missing_approval_never_blocks() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
         let wallet = topology(ExecutionWalletKind::Eoa);
         let mut snapshot = valid_snapshot(&catalog, SettlementRoute::StandardV2, wallet.kind);
         snapshot.operator_approved = false;
@@ -2773,8 +2821,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_chain_and_rpc_failure_remain_typed() {
-        let catalog = resolved_catalog();
+    async fn wrong_chain_failure_typed() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
         let wallet = topology(ExecutionWalletKind::Eoa);
         let wrong_chain =
             ContractDeploymentVerifier::new(catalog.clone(), MockChainReader::wrong_chain())
@@ -2809,7 +2857,7 @@ mod tests {
         ));
 
         let reorg = ContractDeploymentVerifier::new(
-            resolved_catalog(),
+            SettlementDeploymentCatalog::resolved_fixture(),
             MockChainReader::canonical_block_changed(),
         )
         .verify(
@@ -2827,9 +2875,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn code_presence_hash_and_catalog_completeness_are_independent_gates() {
+    async fn code_presence_hash_gates() {
         let route = SettlementRoute::StandardV2;
-        let catalog = resolved_catalog();
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
         let wallet = topology(ExecutionWalletKind::Eoa);
 
         let mut missing = valid_snapshot(&catalog, route, wallet.kind);
@@ -2883,8 +2931,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_bindings_and_neg_risk_dependency_are_exact() {
-        let catalog = resolved_catalog();
+    async fn adapter_bindings_neg_exact() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
         let wallet = topology(ExecutionWalletKind::Eoa);
         let mut standard = valid_snapshot(&catalog, SettlementRoute::StandardV2, wallet.kind);
         standard.bindings.owner = catalog.usdce.clone();
@@ -2938,8 +2986,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collateral_token_proxy_implementation_and_wrapper_role_are_exact() {
-        let catalog = resolved_catalog();
+    async fn collateral_token_proxy_exact() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
         let route = SettlementRoute::StandardV2;
         let wallet = topology(ExecutionWalletKind::Eoa);
 
@@ -2984,8 +3032,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_or_future_chain_observation_cannot_mint_capability() {
-        let catalog = resolved_catalog();
+    async fn stale_chain_cannot_mint() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
         let wallet = topology(ExecutionWalletKind::Eoa);
         for block_timestamp in [
             checked_at() - TimeDelta::seconds(121),
@@ -3009,7 +3057,7 @@ mod tests {
     }
 
     #[test]
-    fn official_catalog_freezes_provenance_and_current_fingerprint() {
+    fn official_catalog_freezes_fingerprint() {
         let catalog =
             SettlementDeploymentCatalog::official_current().expect("built-in catalog is canonical");
         assert_eq!(
@@ -3061,8 +3109,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pause_decimals_topology_and_credentials_all_block() {
-        let catalog = resolved_catalog();
+    async fn pause_decimals_topology_block() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
         let wallet = topology(ExecutionWalletKind::Proxy);
         let mut snapshot = valid_snapshot(&catalog, SettlementRoute::StandardV2, wallet.kind);
         snapshot.adapter_paused = true;
@@ -3105,8 +3153,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observation_verification_skips_signing_credentials() {
-        let catalog = resolved_catalog();
+    async fn observation_verification_skips_credentials() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
         let wallet = topology(ExecutionWalletKind::Proxy);
         let snapshot = valid_snapshot(&catalog, SettlementRoute::StandardV2, wallet.kind);
         let (reader, _) = MockChainReader::snapshot(snapshot);
@@ -3119,8 +3167,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn money_verification_still_requires_signing_credentials() {
-        let catalog = resolved_catalog();
+    async fn money_verification_requires_credentials() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
         let wallet = topology(ExecutionWalletKind::Proxy);
         let snapshot = valid_snapshot(&catalog, SettlementRoute::StandardV2, wallet.kind);
         let readiness = blocked(
@@ -3141,16 +3189,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deposit_wallet_requires_exact_factory_beacon_implementation_and_owner_lineage() {
-        let catalog = resolved_catalog();
-        let wallet = deposit_topology();
+    async fn deposit_wallet_requires_lineage() {
+        let catalog = SettlementDeploymentCatalog::resolved_fixture();
+        let wallet = WalletTopology::deposit_fixture();
         let mut snapshot = valid_snapshot(
             &catalog,
             SettlementRoute::StandardV2,
             ExecutionWalletKind::DepositWallet,
         );
         snapshot.funder_code = deposit_wallet_runtime_code(wallet.signer);
-        snapshot.deposit_wallet = Some(current_deposit_wallet_snapshot());
+        snapshot.deposit_wallet = Some(SettlementDepositWalletSnapshot::current_fixture());
         let (reader, _) = MockChainReader::snapshot(snapshot.clone());
         let capability = ContractDeploymentVerifier::new(catalog.clone(), reader)
             .verify(

@@ -109,7 +109,7 @@ mod tests {
     use super::ModelGovernanceAuditDetail;
 
     #[test]
-    fn persisted_model_governance_detail_rejects_unknown_shape() {
+    fn persisted_rejects_unknown_shape() {
         let unknown_action = serde_json::json!({
             "action": "rollback",
             "target_version_id": "01900000-0000-7000-8000-000000000000"

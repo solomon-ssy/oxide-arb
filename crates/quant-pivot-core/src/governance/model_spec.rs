@@ -108,7 +108,7 @@ const fn source_requirement_wire(source: SourceRequirement) -> &'static str {
     }
 }
 
-const fn point_in_time_rule_wire(rule: PitRule) -> &'static str {
+const fn pit_rule_wire(rule: PitRule) -> &'static str {
     match rule {
         PitRule::BookVersionAtOrBeforeSourceCutoff => "book_version_at_or_before_source_cutoff",
         PitRule::FactAtOrBeforeSourceCutoff => "fact_at_or_before_source_cutoff",
@@ -166,7 +166,7 @@ fn build_feature_contract(features: &FeaturesConfig) -> QuantResult<FeatureContr
             unit: feature_unit_wire(spec.unit).to_owned(),
             null_policy: null_policy_view(&spec.null_policy),
             source: source_requirement_wire(spec.source_requirement).to_owned(),
-            point_in_time_rule: point_in_time_rule_wire(spec.point_in_time_rule).to_owned(),
+            point_in_time_rule: pit_rule_wire(spec.point_in_time_rule).to_owned(),
             staleness_policy: staleness_policy_wire(spec.staleness_policy).to_owned(),
         })
         .collect::<Vec<_>>();
@@ -241,7 +241,7 @@ impl ModelSpecPort for ModelSpecService {
     async fn find(&self, model_spec_id: &ModelSpecId) -> QuantResult<Option<ModelSpecInfo>> {
         self.deps
             .model_registry
-            .find_model_spec_by_id(model_spec_id)
+            .find_model_spec(model_spec_id)
             .await
             .map_err(Into::into)
     }
@@ -258,7 +258,7 @@ mod tests {
     use super::{build_feature_contract, validate_input_contract};
 
     #[test]
-    fn rejects_empty_encoded_unknown_and_wrong_schema_contracts() {
+    fn rejects_empty_unknown_contracts() {
         let features = FeaturesConfig::default();
         let version = features.feature_schema_version;
 
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_non_empty_contract_from_active_schema() {
+    fn accepts_non_empty_schema() {
         let features = FeaturesConfig::default();
         validate_input_contract(
             &ModelInputContract::single_required("book.mid"),
@@ -305,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_contract_is_hash_bound_sorted_and_describes_mid_price() {
+    fn feature_contract_hash_price() {
         let features = FeaturesConfig::default();
         let contract = build_feature_contract(&features).expect("active feature contract");
 

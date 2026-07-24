@@ -160,7 +160,7 @@ impl SourceSliceManifest {
         if self
             .invalid_sessions
             .windows(2)
-            .any(|sessions| invalid_session_key(&sessions[0]) >= invalid_session_key(&sessions[1]))
+            .any(|sessions| sessions[0].invalid_session_key() >= sessions[1].invalid_session_key())
         {
             return Err(
                 "source-slice invalid sessions must be unique and canonically sorted".to_owned(),
@@ -339,12 +339,14 @@ impl SourceSliceManifest {
     }
 }
 
-const fn invalid_session_key(session: &SourceSliceInvalidSession) -> (&str, &str, DateTime<Utc>) {
-    (
-        session.token_id.as_str(),
-        session.session_id.as_str(),
-        session.invalidated_at,
-    )
+impl SourceSliceInvalidSession {
+    const fn invalid_session_key(&self) -> (&str, &str, DateTime<Utc>) {
+        (
+            self.token_id.as_str(),
+            self.session_id.as_str(),
+            self.invalidated_at,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -445,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_object_uri_is_rejected() {
+    fn duplicate_object_uri_rejected() {
         let now = Utc::now();
         let hash = ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash");
         let object = SourceSliceObjectRef {
@@ -505,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn weather_slice_requires_the_exact_24_hour_target_runway() {
+    fn weather_slice_requires_runway() {
         let pit_cutoff = Utc::now();
         let fit_start = pit_cutoff - Duration::days(91);
         let fit_end = pit_cutoff - Duration::days(1);
@@ -525,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn availability_after_materialization_is_rejected() {
+    fn availability_after_materialization_rejected() {
         let pit_cutoff = Utc::now();
         let fit_start = pit_cutoff - Duration::days(91);
         let (mut manifest, _, _) = weather_manifest(fit_start, pit_cutoff, pit_cutoff);

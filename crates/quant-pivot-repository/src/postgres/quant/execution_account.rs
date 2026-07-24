@@ -8,7 +8,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel, sea_query::OnConflict};
 
-use crate::{postgres::error, traits::ExecutionAccountRepository};
+use crate::traits::ExecutionAccountRepository;
 
 pub struct PgExecutionAccountRepository {
     db: DatabaseConnection,
@@ -42,7 +42,7 @@ impl ExecutionAccountRepository for PgExecutionAccountRepository {
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| {
-                error::not_found(QUANT_EXECUTION_ACCOUNT, expected.execution_account_id)
+                StorageError::not_found(QUANT_EXECUTION_ACCOUNT, expected.execution_account_id)
             })?;
         if stored.chain_id != expected.chain_id
             || stored.funder_address != expected.funder_address
@@ -53,7 +53,7 @@ impl ExecutionAccountRepository for PgExecutionAccountRepository {
             || stored.wallet_implementation_code_hash != expected.wallet_implementation_code_hash
             || stored.identity_digest != expected.identity_digest
         {
-            return Err(error::state_conflict(
+            return Err(StorageError::state_conflict(
                 QUANT_EXECUTION_ACCOUNT,
                 Some(expected.execution_account_id),
                 "content-addressed execution account identity mismatch",

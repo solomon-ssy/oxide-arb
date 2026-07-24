@@ -46,7 +46,7 @@ where
 
 /// Fallible indexed parallel map, preserving source order and propagating the
 /// first computation error without manufacturing a result for that element.
-pub fn par_try_map_with_index<T, R, E, F>(items: &[T], f: F) -> Result<Vec<R>, E>
+pub fn par_try_map_index<T, R, E, F>(items: &[T], f: F) -> Result<Vec<R>, E>
 where
     T: Sync,
     R: Send,

@@ -169,10 +169,7 @@ impl CoreOrderIntentService {
     /// [`resolve_return_model_calibration`] check as publish, report, and
     /// admission. A free function (not `&self`) keeps the guard
     /// directly unit-testable against fakes for just its three dependencies.
-    async fn ensure_return_model_still_calibrated(
-        &self,
-        model_version_id: &ModelVersionId,
-    ) -> QuantResult<()> {
+    async fn ensure_model_calibrated(&self, model_version_id: &ModelVersionId) -> QuantResult<()> {
         recheck_return_model_calibrated(
             &self.model_registry,
             &self.artifact_store,
@@ -182,13 +179,13 @@ impl CoreOrderIntentService {
         .await
     }
 
-    async fn ensure_trade_policy_still_executable(
+    async fn ensure_policy_executable(
         &self,
         recommendation: &RecommendationInfo,
     ) -> QuantResult<ResearchProfileRef> {
         let version = self
             .model_registry
-            .find_model_version_by_id(&recommendation.evidence_refs.model_version_id)
+            .find_model_version(&recommendation.evidence_refs.model_version_id)
             .await?
             .ok_or_else(|| ExecutionError::IntentDenied {
                 reason: "recommendation model version no longer exists".to_owned(),
@@ -229,12 +226,12 @@ impl CoreOrderIntentService {
             mode,
             QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution
         ) {
-            let profile_ref = self.ensure_trade_policy_still_executable(&rec).await?;
-            self.ensure_return_model_still_calibrated(&rec.evidence_refs.model_version_id)
+            let profile_ref = self.ensure_policy_executable(&rec).await?;
+            self.ensure_model_calibrated(&rec.evidence_refs.model_version_id)
                 .await?;
             profile_ref
         } else {
-            self.ensure_trade_policy_still_executable(&rec).await?
+            self.ensure_policy_executable(&rec).await?
         };
         let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
         let entry = project_entry_order_spec(&rec, now)?;
@@ -257,7 +254,7 @@ impl CoreOrderIntentService {
                     now,
                 )
                 .await?;
-            require_ready_settlement_recovery(recovery)?;
+            (recovery).require_ready_settlement_recovery()?;
         }
         let resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
         let condition = self
@@ -285,7 +282,8 @@ impl CoreOrderIntentService {
             .await?;
         self.metrics
             .inc_order_intent_created(intent.runtime_mode.as_str(), intent.intent_kind.as_str());
-        self.publish(&intent, IntentEventKind::Created, now);
+        self.lifecycle
+            .publish(&intent, IntentEventKind::Created, now);
         if intent.status == OrderIntentStatus::ApprovedByPolicy {
             self.metrics.inc_order_intent_approved(
                 intent.runtime_mode.as_str(),
@@ -381,19 +379,16 @@ impl CoreOrderIntentService {
             let recommendation = self.load_recommendation(&intent.recommendation_id).await?;
             self.ensure_report_facts_verified(&recommendation.recommendation_report_id)
                 .await?;
-            self.ensure_trade_policy_still_executable(&recommendation)
+            self.ensure_policy_executable(&recommendation).await?;
+            self.ensure_model_calibrated(&recommendation.evidence_refs.model_version_id)
                 .await?;
-            self.ensure_return_model_still_calibrated(
-                &recommendation.evidence_refs.model_version_id,
-            )
-            .await?;
         }
 
         let (entry_override, allocated_override) =
             resolve_downscale(&command, &intent.entry_order_json)?;
         let approval = ApproveOrderIntent {
             approved_by: command.operator_id,
-            approval_reason: approval_reason(&command),
+            approval_reason: command.reason.clone(),
             approved_at: now,
         };
         match self
@@ -412,14 +407,16 @@ impl CoreOrderIntentService {
                     approved.runtime_mode.as_str(),
                     approved.intent_kind.as_str(),
                 );
-                self.publish(&approved, IntentEventKind::Approved, now);
+                self.lifecycle
+                    .publish(&approved, IntentEventKind::Approved, now);
                 // Approval is the operator's final authorization: it arms the
                 // durable trigger worker and may result in a later submission.
                 self.dispatch_wake.wake();
                 Ok(approved)
             }
             ApproveOrderIntentOutcome::Invalidated(invalidated, reason) => {
-                self.publish(&invalidated, IntentEventKind::Invalidated, now);
+                self.lifecycle
+                    .publish(&invalidated, IntentEventKind::Invalidated, now);
                 Err(ExecutionError::ApprovalInvalidated {
                     reason: reason.to_string(),
                 }
@@ -444,7 +441,8 @@ impl CoreOrderIntentService {
             rejected.runtime_mode.as_str(),
             rejected.intent_kind.as_str(),
         );
-        self.publish(&rejected, IntentEventKind::Rejected, now);
+        self.lifecycle
+            .publish(&rejected, IntentEventKind::Rejected, now);
         Ok(rejected)
     }
 
@@ -460,7 +458,8 @@ impl CoreOrderIntentService {
             .intents
             .cancel(&command.order_intent_id, command.reason, now, log)
             .await?;
-        self.publish(&cancelled, IntentEventKind::Cancelled, now);
+        self.lifecycle
+            .publish(&cancelled, IntentEventKind::Cancelled, now);
         Ok(cancelled)
     }
 
@@ -474,7 +473,8 @@ impl CoreOrderIntentService {
             let log = intent_operation_log("quant.intent.expire", &intent, "ttl_expired")?;
             match self.intents.expire(&intent.order_intent_id, now, log).await {
                 Ok(updated) => {
-                    self.publish(&updated, IntentEventKind::Expired, now);
+                    self.lifecycle
+                        .publish(&updated, IntentEventKind::Expired, now);
                     expired = expired.saturating_add(1);
                 }
                 Err(error) => {
@@ -537,10 +537,6 @@ impl CoreOrderIntentService {
             .into()
         })
     }
-
-    fn publish(&self, intent: &OrderIntentInfo, event: IntentEventKind, now: DateTime<Utc>) {
-        self.lifecycle.publish(intent, event, now);
-    }
 }
 
 #[async_trait]
@@ -573,31 +569,28 @@ impl OrderIntentPort for CoreOrderIntentService {
 impl IntentTerminalEventSink for CoreOrderIntentService {
     fn publish_invalidated(&self, intents: &[OrderIntentInfo], now: DateTime<Utc>) {
         for intent in intents {
-            self.publish(intent, IntentEventKind::Invalidated, now);
+            self.lifecycle
+                .publish(intent, IntentEventKind::Invalidated, now);
         }
     }
 }
 
-fn require_ready_settlement_recovery(
-    recovery: SettlementRecoveryAdmission,
-) -> Result<(), ExecutionError> {
-    match recovery {
-        SettlementRecoveryAdmission::Ready(_) => Ok(()),
-        SettlementRecoveryAdmission::Blocked(reason) => {
-            Err(ExecutionError::SettlementRecoveryUnavailable {
+impl SettlementRecoveryAdmission {
+    fn require_ready_settlement_recovery(self) -> Result<(), ExecutionError> {
+        match self {
+            Self::Ready(_) => Ok(()),
+            Self::Blocked(reason) => Err(ExecutionError::SettlementRecoveryUnavailable {
                 reason: reason.to_string(),
-            })
-        }
-        SettlementRecoveryAdmission::NotRequired => {
-            Err(ExecutionError::SettlementRecoveryUnavailable {
+            }),
+            Self::NotRequired => Err(ExecutionError::SettlementRecoveryUnavailable {
                 reason: "required recovery gate returned not_required".to_owned(),
-            })
+            }),
         }
     }
 }
 
 /// The closed-loop calibration recheck (see
-/// [`CoreOrderIntentService::ensure_return_model_still_calibrated`]), extracted
+/// [`CoreOrderIntentService::ensure_model_calibrated`]), extracted
 /// as a free function over its three dependencies so it is unit-testable
 /// without constructing a full [`CoreOrderIntentService`].
 ///
@@ -615,7 +608,7 @@ async fn recheck_return_model_calibrated(
     model_version_id: &ModelVersionId,
 ) -> QuantResult<()> {
     let version = model_registry
-        .find_model_version_by_id(model_version_id)
+        .find_model_version(model_version_id)
         .await?
         .ok_or_else(|| ExecutionError::IntentDenied {
             reason: format!("model version {model_version_id} not found for calibration recheck"),
@@ -970,10 +963,6 @@ fn resolve_downscale(
     Ok((Some(entry), Some(new_notional)))
 }
 
-fn approval_reason(command: &ApproveIntentCommand) -> String {
-    command.reason.clone()
-}
-
 /// Build the WORM operation-log row written inside a background-origin intent
 /// transition transaction (sweep expiry / report-cascade invalidation).
 fn intent_operation_log(
@@ -1018,10 +1007,7 @@ mod tests {
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_error::execution::ExecutionError;
     use quant_pivot_models::{
-        domain::{
-            ports::ApproveIntentCommand,
-            quant::{RecommendationInfo, evaluate_intent_approval_invalidation},
-        },
+        domain::{ports::ApproveIntentCommand, quant::RecommendationInfo},
         enums::{
             common::{OrderType, Side},
             execution::ApprovalInvalidation,
@@ -1042,8 +1028,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        project_entry_order_spec, project_exit_policy_spec, require_ready_settlement_recovery,
-        resolve_downscale, resolve_policy,
+        project_entry_order_spec, project_exit_policy_spec, resolve_downscale, resolve_policy,
     };
     use crate::{
         execution::{
@@ -1123,27 +1108,34 @@ mod tests {
         }
     }
 
-    fn ready_settlement_recovery() -> SettlementRecoveryAdmission {
-        SettlementRecoveryAdmission::Ready(SettlementRecoveryAdmissionEvidence {
-            route: SettlementRoute::StandardV2,
-            wallet_kind: ExecutionWalletKind::Eoa,
-            target_adapter: EvmAddress::parse("0xada100db00ca00073811820692005400218fce1f")
-                .expect("target adapter"),
-            deployment_digest: ContentHash::from_bytes([0x41; 32]),
-            verified_block_number: 90_685_098,
-            verified_block_hash: EvmBlockHash::parse(format!("0x{}", "1".repeat(64)))
-                .expect("block hash"),
-            confirmed_canary: false,
-        })
+    impl SettlementRecoveryAdmission {
+        fn ready_fixture() -> Self {
+            Self::Ready(SettlementRecoveryAdmissionEvidence {
+                route: SettlementRoute::StandardV2,
+                wallet_kind: ExecutionWalletKind::Eoa,
+                target_adapter: EvmAddress::parse("0xada100db00ca00073811820692005400218fce1f")
+                    .expect("target adapter"),
+                deployment_digest: ContentHash::from_bytes([0x41; 32]),
+                verified_block_number: 90_685_098,
+                verified_block_hash: EvmBlockHash::parse(format!("0x{}", "1".repeat(64)))
+                    .expect("block hash"),
+                confirmed_canary: false,
+            })
+        }
     }
 
     #[test]
-    fn required_settlement_recovery_accepts_only_ready_capability() {
-        assert!(require_ready_settlement_recovery(ready_settlement_recovery()).is_ok());
+    fn required_settlement_accepts_capability() {
+        assert!(
+            (SettlementRecoveryAdmission::ready_fixture())
+                .require_ready_settlement_recovery()
+                .is_ok()
+        );
 
-        let blocked = require_ready_settlement_recovery(SettlementRecoveryAdmission::Blocked(
+        let blocked = (SettlementRecoveryAdmission::Blocked(
             SettlementRecoveryAdmissionBlockReason::DeploymentNotReady,
-        ));
+        ))
+        .require_ready_settlement_recovery();
         assert!(matches!(
             blocked,
             Err(ExecutionError::SettlementRecoveryUnavailable { reason })
@@ -1151,14 +1143,14 @@ mod tests {
         ));
 
         assert!(matches!(
-            require_ready_settlement_recovery(SettlementRecoveryAdmission::NotRequired),
+            (SettlementRecoveryAdmission::NotRequired).require_ready_settlement_recovery(),
             Err(ExecutionError::SettlementRecoveryUnavailable { reason })
                 if reason == "required recovery gate returned not_required"
         ));
     }
 
     #[test]
-    fn entry_projection_is_gtd_for_resting_limit() {
+    fn entry_projection_gtd_limit() {
         let mut rec = rec();
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
         entry_mut(&mut rec).valid_until = now + Duration::minutes(10);
@@ -1179,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn aggressive_all_or_nothing_entry_projects_to_fok_usd() {
+    fn aggressive_nothing_projects_usd() {
         let mut rec = rec();
         entry_mut(&mut rec).order_policy = EntryOrderPolicy::Aggressive {
             worst_price: Price::new(dec!(0.60)),
@@ -1195,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn aggressive_partial_entry_projects_to_fak_usd() {
+    fn aggressive_partial_projects_usd() {
         let mut rec = rec();
         entry_mut(&mut rec).order_policy = EntryOrderPolicy::Aggressive {
             worst_price: Price::new(dec!(0.60)),
@@ -1211,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn passive_entry_rejects_effective_lifetime_below_two_minutes() {
+    fn passive_entry_rejects_minutes() {
         let mut rec = rec();
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
         entry_mut(&mut rec).valid_until = now + Duration::seconds(119);
@@ -1222,7 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn passive_entry_rejects_non_post_only_policy() {
+    fn passive_rejects_non_policy() {
         let mut rec = rec();
         entry_mut(&mut rec).order_policy = EntryOrderPolicy::Passive {
             limit_price: Price::new(dec!(0.60)),
@@ -1236,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn exit_projection_drops_full_exit_nodes() {
+    fn exit_projection_drops_nodes() {
         let rec = rec();
         let projected =
             project_exit_policy_spec(&rec, Price::new(dec!(0.60))).expect("exit projection");
@@ -1257,7 +1249,7 @@ mod tests {
     }
 
     #[test]
-    fn downscale_reduces_shares_and_notional() {
+    fn downscale_reduces_shares_notional() {
         let mut cmd = approve_command();
         cmd.override_amount = Some(OrderAmount::Shares(Shares::new(dec!(50))));
         let (entry, alloc) = resolve_downscale(&cmd, &frozen_entry()).expect("downscale");
@@ -1281,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn usd_price_only_override_preserves_frozen_spend() {
+    fn usd_price_preserves_spend() {
         let mut cmd = approve_command();
         cmd.override_price = Some(Price::new(dec!(0.55)));
         let mut frozen = frozen_entry();
@@ -1295,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn sell_price_override_cannot_lower_frozen_bound() {
+    fn sell_price_cannot_bound() {
         let mut cmd = approve_command();
         cmd.override_price = Some(Price::new(dec!(0.50)));
         let mut frozen = frozen_entry();
@@ -1306,14 +1298,14 @@ mod tests {
     }
 
     #[test]
-    fn downscale_rejects_amount_unit_mismatch() {
+    fn downscale_rejects_amount_mismatch() {
         let mut cmd = approve_command();
         cmd.override_amount = Some(OrderAmount::CashBudget(Usd::new(dec!(10))));
         assert!(resolve_downscale(&cmd, &frozen_entry()).is_err());
     }
 
     #[test]
-    fn invalidation_passes_for_fresh_published_intent() {
+    fn invalidation_passes_fresh_intent() {
         let mut rec = rec();
         rec.valid_until = Utc::now() + Duration::hours(1);
         let report = report_fixtures::report(
@@ -1324,21 +1316,13 @@ mod tests {
         let version = DecisionPolicySnapshotId::from_v7();
         let hash = risk(&rec).envelope_hash;
         assert!(
-            evaluate_intent_approval_invalidation(
-                &rec,
-                &report,
-                true,
-                &version,
-                &version,
-                &hash,
-                Utc::now()
-            )
-            .is_none()
+            rec.approval_invalidation(&report, true, &version, &version, &hash, Utc::now())
+                .is_none()
         );
     }
 
     #[test]
-    fn semi_auto_expires_at_is_capped_by_recommendation_valid_until() {
+    fn semi_auto_expires_until() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let rec_valid_until = now + Duration::hours(1);
         let entry_valid_until = now + Duration::hours(2);
@@ -1356,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn semi_auto_expires_at_uses_approval_ttl_when_shorter_than_recommendation() {
+    fn semi_auto_uses_recommendation() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let rec_valid_until = now + Duration::hours(24);
         let entry_valid_until = now + Duration::hours(24);
@@ -1373,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn semi_auto_rejects_unrepresentable_approval_ttl() {
+    fn semi_auto_rejects_ttl() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         assert!(matches!(
             resolve_policy(
@@ -1392,7 +1376,7 @@ mod tests {
     }
 
     #[test]
-    fn gtd_projection_rejects_security_buffer_overflow() {
+    fn gtd_projection_rejects_overflow() {
         let mut rec = rec();
         entry_mut(&mut rec).valid_until = DateTime::<Utc>::MAX_UTC;
         assert!(matches!(
@@ -1405,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn semi_auto_expires_at_is_capped_by_entry_valid_until() {
+    fn semi_auto_capped_until() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let rec_valid_until = now + Duration::hours(24);
         let entry_valid_until = now + Duration::minutes(30);
@@ -1422,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_policy_rejects_when_all_deadlines_elapsed() {
+    fn resolve_policy_rejects_elapsed() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         assert!(matches!(
             resolve_policy(
@@ -1438,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_policy_expires_at_is_capped_by_recommendation_valid_until() {
+    fn auto_policy_expires_until() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let rec_valid_until = now + Duration::hours(1);
         let entry_valid_until = now + Duration::hours(2);
@@ -1475,9 +1459,7 @@ mod tests {
         let mut expired = rec.clone();
         expired.valid_until = now - Duration::hours(1);
         assert_eq!(
-            evaluate_intent_approval_invalidation(
-                &expired, &report, true, &version, &version, &hash, now
-            ),
+            expired.approval_invalidation(&report, true, &version, &version, &hash, now),
             Some(ApprovalInvalidation::RecommendationExpired)
         );
 
@@ -1488,32 +1470,20 @@ mod tests {
             RecommendationReportStatus::Revoked,
         );
         assert_eq!(
-            evaluate_intent_approval_invalidation(
-                &rec, &revoked, true, &version, &version, &hash, now
-            ),
+            rec.approval_invalidation(&revoked, true, &version, &version, &hash, now),
             Some(ApprovalInvalidation::ReportRevoked)
         );
 
         // kill switch opened
         assert_eq!(
-            evaluate_intent_approval_invalidation(
-                &rec, &report, false, &version, &version, &hash, now
-            ),
+            rec.approval_invalidation(&report, false, &version, &version, &hash, now),
             Some(ApprovalInvalidation::KillSwitchOpened)
         );
 
         // runtime config version changed
         let other_version = DecisionPolicySnapshotId::from_v7();
         assert_eq!(
-            evaluate_intent_approval_invalidation(
-                &rec,
-                &report,
-                true,
-                &other_version,
-                &version,
-                &hash,
-                now
-            ),
+            rec.approval_invalidation(&report, true, &other_version, &version, &hash, now),
             Some(ApprovalInvalidation::RuntimeConfigChanged)
         );
 
@@ -1521,15 +1491,7 @@ mod tests {
         let stored_hash = ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash");
         assert_ne!(stored_hash, risk(&rec).envelope_hash);
         assert_eq!(
-            evaluate_intent_approval_invalidation(
-                &rec,
-                &report,
-                true,
-                &version,
-                &version,
-                &stored_hash,
-                now
-            ),
+            rec.approval_invalidation(&report, true, &version, &version, &stored_hash, now),
             Some(ApprovalInvalidation::RiskEnvelopeMismatch)
         );
     }
@@ -1613,7 +1575,7 @@ mod tests {
             ) -> Result<ModelSpecInfo, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
-            async fn find_model_spec_by_id(
+            async fn find_model_spec(
                 &self,
                 _model_spec_id: &ModelSpecId,
             ) -> Result<Option<ModelSpecInfo>, StorageError> {
@@ -1631,7 +1593,7 @@ mod tests {
             ) -> Result<i32, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
-            async fn find_model_version_by_id(
+            async fn find_model_version(
                 &self,
                 model_version_id: &ModelVersionId,
             ) -> Result<Option<ModelVersionInfo>, StorageError> {
@@ -1691,7 +1653,7 @@ mod tests {
             ) -> Result<ModelVersionInfo, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
-            async fn set_publish_path_set_id(
+            async fn set_publish_path(
                 &self,
                 _model_version_id: &ModelVersionId,
                 _publish_path_set_id: Option<BacktestPathSetId>,
@@ -1843,9 +1805,9 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn uncalibrated_model_blocks_semi_auto_intent_creation() {
+        async fn uncalibrated_model_blocks_creation() {
             // Acceptance alias for the same TOCTOU guard exercised by
-            // `heuristic_return_model_denies_semi_auto_intent_creation`.
+            // `heuristic_return_denies_creation`.
             let (store, version) = seeded(ReturnModelSpec::heuristic_default()).await;
             let model_registry: Arc<dyn ModelRegistryRepository> = Arc::new(FakeRegistry {
                 version: Some(version.clone()),
@@ -1866,7 +1828,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn heuristic_return_model_denies_semi_auto_intent_creation() {
+        async fn heuristic_return_denies_creation() {
             let (store, version) = seeded(ReturnModelSpec::heuristic_default()).await;
             let model_registry: Arc<dyn ModelRegistryRepository> = Arc::new(FakeRegistry {
                 version: Some(version.clone()),
@@ -1888,7 +1850,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn calibrated_and_still_active_allows_intent_creation() {
+        async fn calibrated_still_allows_creation() {
             let calibrator_ref = CalibrationArtifactId::from_v7();
             let (store, version) = seeded(ReturnModelSpec::Calibrated(CalibratedReturnModel {
                 calibrator_ref,
@@ -1915,7 +1877,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn calibrated_but_deactivated_after_report_build_denies_intent_creation() {
+        async fn calibrated_after_denies_creation() {
             // This is the TOCTOU scenario itself: the return model is still
             // tagged `Calibrated` (as it was when the report was built), but
             // the bound calibrator has since been deactivated/superseded —
@@ -1946,7 +1908,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn missing_model_version_denies_intent_creation() {
+        async fn missing_model_denies_creation() {
             let model_registry: Arc<dyn ModelRegistryRepository> =
                 Arc::new(FakeRegistry { version: None });
             let calibration_loader: Arc<dyn CalibrationArtifactLoader> =

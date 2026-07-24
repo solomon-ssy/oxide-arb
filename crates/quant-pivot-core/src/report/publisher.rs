@@ -65,7 +65,7 @@ impl ReportPublisher {
     }
 
     /// Install the post-commit sink for atomically invalidated intents.
-    pub fn set_intent_terminal_event_sink(&self, sink: Arc<dyn IntentTerminalEventSink>) {
+    pub fn set_intent_event_sink(&self, sink: Arc<dyn IntentTerminalEventSink>) {
         let _ = self.intent_terminal_events.set(sink);
     }
 
@@ -555,7 +555,7 @@ mod tests {
     use crate::{report::NotificationRecommendation, test_fixtures::report_fixtures};
 
     #[test]
-    fn published_notification_contains_top3_total_mode() {
+    fn published_notification_contains_mode() {
         let report = report_fixtures::report(
             RecommendationReportId::from_v7(),
             ReportKind::TopN,

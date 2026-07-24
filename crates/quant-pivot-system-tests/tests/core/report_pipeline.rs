@@ -25,7 +25,7 @@ use quant_pivot_system_tests::{
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
-pub async fn ad_hoc_publishes_report_with_recommendations() {
+pub async fn ad_hoc_publishes_recommendations() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let harness = ReportPipelineHarness::bootstrap(&db, HarnessOptions::default()).await;
@@ -89,7 +89,7 @@ pub async fn ad_hoc_publishes_report_with_recommendations() {
     assert_eq!(recs[0].market_id.as_str(), MARKET_ID);
 }
 
-pub async fn ad_hoc_idempotent_on_trigger_key() {
+pub async fn ad_hoc_idempotent_key() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let harness = ReportPipelineHarness::bootstrap(&db, HarnessOptions::default()).await;
@@ -125,7 +125,7 @@ pub async fn ad_hoc_idempotent_on_trigger_key() {
     assert_eq!(row.output_report_id, Some(first.recommendation_report_id));
 }
 
-pub async fn empty_selection_publishes_formal_report() {
+pub async fn empty_selection_publishes_report() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let harness = ReportPipelineHarness::bootstrap(&db, HarnessOptions::empty_selection()).await;
@@ -155,7 +155,7 @@ pub async fn empty_selection_publishes_formal_report() {
     assert!(recs.is_empty());
 }
 
-pub async fn missing_trade_policy_publishes_explicit_non_actionable_empty_report() {
+pub async fn missing_non_empty_report() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let harness =
@@ -187,7 +187,7 @@ pub async fn missing_trade_policy_publishes_explicit_non_actionable_empty_report
     );
 }
 
-pub async fn account_unavailable_fails_without_report_row() {
+pub async fn account_fails_without_row() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let harness =
@@ -282,7 +282,7 @@ pub async fn revoke_after_publish() {
     );
 }
 
-pub async fn evidence_refs_and_rank_scores_populated() {
+pub async fn evidence_refs_rank_populated() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let harness = ReportPipelineHarness::bootstrap(&db, HarnessOptions::default()).await;
@@ -376,7 +376,7 @@ async fn neutral_kelly_fraction(collateral: Usd) -> Decimal {
         .expect("neutral kelly fraction")
 }
 
-pub async fn report_persists_real_drawdown_from_equity_history() {
+pub async fn report_persists_real_history() {
     let collateral = Usd::new(dec!(8000));
     let peak = Usd::new(dec!(10000));
     let neutral_kelly = neutral_kelly_fraction(collateral).await;

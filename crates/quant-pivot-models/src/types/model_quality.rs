@@ -230,24 +230,27 @@ mod tests {
     use super::{GateIntent, GateSubject, QUALITY_GATE_REPORT_FORMAT_VERSION, QualityGateReport};
     use crate::types::{ContentHash, ModelVersionId};
 
-    fn report() -> QualityGateReport {
-        QualityGateReport {
-            format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
-            subject: GateSubject::ModelVersion(ModelVersionId::from_v7()),
-            intent: GateIntent::Candidate,
-            evaluated_at: Utc::now(),
-            gates: Vec::new(),
-            hard_failures: Vec::new(),
-            soft_warnings: Vec::new(),
-            passed: true,
-            report_hash: ContentHash::parse(&format!("blake3:{}", "0".repeat(64)))
-                .expect("valid hash"),
+    impl QualityGateReport {
+        fn test_fixture() -> Self {
+            Self {
+                format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
+                subject: GateSubject::ModelVersion(ModelVersionId::from_v7()),
+                intent: GateIntent::Candidate,
+                evaluated_at: Utc::now(),
+                gates: Vec::new(),
+                hard_failures: Vec::new(),
+                soft_warnings: Vec::new(),
+                passed: true,
+                report_hash: ContentHash::parse(&format!("blake3:{}", "0".repeat(64)))
+                    .expect("valid hash"),
+            }
         }
     }
 
     #[test]
-    fn fixed_report_rejects_unknown_missing_and_wrong_version_shape() {
-        let valid = serde_json::to_value(report()).expect("serialize report");
+    fn rejects_unknown_missing_shape() {
+        let valid =
+            serde_json::to_value(QualityGateReport::test_fixture()).expect("serialize report");
         assert!(serde_json::from_value::<QualityGateReport>(valid.clone()).is_ok());
 
         let mut unknown = valid.clone();

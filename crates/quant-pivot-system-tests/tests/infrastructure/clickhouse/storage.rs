@@ -56,7 +56,7 @@ async fn setup_clickhouse() -> (ClickHousePool, Client, ClickHouseConfig, ()) {
     (pool, client, config, ())
 }
 
-pub async fn first_deployment_creates_missing_database_and_schema() {
+pub async fn first_creates_missing_schema() {
     let config = fresh_clickhouse_config("first_deployment");
 
     let missing = verify_schema(&config)
@@ -84,7 +84,7 @@ pub async fn first_deployment_creates_missing_database_and_schema() {
     assert_eq!(count, 1);
 }
 
-pub async fn deployment_and_runtime_fail_closed_while_schema_lock_is_held() {
+pub async fn deployment_runtime_rejects_held() {
     let (_pool, client, config, _stack) = setup_clickhouse().await;
     client
         .query(
@@ -106,7 +106,7 @@ pub async fn deployment_and_runtime_fail_closed_while_schema_lock_is_held() {
     assert!(runtime_error.to_string().contains("deployment lock"));
 }
 
-pub async fn clean_boot_rejects_nonempty_unmanaged_database() {
+pub async fn clean_boot_rejects_database() {
     let config = fresh_clickhouse_config("unmanaged_database");
     let maintenance = ClickHousePool::from_config(&maintenance_config(&config))
         .client()
@@ -161,7 +161,7 @@ pub async fn clean_boot_rejects_nonempty_unmanaged_database() {
     assert_eq!(migration_ledger_count, 0);
 }
 
-pub async fn preproduction_reset_rejects_active_clickhouse_queries_without_dropping() {
+pub async fn preproduction_rejects_without_dropping() {
     let mut config = fresh_clickhouse_config("preproduction_reset");
     "quant_pivot".clone_into(&mut config.database);
     let maintenance = ClickHousePool::from_config(&maintenance_config(&config))
@@ -255,7 +255,7 @@ pub async fn clickhouse_schema_idempotent() {
     pool.verify_schema().await.expect("schema remains valid");
 }
 
-pub async fn native_query_result_limits_fail_closed() {
+pub async fn native_query_limits_rejects() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
     let row_error = ClickHouseQueryLimits::new("ch.system.row_overflow", 1, 1_024)
         .query(&client, "SELECT number FROM numbers(2)")
@@ -283,7 +283,7 @@ struct TableDdl {
     statement: String,
 }
 
-pub async fn canonical_evidence_tables_have_no_delete_ttl() {
+pub async fn canonical_evidence_no_ttl() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
 
     for table in [
@@ -303,7 +303,7 @@ pub async fn canonical_evidence_tables_have_no_delete_ttl() {
     }
 }
 
-pub async fn runtime_schema_verification_rejects_unmanaged_raw_ttl() {
+pub async fn runtime_schema_rejects_ttl() {
     let (_pool, client, config, _stack) = setup_clickhouse().await;
     client
         .query(
@@ -321,7 +321,7 @@ pub async fn runtime_schema_verification_rejects_unmanaged_raw_ttl() {
     assert!(error.to_string().contains("unmanaged table TTL"));
 }
 
-pub async fn runtime_schema_verification_rejects_migration_ledger_drift() {
+pub async fn runtime_schema_rejects_drift() {
     let (_pool, client, config, _stack) = setup_clickhouse().await;
     client
         .query(
@@ -338,7 +338,7 @@ pub async fn runtime_schema_verification_rejects_migration_ledger_drift() {
     assert!(error.to_string().contains("distinct definitions"));
 }
 
-pub async fn runtime_schema_verification_rejects_semantic_column_drift() {
+pub async fn runtime_verification_rejects_drift() {
     let (_pool, client, config, _stack) = setup_clickhouse().await;
     client
         .query(
@@ -356,7 +356,7 @@ pub async fn runtime_schema_verification_rejects_semantic_column_drift() {
     assert!(error.to_string().contains("quant_trade_tape"));
 }
 
-pub async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
+pub async fn clickhouse_fact_uses_columns() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
     let expected: [(&str, &[&str]); 7] = [
         (
@@ -433,7 +433,7 @@ pub async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
     }
 }
 
-pub async fn crypto_price_report_rust_row_matches_clickhouse_schema() {
+pub async fn crypto_price_matches_schema() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
     let now = Utc::now().timestamp_millis();
     let row = CryptoPriceReportRow {
@@ -478,7 +478,7 @@ pub async fn crypto_price_report_rust_row_matches_clickhouse_schema() {
     assert_eq!(count, 1);
 }
 
-pub async fn domain_event_rust_row_matches_clickhouse_schema() {
+pub async fn domain_event_matches_schema() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
     let now = Utc::now().timestamp_millis();
     let row = DomainEventRow {
@@ -521,7 +521,7 @@ pub async fn domain_event_rust_row_matches_clickhouse_schema() {
     assert_eq!(count, 1);
 }
 
-pub async fn report_fact_schema_accepts_immutable_decision_snapshot() {
+pub async fn report_fact_accepts_snapshot() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
     let lifecycle_status_columns: u64 = client
         .query(
@@ -617,7 +617,7 @@ fn sample_trade(token_id: &str, received_at: i64) -> TradeTapeRow {
     }
 }
 
-pub async fn trade_tape_direct_insert_roundtrip() {
+pub async fn trade_tape_direct_roundtrip() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
     let row = sample_trade("tok-direct", Utc::now().timestamp_millis());
     let mut insert = client
@@ -635,7 +635,7 @@ pub async fn trade_tape_direct_insert_roundtrip() {
     assert_eq!(count, 1);
 }
 
-pub async fn last_trade_ledger_retry_projects_exactly_once() {
+pub async fn last_trade_projects_once() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
     let now = Utc::now().timestamp_millis();
     let stream_session_id = Uuid::now_v7();
@@ -669,11 +669,7 @@ pub async fn last_trade_ledger_retry_projects_exactly_once() {
 
     for _ in 0..2 {
         write_manager
-            .write_async_insert_batch_borrowed(
-                &client,
-                "quant_book_l2_ledger",
-                slice::from_ref(&row),
-            )
+            .write_borrowed_batch(&client, "quant_book_l2_ledger", slice::from_ref(&row))
             .await
             .expect("acknowledged async ledger insert");
     }
@@ -764,7 +760,7 @@ fn trade_writer(
     )
 }
 
-pub async fn async_writer_shutdown_drains_buffer() {
+pub async fn async_writer_shutdown_buffer() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
     let shutdown = CancellationToken::new();
     let write_manager = Arc::new(ChWriteManager::new(4));
@@ -788,7 +784,7 @@ pub async fn async_writer_shutdown_drains_buffer() {
     assert_eq!(count, 3, "shutdown should flush all buffered rows");
 }
 
-pub async fn async_writer_channel_close_drains_buffer() {
+pub async fn async_writer_channel_buffer() {
     let (_pool, client, _config, _stack) = setup_clickhouse().await;
     let write_manager = Arc::new(ChWriteManager::new(4));
 

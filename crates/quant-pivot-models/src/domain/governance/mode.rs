@@ -94,7 +94,7 @@ mod tests {
     use crate::enums::quant::QuantRuntimeMode;
 
     #[test]
-    fn passed_requires_all_hard_checks() {
+    fn passed_requires_hard_checks() {
         let report = PreflightReport::new(
             QuantRuntimeMode::SemiAuto,
             vec![
@@ -106,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn soft_failure_does_not_block() {
+    fn soft_failure_never_blocks() {
         let report = PreflightReport::new(
             QuantRuntimeMode::SemiAuto,
             vec![
@@ -118,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn hard_failure_blocks_and_summarizes() {
+    fn hard_failure_blocks_summarizes() {
         let report = PreflightReport::new(
             QuantRuntimeMode::AutoExecution,
             vec![

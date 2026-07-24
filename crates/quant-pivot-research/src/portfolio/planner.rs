@@ -367,7 +367,7 @@ fn classify_allocations<'a>(
             });
             continue;
         };
-        align_allocation_to_executable_tier(&mut alloc, &mut suggestion, selected);
+        align_executable_allocation(&mut alloc, &mut suggestion, selected);
         let binding = resolve_binding(&suggestion, alloc.binding_constraint);
         let risk_adjusted = risk_adjusted_score(candidate, binding, alloc.liquidity_feasible);
         scored.push(Scored {
@@ -389,7 +389,7 @@ fn classify_allocations<'a>(
 /// This deliberately happens before `SizingPlan` and risk-envelope creation,
 /// so no downstream layer can publish an arbitrary fractional cash amount that
 /// never passed the shared execution kernel.
-fn align_allocation_to_executable_tier(
+fn align_executable_allocation(
     allocation: &mut Allocation,
     suggestion: &mut SizingSuggestion,
     selected: ExecutableTierSuggestion,
@@ -490,17 +490,19 @@ fn correlation_shrink_map(
     out
 }
 
-/// Project the allocator's solve provenance into the persisted plan metadata.
-fn optimizer_meta(outcome: &OptimizerOutcome) -> PortfolioOptimizerMeta {
-    PortfolioOptimizerMeta {
-        solver: outcome.solver,
-        solve_mode: outcome.solve_mode,
-        status: outcome.status,
-        fell_back_to_relaxation: outcome.fell_back_to_relaxation,
-        objective_value: outcome.objective_value,
-        elapsed_ms: outcome.elapsed_ms,
-        correlation_source: outcome.correlation_source,
-        constraint_conflicts: outcome.constraint_conflicts.clone(),
+impl OptimizerOutcome {
+    /// Project the allocator's solve provenance into the persisted plan metadata.
+    fn optimizer_meta(&self) -> PortfolioOptimizerMeta {
+        PortfolioOptimizerMeta {
+            solver: self.solver,
+            solve_mode: self.solve_mode,
+            status: self.status,
+            fell_back_to_relaxation: self.fell_back_to_relaxation,
+            objective_value: self.objective_value,
+            elapsed_ms: self.elapsed_ms,
+            correlation_source: self.correlation_source,
+            constraint_conflicts: self.constraint_conflicts.clone(),
+        }
     }
 }
 
@@ -667,7 +669,7 @@ fn build_plan_row(
         risk_budget_json: risk_budget,
         constraints_json: constraints,
         rejected_summary: rejected_summary(rejected),
-        optimizer_meta_json: optimizer_meta(optimizer_outcome),
+        optimizer_meta_json: (optimizer_outcome).optimizer_meta(),
     }
 }
 

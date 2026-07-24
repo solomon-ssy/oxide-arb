@@ -78,7 +78,7 @@ mod tests {
     use super::PeriodicTask;
 
     #[tokio::test]
-    async fn cancellation_interrupts_an_in_flight_iteration() {
+    async fn cancellation_interrupts_flight_iteration() {
         let shutdown = CancellationToken::new();
         let entered = Arc::new(Notify::new());
         let task_entered = Arc::clone(&entered);

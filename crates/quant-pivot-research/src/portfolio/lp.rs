@@ -269,7 +269,7 @@ impl<'a> PreparedModel<'a> {
                 Err(failure) => {
                     let conflicts = failure.conflicts();
                     // Fall back to the pure-Rust continuous relaxation.
-                    if let Ok(raw) = try_relaxation(&ctx) {
+                    if let Ok(raw) = ctx.try_relaxation() {
                         return Ok(Solved {
                             values: self.recover(&raw)?,
                             mode: PortfolioSolveMode::ContinuousRelaxation,
@@ -283,7 +283,7 @@ impl<'a> PreparedModel<'a> {
             }
         }
 
-        match try_relaxation(&ctx) {
+        match ctx.try_relaxation() {
             Ok(raw) => Ok(Solved {
                 values: self.recover(&raw)?,
                 mode: PortfolioSolveMode::ContinuousRelaxation,
@@ -744,6 +744,13 @@ pub mod debug_test_hooks {
         Panic,
     }
 
+    impl MilpBehavior {
+        /// Read the current MILP override.
+        pub fn current() -> Self {
+            MILP.with(|slot| *slot.borrow())
+        }
+    }
+
     /// How the relaxation dispatch behaves when a test installs an override.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
     pub enum RelaxBehavior {
@@ -756,19 +763,30 @@ pub mod debug_test_hooks {
         Panic,
     }
 
+    impl RelaxBehavior {
+        /// Read the current relaxation override.
+        pub fn current() -> Self {
+            RELAX.with(|slot| *slot.borrow())
+        }
+    }
+
     thread_local! {
         static MILP: RefCell<MilpBehavior> = const { RefCell::new(MilpBehavior::Normal) };
         static RELAX: RefCell<RelaxBehavior> = const { RefCell::new(RelaxBehavior::Normal) };
     }
 
-    /// Install a MILP-path override (cleared by [`reset`] or [`Guard`] drop).
-    pub fn set_milp(behavior: MilpBehavior) {
-        MILP.with(|slot| *slot.borrow_mut() = behavior);
+    impl MilpBehavior {
+        /// Install a MILP-path override (cleared by [`reset`] or [`Guard`] drop).
+        pub fn set_milp(self) {
+            MILP.with(|slot| *slot.borrow_mut() = self);
+        }
     }
 
-    /// Install a relaxation-path override (cleared by [`reset`] or [`Guard`] drop).
-    pub fn set_relax(behavior: RelaxBehavior) {
-        RELAX.with(|slot| *slot.borrow_mut() = behavior);
+    impl RelaxBehavior {
+        /// Install a relaxation-path override (cleared by [`reset`] or [`Guard`] drop).
+        pub fn set_relax(self) {
+            RELAX.with(|slot| *slot.borrow_mut() = self);
+        }
     }
 
     /// Clear all overrides.
@@ -799,21 +817,11 @@ pub mod debug_test_hooks {
             reset();
         }
     }
-
-    /// Current MILP override (defaults to [`MilpBehavior::Normal`]).
-    pub fn current_milp() -> MilpBehavior {
-        MILP.with(|slot| *slot.borrow())
-    }
-
-    /// Current relaxation override (defaults to [`RelaxBehavior::Normal`]).
-    pub fn current_relax() -> RelaxBehavior {
-        RELAX.with(|slot| *slot.borrow())
-    }
 }
 
 fn try_milp(ctx: &SolveContext, solver: PortfolioSolverKind) -> Result<Vec<f64>, SolveFail> {
     #[cfg(debug_assertions)]
-    match debug_test_hooks::current_milp() {
+    match MilpBehavior::current() {
         MilpBehavior::Normal => {}
         MilpBehavior::FailInfeasible => return Err(SolveFail::Infeasible),
         MilpBehavior::Panic => {
@@ -826,19 +834,21 @@ fn try_milp(ctx: &SolveContext, solver: PortfolioSolverKind) -> Result<Vec<f64>,
     dispatch_solve(ctx, true, solver)
 }
 
-fn try_relaxation(ctx: &SolveContext) -> Result<Vec<f64>, SolveFail> {
-    #[cfg(debug_assertions)]
-    match debug_test_hooks::current_relax() {
-        RelaxBehavior::Normal => {}
-        RelaxBehavior::FailInfeasible => return Err(SolveFail::Infeasible),
-        RelaxBehavior::Panic => {
-            let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-                panic!("debug_test_hooks: forced relaxation panic");
-            }));
-            return Err(SolveFail::Panicked);
+impl SolveContext {
+    fn try_relaxation(&self) -> Result<Vec<f64>, SolveFail> {
+        #[cfg(debug_assertions)]
+        match RelaxBehavior::current() {
+            RelaxBehavior::Normal => {}
+            RelaxBehavior::FailInfeasible => return Err(SolveFail::Infeasible),
+            RelaxBehavior::Panic => {
+                let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+                    panic!("debug_test_hooks: forced relaxation panic");
+                }));
+                return Err(SolveFail::Panicked);
+            }
         }
+        dispatch_solve(self, false, PortfolioSolverKind::Microlp)
     }
-    dispatch_solve(ctx, false, PortfolioSolverKind::Microlp)
 }
 
 fn dispatch_solve(
@@ -923,7 +933,7 @@ mod tests {
     use super::f64_to_decimal;
 
     #[test]
-    fn non_finite_solver_allocation_fails_closed() {
+    fn non_finite_solver_rejects() {
         assert!(f64_to_decimal(f64::NAN, "solver allocation").is_err());
         assert!(f64_to_decimal(f64::INFINITY, "solver allocation").is_err());
         assert!(f64_to_decimal(f64::NEG_INFINITY, "solver allocation").is_err());

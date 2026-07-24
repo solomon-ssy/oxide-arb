@@ -27,8 +27,7 @@ use crate::{
         BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
         DefaultCombinatorialPurgedBacktester, DsrInput, FoldModelSource, FoldRuntime,
         GroupEvaluation, GroupRowFilter, PboInput, PolicyFoldRuntime, PurgeConfig, RankObservation,
-        ReplayEngine, TimelineGroup, TrialPerformanceMatrix, deflated_sharpe_ratio,
-        probability_of_backtest_overfitting,
+        ReplayEngine, TimelineGroup, TrialPerformanceMatrix, probability_of_backtest_overfitting,
     },
 };
 
@@ -395,7 +394,7 @@ fn policy_significance(
         .iter()
         .map(|candidate| candidate.sharpe_ratio)
         .collect::<Vec<_>>();
-    let dsr = deflated_sharpe_ratio(&DsrInput {
+    let dsr = DsrInput {
         observed_sharpe: representative.sharpe,
         returns_period_count: u64::try_from(representative.group_returns.len()).map_err(
             |error| methodology(format!("policy DSR period count does not fit u64: {error}")),
@@ -407,7 +406,8 @@ fn policy_significance(
             methodology(format!("policy DSR trial count does not fit u32: {error}"))
         })?,
         trial_sharpe_variance: stats::variance(&candidate_sharpes),
-    })?;
+    }
+    .deflated_sharpe_ratio()?;
     let trial_matrix = TrialPerformanceMatrix::from_rows(
         basis
             .groups
@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn produces_exact_56_folds_and_21_complete_paths() {
+    fn produces_exact_56_paths() {
         let candidate_ids = vec!["stable".to_owned(), "noisy".to_owned(), "weak".to_owned()];
         let summary = evaluate_policy_performance(&PolicyPerformanceRequest {
             candidate_ids: &candidate_ids,
@@ -824,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn common_support_is_candidate_symmetric() {
+    fn common_support_candidate_symmetric() {
         let mut rows = observations();
         rows[3].candidate_return_bps[2] = None;
         let candidate_ids = vec!["stable".to_owned(), "noisy".to_owned(), "weak".to_owned()];
@@ -846,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn pbo_requires_a_real_candidate_family() {
+    fn pbo_requires_real_family() {
         let candidate_ids = vec!["only".to_owned()];
         assert!(
             evaluate_policy_performance(&PolicyPerformanceRequest {

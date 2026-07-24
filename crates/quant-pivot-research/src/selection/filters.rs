@@ -387,7 +387,7 @@ mod tests {
     use super::SelectionThresholds;
 
     #[test]
-    fn resolution_thresholds_reject_values_outside_chrono_range() {
+    fn resolution_thresholds_reject_range() {
         let selection = SelectionConfig {
             max_time_to_resolution_secs: u64::MAX,
             ..SelectionConfig::default()

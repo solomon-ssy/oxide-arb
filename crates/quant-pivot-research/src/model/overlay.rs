@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rejects_unknown_and_missing_factors() {
+    fn resolve_rejects_unknown_missing() {
         let overlay = WeightOverlay::from_config(&weights(&[(LIQUIDITY_DEPTH.as_str(), "1.0")]))
             .expect("overlay");
 

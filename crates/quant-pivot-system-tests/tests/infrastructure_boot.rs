@@ -6,7 +6,7 @@ use quant_pivot_storage::cache::CacheBackend;
 use quant_pivot_system_tests::stack::SystemStack;
 
 #[tokio::test]
-async fn fresh_stack_is_schema_complete_and_cross_store_ready() {
+async fn fresh_stack_schema_ready() {
     let stack = Box::pin(SystemStack::start())
         .await
         .expect("start disposable system-test stack");

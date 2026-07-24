@@ -317,7 +317,7 @@ pub fn walk_buy_cash_budget(
     if !complete && requirement == FillRequirement::AllOrNothing {
         return Ok(BookWalkFill::unfilled(cash_budget, Shares::ZERO));
     }
-    Ok(finish_walk(WalkResultParts {
+    Ok((WalkResultParts {
         side: Side::Buy,
         shares,
         gross,
@@ -327,7 +327,8 @@ pub fn walk_buy_cash_budget(
         requirement,
         unfilled_cash_budget: Usd::new(remaining.max(Decimal::ZERO)),
         unfilled_shares: Shares::ZERO,
-    }))
+    })
+    .finish_walk())
 }
 
 fn shares_affordable_with_cash(
@@ -400,7 +401,7 @@ pub fn walk_buy_exact_shares(
     if remaining > Decimal::ZERO && requirement == FillRequirement::AllOrNothing {
         return Ok(BookWalkFill::unfilled(Usd::ZERO, target));
     }
-    Ok(finish_walk(WalkResultParts {
+    Ok((WalkResultParts {
         side: Side::Buy,
         shares,
         gross,
@@ -410,7 +411,8 @@ pub fn walk_buy_exact_shares(
         requirement,
         unfilled_cash_budget: Usd::ZERO,
         unfilled_shares: Shares::new(remaining.max(Decimal::ZERO)),
-    }))
+    })
+    .finish_walk())
 }
 
 /// Sell an exact share quantity into the best-first bid ladder.
@@ -450,7 +452,7 @@ pub fn walk_sell_exact_shares(
     if remaining > Decimal::ZERO && requirement == FillRequirement::AllOrNothing {
         return Ok(BookWalkFill::unfilled(Usd::ZERO, target));
     }
-    Ok(finish_walk(WalkResultParts {
+    Ok((WalkResultParts {
         side: Side::Sell,
         shares,
         gross,
@@ -460,7 +462,8 @@ pub fn walk_sell_exact_shares(
         requirement,
         unfilled_cash_budget: Usd::ZERO,
         unfilled_shares: Shares::new(remaining.max(Decimal::ZERO)),
-    }))
+    })
+    .finish_walk())
 }
 
 #[derive(Clone, Copy)]
@@ -476,39 +479,41 @@ struct WalkResultParts {
     unfilled_shares: Shares,
 }
 
-fn finish_walk(parts: WalkResultParts) -> BookWalkFill {
-    let WalkResultParts {
-        side,
-        shares,
-        gross,
-        fee,
-        worst,
-        complete,
-        requirement,
-        unfilled_cash_budget,
-        unfilled_shares,
-    } = parts;
-    debug_assert!(complete || requirement == FillRequirement::AllowPartial);
-    if shares <= Decimal::ZERO {
-        return BookWalkFill::unfilled(unfilled_cash_budget, unfilled_shares);
-    }
-    BookWalkFill {
-        outcome: if complete {
-            BookWalkOutcome::Filled
-        } else {
-            BookWalkOutcome::Partial
-        },
-        vwap: Some(Price::new(gross / shares)),
-        worst_price: worst,
-        filled_shares: Shares::new(shares),
-        gross_order_amount: Usd::new(gross),
-        expected_fee: Usd::new(fee),
-        total_cash_delta: match side {
-            Side::Buy => -(gross + fee),
-            Side::Sell => gross - fee,
-        },
-        unfilled_cash_budget,
-        unfilled_shares,
+impl WalkResultParts {
+    fn finish_walk(self) -> BookWalkFill {
+        let Self {
+            side,
+            shares,
+            gross,
+            fee,
+            worst,
+            complete,
+            requirement,
+            unfilled_cash_budget,
+            unfilled_shares,
+        } = self;
+        debug_assert!(complete || requirement == FillRequirement::AllowPartial);
+        if shares <= Decimal::ZERO {
+            return BookWalkFill::unfilled(unfilled_cash_budget, unfilled_shares);
+        }
+        BookWalkFill {
+            outcome: if complete {
+                BookWalkOutcome::Filled
+            } else {
+                BookWalkOutcome::Partial
+            },
+            vwap: Some(Price::new(gross / shares)),
+            worst_price: worst,
+            filled_shares: Shares::new(shares),
+            gross_order_amount: Usd::new(gross),
+            expected_fee: Usd::new(fee),
+            total_cash_delta: match side {
+                Side::Buy => -(gross + fee),
+                Side::Sell => gross - fee,
+            },
+            unfilled_cash_budget,
+            unfilled_shares,
+        }
     }
 }
 
@@ -606,31 +611,34 @@ mod tests {
         BookLevel::from_decimal_unchecked(Price::new(price), Shares::new(size))
     }
 
-    fn schedule() -> PitFeeSchedule {
-        let at = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
-        PitFeeSchedule {
-            schedule_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
-            effective_at: at,
-            available_at: at,
-            platform_rate: dec!(0.07),
-            exponent: Decimal::ONE,
-            taker_only: true,
-            builder_maker_fee_bps: Bps::ZERO,
-            builder_taker_fee_bps: Bps::ZERO,
-            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+    impl PitFeeSchedule {
+        fn semantics_fixture() -> Self {
+            let at = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
+            Self {
+                schedule_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64)))
+                    .expect("hash"),
+                effective_at: at,
+                available_at: at,
+                platform_rate: dec!(0.07),
+                exponent: Decimal::ONE,
+                taker_only: true,
+                builder_maker_fee_bps: Bps::ZERO,
+                builder_taker_fee_bps: Bps::ZERO,
+                builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+            }
         }
     }
 
     #[test]
-    fn fok_is_atomic_and_fak_is_partial() {
+    fn fok_atomic_fak_partial() {
         let asks = [level(dec!(0.5), dec!(10))];
-        let at = schedule().effective_at;
+        let at = PitFeeSchedule::semantics_fixture().effective_at;
         let fok = walk_buy_cash_budget(
             &asks,
             Usd::new(dec!(10)),
             Price::new(dec!(0.6)),
             FillRequirement::AllOrNothing,
-            &schedule(),
+            &PitFeeSchedule::semantics_fixture(),
             LiquidityRole::Taker,
             at,
         )
@@ -643,7 +651,7 @@ mod tests {
             Usd::new(dec!(10)),
             Price::new(dec!(0.6)),
             FillRequirement::AllowPartial,
-            &schedule(),
+            &PitFeeSchedule::semantics_fixture(),
             LiquidityRole::Taker,
             at,
         )
@@ -654,15 +662,15 @@ mod tests {
     }
 
     #[test]
-    fn sell_walk_and_fee_are_price_aware() {
+    fn sell_walk_fee_aware() {
         let bids = [level(dec!(0.9), dec!(10)), level(dec!(0.8), dec!(10))];
-        let at = schedule().effective_at;
+        let at = PitFeeSchedule::semantics_fixture().effective_at;
         let fill = walk_sell_exact_shares(
             &bids,
             Shares::new(dec!(15)),
             Price::new(dec!(0.7)),
             FillRequirement::AllowPartial,
-            &schedule(),
+            &PitFeeSchedule::semantics_fixture(),
             LiquidityRole::Taker,
             at,
         )
@@ -676,8 +684,8 @@ mod tests {
     }
 
     #[test]
-    fn advertised_builder_rate_is_not_charged_without_builder_code() {
-        let mut fees = schedule();
+    fn advertised_not_without_code() {
+        let mut fees = PitFeeSchedule::semantics_fixture();
         fees.taker_only = false;
         fees.platform_rate = Decimal::ZERO;
         fees.builder_maker_fee_bps = Bps::new(dec!(25));
@@ -693,8 +701,8 @@ mod tests {
     }
 
     #[test]
-    fn platform_fee_golden_vectors_match_v2_formula_and_rounding() {
-        let mut fees = schedule();
+    fn platform_fee_golden_rounding() {
+        let mut fees = PitFeeSchedule::semantics_fixture();
         fees.platform_rate = dec!(0.25);
         fees.exponent = dec!(2);
         let at = fees.effective_at;
@@ -767,8 +775,8 @@ mod tests {
     }
 
     #[test]
-    fn maker_platform_fee_follows_taker_only_market_fact() {
-        let mut fees = schedule();
+    fn maker_platform_fee_fact() {
+        let mut fees = PitFeeSchedule::semantics_fixture();
         let at = fees.effective_at;
         assert_eq!(
             fees.fee(
@@ -794,12 +802,12 @@ mod tests {
     }
 
     #[test]
-    fn every_prepared_buy_respects_total_cash_budget() {
+    fn buy_respects_total_budget() {
         for budget in [dec!(0.01), dec!(1), dec!(25), dec!(100), dec!(500)] {
             for price in [dec!(0.01), dec!(0.1), dec!(0.5), dec!(0.9), dec!(0.99)] {
                 for rate in [Decimal::ZERO, dec!(0.02), dec!(0.25)] {
                     for exponent in [Decimal::ZERO, Decimal::ONE, dec!(2)] {
-                        let mut fees = schedule();
+                        let mut fees = PitFeeSchedule::semantics_fixture();
                         fees.platform_rate = rate;
                         fees.exponent = exponent;
                         let asks = [level(price, dec!(1000000))];
@@ -824,7 +832,7 @@ mod tests {
     }
 
     #[test]
-    fn passive_queue_ignores_cancels_and_unreconciled_prints() {
+    fn passive_ignores_cancels_prints() {
         let session = Uuid::now_v7();
         let mut queue = PassiveQueueState::new(
             session,

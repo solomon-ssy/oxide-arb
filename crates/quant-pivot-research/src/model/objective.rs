@@ -28,7 +28,7 @@ use crate::{backtest::metrics, precision::RESEARCH_DECIMAL_SCALE, stats};
 const BPS_PER_UNIT_RETURN: i64 = 10_000;
 
 /// Parse the governed runtime-config section into exact `Decimal` weights.
-pub fn training_objective_from_runtime_config(
+pub fn runtime_training_objective(
     config: &ResearchTrainingConfig,
 ) -> QuantResult<TrainingObjectiveSpec> {
     Ok(TrainingObjectiveSpec {
@@ -269,7 +269,7 @@ impl ObjectiveEvaluator {
                     }
                     let pair_weight = match self.spec.rank_loss {
                         RankLossKind::PairwiseRanknet => Decimal::ONE,
-                        RankLossKind::RankIcWeightedRanknet => rank_ic_weighted_pair_weight(
+                        RankLossKind::RankIcWeightedRanknet => rank_pair_weight(
                             score_ranks[i],
                             score_ranks[j],
                             label_ranks[i],
@@ -378,7 +378,7 @@ impl ObjectiveEvaluator {
 /// Uses `|Δr̂|_eff = max(|Δr̂|, 1)` so score-rank ties still contribute signal
 /// for label-discordant pairs (avoids flat-score plateaus killing the loss).
 #[must_use]
-pub(crate) fn rank_ic_weighted_pair_weight(
+pub(crate) fn rank_pair_weight(
     score_rank_a: Decimal,
     score_rank_b: Decimal,
     label_rank_a: Decimal,
@@ -587,8 +587,8 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::{
-        CrossSectionGroup, ObjectiveEvaluator, SampleRow, ndcg_at_k, rank_ic_weighted_pair_weight,
-        topn_pseudo_allocations, training_objective_from_runtime_config,
+        CrossSectionGroup, ObjectiveEvaluator, SampleRow, ndcg_at_k, rank_pair_weight,
+        runtime_training_objective, topn_pseudo_allocations,
     };
 
     fn row(key: &str, signed: Decimal, label: Decimal) -> SampleRow {
@@ -600,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn correct_pairwise_order_has_lower_loss_than_reversed_order() {
+    fn correct_pairwise_order_order() {
         let group = CrossSectionGroup {
             decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
@@ -631,16 +631,16 @@ mod tests {
     }
 
     #[test]
-    fn rank_ic_weighted_pair_weight_matches_closed_form_with_ties_floor() {
-        let weight = rank_ic_weighted_pair_weight(dec!(1), dec!(3), dec!(2), dec!(4), 3);
+    fn rank_ic_matches_floor() {
+        let weight = rank_pair_weight(dec!(1), dec!(3), dec!(2), dec!(4), 3);
         assert_eq!(weight.round_dp(6), dec!(2));
         // Tied score ranks still get |Δr̂|_eff = 1.
-        let tied = rank_ic_weighted_pair_weight(dec!(2), dec!(2), dec!(1), dec!(3), 3);
+        let tied = rank_pair_weight(dec!(2), dec!(2), dec!(1), dec!(3), 3);
         assert!(tied > Decimal::ZERO);
     }
 
     #[test]
-    fn objective_breakdown_total_matches_weighted_components() {
+    fn objective_breakdown_matches_components() {
         let group = CrossSectionGroup {
             decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
@@ -665,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn ndcg_perfect_order_is_one_and_reversed_is_lower() {
+    fn ndcg_perfect_order_lower() {
         let labels = vec![dec!(30), dec!(20), dec!(10)];
         let perfect = vec![dec!(3), dec!(2), dec!(1)];
         let reversed = vec![dec!(1), dec!(2), dec!(3)];
@@ -678,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn topn_pseudo_allocations_only_select_top_n_and_keep_token_keys_separate() {
+    fn topn_pseudo_keep_separate() {
         let group = CrossSectionGroup {
             decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
@@ -696,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn topn_pseudo_allocations_all_negative_scores_still_equal_weight() {
+    fn topn_pseudo_allocations_weight() {
         let group = CrossSectionGroup {
             decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
@@ -715,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn rank_loss_group_count_excludes_all_tied_label_groups() {
+    fn rank_loss_excludes_groups() {
         let groups = vec![
             CrossSectionGroup {
                 decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
@@ -742,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn rank_ic_weighted_ranknet_differs_from_plain_pairwise() {
+    fn rank_ic_weighted_pairwise() {
         let group = CrossSectionGroup {
             decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
@@ -774,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn ndcg_k_truncation_is_respected() {
+    fn ndcg_k_truncation_respected() {
         let labels = vec![dec!(40), dec!(30), dec!(20), dec!(10)];
         let scores = vec![dec!(4), dec!(3), dec!(2), dec!(1)];
         let at_2 = ndcg_at_k(&scores, &labels, 2).expect("ndcg");
@@ -786,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn from_runtime_config_honors_ndcg_k_and_pseudo_top_n() {
+    fn runtime_config_honors_n() {
         let config = ResearchTrainingConfig {
             rank_loss: RankLossKind::PairwiseRanknet,
             optimizer: TrainingOptimizerKind::CoordinateSearch,
@@ -797,7 +797,7 @@ mod tests {
             ndcg_k: 7,
             pseudo_top_n: 4,
         };
-        let spec = training_objective_from_runtime_config(&config).expect("parse");
+        let spec = runtime_training_objective(&config).expect("parse");
         assert_eq!(spec.rank_loss, RankLossKind::PairwiseRanknet);
         assert_eq!(spec.ndcg_k, 7);
         assert_eq!(spec.pseudo_top_n, 4);

@@ -380,7 +380,7 @@ mod tests {
     };
 
     #[test]
-    fn exit_signal_enums_expose_wire_labels() {
+    fn exit_signal_enums_labels() {
         assert_eq!(
             ChExitSignalEvaluatorKind::Reinference.as_str(),
             "reinference"
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_kind_codes_are_stable() {
+    fn feature_kind_codes_stable() {
         assert_eq!(ChFeatureCellState::Missing as i8, 3);
         assert_eq!(
             ChFeatureValueKind::from_i8(1),
@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn ledger_event_kind_wire_labels() {
+    fn ledger_event_kind_labels() {
         assert_eq!(
             ChQuantLedgerEventKind::ExitSubmitted.as_str(),
             "exit_submitted"

@@ -183,15 +183,17 @@ mod tests {
         }
     }
 
-    fn context() -> MarketInferenceContext {
-        MarketInferenceContext {
-            secondary_token_id: Some(TokenId::new("no")),
-            yes_price: Price::new(dec!(0.5)),
-            no_price: Some(Price::new(dec!(0.52))),
-            liquidity_usd: Some(Usd::new(dec!(60000))),
-            data_quality: DataQualityStatus::Fresh,
-            time_to_resolution_secs: Some(86_400),
-            substitution_reasons: Vec::new(),
+    impl MarketInferenceContext {
+        fn batch_fixture() -> Self {
+            Self {
+                secondary_token_id: Some(TokenId::new("no")),
+                yes_price: Price::new(dec!(0.5)),
+                no_price: Some(Price::new(dec!(0.52))),
+                liquidity_usd: Some(Usd::new(dec!(60000))),
+                data_quality: DataQualityStatus::Fresh,
+                time_to_resolution_secs: Some(86_400),
+                substitution_reasons: Vec::new(),
+            }
         }
     }
 
@@ -215,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_scoring_matches_scalar_reference() {
+    fn batch_scoring_matches_reference() {
         let mut weights = BTreeMap::new();
         weights.insert(LIQUIDITY_DEPTH, dec!(0.5));
         weights.insert(MOMENTUM_ROC, dec!(0.5));
@@ -236,7 +238,7 @@ mod tests {
                     FactorDirection::Positive,
                 ),
             ],
-            context: context(),
+            context: MarketInferenceContext::batch_fixture(),
         };
         let bearish = FactorInferenceRow {
             market_id: MarketId::new("0xbear"),
@@ -253,7 +255,7 @@ mod tests {
                     FactorDirection::Negative,
                 ),
             ],
-            context: context(),
+            context: MarketInferenceContext::batch_fixture(),
         };
         let rows = vec![bullish, bearish];
         let batch_nets = layout.compute_nets(&rows).expect("batch nets");

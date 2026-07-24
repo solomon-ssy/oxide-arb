@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_samples_is_deterministic_and_ordered() {
+    fn plan_samples_deterministic_ordered() {
         let req = request(60);
         let markets = vec![market("zzz", -100, None), market("aaa", -100, None)];
         let first = plan_samples(&req, &markets).expect("valid plan");
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn lot_timeline_clamps_to_window_start() {
+    fn lot_timeline_clamps_start() {
         let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
         // Lot opened 100s before the window; closes 120s into it.
         let lots = vec![exit_lot(-100, 120)];
@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn count_samples_matches_plan_samples_len() {
+    fn count_samples_matches_len() {
         let req = request(60);
         let markets = vec![market("aaa", -100, None), market("m", 120, Some(240))];
         let expected = plan_samples(&req, &markets).expect("valid plan").len() as u64;
@@ -255,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn count_samples_stops_past_cap() {
+    fn count_samples_stops_cap() {
         let req = request(60);
         // Single market alive for all 5 window instants; cap of 2 must short-circuit.
         let markets = vec![market("aaa", -100, None)];
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_samples_respects_market_lifetime() {
+    fn plan_samples_respects_lifetime() {
         let req = request(60);
         // Created at +120s and resolves at +240s ⇒ only instants 120, 180.
         let markets = vec![market("m", 120, Some(240))];
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn interval_outside_chrono_range_is_rejected() {
+    fn interval_outside_chrono_rejected() {
         let req = request(u64::MAX);
         let markets = vec![market("m", -100, None)];
 

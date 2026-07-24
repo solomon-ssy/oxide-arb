@@ -37,7 +37,7 @@ impl Default for PolymarketConfig {
             clob_base_url: default_clob_url(),
             clob_ws_url: default_clob_ws_url(),
             order_post_timeout_ms: default_order_post_timeout(),
-            clob_market_info_refresh_secs: default_clob_market_info_refresh_secs(),
+            clob_market_info_refresh_secs: default_market_refresh_secs(),
             chain_id: default_chain_id(),
             onchain: OnchainConfig::default(),
             relayer: RelayerConfig::default(),
@@ -58,7 +58,7 @@ const fn default_chain_id() -> u64 {
 const fn default_order_post_timeout() -> u64 {
     45_000
 }
-const fn default_clob_market_info_refresh_secs() -> u64 {
+const fn default_market_refresh_secs() -> u64 {
     900
 }
 
@@ -253,7 +253,7 @@ mod rpc_endpoint_tests {
     use crate::config::secret::SecretText;
 
     #[test]
-    fn endpoint_source_is_explicitly_tagged() {
+    fn endpoint_source_explicitly_tagged() {
         let public: OnchainConfig = toml::from_str(
             r#"
 rpc_timeout_ms = 5000
@@ -279,7 +279,7 @@ rpc_endpoint = { source = "protected", url = "https://provider.invalid/v2/privat
     }
 
     #[test]
-    fn authenticated_endpoint_debug_is_redacted() {
+    fn authenticated_endpoint_debug_redacted() {
         let endpoint = PolygonRpcEndpoint::Protected {
             url: SecretText::from("https://provider.invalid/v2/private-provider-key"),
         };
@@ -289,7 +289,7 @@ rpc_endpoint = { source = "protected", url = "https://provider.invalid/v2/privat
     }
 
     #[test]
-    fn settlement_governance_durations_have_bounded_defaults() {
+    fn settlement_governance_durations_defaults() {
         let config = PolymarketConfig::default().settlement;
         assert_eq!(config.claim_lease_secs, 30);
         assert_eq!(config.semi_auto_authorization_ttl_secs, 300);

@@ -45,7 +45,7 @@ mod request_tests {
     use super::TrainModelRequest;
 
     #[test]
-    fn request_only_accepts_frozen_dataset_and_reason() {
+    fn request_only_accepts_reason() {
         let base = serde_json::json!({
             "training_dataset_id": uuid::Uuid::now_v7(),
             "reason": "train frozen artifact"

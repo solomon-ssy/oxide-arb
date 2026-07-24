@@ -18,7 +18,7 @@ use quant_pivot_models::{
         quant::{
             CompleteFeatureParityRun, FeatureParityRunInfo, ModelSpecInfo, ModelVersionInfo,
             ModelVersionParityEvidence, NewFeatureParityRun, NewFrozenModelParitySubject,
-            TrainingDatasetInfo, model_version_parity_evidence_hash,
+            TrainingDatasetInfo,
         },
     },
     enums::{
@@ -102,7 +102,7 @@ impl FrozenModelParityService {
             .await?
             && existing.status == FeatureParityRunStatus::Passed
         {
-            validate_passed_model_parity_run(&existing, version, &dataset)?;
+            validate_passed_parity(&existing, version, &dataset)?;
             return Ok(existing);
         }
 
@@ -112,7 +112,7 @@ impl FrozenModelParityService {
             model_version_id: version.model_version_id,
             training_dataset_id: dataset.training_dataset_id,
             subject_generation: version.artifact_hash,
-            evidence_hash: model_version_parity_evidence_hash(&ModelVersionParityEvidence {
+            evidence_hash: ModelVersionParityEvidence {
                 model_version_id: &version.model_version_id,
                 model_spec_id: &version.model_spec_id,
                 artifact_hash: &version.artifact_hash,
@@ -120,7 +120,8 @@ impl FrozenModelParityService {
                 dataset_hash: materialization.dataset_hash,
                 manifest_hash: materialization.manifest_hash,
                 artifact_bytes_hash: materialization.artifact_bytes_hash,
-            })?,
+            }
+            .content_hash()?,
         };
         let queued = self
             .deps
@@ -229,7 +230,7 @@ impl FrozenModelParityService {
                     version.model_version_id, dataset.training_dataset_id
                 ),
             })?;
-        validate_passed_model_parity_run(&run, version, &dataset)?;
+        validate_passed_parity(&run, version, &dataset)?;
         Ok(run)
     }
 
@@ -283,7 +284,7 @@ impl FrozenModelParityService {
         let spec = self
             .deps
             .model_registry_repo
-            .find_model_spec_by_id(&version.model_spec_id)
+            .find_model_spec(&version.model_spec_id)
             .await?
             .ok_or_else(|| StorageError::NotFound {
                 entity: "model_spec",
@@ -832,7 +833,7 @@ fn frozen_model_evidence_rows(
 }
 
 /// Validate the exact subject and completeness of a publication permit.
-pub(crate) fn validate_passed_model_parity_run(
+pub(crate) fn validate_passed_parity(
     run: &FeatureParityRunInfo,
     version: &ModelVersionInfo,
     dataset: &TrainingDatasetInfo,
@@ -898,7 +899,7 @@ mod tests {
     };
 
     use super::{
-        FrozenEvidenceRequest, frozen_model_evidence_rows, validate_passed_model_parity_run,
+        FrozenEvidenceRequest, frozen_model_evidence_rows, validate_passed_parity,
         verify_input_contract_binding,
     };
     use crate::test_fixtures::{
@@ -1050,24 +1051,24 @@ mod tests {
     }
 
     #[test]
-    fn exact_subject_full_pass_is_a_valid_publish_permit() {
+    fn exact_subject_full_permit() {
         let (version, dataset, run) = subject();
-        validate_passed_model_parity_run(&run, &version, &dataset).expect("valid permit");
+        validate_passed_parity(&run, &version, &dataset).expect("valid permit");
     }
 
     #[test]
-    fn swapped_subject_or_incomplete_transform_is_rejected() {
+    fn swapped_subject_incomplete_rejected() {
         let (version, dataset, mut run) = subject();
         run.model_version_id = Some(ModelVersionId::from_v7());
-        assert!(validate_passed_model_parity_run(&run, &version, &dataset).is_err());
+        assert!(validate_passed_parity(&run, &version, &dataset).is_err());
 
         run.model_version_id = Some(version.model_version_id);
         run.transform_hash = None;
-        assert!(validate_passed_model_parity_run(&run, &version, &dataset).is_err());
+        assert!(validate_passed_parity(&run, &version, &dataset).is_err());
     }
 
     #[test]
-    fn swapped_or_malformed_artifact_input_contract_is_rejected() {
+    fn swapped_malformed_artifact_rejected() {
         let spec = ModelInputContract {
             inputs: vec![
                 ModelInputSpec::required("book.mid"),
@@ -1096,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_evidence_is_row_anchored_without_fabricated_values() {
+    fn frozen_evidence_without_values() {
         let (version, dataset, run) = subject();
         let examples = vec![
             training_example(dataset.window_start + Duration::minutes(10)),

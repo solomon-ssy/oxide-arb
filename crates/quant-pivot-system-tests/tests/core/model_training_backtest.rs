@@ -89,7 +89,7 @@ use quant_pivot_research::{
     hashing::ResearchHasher,
     model::{
         CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, LabelSelector, ModelArtifact,
-        ModelRuntimeFactoryBuilder, objective::training_objective_from_runtime_config,
+        ModelRuntimeFactoryBuilder, objective::runtime_training_objective,
     },
     selection::SelectedMarket,
     training::{
@@ -286,55 +286,60 @@ struct E2eReplaySlice {
     max_book_staleness_ms: u64,
 }
 
-fn e2e_replay_slice() -> E2eReplaySlice {
-    let mut weights = BTreeMap::new();
-    weights.insert(
-        LIQUIDITY_DEPTH.to_string(),
-        DecimalValue::new(rust_decimal_macros::dec!(1)),
-    );
-    // PriceBook + MarketMetadata only. Cap every lookback-driving window so
-    // `features.max_lookback_secs` (→ CPCV `min_embargo_secs`) stays well
-    // below the 1h tick spacing — default 3600s micro / 86400s tape windows
-    // embargo entire train partitions on this 4-tick timeline.
-    E2eReplaySlice {
-        features: FeaturesConfig {
-            enabled_feature_families: vec![FeatureFamily::PriceBook, FeatureFamily::MarketMetadata],
-            bar_windows_secs: vec![60],
-            momentum: MomentumFeaturesConfig {
-                roc_windows_secs: vec![120],
-                roc_lag_secs: 60,
-                ema_fast_secs: 30,
-                ema_slow_secs: 60,
-                slope_windows_secs: vec![60],
+impl E2eReplaySlice {
+    fn fixture() -> Self {
+        let mut weights = BTreeMap::new();
+        weights.insert(
+            LIQUIDITY_DEPTH.to_string(),
+            DecimalValue::new(rust_decimal_macros::dec!(1)),
+        );
+        // PriceBook + MarketMetadata only. Cap every lookback-driving window so
+        // `features.max_lookback_secs` (→ CPCV `min_embargo_secs`) stays well
+        // below the 1h tick spacing — default 3600s micro / 86400s tape windows
+        // embargo entire train partitions on this 4-tick timeline.
+        Self {
+            features: FeaturesConfig {
+                enabled_feature_families: vec![
+                    FeatureFamily::PriceBook,
+                    FeatureFamily::MarketMetadata,
+                ],
+                bar_windows_secs: vec![60],
+                momentum: MomentumFeaturesConfig {
+                    roc_windows_secs: vec![120],
+                    roc_lag_secs: 60,
+                    ema_fast_secs: 30,
+                    ema_slow_secs: 60,
+                    slope_windows_secs: vec![60],
+                },
+                volatility_windows_secs: vec![60],
+                structural: StructuralFeaturesConfig {
+                    shock_window_secs: 60,
+                    book_churn_window_secs: 60,
+                    trade_tape_window_secs: 60,
+                    ..StructuralFeaturesConfig::default()
+                },
+                ..FeaturesConfig::default()
             },
-            volatility_windows_secs: vec![60],
-            structural: StructuralFeaturesConfig {
-                shock_window_secs: 60,
-                book_churn_window_secs: 60,
-                trade_tape_window_secs: 60,
-                ..StructuralFeaturesConfig::default()
+            factors: FactorsConfig {
+                enabled_factor_families: vec![FactorFamily::Liquidity],
+                factor_weights: FactorWeights { weights },
+                ..FactorsConfig::default()
             },
-            ..FeaturesConfig::default()
-        },
-        factors: FactorsConfig {
-            enabled_factor_families: vec![FactorFamily::Liquidity],
-            factor_weights: FactorWeights { weights },
-            ..FactorsConfig::default()
-        },
-        domain: DomainConfig::default(),
-        // Frozen data-quality contract used to derive schema bindings.
-        data_quality: DataQualityConfig {
-            max_book_age_ms: 60_000,
-            max_feature_bucket_age_secs: 120,
-            ..DataQualityConfig::default()
-        },
-        max_book_staleness_ms: 60_000,
+            domain: DomainConfig::default(),
+            // Frozen data-quality contract used to derive schema bindings.
+            data_quality: DataQualityConfig {
+                max_book_age_ms: 60_000,
+                max_feature_bucket_age_secs: 120,
+                ..DataQualityConfig::default()
+            },
+            max_book_staleness_ms: 60_000,
+        }
     }
 }
 
 fn e2e_runtime_config() -> DecisionPolicySnapshot {
     let mut config = DecisionPolicySnapshot::default();
-    let replay = e2e_replay_slice();
+    let replay = E2eReplaySlice::fixture();
     config.profile_artifacts.features.definition = replay.features;
     config.profile_artifacts.scoring.definition = replay.factors;
     config.profile_artifacts.domain.definition = replay.domain;
@@ -524,7 +529,7 @@ async fn seed_dataset(
     .await
     .expect("persist replayable Source Slice");
     let model_spec_definition_hash = PgModelRegistryRepository::new(db.clone())
-        .find_model_spec_by_id(model_spec_id)
+        .find_model_spec(model_spec_id)
         .await
         .expect("model spec lookup")
         .expect("model spec")
@@ -607,11 +612,11 @@ async fn seed_dataset(
 
 fn trainer_config() -> ModelTrainerConfig {
     let runtime = e2e_runtime_config();
-    let replay = e2e_replay_slice();
+    let replay = E2eReplaySlice::fixture();
     ModelTrainerConfig {
         factors: replay.factors,
         // Same path as the production port: parse frozen `research.training`.
-        objective: training_objective_from_runtime_config(
+        objective: runtime_training_objective(
             &runtime.profile_artifacts.research_method.research.training,
         )
         .expect("parse research.training"),
@@ -644,7 +649,7 @@ fn portfolio() -> PortfolioConfig {
 /// Replay config governing the PIT recompute — identical slice to the frozen
 /// runtime JSON [`e2e_runtime_config`] embeds for the CPCV port.
 fn replay_config() -> ReplayConfig {
-    let replay = e2e_replay_slice();
+    let replay = E2eReplaySlice::fixture();
     ReplayConfig {
         features: replay.features,
         factors: replay.factors,
@@ -778,7 +783,7 @@ fn make_trainer(
     )
 }
 
-pub async fn train_then_backtest_then_calibrate_e2e() {
+pub async fn train_backtest_calibrate_e2e() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
@@ -868,7 +873,7 @@ pub async fn train_then_backtest_then_calibrate_e2e() {
     );
 }
 
-pub async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
+pub async fn train_cpcv_persists_decomposition() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
@@ -930,10 +935,10 @@ pub async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
         .await
         .expect("cpcv port");
 
-    assert_cpcv_view_and_bind(&db, &registry, &version, &view, &path_set_id, coord_n).await;
+    assert_cpcv_view_bind(&db, &registry, &version, &view, &path_set_id, coord_n).await;
 }
 
-async fn assert_cpcv_view_and_bind(
+async fn assert_cpcv_view_bind(
     db: &DatabaseConnection,
     registry: &Arc<dyn ModelRegistryRepository>,
     version: &ModelVersionInfo,
@@ -968,7 +973,7 @@ async fn assert_cpcv_view_and_bind(
     assert_eq!(cpcv_run.model_run_id, view.model_run_id);
 
     let bound = registry
-        .find_model_version_by_id(&version.model_version_id)
+        .find_model_version(&version.model_version_id)
         .await
         .expect("reload version")
         .expect("version");
@@ -978,12 +983,12 @@ async fn assert_cpcv_view_and_bind(
     );
 
     registry
-        .set_publish_path_set_id(&version.model_version_id, Some(*path_set_id))
+        .set_publish_path(&version.model_version_id, Some(*path_set_id))
         .await
         .expect("explicit bind for publish gate");
 
     let bound = registry
-        .find_model_version_by_id(&version.model_version_id)
+        .find_model_version(&version.model_version_id)
         .await
         .expect("reload after bind")
         .expect("version");

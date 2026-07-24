@@ -165,7 +165,7 @@ mod tests {
     use super::{ModelInputContract, ModelInputSpec};
 
     #[test]
-    fn rejects_duplicate_and_encoded_columns() {
+    fn rejects_duplicate_encoded_columns() {
         let duplicate = ModelInputContract {
             inputs: vec![
                 ModelInputSpec::required("book.mid"),

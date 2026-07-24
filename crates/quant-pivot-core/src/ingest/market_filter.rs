@@ -71,7 +71,7 @@ mod tests {
     }
 
     #[test]
-    fn narrowed_filter_matches_any_membership() {
+    fn narrowed_filter_matches_membership() {
         let filter = MarketFilter::new(&[MarketCategory::Geopolitics]);
         let multi: CategorySet = [MarketCategory::Politics, MarketCategory::Geopolitics]
             .into_iter()
@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn reload_swaps_the_enabled_set() {
+    fn reload_swaps_enabled_set() {
         let filter = MarketFilter::new(&[MarketCategory::Sports]);
         assert!(filter.is_enabled(CategorySet::from(MarketCategory::Sports)));
         filter.reload(&[MarketCategory::Crypto]);

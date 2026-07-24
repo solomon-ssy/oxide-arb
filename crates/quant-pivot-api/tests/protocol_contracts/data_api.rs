@@ -80,7 +80,7 @@ async fn positions_deserializes_openapi_fixture() {
 }
 
 #[tokio::test]
-async fn positions_paginates_until_short_page() {
+async fn positions_paginates_until_page() {
     let server = MockServer::start().await;
     let page_size = 2_u32;
 
@@ -158,7 +158,7 @@ async fn positions_retries_transient_429() {
 }
 
 #[tokio::test]
-async fn positions_http_error_surfaces_api_error() {
+async fn positions_error_surfaces_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/positions"))

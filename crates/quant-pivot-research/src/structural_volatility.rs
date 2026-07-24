@@ -218,7 +218,7 @@ fn forecast_points(
         }
         *hourly_volume
             .entry((trade.token_id.clone(), decision_at))
-            .or_default() += trade.notional_usd.to_usd().inner();
+            .or_default() += Usd::from(trade.notional_usd).inner();
     }
     let mut timelines = BTreeMap::<(MarketId, TokenId), Vec<&TrainingExample>>::new();
     for example in examples {
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn month_windows_are_half_open_across_year_boundary() {
+    fn month_windows_half_boundary() {
         assert_eq!(
             next_month_start((2025, 12)).expect("next"),
             month_start((2026, 1)).expect("month")
@@ -467,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn qml_scale_is_nonnegative_and_collapses_without_excess_variance() {
+    fn qml_scale_without_variance() {
         let points = [
             point(0, dec!(0.55), dec!(0.01), dec!(0.002), dec!(100)),
             point(1, dec!(0.45), dec!(0.01), dec!(0.003), dec!(200)),
@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn interval_metrics_use_forecast_origin_volume_weights() {
+    fn interval_metrics_use_weights() {
         let points = [
             point(0, dec!(0.51), dec!(0.0025), Decimal::ZERO, dec!(9)),
             point(1, dec!(0.99), dec!(0.0001), Decimal::ZERO, dec!(1)),

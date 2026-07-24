@@ -52,8 +52,7 @@ use crate::{
     service::{
         backtest::BacktestInput,
         calibration_shared::{
-            assert_disjoint_from_all_training_datasets, assert_embargoed_after,
-            calibration_split_hash,
+            assert_dataset_disjoint, assert_embargoed_after, calibration_split_hash,
         },
     },
 };
@@ -183,7 +182,7 @@ impl ModelCalibrationFitService {
     ) -> QuantResult<TimeWindow> {
         let version = self
             .model_registry_repo
-            .find_model_version_by_id(model_version_id)
+            .find_model_version(model_version_id)
             .await?
             .ok_or_else(|| {
                 QuantError::from(ResearchError::DatasetBuild {
@@ -231,7 +230,7 @@ impl ModelCalibrationFitService {
             calibration_dataset.window_end,
         );
         // Purge: disjoint from every Ready training dataset in the system.
-        assert_disjoint_from_all_training_datasets(
+        assert_dataset_disjoint(
             self.training_dataset_repo.as_ref(),
             &calibration_window,
             "model calibration fit",
@@ -307,7 +306,7 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
 
         let version = self
             .model_registry_repo
-            .find_model_version_by_id(model_version_id)
+            .find_model_version(model_version_id)
             .await?
             .ok_or_else(|| {
                 QuantError::from(ResearchError::DatasetBuild {
@@ -343,7 +342,7 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
             calibration_dataset.window_end,
         );
 
-        let disjoint_ok = match assert_disjoint_from_all_training_datasets(
+        let disjoint_ok = match assert_dataset_disjoint(
             self.training_dataset_repo.as_ref(),
             &calibration_window,
             "model calibration fit preflight",

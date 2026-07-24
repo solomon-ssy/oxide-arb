@@ -24,7 +24,7 @@ use quant_pivot_system_tests::{
 };
 use rust_decimal::Decimal;
 
-pub async fn create_snapshot_then_find_and_list_members() {
+pub async fn create_snapshot_find_members() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
 

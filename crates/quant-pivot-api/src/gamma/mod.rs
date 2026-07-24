@@ -98,7 +98,7 @@ impl GammaClient {
         let concurrency = max_concurrency.max(1);
         stream::iter(market_ids.iter().cloned())
             .map(|market_id| async move {
-                let result = self.get_market_with_source_time(&market_id).await;
+                let result = self.market_at_source_time(&market_id).await;
                 (market_id, result)
             })
             .buffer_unordered(concurrency)
@@ -126,17 +126,17 @@ impl GammaClient {
         &self,
         condition_id: &MarketId,
     ) -> Result<MarketRegistryInfo, ApiError> {
-        self.get_market_with_source_time(condition_id)
+        self.market_at_source_time(condition_id)
             .await
             .map(|fetched| fetched.registry)
     }
 
-    async fn get_market_with_source_time(
+    async fn market_at_source_time(
         &self,
         condition_id: &MarketId,
     ) -> Result<FetchedCatalogMarket, ApiError> {
         let cid = condition_id.as_str();
-        let Some(wire) = self.fetch_market_by_condition_id(cid).await? else {
+        let Some(wire) = self.fetch_condition_market(cid).await? else {
             return Err(ApiError::Gamma {
                 endpoint: format!("/markets?condition_ids={cid}"),
                 status: 404,
@@ -200,7 +200,7 @@ impl GammaClient {
         condition_id: &MarketId,
     ) -> Result<Option<GammaResolution>, ApiError> {
         let cid = condition_id.as_str();
-        let Some(wire) = self.fetch_market_by_condition_id(cid).await? else {
+        let Some(wire) = self.fetch_condition_market(cid).await? else {
             return Ok(None);
         };
 
@@ -226,10 +226,7 @@ impl GammaClient {
     }
 
     /// `GET /markets?condition_ids={cid}` with retry; `Ok(None)` = unknown market.
-    async fn fetch_market_by_condition_id(
-        &self,
-        cid: &str,
-    ) -> Result<Option<WireMarket>, ApiError> {
+    async fn fetch_condition_market(&self, cid: &str) -> Result<Option<WireMarket>, ApiError> {
         let http = self.http.clone();
         let base_url = self.config.base_url.clone();
         let cid = cid.to_owned();

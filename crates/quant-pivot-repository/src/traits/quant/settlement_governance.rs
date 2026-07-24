@@ -95,7 +95,7 @@ pub trait SettlementGovernanceRepository: Send + Sync {
         command: RecordGovernedActionRelayerAcceptance,
     ) -> Result<SettlementChainSubmissionInfo, StorageError>;
 
-    async fn record_action_relayer_chain_hash(
+    async fn record_relayer_chain_hash(
         &self,
         command: RecordGovernedActionRelayerChainHash,
     ) -> Result<SettlementChainSubmissionInfo, StorageError>;

@@ -320,7 +320,7 @@ mod tests {
 
     /// Construct a strongly-typed candidate.
     #[test]
-    fn typed_signal_candidate_constructs_from_newtypes() {
+    fn typed_signal_candidate_newtypes() {
         let candidate = SignalCandidate {
             signal_candidate_id: SignalCandidateId::from_v7(),
             model_run_id: ModelRunId::from_v7(),
@@ -356,39 +356,41 @@ mod tests {
         assert_eq!(back, candidate);
     }
 
-    fn sample_candidate() -> SignalCandidate {
-        SignalCandidate {
-            signal_candidate_id: SignalCandidateId::from_v7(),
-            model_run_id: ModelRunId::from_v7(),
-            market_id: MarketId::new("0xmarket"),
-            token_id: TokenId::new("123456"),
-            outcome_side: OutcomeSide::No,
-            composite_score: Probability::new(Decimal::new(72, 2)),
-            confidence: Probability::new(Decimal::new(60, 2)),
-            // +200 bps target, -500 bps stop on a 0.40 entry.
-            expected_return_bps: Decimal::from(200),
-            downside_bps: Decimal::from(500),
-            win_probability: Some(Probability::new(Decimal::new(52, 2))),
-            entry_price_ref: Price::new(Decimal::new(40, 2)),
-            suggested_horizon_secs: 3_600,
-            factor_breakdown: Vec::new(),
-            model_explanation: ModelExplanation {
-                headline: "test".to_owned(),
-                top_positive: Vec::new(),
-                top_negative: Vec::new(),
-            },
-            rejection_warnings: Vec::new(),
-            rank_before_portfolio: 3,
-            liquidity_score: Probability::ZERO,
-            data_quality_score: Probability::ZERO,
-            model_score_percentile: Probability::ZERO,
-            decision_at: Utc::now(),
+    impl SignalCandidate {
+        fn test_fixture() -> Self {
+            Self {
+                signal_candidate_id: SignalCandidateId::from_v7(),
+                model_run_id: ModelRunId::from_v7(),
+                market_id: MarketId::new("0xmarket"),
+                token_id: TokenId::new("123456"),
+                outcome_side: OutcomeSide::No,
+                composite_score: Probability::new(Decimal::new(72, 2)),
+                confidence: Probability::new(Decimal::new(60, 2)),
+                // +200 bps target, -500 bps stop on a 0.40 entry.
+                expected_return_bps: Decimal::from(200),
+                downside_bps: Decimal::from(500),
+                win_probability: Some(Probability::new(Decimal::new(52, 2))),
+                entry_price_ref: Price::new(Decimal::new(40, 2)),
+                suggested_horizon_secs: 3_600,
+                factor_breakdown: Vec::new(),
+                model_explanation: ModelExplanation {
+                    headline: "test".to_owned(),
+                    top_positive: Vec::new(),
+                    top_negative: Vec::new(),
+                },
+                rejection_warnings: Vec::new(),
+                rank_before_portfolio: 3,
+                liquidity_score: Probability::ZERO,
+                data_quality_score: Probability::ZERO,
+                model_score_percentile: Probability::ZERO,
+                decision_at: Utc::now(),
+            }
         }
     }
 
     #[test]
-    fn business_prediction_hash_ignores_execution_ids() {
-        let candidate = sample_candidate();
+    fn business_prediction_ignores_ids() {
+        let candidate = SignalCandidate::test_fixture();
         let mut replayed = candidate.clone();
         replayed.signal_candidate_id = SignalCandidateId::from_v7();
         replayed.model_run_id = ModelRunId::from_v7();
@@ -400,8 +402,8 @@ mod tests {
     }
 
     #[test]
-    fn business_prediction_hash_is_order_independent() {
-        let first = sample_candidate();
+    fn business_prediction_hash_independent() {
+        let first = SignalCandidate::test_fixture();
         let mut second = first.clone();
         second.signal_candidate_id = SignalCandidateId::from_v7();
         second.market_id = MarketId::new("0xsecond");
@@ -415,8 +417,8 @@ mod tests {
     }
 
     #[test]
-    fn business_prediction_hash_commits_downstream_business_fields() {
-        let candidate = sample_candidate();
+    fn business_prediction_commits_fields() {
+        let candidate = SignalCandidate::test_fixture();
         let baseline =
             canonical_business_prediction_hash(slice::from_ref(&candidate)).expect("baseline");
 
@@ -455,8 +457,8 @@ mod tests {
     }
 
     #[test]
-    fn business_prediction_hash_rejects_duplicate_business_key() {
-        let first = sample_candidate();
+    fn business_rejects_duplicate_key() {
+        let first = SignalCandidate::test_fixture();
         let mut duplicate = first.clone();
         duplicate.signal_candidate_id = SignalCandidateId::from_v7();
         duplicate.model_run_id = ModelRunId::from_v7();
@@ -468,8 +470,8 @@ mod tests {
     }
 
     #[test]
-    fn signal_candidate_maps_to_ch_row() {
-        let candidate = sample_candidate();
+    fn signal_candidate_maps_row() {
+        let candidate = SignalCandidate::test_fixture();
         let row = signal_candidate_event(&candidate, "score_below_floor", 1_700_000_000_000);
 
         assert_eq!(row.event_time, 1_700_000_000_000);
@@ -482,10 +484,13 @@ mod tests {
         assert_eq!(row.rejection_reason, "score_below_floor");
         // target = 0.40 × (1 + 0.02) = 0.408; stop = 0.40 × (1 − 0.05) = 0.38.
         assert_eq!(
-            row.target_price.to_price(),
+            Price::from(row.target_price),
             Price::new(Decimal::new(408, 3))
         );
-        assert_eq!(row.stop_price.to_price(), Price::new(Decimal::new(380, 3)));
+        assert_eq!(
+            Price::from(row.stop_price),
+            Price::new(Decimal::new(380, 3))
+        );
 
         let batch = signal_candidate_events(slice::from_ref(&candidate), 1);
         assert_eq!(batch.len(), 1);

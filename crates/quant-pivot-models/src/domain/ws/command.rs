@@ -45,7 +45,7 @@ mod tests {
     use crate::{domain::ws::channel::WsChannel, types::MarketId};
 
     #[test]
-    fn subscribe_parses_into_typed_channel_and_market() {
+    fn subscribe_parses_into_market() {
         let cmd: ClientCommand = serde_json::from_str(
             r#"{ "action": "subscribe", "channel": "market.book_update", "market_id": "0xabc" }"#,
         )
@@ -60,7 +60,7 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_without_market_defaults_to_none() {
+    fn subscribe_without_market_none() {
         let cmd: ClientCommand =
             serde_json::from_str(r#"{ "action": "subscribe", "channel": "quant.report" }"#)
                 .expect("valid subscribe");
@@ -74,7 +74,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_channel_is_rejected_by_name() {
+    fn unknown_channel_rejected_name() {
         let err = serde_json::from_str::<ClientCommand>(
             r#"{ "action": "subscribe", "channel": "market.bogus" }"#,
         )

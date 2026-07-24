@@ -24,7 +24,7 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::{ContentHash, SettlementGovernedActionId, SettlementRedeemId, UserId},
+    types::{ContentHash, SettlementGovernedActionId, SettlementRedeemId},
 };
 use serde::Serialize;
 
@@ -156,7 +156,9 @@ async fn approve(
     body: ValidatedJson<SettlementAuthorizationRequest>,
 ) -> Result<WebResponse<SettlementRedeemView>, WebError> {
     let settlement_redeem_id = id.into_inner();
-    let actor_id = actor_user_id(&actor)?;
+    let actor_id = actor
+        .user_id()
+        .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))?;
     let request = body.into_inner();
     let reason = authorization_reason(&request.reason)?;
     let before = require_detail(&state, &settlement_redeem_id).await?;
@@ -188,7 +190,9 @@ async fn revoke_approval(
     body: ValidatedJson<SettlementAuthorizationRequest>,
 ) -> Result<WebResponse<SettlementRedeemView>, WebError> {
     let settlement_redeem_id = id.into_inner();
-    let actor_id = actor_user_id(&actor)?;
+    let actor_id = actor
+        .user_id()
+        .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))?;
     let request = body.into_inner();
     let reason = authorization_reason(&request.reason)?;
     let before = require_detail(&state, &settlement_redeem_id).await?;
@@ -311,7 +315,9 @@ async fn revoke_governed_action(
     body: ValidatedJson<SettlementGovernedActionRevokeRequest>,
 ) -> Result<WebResponse<SettlementGovernedActionView>, WebError> {
     let action_id = id.into_inner();
-    let actor_id = actor_user_id(&actor)?;
+    let actor_id = actor
+        .user_id()
+        .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))?;
     let before = state
         .settlement_control
         .get_governed_action(&action_id)
@@ -343,7 +349,9 @@ async fn apply_governed_action(
     request: SettlementGovernedActionApplyRequest,
     action: &'static str,
 ) -> Result<WebResponse<SettlementGovernedActionView>, WebError> {
-    let actor_id = actor_user_id(&actor)?;
+    let actor_id = actor
+        .user_id()
+        .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))?;
     let applied = state
         .settlement_control
         .apply_governed_action(request, actor_id, Utc::now())
@@ -450,14 +458,6 @@ fn record_governed_action_audit(
         "request_id": request_id.0,
     }))?;
     Ok(())
-}
-
-fn actor_user_id(actor: &AuthedActor) -> Result<UserId, WebError> {
-    actor
-        .claims
-        .sub
-        .parse()
-        .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))
 }
 
 fn authorization_reason(reason: &str) -> Result<&str, WebError> {

@@ -515,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn max_staleness_uses_oldest_side() {
+    fn max_staleness_uses_side() {
         let book = QuantBookSnapshot {
             yes_bids: side(dec!(0.96), 900),
             yes_asks: side(dec!(0.97), 950),
@@ -552,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_summary_matches_reference_scans() {
+    fn publish_summary_matches_scans() {
         let bids = Arc::from([
             level_with_size(dec!(0.55), dec!(10)),
             level_with_size(dec!(0.54), dec!(20)),
@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn bid_depth_down_to_walks_sorted_levels() {
+    fn bid_depth_down_levels() {
         let bids = Arc::from([
             level_with_size(dec!(0.95), dec!(8)),
             level_with_size(dec!(0.93), dec!(12)),
@@ -594,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn top_n_share_depth_sums_best_n_by_shares() {
+    fn top_n_share_shares() {
         let levels = [
             level_with_size(dec!(0.50), dec!(10)),
             level_with_size(dec!(0.49), dec!(20)),

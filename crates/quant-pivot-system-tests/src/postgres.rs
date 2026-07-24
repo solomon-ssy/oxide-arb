@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use quant_pivot_migration::apply as apply_postgres_migrations;
 use quant_pivot_models::{config::PostgresConfig, security::hash_password};
 use quant_pivot_storage::postgres::{PostgresPool, migration::finalize_schema_deployment};
@@ -119,6 +120,25 @@ impl PostgresSuite {
 /// Serial guard retaining exclusive access to the shared scenario database.
 pub struct ScenarioDatabase {
     _permit: OwnedMutexGuard<()>,
+}
+
+/// Database-clock boundary for fixtures that participate in persisted timelines.
+pub trait PostgresClock {
+    async fn statement_time(&self) -> DateTime<Utc>;
+}
+
+impl PostgresClock for DatabaseConnection {
+    async fn statement_time(&self) -> DateTime<Utc> {
+        self.query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT statement_timestamp() AS statement_time",
+        ))
+        .await
+        .expect("read database statement time")
+        .expect("database statement time row")
+        .try_get::<DateTime<Utc>>("", "statement_time")
+        .expect("decode database statement time")
+    }
 }
 
 /// Run all repository contracts against one disposable `PostgreSQL` server.

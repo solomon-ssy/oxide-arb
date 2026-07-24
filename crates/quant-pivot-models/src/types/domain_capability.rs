@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_hash_is_order_independent_after_canonicalization() {
+    fn registry_hash_after_canonicalization() {
         let left = DomainCapabilityRegistryArtifact::new(
             ResolverVersion::new(3),
             vec![capability(&["ETH", "BTC"])],
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_hash_binds_resolver_version() {
+    fn registry_hash_binds_version() {
         let v3 = DomainCapabilityRegistryArtifact::new(
             ResolverVersion::new(3),
             vec![capability(&["BTC"])],

@@ -33,7 +33,13 @@ use reqwest::{Client, Url};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::contracts::SettlementDeploymentCatalog;
+use super::{
+    contracts::SettlementDeploymentCatalog,
+    typed::{
+        IntoEvmAddress, IntoEvmBlockHash, IntoEvmTransactionHash, IntoEvmUint,
+        SettlementValueError, SettlementValueKind,
+    },
+};
 
 const POLYGON_CHAIN_ID: u64 = 137;
 const BINARY_OUTCOME_COUNT: usize = 2;
@@ -90,8 +96,11 @@ impl FinalizedResolutionVector {
             exact_payout_ratio(numerators[1], denominator)?,
         ];
         Ok(Self {
-            denominator: typed_uint(denominator)?,
-            numerators: [typed_uint(numerators[0])?, typed_uint(numerators[1])?],
+            denominator: (denominator).into_evm_uint()?,
+            numerators: [
+                (numerators[0]).into_evm_uint()?,
+                (numerators[1]).into_evm_uint()?,
+            ],
             payout_ratios,
         })
     }
@@ -246,7 +255,7 @@ impl AlloyFinalizedResolutionReader {
         let block_time = block_time(block.timestamp)?;
         Ok(FinalizedResolutionBlock {
             block_number: block.number,
-            block_hash: typed_block_hash(block.hash)?,
+            block_hash: (block.hash).into_evm_block_hash()?,
             block_time,
         })
     }
@@ -330,7 +339,7 @@ impl AlloyFinalizedResolutionReader {
                 blocks.insert(block_number, block.clone());
                 block
             };
-            let typed_log_block_hash = typed_block_hash(block_hash)?;
+            let typed_log_block_hash = (block_hash).into_evm_block_hash()?;
             if source_block.block_hash != typed_log_block_hash {
                 return Err(ResolutionSourceReadError::CanonicalHashChanged {
                     block: block_number,
@@ -340,7 +349,7 @@ impl AlloyFinalizedResolutionReader {
                 .verify_contract_state(decoded.condition_id, block_hash, &decoded.numerators)
                 .await?;
             let market_id = MarketId::new(format!("{:#x}", decoded.condition_id));
-            let typed_transaction_hash = typed_transaction_hash(transaction_hash)?;
+            let typed_transaction_hash = (transaction_hash).into_evm_transaction_hash()?;
             let source_checkpoint_hash = resolution_checkpoint_hash(
                 &self.conditional_tokens,
                 &market_id,
@@ -352,7 +361,7 @@ impl AlloyFinalizedResolutionReader {
             observations.push(FinalizedResolutionObservation {
                 market_id,
                 vector,
-                oracle: typed_address(decoded.oracle)?,
+                oracle: (decoded.oracle).into_evm_address()?,
                 question_id: format!("{:#x}", decoded.question_id),
                 transaction_hash: typed_transaction_hash,
                 block_number,
@@ -668,38 +677,6 @@ fn parse_u256(field: &'static str, value: &str) -> Result<U256, ResolutionSource
     })
 }
 
-fn typed_uint(value: U256) -> Result<EvmUint256, ResolutionSourceReadError> {
-    EvmUint256::parse(value.to_string()).map_err(|source| {
-        ResolutionSourceReadError::NumericEvidence {
-            detail: source.to_string(),
-        }
-    })
-}
-
-fn typed_address(value: Address) -> Result<EvmAddress, ResolutionSourceReadError> {
-    EvmAddress::parse(format!("{value:#x}").to_lowercase()).map_err(|source| {
-        ResolutionSourceReadError::InvalidLog {
-            detail: source.to_string(),
-        }
-    })
-}
-
-fn typed_block_hash(value: B256) -> Result<EvmBlockHash, ResolutionSourceReadError> {
-    EvmBlockHash::parse(format!("{value:#x}")).map_err(|source| {
-        ResolutionSourceReadError::InvalidLog {
-            detail: source.to_string(),
-        }
-    })
-}
-
-fn typed_transaction_hash(value: B256) -> Result<EvmTransactionHash, ResolutionSourceReadError> {
-    EvmTransactionHash::parse(format!("{value:#x}")).map_err(|source| {
-        ResolutionSourceReadError::InvalidLog {
-            detail: source.to_string(),
-        }
-    })
-}
-
 fn block_time(seconds: u64) -> Result<DateTime<Utc>, ResolutionSourceReadError> {
     let seconds =
         i64::try_from(seconds).map_err(|source| ResolutionSourceReadError::InvalidBlockTime {
@@ -776,6 +753,20 @@ pub enum ResolutionSourceReadError {
     CanonicalDigest(#[from] CanonicalDigestError),
 }
 
+impl From<SettlementValueError> for ResolutionSourceReadError {
+    fn from(error: SettlementValueError) -> Self {
+        if error.kind() == SettlementValueKind::Uint {
+            Self::NumericEvidence {
+                detail: error.detail().to_owned(),
+            }
+        } else {
+            Self::InvalidLog {
+                detail: error.detail().to_owned(),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloy::{
@@ -798,7 +789,7 @@ mod tests {
     use crate::settlement::contracts::SettlementDeploymentCatalog;
 
     #[test]
-    fn condition_resolution_decoder_requires_exact_binary_abi() {
+    fn condition_resolution_requires_abi() {
         let condition_id = B256::repeat_byte(0x11);
         let oracle = Address::repeat_byte(0x22);
         let question_id = B256::repeat_byte(0x33);
@@ -825,11 +816,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalized_scan_binds_event_state_and_canonical_checkpoint() {
-        let (_server, reader) = test_reader(RpcScenario {
+    async fn finalized_scan_binds_checkpoint() {
+        let (_server, reader) = (RpcScenario {
             state_yes: 1,
             state_no: 1,
         })
+        .test_reader()
         .await;
         let first = reader
             .scan_finalized(100, 100)
@@ -859,11 +851,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalized_scan_rejects_event_state_divergence() {
-        let (_server, reader) = test_reader(RpcScenario {
+    async fn finalized_scan_rejects_divergence() {
+        let (_server, reader) = (RpcScenario {
             state_yes: 1,
             state_no: 0,
         })
+        .test_reader()
         .await;
         assert!(matches!(
             reader.scan_finalized(100, 100).await,
@@ -877,18 +870,20 @@ mod tests {
         state_no: u64,
     }
 
-    async fn test_reader(scenario: RpcScenario) -> (MockServer, AlloyFinalizedResolutionReader) {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(move |request: &Request| rpc_response(request, scenario))
-            .mount(&server)
-            .await;
-        let reader = AlloyFinalizedResolutionReader::connect(&OnchainConfig {
-            rpc_endpoint: PolygonRpcEndpoint::Public { url: server.uri() },
-            rpc_timeout_ms: 5_000,
-        })
-        .expect("test resolution reader");
-        (server, reader)
+    impl RpcScenario {
+        async fn test_reader(self) -> (MockServer, AlloyFinalizedResolutionReader) {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(move |request: &Request| rpc_response(request, self))
+                .mount(&server)
+                .await;
+            let reader = AlloyFinalizedResolutionReader::connect(&OnchainConfig {
+                rpc_endpoint: PolygonRpcEndpoint::Public { url: server.uri() },
+                rpc_timeout_ms: 5_000,
+            })
+            .expect("test resolution reader");
+            (server, reader)
+        }
     }
 
     fn rpc_response(request: &Request, scenario: RpcScenario) -> ResponseTemplate {

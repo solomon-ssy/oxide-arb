@@ -38,7 +38,7 @@ fn report(source_sequence: u64) -> CryptoPriceReport {
     }
 }
 
-pub async fn crypto_source_sequence_roundtrips_through_postgres_bigint() {
+pub async fn crypto_source_sequence_bigint() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgDomainProjectionRepository::new(db.clone());
@@ -68,7 +68,7 @@ pub async fn crypto_source_sequence_roundtrips_through_postgres_bigint() {
     assert_eq!(stored.source_sequence, 5_123_456_789_i64);
 }
 
-pub async fn crypto_source_sequence_above_postgres_bigint_is_rejected_before_write() {
+pub async fn crypto_rejected_before_write() {
     let (pool, _container) = setup_pg().await;
     let repo = PgDomainProjectionRepository::new(pool.connection().clone());
     let report = report(u64::MAX);

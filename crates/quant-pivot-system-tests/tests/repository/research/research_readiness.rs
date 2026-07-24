@@ -65,7 +65,7 @@ fn new_evidence(
     }
 }
 
-pub async fn readiness_evidence_is_scoped_expiring_idempotent_and_append_only() {
+pub async fn readiness_evidence_scoped_only() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgResearchReadinessEvidenceRepository::new(db.clone());
@@ -124,7 +124,7 @@ pub async fn readiness_evidence_is_scoped_expiring_idempotent_and_append_only() 
     );
 }
 
-pub async fn readiness_evidence_rejects_payload_hash_or_kind_tampering() {
+pub async fn readiness_evidence_rejects_tampering() {
     let (pool, _container) = setup_pg().await;
     let repo = PgResearchReadinessEvidenceRepository::new(pool.connection().clone());
     let observed_at = Utc::now() - Duration::minutes(1);
@@ -137,7 +137,7 @@ pub async fn readiness_evidence_rejects_payload_hash_or_kind_tampering() {
     assert!(repo.append(evidence).await.is_err());
 }
 
-pub async fn shadow_latency_observation_returns_missing_dimensions_without_fallbacks() {
+pub async fn shadow_missing_without_fallbacks() {
     let (pool, _container) = setup_pg().await;
     let repo = PgResearchReadinessEvidenceRepository::new(pool.connection().clone());
     let end = Utc::now();

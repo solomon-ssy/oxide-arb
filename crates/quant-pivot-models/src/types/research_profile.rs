@@ -540,7 +540,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
             ],
             allowed_cash_budget_tiers: cash_budget.clone(),
             activation_eligibility: ResearchEvaluationTrack::ResearchOnly,
-            quality_gate: production_quality_gate(),
+            quality_gate: TradePolicyQualityGate::production(),
             feedback_policy: production_feedback_policy(false),
         },
         published_at,
@@ -572,7 +572,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
             ],
             allowed_cash_budget_tiers: cash_budget.clone(),
             activation_eligibility: ResearchEvaluationTrack::ResearchOnly,
-            quality_gate: production_quality_gate(),
+            quality_gate: TradePolicyQualityGate::production(),
             feedback_policy: production_feedback_policy(true),
         },
         published_at,
@@ -605,7 +605,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
             ],
             allowed_cash_budget_tiers: cash_budget,
             activation_eligibility: ResearchEvaluationTrack::SemiAutoCandidate,
-            quality_gate: production_quality_gate(),
+            quality_gate: TradePolicyQualityGate::production(),
             feedback_policy: production_feedback_policy(true),
         },
         published_at,
@@ -629,35 +629,18 @@ pub fn minimum_raw_retention_days() -> Result<u32, String> {
         .ok_or_else(|| "raw-retention floor overflow".to_owned())
 }
 
-/// Resolve and verify an immutable built-in profile reference.
-pub fn resolve_builtin_research_profile(
-    profile_ref: &ResearchProfileRef,
-) -> Result<ResearchProfileArtifact, String> {
-    builtin_research_profiles()?
-        .into_iter()
-        .find(|profile| profile.profile_ref == *profile_ref)
-        .ok_or_else(|| {
-            format!(
-                "unknown or content-mismatched research profile {}@{}",
-                profile_ref.id, profile_ref.version
-            )
-        })
-}
-
-fn production_quality_gate() -> TradePolicyQualityGate {
-    TradePolicyQualityGate {
-        min_effective_sample_size: 100,
-        min_full_l2_coverage: Decimal::new(95, 2),
-        min_common_candidate_support: Decimal::new(95, 2),
-        min_passive_reconciled_trade_coverage: Decimal::new(95, 2),
-        min_fee_catalog_coverage: Decimal::ONE,
-        min_eligible_market_coverage: Decimal::new(95, 2),
-        min_cpcv_paths: 21,
-        min_deflated_sharpe_ratio: Decimal::new(95, 2),
-        max_probability_of_backtest_overfitting: Decimal::new(5, 1),
-        max_ambiguous_touch_rate: Decimal::new(5, 2),
-        max_depth_failure_rate: Decimal::new(5, 2),
-        min_lower_confidence_utility_bps: Bps::ZERO,
+impl ResearchProfileRef {
+    /// Resolve and verify an immutable built-in profile reference.
+    pub fn resolve_builtin_research_profile(&self) -> Result<ResearchProfileArtifact, String> {
+        builtin_research_profiles()?
+            .into_iter()
+            .find(|profile| profile.profile_ref == *self)
+            .ok_or_else(|| {
+                format!(
+                    "unknown or content-mismatched research profile {}@{}",
+                    self.id, self.version
+                )
+            })
     }
 }
 
@@ -681,11 +664,11 @@ fn production_feedback_policy(auto_publish_eligible: bool) -> ResearchFeedbackPo
 mod tests {
     use super::{
         Bps, ResearchEvaluationTrack, WEATHER_FORECAST_24H_HORIZON_SECS, builtin_research_profiles,
-        minimum_raw_retention_days, resolve_builtin_research_profile,
+        minimum_raw_retention_days,
     };
 
     #[test]
-    fn builtins_are_hash_stable_and_weather_is_the_only_semi_auto_candidate() {
+    fn builtins_hash_stable_candidate() {
         let profiles = builtin_research_profiles().expect("profiles");
         assert_eq!(profiles.len(), 3);
         let weather = profiles
@@ -704,7 +687,9 @@ mod tests {
                 .permits(ResearchEvaluationTrack::SemiAutoCandidate)
         );
         assert_eq!(
-            resolve_builtin_research_profile(&weather.profile_ref)
+            weather
+                .profile_ref
+                .resolve_builtin_research_profile()
                 .expect("resolve")
                 .profile_ref,
             weather.profile_ref

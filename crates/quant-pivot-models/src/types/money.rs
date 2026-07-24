@@ -107,6 +107,11 @@ macro_rules! decimal_newtype {
             #[must_use]
             #[inline]
             pub fn ceil(self) -> Self { Self(self.0.ceil()) }
+
+            /// Return the canonical decimal representation without trailing zeroes.
+            #[must_use]
+            #[inline]
+            pub fn normalized(self) -> Self { Self(self.0.normalize()) }
         }
 
         impl Default for $name {
@@ -447,7 +452,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn payout_ratio_accepts_closed_interval_and_split_payout() {
+    fn payout_ratio_accepts_payout() {
         for value in [dec!(0), dec!(0.5), dec!(1)] {
             let ratio = PayoutRatio::try_new(value).expect("valid payout ratio");
             assert_eq!(ratio.inner(), value);
@@ -455,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn payout_ratio_rejects_values_outside_closed_interval() {
+    fn payout_ratio_rejects_interval() {
         for value in [dec!(-0.000000000000000001), dec!(1.000000000000000001)] {
             assert_eq!(
                 PayoutRatio::try_new(value),
@@ -465,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn payout_ratio_normalizes_and_rejects_unpersistable_scale() {
+    fn payout_normalizes_rejects_scale() {
         assert_eq!(
             PayoutRatio::try_new(dec!(0.5000000000000000000))
                 .expect("canonical half")
@@ -484,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn payout_ratio_serde_is_validated_decimal_string() {
+    fn payout_ratio_serde_string() {
         let split = PayoutRatio::try_new(dec!(0.5)).expect("valid split payout");
         assert_eq!(
             serde_json::to_string(&split).expect("serialize payout ratio"),
@@ -499,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn payout_ratio_seaorm_roundtrip_and_read_validation() {
+    fn payout_ratio_seaorm_validation() {
         let split = PayoutRatio::try_new(dec!(0.5)).expect("valid split payout");
         let value: Value = split.into();
         assert_eq!(
@@ -512,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn shares_times_price_equals_usd() {
+    fn shares_times_price_usd() {
         let shares = Shares::new(dec!(100));
         let price = Price::new(dec!(0.65));
         let usd: Usd = shares * price;
@@ -520,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn usd_div_price_equals_shares() {
+    fn usd_div_price_shares() {
         let usd = Usd::new(dec!(100));
         let price = Price::new(dec!(0.50));
         let shares: Shares = usd / price;
@@ -543,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn bps_spread_zero_expected_returns_none() {
+    fn bps_zero_returns_none() {
         assert!(Bps::spread(Price::new(dec!(0.5)), Price::ZERO).is_none());
     }
 

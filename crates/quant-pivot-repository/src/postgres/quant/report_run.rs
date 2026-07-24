@@ -56,9 +56,7 @@ use sea_orm::{
 
 use crate::{
     postgres::{
-        governance::runtime_config::{acquire_activation_lock, do_load_current},
-        primitives,
-        query::paginate_mapped,
+        governance::runtime_config::PgPolicyRepository, primitives, query::paginate_mapped,
     },
     traits::ReportRunRepository,
 };
@@ -96,30 +94,32 @@ fn checked_duration(field: &'static str, secs: u64) -> Result<Duration, StorageE
     Ok(Duration::seconds(secs))
 }
 
-async fn expire_stale_ad_hoc(
-    txn: &DatabaseTransaction,
-    now: DateTime<Utc>,
-    ttl: Duration,
-) -> Result<(), StorageError> {
-    let cutoff = now - ttl;
-    let rows = Entity::find()
-        .filter(Column::Status.eq(ReportRunStatus::Queued))
-        .filter(Column::TriggerKind.eq(ReportTriggerKind::AdHoc))
-        .filter(Column::RequestedAt.lte(cutoff))
-        .order_by_asc(Column::RequestedAt)
-        .order_by_asc(Column::ReportRunId)
-        .lock_exclusive()
-        .all(txn)
-        .await
-        .map_err(StorageError::from)?;
-    for row in rows {
-        let mut active = row.into_active_model();
-        active.status = ActiveValue::Set(ReportRunStatus::Skipped);
-        active.terminal_reason = ActiveValue::Set(Some(ReportRunTerminalReason::QueueExpired));
-        active.finished_at = ActiveValue::Set(Some(now));
-        active.update(txn).await.map_err(StorageError::from)?;
+impl PgReportRunRepository {
+    async fn expire_stale_ad_hoc(
+        txn: &DatabaseTransaction,
+        now: DateTime<Utc>,
+        ttl: Duration,
+    ) -> Result<(), StorageError> {
+        let cutoff = now - ttl;
+        let rows = Entity::find()
+            .filter(Column::Status.eq(ReportRunStatus::Queued))
+            .filter(Column::TriggerKind.eq(ReportTriggerKind::AdHoc))
+            .filter(Column::RequestedAt.lte(cutoff))
+            .order_by_asc(Column::RequestedAt)
+            .order_by_asc(Column::ReportRunId)
+            .lock_exclusive()
+            .all(txn)
+            .await
+            .map_err(StorageError::from)?;
+        for row in rows {
+            let mut active = row.into_active_model();
+            active.status = ActiveValue::Set(ReportRunStatus::Skipped);
+            active.terminal_reason = ActiveValue::Set(Some(ReportRunTerminalReason::QueueExpired));
+            active.finished_at = ActiveValue::Set(Some(now));
+            active.update(txn).await.map_err(StorageError::from)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn validate_new_ad_hoc(run: &NewReportRun) -> Result<(), StorageError> {
@@ -187,54 +187,60 @@ fn gap_page_condition(query: &ReportScheduleGapListQuery) -> Condition {
         )
 }
 
-async fn verify_active_config(
-    txn: &DatabaseTransaction,
-    expected: &DecisionPolicySnapshotId,
-) -> Result<(), StorageError> {
-    acquire_activation_lock(txn).await?;
-    let current = do_load_current(txn).await?.ok_or_else(|| {
-        StorageError::state_conflict(
-            DECISION_POLICY_SNAPSHOT,
-            Option::<&DecisionPolicySnapshotId>::None,
-            "no active runtime config",
-        )
-    })?;
-    if current.decision_policy_snapshot_id != *expected {
-        return Err(StorageError::state_conflict(
-            DECISION_POLICY_SNAPSHOT,
-            Some(expected),
-            "runtime config changed during report schedule operation",
-        ));
+impl PgReportRunRepository {
+    async fn verify_active_config(
+        txn: &DatabaseTransaction,
+        expected: &DecisionPolicySnapshotId,
+    ) -> Result<(), StorageError> {
+        PgPolicyRepository::acquire_activation_lock(txn).await?;
+        let current = PgPolicyRepository::load_current_from(txn)
+            .await?
+            .ok_or_else(|| {
+                StorageError::state_conflict(
+                    DECISION_POLICY_SNAPSHOT,
+                    Option::<&DecisionPolicySnapshotId>::None,
+                    "no active runtime config",
+                )
+            })?;
+        if current.decision_policy_snapshot_id != *expected {
+            return Err(StorageError::state_conflict(
+                DECISION_POLICY_SNAPSHOT,
+                Some(expected),
+                "runtime config changed during report schedule operation",
+            ));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
-async fn skip_queued_schedule(
-    txn: &DatabaseTransaction,
-    schedule_id: &ReportScheduleId,
-    reason: ReportRunTerminalReason,
-    occurred_at: DateTime<Utc>,
-) -> Result<Option<Model>, StorageError> {
-    let row = Entity::find()
-        .filter(Column::Status.eq(ReportRunStatus::Queued))
-        .filter(Column::TriggerKind.eq(ReportTriggerKind::Scheduled))
-        .filter(Column::ScheduleId.eq(schedule_id.clone()))
-        .lock_exclusive()
-        .one(txn)
-        .await
-        .map_err(StorageError::from)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let mut active = row.into_active_model();
-    active.status = ActiveValue::Set(ReportRunStatus::Skipped);
-    active.terminal_reason = ActiveValue::Set(Some(reason));
-    active.finished_at = ActiveValue::Set(Some(occurred_at));
-    active
-        .update(txn)
-        .await
-        .map(Some)
-        .map_err(StorageError::from)
+impl PgReportRunRepository {
+    async fn skip_queued_schedule(
+        txn: &DatabaseTransaction,
+        schedule_id: &ReportScheduleId,
+        reason: ReportRunTerminalReason,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<Option<Model>, StorageError> {
+        let row = Entity::find()
+            .filter(Column::Status.eq(ReportRunStatus::Queued))
+            .filter(Column::TriggerKind.eq(ReportTriggerKind::Scheduled))
+            .filter(Column::ScheduleId.eq(schedule_id.clone()))
+            .lock_exclusive()
+            .one(txn)
+            .await
+            .map_err(StorageError::from)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut active = row.into_active_model();
+        active.status = ActiveValue::Set(ReportRunStatus::Skipped);
+        active.terminal_reason = ActiveValue::Set(Some(reason));
+        active.finished_at = ActiveValue::Set(Some(occurred_at));
+        active
+            .update(txn)
+            .await
+            .map(Some)
+            .map_err(StorageError::from)
+    }
 }
 
 struct ScheduleGapInsert<'a> {
@@ -248,30 +254,32 @@ struct ScheduleGapInsert<'a> {
     detail: Option<String>,
 }
 
-async fn insert_schedule_gap(
-    txn: &DatabaseTransaction,
-    gap: ScheduleGapInsert<'_>,
-) -> Result<QuantReportScheduleGapModel, StorageError> {
-    if gap.count <= 0 || gap.first > gap.last {
-        return Err(StorageError::invariant_violation(
-            Some(QUANT_REPORT_SCHEDULE_GAP),
-            "schedule gap requires a positive count and ordered occurrence range",
-        ));
+impl PgReportRunRepository {
+    async fn insert_schedule_gap(
+        txn: &DatabaseTransaction,
+        gap: ScheduleGapInsert<'_>,
+    ) -> Result<QuantReportScheduleGapModel, StorageError> {
+        if gap.count <= 0 || gap.first > gap.last {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_REPORT_SCHEDULE_GAP),
+                "schedule gap requires a positive count and ordered occurrence range",
+            ));
+        }
+        ActiveModel {
+            gap_id: ActiveValue::Set(ReportScheduleGapId::from_v7()),
+            schedule_id: ActiveValue::Set(gap.schedule_id.clone()),
+            decision_policy_snapshot_id: ActiveValue::Set(*gap.decision_policy_snapshot_id),
+            reason: ActiveValue::Set(gap.reason),
+            first_scheduled_for: ActiveValue::Set(gap.first),
+            last_scheduled_for: ActiveValue::Set(gap.last),
+            missed_count: ActiveValue::Set(gap.count),
+            detected_at: ActiveValue::Set(gap.detected_at),
+            detail: ActiveValue::Set(gap.detail),
+        }
+        .insert(txn)
+        .await
+        .map_err(StorageError::from)
     }
-    ActiveModel {
-        gap_id: ActiveValue::Set(ReportScheduleGapId::from_v7()),
-        schedule_id: ActiveValue::Set(gap.schedule_id.clone()),
-        decision_policy_snapshot_id: ActiveValue::Set(*gap.decision_policy_snapshot_id),
-        reason: ActiveValue::Set(gap.reason),
-        first_scheduled_for: ActiveValue::Set(gap.first),
-        last_scheduled_for: ActiveValue::Set(gap.last),
-        missed_count: ActiveValue::Set(gap.count),
-        detected_at: ActiveValue::Set(gap.detected_at),
-        detail: ActiveValue::Set(gap.detail),
-    }
-    .insert(txn)
-    .await
-    .map_err(StorageError::from)
 }
 
 #[async_trait::async_trait]
@@ -301,7 +309,7 @@ impl ReportRunRepository for PgReportRunRepository {
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         primitives::advisory_xact_lock(&txn, REPORT_SCHEDULE_LOCK_KEY).await?;
-        verify_active_config(&txn, decision_policy_snapshot_id).await?;
+        Self::verify_active_config(&txn, decision_policy_snapshot_id).await?;
         let now = primitives::statement_timestamp(&txn).await?;
         let existing = QuantReportScheduleStateEntity::find()
             .order_by_asc(QuantReportScheduleStateColumn::ScheduleId)
@@ -320,7 +328,7 @@ impl ReportRunRepository for PgReportRunRepository {
             let spec_changed = incoming
                 .is_none_or(|spec| spec.spec_hash != row.spec_hash || spec.enabled != row.enabled);
             if spec_changed
-                && let Some(skipped) = skip_queued_schedule(
+                && let Some(skipped) = Self::skip_queued_schedule(
                     &txn,
                     &schedule_id,
                     ReportRunTerminalReason::ScheduleReconfigured,
@@ -334,7 +342,7 @@ impl ReportRunRepository for PgReportRunRepository {
                         "queued scheduled run has no scheduled_for",
                     )
                 })?;
-                let gap = insert_schedule_gap(
+                let gap = Self::insert_schedule_gap(
                     &txn,
                     ScheduleGapInsert {
                         schedule_id: &schedule_id,
@@ -437,7 +445,7 @@ impl ReportRunRepository for PgReportRunRepository {
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         primitives::advisory_xact_lock(&txn, REPORT_SCHEDULE_LOCK_KEY).await?;
-        verify_active_config(&txn, &command.decision_policy_snapshot_id).await?;
+        Self::verify_active_config(&txn, &command.decision_policy_snapshot_id).await?;
         let now = primitives::statement_timestamp(&txn).await?;
         let state = QuantReportScheduleStateEntity::find_by_id(command.schedule_id.clone())
             .lock_exclusive()
@@ -459,7 +467,7 @@ impl ReportRunRepository for PgReportRunRepository {
             ));
         }
 
-        let skipped = skip_queued_schedule(
+        let skipped = Self::skip_queued_schedule(
             &txn,
             &command.schedule_id,
             ReportRunTerminalReason::CoalescedByNewerOccurrence,
@@ -493,7 +501,7 @@ impl ReportRunRepository for PgReportRunRepository {
                 ReportScheduleGapReason::CoordinatorLag
             };
             gaps.push(
-                insert_schedule_gap(
+                Self::insert_schedule_gap(
                     &txn,
                     ScheduleGapInsert {
                         schedule_id: &command.schedule_id,
@@ -699,7 +707,7 @@ impl ReportRunRepository for PgReportRunRepository {
             return Ok(EnqueueReportRunOutcome::Existing(existing.into()));
         }
         let now = primitives::statement_timestamp(&txn).await?;
-        expire_stale_ad_hoc(&txn, now, ttl).await?;
+        Self::expire_stale_ad_hoc(&txn, now, ttl).await?;
         let queued = Entity::find()
             .filter(Column::Status.eq(ReportRunStatus::Queued))
             .filter(Column::TriggerKind.eq(ReportTriggerKind::AdHoc))
@@ -800,9 +808,9 @@ impl ReportRunRepository for PgReportRunRepository {
         }
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         primitives::advisory_xact_lock(&txn, REPORT_RUN_CLAIM_LOCK_KEY).await?;
-        verify_active_config(&txn, &config.decision_policy_snapshot_id).await?;
+        Self::verify_active_config(&txn, &config.decision_policy_snapshot_id).await?;
         let now = primitives::statement_timestamp(&txn).await?;
-        expire_stale_ad_hoc(&txn, now, ttl).await?;
+        Self::expire_stale_ad_hoc(&txn, now, ttl).await?;
         let running = Entity::find()
             .filter(Column::Status.eq(ReportRunStatus::Running))
             .count(&txn)

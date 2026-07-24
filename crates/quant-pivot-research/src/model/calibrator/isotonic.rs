@@ -167,7 +167,7 @@ mod tests {
     use crate::model::calibrator::ProbabilityCalibrator;
 
     #[test]
-    fn fit_fails_closed_below_min_samples() {
+    fn fit_rejects_below_samples() {
         let calibrator = IsotonicCalibrator::new(1000);
         let scores = vec![dec!(0.1), dec!(0.9)];
         let outcomes = vec![false, true];
@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn fit_fails_closed_without_both_classes() {
+    fn fit_rejects_without_classes() {
         // All-win split: no discriminative signal, PAVA would otherwise
         // silently fit a degenerate constant-1.0 mapping (matches Platt's
         // equivalent guard).
@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn fit_produces_monotone_calibrated_probabilities() {
+    fn fit_produces_monotone_probabilities() {
         let calibrator = IsotonicCalibrator::new(10);
         let mut scores = Vec::new();
         let mut outcomes = Vec::new();
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn isotonic_tied_scores_match_grouped_pava() {
+    fn isotonic_tied_scores_pava() {
         let calibrator = IsotonicCalibrator::new(10);
         let (scores, outcomes) = tied_scores_dataset();
         let mapping = calibrator.fit(&scores, &outcomes).expect("fit");
@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn isotonic_interpolate_linear_between_knots() {
+    fn isotonic_interpolate_linear_knots() {
         let calibrator = IsotonicCalibrator::new(10);
         let (scores, outcomes) = tied_scores_dataset();
         let mapping = calibrator.fit(&scores, &outcomes).expect("fit");
@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn isotonic_interpolate_clamps_outside_fitted_range() {
+    fn isotonic_interpolate_clamps_range() {
         let calibrator = IsotonicCalibrator::new(10);
         let (scores, outcomes) = tied_scores_dataset();
         let mapping = calibrator.fit(&scores, &outcomes).expect("fit");

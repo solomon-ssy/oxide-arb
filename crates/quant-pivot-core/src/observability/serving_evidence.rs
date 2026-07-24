@@ -569,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_binds_exact_counts_hashes_and_vector_identity() {
+    fn completion_binds_exact_identity() {
         let decision_at = Utc::now();
         let boundary = DecisionClock::new(0)
             .boundary(decision_at)
@@ -605,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_rejects_missing_or_tampered_rows() {
+    fn completion_rejects_missing_rows() {
         let decision_at = Utc::now();
         let boundary = DecisionClock::new(0)
             .boundary(decision_at)
@@ -634,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_rejects_legacy_format_and_inconsistent_capture_binding() {
+    fn completion_rejects_legacy_binding() {
         let decision_at = Utc::now();
         let boundary = DecisionClock::new(0)
             .boundary(decision_at)
@@ -665,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_commits_rejected_vectors_without_requiring_model_inputs() {
+    fn completion_rejected_without_inputs() {
         let decision_at = Utc::now();
         let boundary = DecisionClock::new(0)
             .boundary(decision_at)
@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completion_marker_is_acknowledged_only_after_model_input_rows() {
+    async fn completion_marker_after_rows() {
         let decision_at = Utc::now();
         let boundary = DecisionClock::new(0)
             .boundary(decision_at)
@@ -747,7 +747,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn input_sink_failure_never_writes_completion_marker() {
+    async fn input_failure_never_marker() {
         let decision_at = Utc::now();
         let boundary = DecisionClock::new(0)
             .boundary(decision_at)

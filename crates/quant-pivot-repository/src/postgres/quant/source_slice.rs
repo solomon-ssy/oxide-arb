@@ -15,7 +15,7 @@ use sea_orm::{
     IntoActiveModel, QueryFilter, QuerySelect, TransactionTrait, sea_query::OnConflict,
 };
 
-use crate::{postgres::error, traits::SourceSliceRepository};
+use crate::traits::SourceSliceRepository;
 
 pub struct PgSourceSliceRepository {
     db: DatabaseConnection,
@@ -50,7 +50,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
             .find_by_identity(&identity_hash)
             .await?
             .ok_or_else(|| {
-                error::invariant_violation(
+                StorageError::invariant_violation(
                     Some(QUANT_SOURCE_SLICE),
                     "source-slice claim was not observable after insert".to_owned(),
                 )
@@ -89,10 +89,9 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         source_slice_id: &SourceSliceId,
         completion: CompleteSourceSlice,
     ) -> Result<SourceSliceInfo, StorageError> {
-        completion
-            .manifest
-            .validate()
-            .map_err(|detail| error::invariant_violation(Some(QUANT_SOURCE_SLICE), detail))?;
+        completion.manifest.validate().map_err(|detail| {
+            StorageError::invariant_violation(Some(QUANT_SOURCE_SLICE), detail)
+        })?;
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
         let row = load_for_update(&transaction, source_slice_id).await?;
         if row.status == SourceSliceStatus::Ready {
@@ -101,7 +100,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
             return Ok(row.into());
         }
         if row.status != SourceSliceStatus::Materializing {
-            return Err(error::illegal_transition(
+            return Err(StorageError::illegal_transition(
                 QUANT_SOURCE_SLICE,
                 Some(source_slice_id),
                 row.status,
@@ -129,7 +128,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         detail: String,
     ) -> Result<SourceSliceInfo, StorageError> {
         if detail.trim().is_empty() {
-            return Err(error::invariant_violation(
+            return Err(StorageError::invariant_violation(
                 Some(QUANT_SOURCE_SLICE),
                 "source-slice failure detail must not be empty".to_owned(),
             ));
@@ -141,7 +140,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
             return Ok(row.into());
         }
         if row.status != SourceSliceStatus::Materializing {
-            return Err(error::illegal_transition(
+            return Err(StorageError::illegal_transition(
                 QUANT_SOURCE_SLICE,
                 Some(source_slice_id),
                 row.status,
@@ -170,14 +169,14 @@ where
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| error::not_found(QUANT_SOURCE_SLICE, source_slice_id))
+        .ok_or_else(|| StorageError::not_found(QUANT_SOURCE_SLICE, source_slice_id))
 }
 
 fn validate_new(source_slice: &NewSourceSlice) -> Result<(), StorageError> {
     if source_slice.window_start >= source_slice.window_end
         || source_slice.window_end > source_slice.pit_cutoff
     {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SOURCE_SLICE),
             "source-slice identity boundaries or contracts are invalid".to_owned(),
         ));
@@ -201,7 +200,7 @@ fn ensure_manifest_binding(
         && manifest.reader_contract_version == row.reader_contract_version
         && manifest.schema_contract_version == row.schema_contract_version;
     if !bound {
-        return Err(error::invariant_violation(
+        return Err(StorageError::invariant_violation(
             Some(QUANT_SOURCE_SLICE),
             "source-slice manifest does not match the claimed canonical identity".to_owned(),
         ));
@@ -217,7 +216,7 @@ fn ensure_idempotent_completion(
         || row.manifest_hash.as_ref() != Some(&completion.manifest_ref.manifest_hash)
         || row.manifest_json.as_ref() != Some(&completion.manifest)
     {
-        return Err(error::state_conflict(
+        return Err(StorageError::state_conflict(
             QUANT_SOURCE_SLICE,
             Some(&row.source_slice_id),
             "ready source slice cannot be rebound to different manifest evidence".to_owned(),

@@ -130,7 +130,7 @@ async fn seed_market_selection(
     id
 }
 
-pub async fn optimizer_meta_persisted_in_plan_row() {
+pub async fn optimizer_meta_persisted_row() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;

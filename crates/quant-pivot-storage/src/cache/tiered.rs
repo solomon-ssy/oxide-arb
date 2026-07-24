@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tiered_l2_hit_backfills_l1_without_redis() {
+    async fn tiered_l2_without_redis() {
         let l2 = MockL2::default();
         let writer = MockTiered::new(MokaBackend::new(100), l2);
         let key = CacheKey::MarketInfo {
@@ -269,7 +269,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tiered_both_miss_without_redis() {
+    async fn tiered_both_without_redis() {
         let cache = MockTiered::new(MokaBackend::new(100), MockL2::default());
         let key = CacheKey::EventInfo {
             event_id: EventId::new("missing"),

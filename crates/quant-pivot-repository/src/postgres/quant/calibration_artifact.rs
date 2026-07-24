@@ -163,7 +163,10 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(error::not_found(QUANT_CALIBRATION_ARTIFACT, artifact_id));
+            return Err(StorageError::not_found(
+                QUANT_CALIBRATION_ARTIFACT,
+                artifact_id,
+            ));
         };
         // `market_price_bias` has exactly one global governance pointer
         // (runtime-config `bias_table_ref`), so activating one deactivates

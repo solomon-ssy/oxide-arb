@@ -279,7 +279,7 @@ mod tests {
 
     #[cfg(feature = "research-jobs")]
     #[test]
-    fn source_slice_parquet_is_deterministic_and_lossless() {
+    fn source_slice_parquet_lossless() {
         let expected = vec![record("a", 1), record("b", 2)];
         let reversed = vec![expected[1].clone(), expected[0].clone()];
         let first = SourceSliceParquetCodec::encode(&expected).expect("encode");
@@ -293,7 +293,7 @@ mod tests {
 
     #[cfg(feature = "research-jobs")]
     #[test]
-    fn duplicate_source_identity_is_rejected() {
+    fn duplicate_source_identity_rejected() {
         let row = record("same", 1);
         assert!(SourceSliceParquetCodec::encode(&[row.clone(), row]).is_err());
     }

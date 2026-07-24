@@ -48,7 +48,7 @@ pub fn cursors_by_contract_address(
 /// least one contract in that family must have a non-error cursor with durable
 /// progress before trade-tape features may score for the market.
 #[must_use]
-pub fn trade_tape_market_ingest_available<S: BuildHasher>(
+pub fn market_tape_available<S: BuildHasher>(
     config: &TradeTapeOnChainConfig,
     cursors_by_address: &HashMap<String, &TradeTapeBlockCursorInfo, S>,
     neg_risk: bool,
@@ -78,13 +78,13 @@ pub fn trade_tape_ingest_available(
         return false;
     }
     let by_address = cursors_by_contract_address(cursors);
-    trade_tape_market_ingest_available(config, &by_address, false)
-        && trade_tape_market_ingest_available(config, &by_address, true)
+    market_tape_available(config, &by_address, false)
+        && market_tape_available(config, &by_address, true)
 }
 
 /// Worst `head_lag_blocks` across the contracts in one market's exchange route.
 #[must_use]
-pub fn trade_tape_route_lag_blocks<S: BuildHasher>(
+pub fn tape_route_lag_blocks<S: BuildHasher>(
     neg_risk: bool,
     cursors_by_address: &HashMap<String, &TradeTapeBlockCursorInfo, S>,
 ) -> Option<i64> {
@@ -131,27 +131,19 @@ mod tests {
     }
 
     #[test]
-    fn binary_market_available_when_ctf_route_has_one_healthy_cursor() {
+    fn binary_market_ctf_cursor() {
         let cursors = vec![
             cursor(CTF_EXCHANGE_V2, TradeTapeBlockCursorStatus::Live, 1),
             cursor(NEG_RISK_EXCHANGE_V1, TradeTapeBlockCursorStatus::Faulted, 0),
             cursor(NEG_RISK_EXCHANGE_V2, TradeTapeBlockCursorStatus::Faulted, 0),
         ];
         let by_address = cursors_by_contract_address(&cursors);
-        assert!(trade_tape_market_ingest_available(
-            &enabled_config(),
-            &by_address,
-            false
-        ));
-        assert!(!trade_tape_market_ingest_available(
-            &enabled_config(),
-            &by_address,
-            true
-        ));
+        assert!(market_tape_available(&enabled_config(), &by_address, false));
+        assert!(!market_tape_available(&enabled_config(), &by_address, true));
     }
 
     #[test]
-    fn plane_available_requires_both_exchange_families_healthy() {
+    fn plane_requires_both_healthy() {
         let cursors = vec![
             cursor(CTF_EXCHANGE_V1, TradeTapeBlockCursorStatus::Live, 1),
             cursor(CTF_EXCHANGE_V2, TradeTapeBlockCursorStatus::Live, 1),

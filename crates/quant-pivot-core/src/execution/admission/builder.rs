@@ -283,8 +283,7 @@ impl AdmissionInputBuilder {
             venue_metadata_result,
         ) = tokio::join!(
             deps.reports.find_by_id(&report_id),
-            deps.model_registry
-                .find_model_version_by_id(&model_version_id),
+            deps.model_registry.find_model_version(&model_version_id),
             deps.reconciliation.has_unresolvable(),
             deps.execution_orders.has_ambiguous_inflight(),
             deps.capital.find_by_intent(&order_intent_id),

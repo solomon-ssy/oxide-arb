@@ -56,7 +56,7 @@ use crate::{
     },
     observability::metrics_hub::MetricsHub,
     service::{
-        catalog_lifecycle::apply_past_deadline_to_catalog, catalog_readiness::CatalogReadiness,
+        catalog_lifecycle::apply_catalog_deadline, catalog_readiness::CatalogReadiness,
         system_status_nudge::SystemStatusNudge, ws_subscription::WsSubscriptionCoordinator,
     },
 };
@@ -287,8 +287,7 @@ impl GammaService {
             .map(|m| m.market_id.clone())
             .collect();
 
-        let past_deadline_paused =
-            apply_past_deadline_to_catalog(&mut batch.registry_markets, fetched_at);
+        let past_deadline_paused = apply_catalog_deadline(&mut batch.registry_markets, fetched_at);
         let mut event_mutations = HashMap::new();
         let mut market_mutations = HashMap::new();
         let tombstoned_count = if attempt.sync_kind == CatalogSyncKind::Reconcile {
@@ -539,7 +538,7 @@ impl GammaService {
                     event_mutations.insert(fetched.event.event_id, CatalogMutation::recheck());
                     market_mutations.insert(market_id, CatalogMutation::recheck());
                 }
-                Err(error) if api_error_is_not_found(&error) => {
+                Err(error) if is_not_found(&error) => {
                     let prior = self
                         .catalog_ledger_repo
                         .market_at(&market_id, &boundary)
@@ -1047,7 +1046,7 @@ const fn rejection_reason(rejection: &CatalogMarketReject) -> CatalogRejectionRe
     }
 }
 
-const fn api_error_is_not_found(error: &ApiError) -> bool {
+const fn is_not_found(error: &ApiError) -> bool {
     matches!(error, ApiError::Gamma { status: 404, .. })
 }
 
@@ -1219,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_transitions_detects_only_newly_settled_known_markets() {
+    fn settlement_transitions_detects_markets() {
         let now = Utc::now();
         let batch = vec![
             // Active → Settled with YES winning: publish (outcome = true).
@@ -1258,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_transitions_maps_secondary_token_outcome_to_false() {
+    fn settlement_transitions_maps_false() {
         let now = Utc::now();
         let batch = vec![registry_market(
             "m1",
@@ -1274,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_transitions_missing_outcome_is_ambiguous_not_false() {
+    fn settlement_missing_not_false() {
         let now = Utc::now();
         let batch = vec![registry_market(
             "m1",
@@ -1289,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_transitions_resolves_custom_labels_by_token_identity() {
+    fn settlement_transitions_resolves_identity() {
         let now = Utc::now();
         let resolved_at = Some(now - Duration::hours(1));
         let batch = vec![
@@ -1325,7 +1324,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_transitions_suppresses_stale_resolved_at() {
+    fn settlement_transitions_stale_resolved() {
         let now = Utc::now();
         let batch = vec![registry_market(
             "m-stale",
@@ -1341,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_transitions_keeps_recent_resolved_at() {
+    fn settlement_transitions_keeps_resolved() {
         let now = Utc::now();
         let batch = vec![registry_market(
             "m-recent",
@@ -1358,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_transitions_bootstrap_empty_prior_publishes_nothing() {
+    fn settlement_empty_publishes_nothing() {
         let now = Utc::now();
         let batch = vec![registry_market(
             "m-bootstrap",
@@ -1373,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_transitions_missing_resolved_at_is_not_publishable() {
+    fn settlement_missing_not_publishable() {
         let now = Utc::now();
         let batch = vec![registry_market(
             "m1",
@@ -1389,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_transitions_future_resolved_at_is_not_publishable() {
+    fn settlement_transitions_not_publishable() {
         let now = Utc::now();
         let batch = vec![registry_market(
             "m1",

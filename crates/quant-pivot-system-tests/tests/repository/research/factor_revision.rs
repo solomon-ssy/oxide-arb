@@ -49,7 +49,7 @@ fn revision(name: &str, seed: char) -> NewFactorDefinition {
     }
 }
 
-pub async fn registration_is_insert_only_and_publication_retires_prior_revision() {
+pub async fn registration_insert_only_revision() {
     let (pool, _container) = setup_pg().await;
     let repo = PgFactorRepository::new(pool.connection().clone());
     let first = revision("momentum", '1');
@@ -91,7 +91,7 @@ pub async fn registration_is_insert_only_and_publication_retires_prior_revision(
     assert_eq!(published.status, PublicationStatus::Published);
 }
 
-pub async fn batch_publication_is_atomic_and_rejects_content_address_collisions() {
+pub async fn batch_atomic_rejects_collisions() {
     let (pool, _container) = setup_pg().await;
     let repo = PgFactorRepository::new(pool.connection().clone());
     let left = revision("left", '3');

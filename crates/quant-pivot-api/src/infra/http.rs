@@ -92,7 +92,7 @@ pub async fn get_text_with_retry(
 
 /// Perform one GET and return response bytes. `404` is represented as `None`
 /// for immutable public-data partitions that may not have been published yet.
-pub async fn get_optional_bytes_with_retry(
+pub async fn get_optional_bytes(
     http: &Client,
     retry_policy: &RetryPolicy,
     url: &str,
@@ -137,7 +137,7 @@ pub async fn get_optional_bytes_with_retry(
 
 /// Perform one retrying GET while streaming into a caller-bounded byte buffer.
 /// `404` is represented as `None` for unpublished immutable partitions.
-pub async fn get_optional_bounded_bytes_with_retry(
+pub async fn get_optional_bounded_bytes(
     http: &Client,
     retry_policy: &RetryPolicy,
     url: &str,
@@ -238,25 +238,25 @@ mod tests {
         matchers::{method, path},
     };
 
-    use super::{get_optional_bounded_bytes_with_retry, response_error, retry_after_ms};
+    use super::{get_optional_bounded_bytes, response_error, retry_after_ms};
     use crate::infra::retry::RetryPolicy;
 
     #[test]
-    fn retry_after_seconds_are_converted_to_milliseconds() {
+    fn retry_after_seconds_milliseconds() {
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
         assert_eq!(retry_after_ms(&headers), Some(7_000));
     }
 
     #[test]
-    fn invalid_retry_after_is_ignored() {
+    fn invalid_retry_after_ignored() {
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, HeaderValue::from_static("not-a-date"));
         assert_eq!(retry_after_ms(&headers), None);
     }
 
     #[tokio::test]
-    async fn rate_limit_response_preserves_retry_after_for_backoff() {
+    async fn rate_preserves_after_backoff() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/limited"))
@@ -280,7 +280,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn optional_bounded_body_distinguishes_404_and_rejects_oversize() {
+    async fn optional_distinguishes_rejects_oversize() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/missing"))
@@ -294,7 +294,7 @@ mod tests {
             .await;
         let http = Client::new();
         let policy = RetryPolicy::gamma_default();
-        let missing = get_optional_bounded_bytes_with_retry(
+        let missing = get_optional_bounded_bytes(
             &http,
             &policy,
             &format!("{}/missing", server.uri()),
@@ -304,7 +304,7 @@ mod tests {
         .await
         .expect("missing response");
         assert!(missing.is_none());
-        let oversize = get_optional_bounded_bytes_with_retry(
+        let oversize = get_optional_bounded_bytes(
             &http,
             &policy,
             &format!("{}/oversize", server.uri()),

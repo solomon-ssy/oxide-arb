@@ -84,7 +84,7 @@ impl ArtifactStore for LocalArtifactStore {
 
         // Atomic publish: write a uniquely-named temp file, then rename onto the
         // final path so readers never observe a partial write.
-        let temp = parent.join(temp_file_name(&key));
+        let temp = parent.join(key.temp_file_name());
         let mut file = File::create(&temp)
             .await
             .map_err(|error| io_error(&temp, &error))?;
@@ -217,19 +217,21 @@ fn io_error(path: &Path, error: &Error) -> ResearchError {
     }
 }
 
-/// Process-, time-, and invocation-unique temp file name for an atomic write.
-fn temp_file_name(key: &ArtifactKey) -> String {
-    static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+impl ArtifactKey {
+    /// Process-, time-, and invocation-unique temp file name for an atomic write.
+    fn temp_file_name(&self) -> String {
+        static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let sequence = WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!(
-        ".{}.{}.{nanos}.{sequence}.tmp",
-        key.namespace().as_str(),
-        process::id()
-    )
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let sequence = WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        format!(
+            ".{}.{}.{nanos}.{sequence}.tmp",
+            self.namespace().as_str(),
+            process::id()
+        )
+    }
 }
 
 #[cfg(test)]
@@ -244,7 +246,7 @@ mod tests {
 
     use quant_pivot_models::types::ArtifactUri;
 
-    use super::{ArtifactKey, ArtifactStore, LocalArtifactStore, temp_file_name};
+    use super::{ArtifactKey, ArtifactStore, LocalArtifactStore};
     use crate::artifact::ArtifactNamespace;
 
     fn temp_root() -> PathBuf {
@@ -260,9 +262,9 @@ mod tests {
     }
 
     #[test]
-    fn atomic_write_temp_names_are_unique_within_one_process() {
+    fn atomic_write_unique_process() {
         let key = ArtifactKey::new(ArtifactNamespace::Model, "abc123", "json").expect("valid key");
-        assert_ne!(temp_file_name(&key), temp_file_name(&key));
+        assert_ne!(key.temp_file_name(), key.temp_file_name());
     }
 
     #[tokio::test]
@@ -279,7 +281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_missing_uri_returns_typed_error() {
+    async fn get_missing_returns_error() {
         let root = temp_root();
         let store = LocalArtifactStore::new(&root);
         let uri = ArtifactUri::parse(format!(

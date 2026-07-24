@@ -18,15 +18,12 @@ use quant_pivot_models::{
     types::{RoleCode, RoleId, UserId},
 };
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    QueryOrder, TransactionTrait, sea_query::OnConflict,
+    ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    TransactionTrait, sea_query::OnConflict,
 };
 
 use crate::{
-    postgres::{
-        error,
-        rbac::{casbin::sync, junction},
-    },
+    postgres::rbac::{casbin::CasbinPolicyStore, junction},
     traits::rbac::UserRoleRepository,
 };
 
@@ -42,148 +39,132 @@ impl PgUserRoleRepository {
     }
 }
 
-async fn do_set_roles(
-    db: &DatabaseConnection,
-    assignment: AssignRoles,
-) -> Result<(), StorageError> {
-    let AssignRoles { user_id, role_ids } = assignment;
-    let target: HashSet<RoleId> = role_ids.into_iter().collect();
+#[async_trait::async_trait]
+impl UserRoleRepository for PgUserRoleRepository {
+    async fn set_roles_for_user(&self, assignment: AssignRoles) -> Result<(), StorageError> {
+        let AssignRoles { user_id, role_ids } = assignment;
+        let target = role_ids.into_iter().collect::<HashSet<RoleId>>();
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
 
-    let txn = db.begin().await.map_err(StorageError::from)?;
+        if Entity::find_by_id(user_id)
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .is_none()
+        {
+            txn.rollback().await.map_err(StorageError::from)?;
+            return Err(StorageError::not_found(USER, user_id));
+        }
 
-    if Entity::find_by_id(user_id)
-        .one(&txn)
-        .await
-        .map_err(StorageError::from)?
-        .is_none()
-    {
-        txn.rollback().await.map_err(StorageError::from)?;
-        return Err(error::not_found(USER, user_id));
-    }
+        let target_roles = RoleEntity::find()
+            .filter(Column::Id.is_in(target.iter().copied()))
+            .all(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        if target_roles.len() != target.len() {
+            let found = target_roles
+                .iter()
+                .map(|role| role.id)
+                .collect::<HashSet<RoleId>>();
+            let missing = target
+                .iter()
+                .find(|id| !found.contains(id))
+                .map_or_else(|| "<unknown>".to_owned(), ToString::to_string);
+            txn.rollback().await.map_err(StorageError::from)?;
+            return Err(StorageError::not_found(ROLE, missing));
+        }
 
-    // Resolve every target role to its code, rejecting unknown ids.
-    let target_roles = RoleEntity::find()
-        .filter(Column::Id.is_in(target.iter().copied()))
-        .all(&txn)
-        .await
-        .map_err(StorageError::from)?;
-    if target_roles.len() != target.len() {
-        let found: HashSet<RoleId> = target_roles.iter().map(|role| role.id).collect();
-        let missing = target
+        // Disabled roles retain relational membership but project no Casbin group.
+        let enabled_code_of = target_roles
             .iter()
-            .find(|id| !found.contains(id))
-            .map_or_else(|| "<unknown>".to_owned(), ToString::to_string);
-        txn.rollback().await.map_err(StorageError::from)?;
-        return Err(error::not_found(ROLE, missing));
-    }
-    // Only *enabled* roles project a Casbin grouping (`g`): a disabled role keeps
-    // its relational `user_role` membership but grants nothing until re-enabled,
-    // at which point its groupings are rebuilt from that membership.
-    let enabled_code_of: HashMap<RoleId, RoleCode> = target_roles
-        .iter()
-        .filter(|role| role.status == RoleStatus::Enabled)
-        .map(|role| (role.id, role.code.clone()))
-        .collect();
-
-    let current: HashSet<RoleId> = UserRoleEntity::find()
-        .filter(UserRoleColumn::UserId.eq(user_id))
-        .all(&txn)
-        .await
-        .map_err(StorageError::from)?
-        .into_iter()
-        .map(|row| row.role_id)
-        .collect();
-
-    let (added, removed) = junction::replace_set_diff(&target, &current);
-
-    // Codes for removed roles (their ids are guaranteed to exist via FK).
-    let removed_codes = if removed.is_empty() {
-        HashMap::new()
-    } else {
-        RoleEntity::find()
-            .filter(Column::Id.is_in(removed.iter().copied()))
+            .filter(|role| role.status == RoleStatus::Enabled)
+            .map(|role| (role.id, role.code.clone()))
+            .collect::<HashMap<RoleId, RoleCode>>();
+        let current = UserRoleEntity::find()
+            .filter(UserRoleColumn::UserId.eq(user_id))
             .all(&txn)
             .await
             .map_err(StorageError::from)?
             .into_iter()
-            .map(|role| (role.id, role.code))
-            .collect::<HashMap<RoleId, RoleCode>>()
-    };
+            .map(|row| row.role_id)
+            .collect::<HashSet<RoleId>>();
+        let (added, removed) = junction::replace_set_diff(&target, &current);
 
-    if !added.is_empty() {
-        let rows = added.iter().map(|role_id| ActiveModel {
-            user_id: Set(user_id),
-            role_id: Set(*role_id),
-            ..Default::default()
-        });
-        junction::insert_junction_rows::<UserRoleEntity>(
-            &txn,
-            rows,
-            OnConflict::columns([UserRoleColumn::UserId, UserRoleColumn::RoleId])
-                .do_nothing()
-                .to_owned(),
-        )
-        .await?;
-        let codes = added
-            .iter()
-            .filter_map(|role_id| enabled_code_of.get(role_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        sync::do_grant_roles(&txn, &user_id, &codes).await?;
-    }
+        let removed_codes = if removed.is_empty() {
+            HashMap::new()
+        } else {
+            RoleEntity::find()
+                .filter(Column::Id.is_in(removed.iter().copied()))
+                .all(&txn)
+                .await
+                .map_err(StorageError::from)?
+                .into_iter()
+                .map(|role| (role.id, role.code))
+                .collect::<HashMap<RoleId, RoleCode>>()
+        };
+        let policies = CasbinPolicyStore::new(&txn);
 
-    if !removed.is_empty() {
-        UserRoleEntity::delete_many()
-            .filter(UserRoleColumn::UserId.eq(user_id))
-            .filter(UserRoleColumn::RoleId.is_in(removed.iter().copied()))
-            .exec(&txn)
-            .await
-            .map_err(StorageError::from)?;
-        let codes = removed
-            .iter()
-            .filter_map(|role_id| removed_codes.get(role_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        sync::do_revoke_roles(&txn, &user_id, &codes).await?;
-    }
+        if !added.is_empty() {
+            let rows = added.iter().map(|role_id| ActiveModel {
+                user_id: Set(user_id),
+                role_id: Set(*role_id),
+                ..Default::default()
+            });
+            junction::insert_junction_rows::<UserRoleEntity>(
+                &txn,
+                rows,
+                OnConflict::columns([UserRoleColumn::UserId, UserRoleColumn::RoleId])
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .await?;
+            let codes = added
+                .iter()
+                .filter_map(|role_id| enabled_code_of.get(role_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            policies.grant_roles(&user_id, &codes).await?;
+        }
 
-    txn.commit().await.map_err(StorageError::from)?;
-    Ok(())
-}
+        if !removed.is_empty() {
+            UserRoleEntity::delete_many()
+                .filter(UserRoleColumn::UserId.eq(user_id))
+                .filter(UserRoleColumn::RoleId.is_in(removed.iter().copied()))
+                .exec(&txn)
+                .await
+                .map_err(StorageError::from)?;
+            let codes = removed
+                .iter()
+                .filter_map(|role_id| removed_codes.get(role_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            policies.revoke_roles(&user_id, &codes).await?;
+        }
 
-async fn do_list_roles_for_user(
-    db: &impl ConnectionTrait,
-    user_id: &UserId,
-) -> Result<Vec<RoleInfo>, StorageError> {
-    let role_ids: Vec<RoleId> = UserRoleEntity::find()
-        .filter(UserRoleColumn::UserId.eq(*user_id))
-        .all(db)
-        .await
-        .map_err(StorageError::from)?
-        .into_iter()
-        .map(|row| row.role_id)
-        .collect();
-    if role_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let roles = RoleEntity::find()
-        .filter(Column::Id.is_in(role_ids))
-        .order_by_asc(Column::Sort)
-        .order_by_asc(Column::Code)
-        .all(db)
-        .await
-        .map_err(StorageError::from)?;
-    Ok(roles.into_iter().map(Into::into).collect())
-}
-
-#[async_trait::async_trait]
-impl UserRoleRepository for PgUserRoleRepository {
-    async fn set_roles_for_user(&self, assignment: AssignRoles) -> Result<(), StorageError> {
-        do_set_roles(&self.db, assignment).await
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(())
     }
 
     async fn list_roles_for_user(&self, user_id: &UserId) -> Result<Vec<RoleInfo>, StorageError> {
-        do_list_roles_for_user(&self.db, user_id).await
+        let role_ids = UserRoleEntity::find()
+            .filter(UserRoleColumn::UserId.eq(*user_id))
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(|row| row.role_id)
+            .collect::<Vec<RoleId>>();
+        if role_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let roles = RoleEntity::find()
+            .filter(Column::Id.is_in(role_ids))
+            .order_by_asc(Column::Sort)
+            .order_by_asc(Column::Code)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(roles.into_iter().map(Into::into).collect())
     }
 }

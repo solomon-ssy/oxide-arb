@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_page_query_derive_hardens_page() {
+    fn normalize_page_query_page() {
         let query = SmokeQuery {
             filter: Some(1),
             page: PageRequest::new(0, 9999),
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn page_window_hardens_raw_request() {
+    fn page_window_hardens_request() {
         let window = PageWindow::harden(PageRequest::new(0, 9999));
         assert_eq!(window.page(), 1);
         assert_eq!(window.size(), PageRequest::MAX_SIZE);
@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_for_uses_query_window() {
+    fn empty_uses_query_window() {
         let query = SmokeQuery {
             filter: None,
             page: PageRequest::new(2, 50),
@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_numeric_and_negative_params() {
+    fn rejects_non_numeric_params() {
         assert!(
             serde_json::from_value::<PageRequest>(serde_json::json!({ "page": "abc" })).is_err()
         );
@@ -331,20 +331,20 @@ mod tests {
     }
 
     #[test]
-    fn default_is_first_page_default_size() {
+    fn default_first_page_size() {
         let request = PageRequest::default();
         assert_eq!(request.page, PageRequest::DEFAULT_PAGE);
         assert_eq!(request.size, PageRequest::DEFAULT_SIZE);
     }
 
     #[test]
-    fn normalize_forces_page_to_at_least_one() {
+    fn normalize_forces_page_one() {
         assert_eq!(PageRequest::new(0, 10).normalized().page, 1);
         assert_eq!(PageRequest::new(3, 10).normalized().page, 3);
     }
 
     #[test]
-    fn normalize_maps_zero_size_to_default() {
+    fn normalize_maps_zero_default() {
         assert_eq!(
             PageRequest::new(1, 0).normalized().size,
             PageRequest::DEFAULT_SIZE
@@ -352,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_clamps_oversized_size_to_max() {
+    fn normalize_clamps_oversized_max() {
         assert_eq!(
             PageRequest::new(1, PageRequest::MAX_SIZE + 1)
                 .normalized()
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn offset_and_limit_use_the_normalized_window() {
+    fn offset_limit_use_window() {
         let request = PageRequest::new(3, 25);
         assert_eq!(request.offset(), 50);
         assert_eq!(request.limit(), 25);
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn from_window_reports_the_hardened_window_and_has_next() {
+    fn window_reports_hardened_next() {
         let window = PageWindow::harden(PageRequest::new(0, 0));
         let page = Paginated::from_window(vec![1, 2], 5, window);
         assert_eq!(page.page, 1);

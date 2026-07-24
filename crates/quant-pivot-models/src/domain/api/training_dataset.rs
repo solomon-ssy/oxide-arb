@@ -73,7 +73,7 @@ pub struct BuildTrainingDatasetRequest {
     #[validate(range(min = 1))]
     pub knowledge_lag_secs: u64,
     /// Feature schema version to materialize (defaults to v1).
-    #[serde(default = "default_feature_schema_version")]
+    #[serde(default)]
     pub feature_schema_version: SchemaVersion,
     /// Sample sources to materialize.
     #[serde(default = "default_sample_sources")]
@@ -88,10 +88,6 @@ pub struct BuildTrainingDatasetRequest {
 }
 
 half_open_window_request!(BuildTrainingDatasetRequest);
-
-const fn default_feature_schema_version() -> SchemaVersion {
-    SchemaVersion::FIRST
-}
 
 /// Dry-plan response — no ledger row is written.
 #[derive(Debug, Clone, Serialize)]

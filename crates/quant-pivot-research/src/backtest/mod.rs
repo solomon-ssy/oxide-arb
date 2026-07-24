@@ -23,7 +23,7 @@ pub use calendarize::{
     CalendarReturn, active_observation_count, calendarize_lot_returns, mean_calendar_return,
 };
 use chrono::{DateTime, Utc};
-pub use comparison::{ModelComparisonReport, compare_reports};
+pub use comparison::ModelComparisonReport;
 pub use lot_replay::{
     LotBacktestInputs, LotBacktestRunResult, LotBacktester, LotDecisionSequence, LotOutcome,
     LotReplayBacktester, SellNullBaseline, replay_lot_null_baseline,
@@ -319,7 +319,7 @@ mod tests {
     use quant_pivot_models::runtime_config::DecimalValue;
 
     #[test]
-    fn malformed_portfolio_cap_is_rejected_at_the_wire_boundary() {
+    fn malformed_portfolio_rejected_boundary() {
         serde_json::from_value::<DecimalValue>(serde_json::json!("not-a-decimal"))
             .expect_err("malformed cap must fail DTO deserialization");
     }

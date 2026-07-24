@@ -312,10 +312,7 @@ pub async fn list_backtest_reports(
         .iter()
         .map(|info| info.backtest_report_id)
         .collect();
-    let comparison_ids = state
-        .backtests
-        .comparison_ids_for_backtest_reports(&ids)
-        .await?;
+    let comparison_ids = state.backtests.backtest_comparison_ids(&ids).await?;
     let items = page
         .items
         .into_iter()

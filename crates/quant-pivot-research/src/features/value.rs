@@ -103,7 +103,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     #[test]
-    fn feature_cell_states_do_not_fabricate_values() {
+    fn cells_never_fabricate_values() {
         let observed = FeatureCell::observed(
             FeatureValue::Decimal(dec!(1.25)),
             None,

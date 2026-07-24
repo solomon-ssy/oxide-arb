@@ -34,7 +34,7 @@ use quant_pivot_web::{
     auth::casbin::{CasbinService, PermChecker},
     jwt::{JwtService, TokenBlacklist},
     readiness::PgRedisReadiness,
-    routes, spawn_web_server,
+    spawn_web_server,
     state::AppState,
     ws::{SessionHubMetrics, SessionRegistry, spawn_ws_broadcaster},
 };
@@ -82,7 +82,7 @@ impl AppContext {
         order_intents: Arc<dyn OrderIntentPort>,
         research_jobs: Arc<dyn ResearchJobPort>,
     ) -> QuantResult<()> {
-        let (operation_log, op_log_worker) = build_operation_log_writer(self);
+        let (operation_log, op_log_worker) = (self).build_operation_log_writer();
         let (ws_sessions, session_hub) = SessionRegistry::new(SessionHubMetrics {
             best_effort_dropped: self.infra.metrics.ws_fanout_best_effort_dropped.clone(),
             best_effort_coalesced: self.infra.metrics.ws_fanout_best_effort_coalesced.clone(),
@@ -146,12 +146,12 @@ async fn build_app_state(
     ws_sessions: SessionRegistry,
 ) -> QuantResult<AppState> {
     let repos = &ctx.infra.repos;
-    let auth = build_web_auth(ctx).await?;
-    let execution = build_web_execution_ports(ctx);
-    let research_ports = build_research_web_ports(ctx);
+    let auth = (ctx).build_web_auth().await?;
+    let execution = (ctx).build_web_execution_ports();
+    let research_ports = (ctx).build_research_web_ports();
     let trade_policy_dataset_builder =
         Arc::clone(&research_ports.training_datasets) as Arc<dyn TrainingDatasetPort>;
-    let research_readiness = build_research_readiness(ctx)?;
+    let research_readiness = (ctx).build_research_readiness()?;
 
     Ok(AppState {
         deploy: Arc::clone(&ctx.config),
@@ -199,7 +199,7 @@ async fn build_app_state(
         research_catalog: Arc::new(CoreResearchCatalogPort::from_research(&ctx.research)),
         research_jobs,
         research_readiness: Arc::clone(&research_readiness) as Arc<dyn ResearchReadinessPort>,
-        feature_integrity: build_feature_integrity(ctx),
+        feature_integrity: (ctx).build_feature_integrity(),
         calibration_artifacts: Arc::clone(&ctx.research.calibration_artifact_fit),
         model_calibration_fit: research_ports.model_calibration_fit
             as Arc<dyn ModelCalibrationFitPort>,
@@ -257,21 +257,21 @@ async fn build_app_state(
     })
 }
 
-fn build_research_readiness(
-    ctx: &AppContext,
-) -> QuantResult<Arc<ResearchReadinessEvidenceService>> {
-    let attestor = EvidenceAttestor::from_config(&ctx.config.research.evidence_attestation)?;
-    let evidence_scope = EvidenceScopeIdentity::from_config(
-        &ctx.config.db.clickhouse,
-        &ctx.config.research.artifact_store,
-    )?;
-    Ok(Arc::new(ResearchReadinessEvidenceService::new(
-        Arc::clone(&ctx.infra.repos.research_readiness)
-            as Arc<dyn ResearchReadinessEvidenceRepository>,
-        Arc::clone(&ctx.research.artifact_store),
-        attestor,
-        &evidence_scope,
-    )?))
+impl AppContext {
+    fn build_research_readiness(&self) -> QuantResult<Arc<ResearchReadinessEvidenceService>> {
+        let attestor = EvidenceAttestor::from_config(&self.config.research.evidence_attestation)?;
+        let evidence_scope = EvidenceScopeIdentity::from_config(
+            &self.config.db.clickhouse,
+            &self.config.research.artifact_store,
+        )?;
+        Ok(Arc::new(ResearchReadinessEvidenceService::new(
+            Arc::clone(&self.infra.repos.research_readiness)
+                as Arc<dyn ResearchReadinessEvidenceRepository>,
+            Arc::clone(&self.research.artifact_store),
+            attestor,
+            &evidence_scope,
+        )?))
+    }
 }
 
 fn build_trade_policy_port(
@@ -293,18 +293,20 @@ fn build_trade_policy_port(
     }))
 }
 
-fn build_feature_integrity(ctx: &AppContext) -> Arc<dyn FeatureIntegrityPort> {
-    Arc::new(FeatureIntegrityService::new(
-        Arc::clone(&ctx.report.feature_parity),
-        Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
-            &ctx.infra.ch,
-        ))) as Arc<dyn FeatureParityEventRepository>,
-        Some(Arc::new(CatalogFeatureIntegrityCoverage::new(Arc::clone(
-            &ctx.research.catalog_ledger_repo,
-        )
-            as Arc<dyn CatalogLedgerRepository>))),
-        Arc::clone(&ctx.infra.metrics),
-    ))
+impl AppContext {
+    fn build_feature_integrity(&self) -> Arc<dyn FeatureIntegrityPort> {
+        Arc::new(FeatureIntegrityService::new(
+            Arc::clone(&self.report.feature_parity),
+            Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
+                &self.infra.ch,
+            ))) as Arc<dyn FeatureParityEventRepository>,
+            Some(Arc::new(CatalogFeatureIntegrityCoverage::new(Arc::clone(
+                &self.research.catalog_ledger_repo,
+            )
+                as Arc<dyn CatalogLedgerRepository>))),
+            Arc::clone(&self.infra.metrics),
+        ))
+    }
 }
 
 struct WebAuthServices {
@@ -313,29 +315,31 @@ struct WebAuthServices {
     perm_checker: Arc<PermChecker>,
 }
 
-async fn build_web_auth(ctx: &AppContext) -> QuantResult<WebAuthServices> {
-    let perm_checker = Arc::new(routes::init_rbac_rules());
-    let casbin = Arc::new(
-        CasbinService::new(ctx.infra.pg.connection().clone())
-            .await
+impl AppContext {
+    async fn build_web_auth(&self) -> QuantResult<WebAuthServices> {
+        let perm_checker = Arc::new(PermChecker::route_rules());
+        let casbin = Arc::new(
+            CasbinService::new(self.infra.pg.connection().clone())
+                .await
+                .map_err(|error| InfraError::Misconfigured {
+                    detail: error.to_string(),
+                })?,
+        );
+        let jwt = Arc::new(
+            JwtService::new(
+                &self.config.web.jwt,
+                Arc::clone(&self.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
+            )
             .map_err(|error| InfraError::Misconfigured {
                 detail: error.to_string(),
             })?,
-    );
-    let jwt = Arc::new(
-        JwtService::new(
-            &ctx.config.web.jwt,
-            Arc::clone(&ctx.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
-        )
-        .map_err(|error| InfraError::Misconfigured {
-            detail: error.to_string(),
-        })?,
-    );
-    Ok(WebAuthServices {
-        casbin,
-        jwt,
-        perm_checker,
-    })
+        );
+        Ok(WebAuthServices {
+            casbin,
+            jwt,
+            perm_checker,
+        })
+    }
 }
 
 struct WebExecutionPorts {
@@ -345,62 +349,67 @@ struct WebExecutionPorts {
     execution_recovery: Arc<dyn ExecutionRecoveryPort>,
 }
 
-fn build_web_execution_ports(ctx: &AppContext) -> WebExecutionPorts {
-    let repos = &ctx.infra.repos;
-    let execution_read = Arc::new(CoreExecutionReadPort::new(
-        Arc::clone(&repos.execution_order) as Arc<dyn ExecutionOrderRepository>,
-        Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
-        Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
-        Arc::clone(&repos.settlement_redeem) as Arc<dyn SettlementRedeemRepository>,
-    ));
-    let settlement_control = Arc::clone(&ctx.execution.settlement_control);
-    let reconciliation = Arc::new(CoreReconciliationPort::new(
-        Arc::clone(&ctx.execution.reconciliation),
-        Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
-        Arc::clone(&ctx.governance.execution_recovery),
-    )) as Arc<dyn ReconciliationPort>;
-    let execution_recovery = Arc::new(CoreExecutionRecoveryPort::new(
-        Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
-        Arc::clone(&ctx.governance.kill_switch),
-        ctx.governance.runtime_controls.clone(),
-    )) as Arc<dyn ExecutionRecoveryPort>;
+impl AppContext {
+    fn build_web_execution_ports(&self) -> WebExecutionPorts {
+        let repos = &self.infra.repos;
+        let execution_read = Arc::new(CoreExecutionReadPort::new(
+            Arc::clone(&repos.execution_order) as Arc<dyn ExecutionOrderRepository>,
+            Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
+            Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
+            Arc::clone(&repos.settlement_redeem) as Arc<dyn SettlementRedeemRepository>,
+        ));
+        let settlement_control = Arc::clone(&self.execution.settlement_control);
+        let reconciliation = Arc::new(CoreReconciliationPort::new(
+            Arc::clone(&self.execution.reconciliation),
+            Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
+            Arc::clone(&self.governance.execution_recovery),
+        )) as Arc<dyn ReconciliationPort>;
+        let execution_recovery = Arc::new(CoreExecutionRecoveryPort::new(
+            Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
+            Arc::clone(&self.governance.kill_switch),
+            self.governance.runtime_controls.clone(),
+        )) as Arc<dyn ExecutionRecoveryPort>;
 
-    WebExecutionPorts {
-        execution_read: execution_read as Arc<dyn ExecutionReadPort>,
-        settlement_control,
-        reconciliation,
-        execution_recovery,
+        WebExecutionPorts {
+            execution_read: execution_read as Arc<dyn ExecutionReadPort>,
+            settlement_control,
+            reconciliation,
+            execution_recovery,
+        }
     }
 }
 
-/// Wire the best-effort Postgres operation-log `AsyncWriter`.
-fn build_operation_log_writer(
-    ctx: &AppContext,
-) -> (OperationLogBuffer, AsyncWriterWorker<NewOperationLog>) {
-    let op_log_repo = Arc::clone(&ctx.infra.repos.operation_log) as Arc<dyn OperationLogRepository>;
-    let op_log_drops = ctx
-        .infra
-        .metrics
-        .async_writer_dropped
-        .with_label_values(&["operation_log"]);
-    let (op_log_writer, op_log_worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("operation_log")
-            .capacity(OPERATION_LOG_BUFFER_CAPACITY)
-            .batch_size(OPERATION_LOG_BATCH_SIZE)
-            .flush_interval(OPERATION_LOG_FLUSH_INTERVAL),
-        move |rows: Vec<NewOperationLog>| {
-            let repo = Arc::clone(&op_log_repo);
-            Box::pin(async move { repo.append_batch(rows).await })
-        },
-        op_log_drops,
-        ctx.infra
+impl AppContext {
+    /// Wire the best-effort Postgres operation-log `AsyncWriter`.
+    fn build_operation_log_writer(
+        &self,
+    ) -> (OperationLogBuffer, AsyncWriterWorker<NewOperationLog>) {
+        let op_log_repo =
+            Arc::clone(&self.infra.repos.operation_log) as Arc<dyn OperationLogRepository>;
+        let op_log_drops = self
+            .infra
             .metrics
-            .async_writer_observability("operation_log"),
-    );
-    (
-        OperationLogBuffer::new(Arc::new(op_log_writer)),
-        op_log_worker,
-    )
+            .async_writer_dropped
+            .with_label_values(&["operation_log"]);
+        let (op_log_writer, op_log_worker) = AsyncWriter::new(
+            AsyncWriterConfig::new("operation_log")
+                .capacity(OPERATION_LOG_BUFFER_CAPACITY)
+                .batch_size(OPERATION_LOG_BATCH_SIZE)
+                .flush_interval(OPERATION_LOG_FLUSH_INTERVAL),
+            move |rows: Vec<NewOperationLog>| {
+                let repo = Arc::clone(&op_log_repo);
+                Box::pin(async move { repo.append_batch(rows).await })
+            },
+            op_log_drops,
+            self.infra
+                .metrics
+                .async_writer_observability("operation_log"),
+        );
+        (
+            OperationLogBuffer::new(Arc::new(op_log_writer)),
+            op_log_worker,
+        )
+    }
 }
 
 struct ResearchWebPorts {
@@ -411,43 +420,45 @@ struct ResearchWebPorts {
     model_calibration_fit: Arc<ModelCalibrationFitService>,
 }
 
-fn build_research_web_ports(ctx: &AppContext) -> ResearchWebPorts {
-    let repos = &ctx.infra.repos;
-    let runtime_config = Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>;
-    let bias_table =
-        Arc::clone(&repos.calibration_artifact) as Arc<dyn CalibrationArtifactRepository>;
-    let backtests = Arc::new(CoreBacktestPort::from_research(
-        &ctx.research,
-        Arc::clone(&runtime_config),
-        Arc::clone(&bias_table),
-    ));
-    let cpcv_backtests = Arc::new(CoreCpcvBacktestPort::from_research(
-        &ctx.research,
-        Arc::clone(&runtime_config),
-        Arc::clone(&bias_table),
-    ));
-    let model_calibration_fit = Arc::new(ModelCalibrationFitService::new(
-        Arc::clone(&backtests),
-        Arc::clone(&ctx.research.model_registry_repo),
-        Arc::clone(&ctx.research.training_dataset_repo),
-        Arc::clone(&bias_table),
-        Arc::clone(&runtime_config),
-    ));
-    ResearchWebPorts {
-        training_datasets: Arc::new(CoreTrainingDatasetPort::from_research(
-            &ctx.research,
+impl AppContext {
+    fn build_research_web_ports(&self) -> ResearchWebPorts {
+        let repos = &self.infra.repos;
+        let runtime_config = Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>;
+        let bias_table =
+            Arc::clone(&repos.calibration_artifact) as Arc<dyn CalibrationArtifactRepository>;
+        let backtests = Arc::new(CoreBacktestPort::from_research(
+            &self.research,
             Arc::clone(&runtime_config),
             Arc::clone(&bias_table),
-            ctx.config.quant.research_jobs.max_spine_samples,
-            ctx.config.quant.research_jobs.plan_sample_slices,
-            ctx.config.quant.research_jobs.plan_sample_markets,
-        )),
-        model_training: Arc::new(CoreModelTrainingPort::from_research(
-            &ctx.research,
+        ));
+        let cpcv_backtests = Arc::new(CoreCpcvBacktestPort::from_research(
+            &self.research,
             Arc::clone(&runtime_config),
-        )),
-        backtests,
-        cpcv_backtests,
-        model_calibration_fit,
+            Arc::clone(&bias_table),
+        ));
+        let model_calibration_fit = Arc::new(ModelCalibrationFitService::new(
+            Arc::clone(&backtests),
+            Arc::clone(&self.research.model_registry_repo),
+            Arc::clone(&self.research.training_dataset_repo),
+            Arc::clone(&bias_table),
+            Arc::clone(&runtime_config),
+        ));
+        ResearchWebPorts {
+            training_datasets: Arc::new(CoreTrainingDatasetPort::from_research(
+                &self.research,
+                Arc::clone(&runtime_config),
+                Arc::clone(&bias_table),
+                self.config.quant.research_jobs.max_spine_samples,
+                self.config.quant.research_jobs.plan_sample_slices,
+                self.config.quant.research_jobs.plan_sample_markets,
+            )),
+            model_training: Arc::new(CoreModelTrainingPort::from_research(
+                &self.research,
+                Arc::clone(&runtime_config),
+            )),
+            backtests,
+            cpcv_backtests,
+            model_calibration_fit,
+        }
     }
 }

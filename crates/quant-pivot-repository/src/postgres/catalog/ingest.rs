@@ -12,7 +12,7 @@ use crate::batch::chunk_for_in_clause;
 
 /// Load all rows whose string id column matches any of `ids`, chunking the `IN`
 /// list to stay under the Postgres bind-parameter limit.
-pub async fn find_models_by_str_id_chunks<E, C, Id, F>(
+pub async fn find_str_id_chunks<E, C, Id, F>(
     db: &impl ConnectionTrait,
     ids: &[Id],
     id_column: C,
@@ -36,7 +36,7 @@ where
 }
 
 /// Project only the string id column for existence checks, chunked.
-pub async fn find_existing_str_id_chunks<E, C, Id, F>(
+pub async fn find_existing_chunks<E, C, Id, F>(
     db: &impl ConnectionTrait,
     ids: &[Id],
     id_column: C,

@@ -17,7 +17,7 @@ async fn moka_set_get_roundtrip() {
 }
 
 #[tokio::test]
-async fn moka_get_missing_returns_none() {
+async fn moka_missing_returns_none() {
     let backend = MokaBackend::new(100);
     let val = backend.get("nonexistent").await.unwrap();
     assert_eq!(val, None);
@@ -47,7 +47,7 @@ async fn moka_exists_check() {
 }
 
 #[tokio::test]
-async fn moka_mget_returns_correct_order() {
+async fn moka_mget_returns_order() {
     let backend = MokaBackend::new(100);
     backend
         .set("a", b"1", Duration::from_mins(1))
@@ -76,7 +76,7 @@ async fn moka_mset_bulk_write() {
 }
 
 #[tokio::test]
-async fn cache_key_format_and_ttl() {
+async fn cache_key_format_ttl() {
     let key = CacheKey::MarketInfo {
         market_id: MarketId::new("0xabc"),
     };
@@ -86,7 +86,7 @@ async fn cache_key_format_and_ttl() {
 }
 
 #[tokio::test]
-async fn moka_per_entry_ttl_expiry() {
+async fn moka_per_entry_expiry() {
     let backend = MokaBackend::new(100);
     backend
         .set("ephemeral", b"gone", Duration::from_millis(1))
@@ -117,7 +117,7 @@ fn bitcode_roundtrip_market_stub() {
 }
 
 #[test]
-fn bitcode_roundtrip_calibration_bucket_key_payload() {
+fn bitcode_roundtrip_calibration_payload() {
     #[derive(bitcode::Encode, bitcode::Decode, Debug, PartialEq, Eq)]
     struct CalibrationCache {
         category: String,

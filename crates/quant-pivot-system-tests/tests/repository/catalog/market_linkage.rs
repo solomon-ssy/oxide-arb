@@ -88,7 +88,7 @@ fn boundary(decision_at: DateTime<Utc>, knowledge_lag_secs: u64) -> DecisionBoun
         .expect("linkage cutoff")
 }
 
-pub async fn valid_at_never_sees_a_revision_effective_after_the_source_cutoff() {
+pub async fn valid_never_after_cutoff() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_market(&db, "0xlinkage1").await;
@@ -151,7 +151,7 @@ pub async fn valid_at_never_sees_a_revision_effective_after_the_source_cutoff() 
     );
 }
 
-pub async fn valid_at_for_markets_matches_valid_at_batched() {
+pub async fn valid_markets_matches_batched() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_market(&db, "0xlinkage2").await;
@@ -208,7 +208,7 @@ pub async fn valid_at_for_markets_matches_valid_at_batched() {
     assert_eq!(latest[0].effective_at(), late_at);
 }
 
-pub async fn backdated_row_is_invisible_before_database_availability() {
+pub async fn backdated_row_before_availability() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_market(&db, "0xlinkage-late-created").await;
@@ -276,7 +276,7 @@ pub async fn backdated_row_is_invisible_before_database_availability() {
     );
 }
 
-pub async fn append_batch_rolls_back_the_entire_group_when_any_member_is_invalid() {
+pub async fn append_batch_rolls_invalid() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_market(&db, "0xlinkage-batch-a").await;

@@ -166,7 +166,7 @@ impl AppContext {
                     {
                         break;
                     }
-                    if let Err(error) = armed_dispatch_pass(&worker).await {
+                    if let Err(error) = worker.armed_dispatch_pass().await {
                         tracing::warn!(%error, "auto-execution dispatch pass failed");
                     }
                 }
@@ -221,19 +221,21 @@ async fn recover_dangling_orders(
     Ok(enqueued)
 }
 
-/// One auto-dispatch pass: worker-level early-exit unless mode is
-/// `auto_execution`, the kill-switch admits new entries, and no unresolvable
-/// reconciliation is outstanding; then pull a bounded batch of
-/// `ApprovedByPolicy` intents and submit each. Each submit is independently
-/// row-locked + admitted; a per-intent failure never aborts the batch. The
-/// `has_unresolvable` early-exit is a cheap batch-level backstop in addition to
-/// admission `#17`, which denies the same condition per intent.
-async fn armed_dispatch_pass(worker: &ArmedDispatchWorker) -> QuantResult<()> {
-    let controls = worker.runtime_controls.snapshot();
-    dispatch_for_runtime_mode(controls.quant_runtime_mode, |status| {
-        armed_dispatch_enabled_pass(worker, status)
-    })
-    .await
+impl ArmedDispatchWorker {
+    /// One auto-dispatch pass: worker-level early-exit unless mode is
+    /// `auto_execution`, the kill-switch admits new entries, and no unresolvable
+    /// reconciliation is outstanding; then pull a bounded batch of
+    /// `ApprovedByPolicy` intents and submit each. Each submit is independently
+    /// row-locked + admitted; a per-intent failure never aborts the batch. The
+    /// `has_unresolvable` early-exit is a cheap batch-level backstop in addition to
+    /// admission `#17`, which denies the same condition per intent.
+    async fn armed_dispatch_pass(&self) -> QuantResult<()> {
+        let controls = self.runtime_controls.snapshot();
+        dispatch_for_runtime_mode(controls.quant_runtime_mode, |status| {
+            armed_dispatch_enabled_pass(self, status)
+        })
+        .await
+    }
 }
 
 async fn dispatch_for_runtime_mode<F, Fut>(mode: QuantRuntimeMode, dispatch: F) -> QuantResult<()>
@@ -347,7 +349,7 @@ mod tests {
     use super::dispatch_for_runtime_mode;
 
     #[tokio::test]
-    async fn report_only_never_invokes_the_submission_path() {
+    async fn report_never_submits() {
         let calls = AtomicUsize::new(0);
 
         dispatch_for_runtime_mode(QuantRuntimeMode::ReportOnly, |_| {

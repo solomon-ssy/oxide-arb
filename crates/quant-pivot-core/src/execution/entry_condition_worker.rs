@@ -27,6 +27,7 @@ use quant_pivot_repository::traits::{
     ModelRegistryRepository, PolicyRepository, QuantFactReadRepository, RecommendationRepository,
 };
 use quant_pivot_storage::postgres::PostgresNotificationListener;
+use rust_decimal::Decimal;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -127,7 +128,7 @@ impl LiveEntryConditionInputProvider {
             .await?;
         let model = self
             .models
-            .find_model_version_by_id(&expected.model_version_id)
+            .find_model_version(&expected.model_version_id)
             .await?;
         let current_runtime_config = self.runtime_configs.load_current().await?;
         let factor_ids = expected
@@ -318,7 +319,7 @@ impl LiveEntryConditionInputProvider {
                 })?;
             let mut rows = self
                 .facts
-                .crypto_price_reports_available_between(
+                .crypto_reports_between(
                     vec![condition.source.instrument_key.clone()],
                     from,
                     to,
@@ -365,7 +366,7 @@ impl LiveEntryConditionInputProvider {
                 .filter_map(|row| {
                     Some(CryptoPriceReportInput {
                         source_sequence: row.source_sequence,
-                        price: Usd::new(row.price.to_decimal()),
+                        price: Usd::new(Decimal::from(row.price)),
                         event_at: DateTime::from_timestamp_millis(row.event_time)?,
                         available_at: DateTime::from_timestamp_millis(row.available_at)?,
                         report_hash: row.report_hash,

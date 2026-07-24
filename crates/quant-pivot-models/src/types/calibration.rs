@@ -411,91 +411,95 @@ mod tests {
     };
     use crate::{enums::quant::DataQualityStatus, types::feature::NullReason};
 
-    fn report() -> ScoreMultiplierCalibrationReport {
-        let data_quality_strata = [
-            DataQualityStatus::Fresh,
-            DataQualityStatus::Acceptable,
-            DataQualityStatus::Degraded,
-            DataQualityStatus::Stale,
-            DataQualityStatus::Insufficient,
-        ]
-        .into_iter()
-        .map(|status| DataQualityStratumFit {
-            status,
-            sample_count: 3,
-            mean_realized_bps: Some(dec!(1)),
-        })
-        .collect();
-        let horizon_strata = [
-            HorizonCalibrationBucket::TooSoon,
-            HorizonCalibrationBucket::InWindow,
-            HorizonCalibrationBucket::TooLate,
-        ]
-        .into_iter()
-        .map(|bucket| HorizonStratumFit {
-            bucket,
-            sample_count: 3,
-            mean_realized_bps: Some(dec!(1)),
-        })
-        .collect();
-        let reasons = [
-            NullReason::SourceUnavailable,
-            NullReason::StaleBeyondPolicy,
-            NullReason::OutOfValidRange,
-            NullReason::InsufficientHistory,
-            NullReason::NotApplicable,
-            NullReason::LegBookMissing,
-            NullReason::TradeTapeUnavailable,
-            NullReason::InsufficientTradeTape,
-            NullReason::InsufficientRoleCoverage,
-            NullReason::DomainSourceUnavailable,
-            NullReason::LinkageUnresolved,
-        ];
-        let mut substitution_strata: Vec<_> = reasons
+    impl ScoreMultiplierCalibrationReport {
+        fn test_fixture() -> Self {
+            let data_quality_strata = [
+                DataQualityStatus::Fresh,
+                DataQualityStatus::Acceptable,
+                DataQualityStatus::Degraded,
+                DataQualityStatus::Stale,
+                DataQualityStatus::Insufficient,
+            ]
             .into_iter()
-            .map(|reason| SubstitutionStratumFit {
-                bucket: SubstitutionCalibrationBucket::Reason { reason },
+            .map(|status| DataQualityStratumFit {
+                status,
                 sample_count: 3,
                 mean_realized_bps: Some(dec!(1)),
             })
             .collect();
-        substitution_strata.push(SubstitutionStratumFit {
-            bucket: SubstitutionCalibrationBucket::Clean,
-            sample_count: 3,
-            mean_realized_bps: Some(dec!(1)),
-        });
-        ScoreMultiplierCalibrationReport {
-            methodology_version: SCORE_MULTIPLIER_CALIBRATION_METHODOLOGY_VERSION,
-            minimum_stratum_samples: 3,
-            total_samples: 3,
-            data_quality_strata,
-            liquidity_strata: vec![
-                LiquidityStratumFit {
-                    bucket: LiquidityCalibrationBucket::Tier {
-                        min_liquidity_usd: dec!(1000),
+            let horizon_strata = [
+                HorizonCalibrationBucket::TooSoon,
+                HorizonCalibrationBucket::InWindow,
+                HorizonCalibrationBucket::TooLate,
+            ]
+            .into_iter()
+            .map(|bucket| HorizonStratumFit {
+                bucket,
+                sample_count: 3,
+                mean_realized_bps: Some(dec!(1)),
+            })
+            .collect();
+            let reasons = [
+                NullReason::SourceUnavailable,
+                NullReason::StaleBeyondPolicy,
+                NullReason::OutOfValidRange,
+                NullReason::InsufficientHistory,
+                NullReason::NotApplicable,
+                NullReason::LegBookMissing,
+                NullReason::TradeTapeUnavailable,
+                NullReason::InsufficientTradeTape,
+                NullReason::InsufficientRoleCoverage,
+                NullReason::DomainSourceUnavailable,
+                NullReason::LinkageUnresolved,
+            ];
+            let mut substitution_strata: Vec<_> = reasons
+                .into_iter()
+                .map(|reason| SubstitutionStratumFit {
+                    bucket: SubstitutionCalibrationBucket::Reason { reason },
+                    sample_count: 3,
+                    mean_realized_bps: Some(dec!(1)),
+                })
+                .collect();
+            substitution_strata.push(SubstitutionStratumFit {
+                bucket: SubstitutionCalibrationBucket::Clean,
+                sample_count: 3,
+                mean_realized_bps: Some(dec!(1)),
+            });
+            Self {
+                methodology_version: SCORE_MULTIPLIER_CALIBRATION_METHODOLOGY_VERSION,
+                minimum_stratum_samples: 3,
+                total_samples: 3,
+                data_quality_strata,
+                liquidity_strata: vec![
+                    LiquidityStratumFit {
+                        bucket: LiquidityCalibrationBucket::Tier {
+                            min_liquidity_usd: dec!(1000),
+                        },
+                        sample_count: 3,
+                        mean_realized_bps: Some(dec!(1)),
                     },
-                    sample_count: 3,
-                    mean_realized_bps: Some(dec!(1)),
-                },
-                LiquidityStratumFit {
-                    bucket: LiquidityCalibrationBucket::Floor,
-                    sample_count: 3,
-                    mean_realized_bps: Some(dec!(1)),
-                },
-            ],
-            horizon_strata,
-            substitution_strata,
+                    LiquidityStratumFit {
+                        bucket: LiquidityCalibrationBucket::Floor,
+                        sample_count: 3,
+                        mean_realized_bps: Some(dec!(1)),
+                    },
+                ],
+                horizon_strata,
+                substitution_strata,
+            }
         }
     }
 
     #[test]
-    fn score_multiplier_report_accepts_complete_closed_evidence() {
-        report().validate().expect("complete report");
+    fn score_multiplier_accepts_evidence() {
+        ScoreMultiplierCalibrationReport::test_fixture()
+            .validate()
+            .expect("complete report");
     }
 
     #[test]
-    fn score_multiplier_report_rejects_duplicate_strata() {
-        let mut report = report();
+    fn score_rejects_duplicate_strata() {
+        let mut report = ScoreMultiplierCalibrationReport::test_fixture();
         report
             .data_quality_strata
             .push(report.data_quality_strata[0].clone());
@@ -503,15 +507,16 @@ mod tests {
     }
 
     #[test]
-    fn score_multiplier_report_rejects_mean_below_sample_floor() {
-        let mut report = report();
+    fn score_multiplier_rejects_floor() {
+        let mut report = ScoreMultiplierCalibrationReport::test_fixture();
         report.horizon_strata[0].sample_count = 2;
         assert!(report.validate().is_err());
     }
 
     #[test]
-    fn score_multiplier_report_rejects_unknown_json_fields() {
-        let mut value = serde_json::to_value(report()).expect("serialize report");
+    fn score_rejects_unknown_fields() {
+        let mut value = serde_json::to_value(ScoreMultiplierCalibrationReport::test_fixture())
+            .expect("serialize report");
         value
             .as_object_mut()
             .expect("report object")

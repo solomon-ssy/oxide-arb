@@ -45,7 +45,7 @@ mod tests {
     use super::operational_phase_from_readiness;
 
     #[test]
-    fn closed_with_ready_infra_is_operational() {
+    fn closed_ready_infra_operational() {
         assert_eq!(
             operational_phase_from_readiness(KillSwitchState::Closed, true, true),
             OperationalPhase::Operational
@@ -53,7 +53,7 @@ mod tests {
     }
 
     #[test]
-    fn tightened_kill_switch_states_are_degraded_not_halted() {
+    fn tightened_kill_not_halted() {
         let state = KillSwitchState::ExitOnly;
         assert_eq!(
             operational_phase_from_readiness(state, true, true),
@@ -64,7 +64,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_freeze_states_are_halted() {
+    fn execution_freeze_states_halted() {
         for state in [
             KillSwitchState::ExecutionHalted,
             KillSwitchState::EmergencyHalted,
@@ -77,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_warming_takes_priority_over_kill_switch() {
+    fn catalog_warming_takes_switch() {
         assert_eq!(
             operational_phase_from_readiness(KillSwitchState::EmergencyHalted, false, true),
             OperationalPhase::CatalogWarming

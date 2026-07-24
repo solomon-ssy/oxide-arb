@@ -490,7 +490,7 @@ mod tests {
     };
 
     #[test]
-    fn selects_bounded_tmax_and_tmin_ranges() {
+    fn selects_bounded_tmax_ranges() {
         let index = concat!(
             "1:0:d=2026071300:TMP:2 m above ground:3 hour fcst:\n",
             "2:100:d=2026071300:TMAX:2 m above ground:0-3 hour max fcst:\n",
@@ -514,14 +514,14 @@ mod tests {
     }
 
     #[test]
-    fn builds_control_and_perturbed_urls() {
+    fn builds_control_perturbed_urls() {
         let reference = Utc.with_ymd_and_hms(2026, 7, 13, 6, 0, 0).unwrap();
         assert!(product_url("https://bucket", reference, 3, 0).contains("gec00.t06z"));
         assert!(product_url("https://bucket", reference, 240, 30).contains("gep30.t06z"));
     }
 
     #[test]
-    fn interpolates_real_gefs_negative_longitude_grid() {
+    fn interpolates_real_gefs_grid() {
         let binding = GefsStationBinding {
             station: IcaoStation::parse("KLGA").expect("station"),
             latitude: dec!(40.75),
@@ -541,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn merges_station_fields_and_rejects_inverted_extremes() {
+    fn merges_station_rejects_extremes() {
         let station = IcaoStation::parse("KLGA").expect("station");
         let grid_binding_hash =
             ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("hash");

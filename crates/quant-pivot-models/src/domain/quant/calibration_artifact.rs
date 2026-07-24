@@ -101,7 +101,7 @@ mod tests {
     use super::CalibrationArtifactPayload;
 
     #[test]
-    fn persisted_calibration_payload_rejects_unknown_kind_and_fields() {
+    fn persisted_rejects_unknown_fields() {
         let unknown_kind = serde_json::json!({
             "kind": "custom_calibrator",
             "payload": {}

@@ -2,16 +2,18 @@
 
 use insta::assert_json_snapshot;
 use support::report_snapshots::{
-    empty_report, non_empty_topn_report, recommendation_immediate_entry,
-    recommendation_limit_entry, recommendation_not_auto_eligible, recommendation_partial_exits,
-    revoked_report,
+    TopNReportSnapshot, empty_report, recommendation_immediate_entry, recommendation_limit_entry,
+    recommendation_not_auto_eligible, recommendation_partial_exits, revoked_report,
 };
 
 mod support;
 
 #[test]
-fn non_empty_topn_report_snapshot() {
-    assert_json_snapshot!(non_empty_topn_report());
+fn non_empty_topn_snapshot() {
+    assert_json_snapshot!(
+        "non_empty_topn_report_snapshot",
+        TopNReportSnapshot::non_empty()
+    );
 }
 
 #[test]
@@ -35,8 +37,11 @@ fn recommendation_partial_exits_snapshot() {
 }
 
 #[test]
-fn recommendation_not_auto_eligible_snapshot() {
-    assert_json_snapshot!(recommendation_not_auto_eligible());
+fn recommendation_not_auto_snapshot() {
+    assert_json_snapshot!(
+        "recommendation_not_auto_eligible_snapshot",
+        recommendation_not_auto_eligible()
+    );
 }
 
 #[test]

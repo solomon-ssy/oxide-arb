@@ -46,7 +46,7 @@ async fn ws_check(checker: &HealthChecker) -> SubsystemHealth {
         .expect("websocket subsystem probe")
 }
 
-pub async fn ws_skipped_during_catalog_warming() {
+pub async fn ws_skipped_catalog_warming() {
     let (pg, _container) = setup_pg().await;
     let deploy = DeployConfig::default();
     let checker = checker_with(
@@ -65,7 +65,7 @@ pub async fn ws_skipped_during_catalog_warming() {
     ));
 }
 
-pub async fn ws_skipped_while_market_data_connecting() {
+pub async fn ws_skipped_while_connecting() {
     let (pg, _container) = setup_pg().await;
     let deploy = DeployConfig::default();
     let catalog = Arc::new(CatalogReadiness::new());
@@ -86,7 +86,7 @@ pub async fn ws_skipped_while_market_data_connecting() {
     ));
 }
 
-pub async fn ws_reports_message_age_when_fresh() {
+pub async fn ws_reports_message_fresh() {
     let (pg, _container) = setup_pg().await;
     let deploy = DeployConfig::default();
     let catalog = Arc::new(CatalogReadiness::new());
@@ -103,7 +103,7 @@ pub async fn ws_reports_message_age_when_fresh() {
     assert_eq!(check.latency_ms, Some(42));
 }
 
-pub async fn ws_unhealthy_when_message_stale() {
+pub async fn ws_unhealthy_message_stale() {
     let (pg, _container) = setup_pg().await;
     let deploy = DeployConfig::default();
     let catalog = Arc::new(CatalogReadiness::new());
@@ -126,7 +126,7 @@ pub async fn ws_unhealthy_when_message_stale() {
     );
 }
 
-pub async fn ws_unhealthy_when_shards_disconnected() {
+pub async fn ws_unhealthy_shards_disconnected() {
     let (pg, _container) = setup_pg().await;
     let deploy = DeployConfig::default();
     let catalog = Arc::new(CatalogReadiness::new());

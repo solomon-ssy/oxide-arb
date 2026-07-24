@@ -183,7 +183,7 @@ impl RuntimeControlPort for QuantRuntimeControl {
             oldest_disconnected_secs: shards.oldest_disconnected_secs,
             connected_ratio_bps: shards.connected_ratio_bps,
         };
-        let last_message_age_ms = self.health_checker.ws_last_message_age_ms();
+        let last_message_age_ms = self.health_checker.ws_message_age_ms();
         let market_data = MarketDataConnectivity::from_parts(last_message_age_ms, ws_shards);
         let active_markets = match &catalog {
             CatalogState::Ready { markets, .. } => u32::try_from(*markets).unwrap_or(u32::MAX),

@@ -188,7 +188,7 @@ impl BookStore {
     }
 
     #[must_use]
-    pub fn load_last_known_by_id(&self, token_id: &TokenId) -> LastKnownBook {
+    pub fn load_known_book(&self, token_id: &TokenId) -> LastKnownBook {
         self.resolve(token_id).map_or(
             LastKnownBook {
                 snapshot: None,
@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn poisoned_ticket_cannot_republish_and_new_session_snapshot_recovers() {
+    fn poisoned_ticket_cannot_recovers() {
         let metrics = Arc::new(MetricsHub::new());
         let token_id = TokenId::new("tok-session");
         let data_plane = Arc::new(DataPlane::new());
@@ -609,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn retirement_releases_last_known_sides_and_requires_a_newer_snapshot_session() {
+    fn retirement_releases_requires_session() {
         let token_id = TokenId::new("tok-retire");
         let data_plane = Arc::new(DataPlane::new());
         data_plane.register_test_tokens(slice::from_ref(&token_id));
@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_poison_cannot_leave_a_semantically_fresh_book() {
+    fn concurrent_poison_cannot_book() {
         let token_id = TokenId::new("tok-race");
         let data_plane = Arc::new(DataPlane::new());
         data_plane.register_test_tokens(slice::from_ref(&token_id));
@@ -691,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn loom_publish_poison_interleavings_are_never_semantically_fresh() {
+    fn loom_publish_never_fresh() {
         model(|| {
             const INVALID: u8 = 0;
             const FRESH: u8 = 1;
@@ -726,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn independently_loaded_fresh_pair_keeps_shared_sides() {
+    fn independently_loaded_keeps_sides() {
         let metrics = Arc::new(MetricsHub::new());
         let yes = TokenId::new("yes");
         let no = TokenId::new("no");

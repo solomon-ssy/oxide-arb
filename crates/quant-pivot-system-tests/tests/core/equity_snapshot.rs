@@ -52,7 +52,7 @@ async fn seed_peak(db: &DatabaseConnection, capital: Usd, as_of: DateTime<Utc>) 
     .expect("seed peak equity snapshot");
 }
 
-pub async fn new_account_no_history_is_neutral_drawdown() {
+pub async fn account_no_history_drawdown() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let execution_account_id = ensure_fixture_execution_account(&db).await;
@@ -73,7 +73,7 @@ pub async fn new_account_no_history_is_neutral_drawdown() {
     assert_eq!(resolution.high_water_mark_usd, Usd::new(dec!(10000)));
 }
 
-pub async fn resolve_drawdown_re_read_picks_up_concurrent_history() {
+pub async fn resolve_drawdown_concurrent_history() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let execution_account_id = ensure_fixture_execution_account(&db).await;
@@ -103,7 +103,7 @@ pub async fn resolve_drawdown_re_read_picks_up_concurrent_history() {
     assert_eq!(second.drawdown_state.current_drawdown, dec!(0.2));
 }
 
-pub async fn equity_snapshot_records_real_equity_and_pnl() {
+pub async fn equity_snapshot_real_pnl() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let execution_account_id = ensure_fixture_execution_account(&db).await;

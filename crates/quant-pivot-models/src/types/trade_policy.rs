@@ -23,7 +23,7 @@ use crate::{
         ENTRY_CONDITION_MIN_GROUP_CHILDREN, FactorDefinitionId, FactorMeasure, ModelVersionId,
         OpportunisticExitPolicy, Price, ResearchEvaluationTrack, ResearchJobId, ResearchProfileRef,
         ResearchReadinessEvidenceId, StructuralVolatilityOosEvidence, TradePolicyArtifactId,
-        TrainingDatasetId, Usd, resolve_builtin_research_profile,
+        TrainingDatasetId, Usd,
     },
 };
 
@@ -51,6 +51,25 @@ pub struct TradePolicyQualityGate {
 }
 
 impl TradePolicyQualityGate {
+    /// Canonical publication gate used by every built-in production profile.
+    #[must_use]
+    pub fn production() -> Self {
+        Self {
+            min_effective_sample_size: 100,
+            min_full_l2_coverage: Decimal::new(95, 2),
+            min_common_candidate_support: Decimal::new(95, 2),
+            min_passive_reconciled_trade_coverage: Decimal::new(95, 2),
+            min_fee_catalog_coverage: Decimal::ONE,
+            min_eligible_market_coverage: Decimal::new(95, 2),
+            min_cpcv_paths: 21,
+            min_deflated_sharpe_ratio: Decimal::new(95, 2),
+            max_probability_of_backtest_overfitting: Decimal::new(5, 1),
+            max_ambiguous_touch_rate: Decimal::new(5, 2),
+            max_depth_failure_rate: Decimal::new(5, 2),
+            min_lower_confidence_utility_bps: Bps::ZERO,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.min_effective_sample_size < 100 {
             return Err("min_effective_sample_size cannot be lower than 100".to_owned());
@@ -173,7 +192,7 @@ impl TradePolicyFitContract {
         if self.latency_evidence_id.as_uuid().is_nil() {
             return Err("trade-policy latency evidence identity cannot be nil".to_owned());
         }
-        let profile = resolve_builtin_research_profile(&self.profile_ref)?;
+        let profile = self.profile_ref.resolve_builtin_research_profile()?;
         if !profile.spec.permits(self.evaluation_track) {
             return Err(
                 "research profile does not permit the requested evaluation track".to_owned(),
@@ -862,8 +881,8 @@ pub fn canonicalize_policy_candidates(
                 *root = root.clone().canonicalized()?;
             }
         }
-        validate_entry_execution(&candidate.entry_execution)?;
-        validate_exit_template(&candidate.exit)?;
+        candidate.entry_execution.validate_entry_execution()?;
+        candidate.exit.validate_exit_template()?;
     }
     if immediate_count != 1 {
         return Err("policy candidates must contain exactly one Immediate baseline".to_owned());
@@ -872,89 +891,97 @@ pub fn canonicalize_policy_candidates(
     Ok(candidates)
 }
 
-fn validate_entry_execution(entry: &EntryOrderTemplate) -> Result<(), String> {
-    match entry {
-        EntryOrderTemplate::PassivePostOnly {
-            placement,
-            good_til_secs,
-            max_book_age_ms,
-        } => {
-            if *good_til_secs == 0 || *max_book_age_ms == 0 {
-                return Err("passive GTD and book freshness must be positive".to_owned());
-            }
-            if matches!(
+impl EntryOrderTemplate {
+    fn validate_entry_execution(&self) -> Result<(), String> {
+        match self {
+            Self::PassivePostOnly {
                 placement,
-                PassivePlacement::ImproveBestBidByTicks { ticks: 0 }
-            ) {
-                return Err("passive improve ticks must be positive".to_owned());
+                good_til_secs,
+                max_book_age_ms,
+            } => {
+                if *good_til_secs == 0 || *max_book_age_ms == 0 {
+                    return Err("passive GTD and book freshness must be positive".to_owned());
+                }
+                if matches!(
+                    placement,
+                    PassivePlacement::ImproveBestBidByTicks { ticks: 0 }
+                ) {
+                    return Err("passive improve ticks must be positive".to_owned());
+                }
+            }
+            Self::Aggressive {
+                max_slippage_bps,
+                max_book_age_ms,
+                ..
+            } => {
+                if *max_slippage_bps < Bps::ZERO || *max_book_age_ms == 0 {
+                    return Err(
+                        "aggressive slippage must be non-negative and freshness positive"
+                            .to_owned(),
+                    );
+                }
             }
         }
-        EntryOrderTemplate::Aggressive {
-            max_slippage_bps,
-            max_book_age_ms,
-            ..
-        } => {
-            if *max_slippage_bps < Bps::ZERO || *max_book_age_ms == 0 {
+        Ok(())
+    }
+}
+
+impl TradePolicyExitTemplate {
+    fn validate_exit_template(&self) -> Result<(), String> {
+        if self.vertical_barrier_secs == 0
+            || self.scale_out_targets.len() > 3
+            || !(Decimal::ZERO..=Decimal::ONE).contains(&self.min_score_retention)
+        {
+            return Err("exit vertical/scale-out/retention contract is invalid".to_owned());
+        }
+        let opportunistic = &self.opportunistic_exit;
+        if opportunistic.min_expected_alpha_bps < Bps::ZERO
+            || opportunistic.max_cumulative_exit_pct <= Decimal::ZERO
+            || opportunistic.max_cumulative_exit_pct > Decimal::ONE
+            || opportunistic.min_incremental_exit_pct <= Decimal::ZERO
+            || opportunistic.min_incremental_exit_pct > opportunistic.max_cumulative_exit_pct
+        {
+            return Err("opportunistic exit policy bounds are invalid".to_owned());
+        }
+        let mut prior = Decimal::ZERO;
+        let mut target_ids = BTreeSet::new();
+        for target in &self.scale_out_targets {
+            if target.target_id.trim().is_empty()
+                || !target_ids.insert(target.target_id.as_str())
+                || target.target_cumulative_exit_pct <= prior
+                || target.target_cumulative_exit_pct > Decimal::ONE
+            {
                 return Err(
-                    "aggressive slippage must be non-negative and freshness positive".to_owned(),
+                    "scale-out targets must be unique and strictly cumulative in (0,1]".to_owned(),
+                );
+            }
+            prior = target.target_cumulative_exit_pct;
+        }
+        let mut reasons = BTreeSet::new();
+        for execution in &self.reason_execution {
+            if !reasons.insert(execution.reason.as_str())
+                || execution.fill_requirement != FillRequirement::AllowPartial
+                || execution.max_attempts == 0
+                || execution.retry_cadence_ms == 0
+                || execution.max_slippage_bps < Bps::ZERO
+            {
+                return Err(
+                    "exit reason execution must be unique, FAK, bounded and non-negative"
+                        .to_owned(),
                 );
             }
         }
-    }
-    Ok(())
-}
-
-fn validate_exit_template(exit: &TradePolicyExitTemplate) -> Result<(), String> {
-    if exit.vertical_barrier_secs == 0
-        || exit.scale_out_targets.len() > 3
-        || !(Decimal::ZERO..=Decimal::ONE).contains(&exit.min_score_retention)
-    {
-        return Err("exit vertical/scale-out/retention contract is invalid".to_owned());
-    }
-    let opportunistic = &exit.opportunistic_exit;
-    if opportunistic.min_expected_alpha_bps < Bps::ZERO
-        || opportunistic.max_cumulative_exit_pct <= Decimal::ZERO
-        || opportunistic.max_cumulative_exit_pct > Decimal::ONE
-        || opportunistic.min_incremental_exit_pct <= Decimal::ZERO
-        || opportunistic.min_incremental_exit_pct > opportunistic.max_cumulative_exit_pct
-    {
-        return Err("opportunistic exit policy bounds are invalid".to_owned());
-    }
-    let mut prior = Decimal::ZERO;
-    let mut target_ids = BTreeSet::new();
-    for target in &exit.scale_out_targets {
-        if target.target_id.trim().is_empty()
-            || !target_ids.insert(target.target_id.as_str())
-            || target.target_cumulative_exit_pct <= prior
-            || target.target_cumulative_exit_pct > Decimal::ONE
+        if reasons.len() != ExitReason::ALL.len()
+            || ExitReason::ALL
+                .iter()
+                .any(|reason| !reasons.contains(reason.as_str()))
         {
             return Err(
-                "scale-out targets must be unique and strictly cumulative in (0,1]".to_owned(),
+                "exit policy must freeze exactly one rule for every exit reason".to_owned(),
             );
         }
-        prior = target.target_cumulative_exit_pct;
+        Ok(())
     }
-    let mut reasons = BTreeSet::new();
-    for execution in &exit.reason_execution {
-        if !reasons.insert(execution.reason.as_str())
-            || execution.fill_requirement != FillRequirement::AllowPartial
-            || execution.max_attempts == 0
-            || execution.retry_cadence_ms == 0
-            || execution.max_slippage_bps < Bps::ZERO
-        {
-            return Err(
-                "exit reason execution must be unique, FAK, bounded and non-negative".to_owned(),
-            );
-        }
-    }
-    if reasons.len() != ExitReason::ALL.len()
-        || ExitReason::ALL
-            .iter()
-            .any(|reason| !reasons.contains(reason.as_str()))
-    {
-        return Err("exit policy must freeze exactly one rule for every exit reason".to_owned());
-    }
-    Ok(())
 }
 
 /// Publication target governed by source-specific shadow evidence.
@@ -1413,7 +1440,7 @@ impl TradePolicyArtifactPayload {
                 .parameter_source
                 .relaxed_dimensions
                 .windows(2)
-                .any(|pair| shrink_rank(pair[0]) >= shrink_rank(pair[1]))
+                .any(|pair| (pair[0]).shrink_rank() >= (pair[1]).shrink_rank())
                 || cohort.parameter_source.source_effective_sample_size <= Decimal::ZERO
             {
                 blockers
@@ -1429,12 +1456,14 @@ impl TradePolicyArtifactPayload {
     }
 }
 
-const fn shrink_rank(dimension: TradePolicyShrinkDimension) -> u8 {
-    match dimension {
-        TradePolicyShrinkDimension::Category => 0,
-        TradePolicyShrinkDimension::Volatility => 1,
-        TradePolicyShrinkDimension::Liquidity => 2,
-        TradePolicyShrinkDimension::EntryPrice => 3,
+impl TradePolicyShrinkDimension {
+    const fn shrink_rank(self) -> u8 {
+        match self {
+            Self::Category => 0,
+            Self::Volatility => 1,
+            Self::Liquidity => 2,
+            Self::EntryPrice => 3,
+        }
     }
 }
 
@@ -1469,42 +1498,44 @@ mod tests {
             .expect("canonical hash")
     }
 
-    fn contract() -> TradePolicyFitContract {
-        let profile = builtin_research_profiles()
-            .expect("profiles")
-            .into_iter()
-            .next()
-            .expect("pooled profile");
-        let fit_window_end = Utc.timestamp_opt(1_700_086_400, 0).single().expect("time");
-        TradePolicyFitContract {
-            profile_ref: profile.profile_ref,
-            evaluation_track: ResearchEvaluationTrack::ResearchOnly,
-            research_program_hash: hash('7'),
-            source_dataset_id: TrainingDatasetId::from_v7(),
-            model_version_id: ModelVersionId::from_v7(),
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            fit_window_start: fit_window_end - Duration::days(30),
-            fit_window_end,
-            pit_cutoff: fit_window_end,
-            target_horizon_secs: profile.spec.target_horizon_secs,
-            cash_budget_tiers: profile.spec.allowed_cash_budget_tiers,
-            methodology_hash: hash('8'),
-            latency_evidence_id: ResearchReadinessEvidenceId::from_v7(),
-            latency_profile_hash: hash('9'),
-            quality_gate: profile.spec.quality_gate,
+    impl TradePolicyFitContract {
+        fn test_fixture() -> Self {
+            let profile = builtin_research_profiles()
+                .expect("profiles")
+                .into_iter()
+                .next()
+                .expect("pooled profile");
+            let fit_window_end = Utc.timestamp_opt(1_700_086_400, 0).single().expect("time");
+            Self {
+                profile_ref: profile.profile_ref,
+                evaluation_track: ResearchEvaluationTrack::ResearchOnly,
+                research_program_hash: hash('7'),
+                source_dataset_id: TrainingDatasetId::from_v7(),
+                model_version_id: ModelVersionId::from_v7(),
+                decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+                fit_window_start: fit_window_end - Duration::days(30),
+                fit_window_end,
+                pit_cutoff: fit_window_end,
+                target_horizon_secs: profile.spec.target_horizon_secs,
+                cash_budget_tiers: profile.spec.allowed_cash_budget_tiers,
+                methodology_hash: hash('8'),
+                latency_evidence_id: ResearchReadinessEvidenceId::from_v7(),
+                latency_profile_hash: hash('9'),
+                quality_gate: profile.spec.quality_gate,
+            }
         }
     }
 
     #[test]
-    fn fit_contract_rejects_labels_beyond_pit_cutoff() {
-        let mut value = contract();
+    fn fit_contract_rejects_cutoff() {
+        let mut value = TradePolicyFitContract::test_fixture();
         value.pit_cutoff = value.fit_window_end - Duration::seconds(1);
         assert!(value.validate().is_err());
     }
 
     #[test]
-    fn fit_contract_rejects_a_second_quality_gate_truth() {
-        let mut value = contract();
+    fn fit_contract_rejects_truth() {
+        let mut value = TradePolicyFitContract::test_fixture();
         value.quality_gate.min_effective_sample_size += 1;
         assert_eq!(
             value.validate(),
@@ -1513,11 +1544,11 @@ mod tests {
     }
 
     #[test]
-    fn absent_evidence_and_empty_cohorts_cannot_self_attest_publication() {
+    fn absent_empty_cannot_publication() {
         let payload = TradePolicyArtifactPayload {
             format_version: TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
             activation_target: VerticalActivationTarget::SemiAuto,
-            fit_contract: contract(),
+            fit_contract: TradePolicyFitContract::test_fixture(),
             source_dataset_hash: hash('1'),
             feature_schema_hash: hash('2'),
             label_schema_hash: hash('3'),

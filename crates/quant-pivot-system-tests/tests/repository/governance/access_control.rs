@@ -137,7 +137,7 @@ fn new_menu(title: &str, parent_id: Option<MenuId>, kind: MenuKind, sort: i32) -
     }
 }
 
-pub async fn user_crud_paging_and_delete() {
+pub async fn user_crud_paging_delete() {
     let (pool, _container) = setup_pg().await;
     let repo = PgUserRepository::new(pool.connection().clone());
 
@@ -225,7 +225,7 @@ pub async fn user_crud_paging_and_delete() {
     ));
 }
 
-pub async fn role_crud_and_builtin_protection() {
+pub async fn role_crud_builtin_protection() {
     let (pool, _container) = setup_pg().await;
     let repo = PgRoleRepository::new(pool.connection().clone());
 
@@ -288,7 +288,7 @@ pub async fn role_crud_and_builtin_protection() {
     );
 }
 
-pub async fn menu_tree_accessibility_and_delete_guard() {
+pub async fn menu_tree_accessibility_guard() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let menus = PgMenuRepository::new(db.clone());
@@ -359,7 +359,7 @@ pub async fn menu_tree_accessibility_and_delete_guard() {
     );
 }
 
-pub async fn assign_roles_replaces_join_and_casbin_grouping() {
+pub async fn assign_roles_replaces_grouping() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let users = PgUserRepository::new(db.clone());
@@ -449,7 +449,7 @@ pub async fn assign_roles_replaces_join_and_casbin_grouping() {
     ));
 }
 
-pub async fn assign_permissions_validates_and_round_trips() {
+pub async fn assign_permissions_validates_trips() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let roles = PgRoleRepository::new(db.clone());
@@ -511,7 +511,7 @@ pub async fn assign_permissions_validates_and_round_trips() {
     ));
 }
 
-pub async fn set_permissions_for_unknown_role_is_not_found() {
+pub async fn set_unknown_not_found() {
     let (pool, _container) = setup_pg().await;
     let perms = PgRolePermissionRepository::new(pool.connection().clone());
 
@@ -527,7 +527,7 @@ pub async fn set_permissions_for_unknown_role_is_not_found() {
     assert!(matches!(listed, Err(StorageError::NotFound { .. })));
 }
 
-pub async fn casbin_adapter_matches_full_tuple() {
+pub async fn casbin_adapter_matches_tuple() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let mut adapter = PgCasbinAdapter::new(db.clone());
@@ -676,7 +676,7 @@ pub async fn casbin_adapter_matches_full_tuple() {
     assert_eq!(grouping, 1);
 }
 
-pub async fn enforce_reflects_assignments_and_super_admin_bypass() {
+pub async fn enforce_reflects_assignments_bypass() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let users = PgUserRepository::new(db.clone());
@@ -737,7 +737,7 @@ pub async fn enforce_reflects_assignments_and_super_admin_bypass() {
     );
 }
 
-pub async fn role_disable_revokes_then_enable_rebuilds_grouping() {
+pub async fn role_disable_revokes_grouping() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let users = PgUserRepository::new(db.clone());
@@ -813,7 +813,7 @@ pub async fn role_disable_revokes_then_enable_rebuilds_grouping() {
     );
 }
 
-pub async fn assigning_a_disabled_role_writes_no_grouping() {
+pub async fn assigning_writes_no_grouping() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let users = PgUserRepository::new(db.clone());
@@ -851,7 +851,7 @@ pub async fn assigning_a_disabled_role_writes_no_grouping() {
     );
 }
 
-pub async fn operation_log_appends_and_pages_and_is_worm() {
+pub async fn operation_log_appends_worm() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgOperationLogRepository::new(db.clone());

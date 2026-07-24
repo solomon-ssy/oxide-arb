@@ -285,7 +285,7 @@ mod tests {
     use super::{ScheduleCadence, preview_fire_times};
 
     #[test]
-    fn interval_preview_steps_by_interval() {
+    fn interval_preview_steps_interval() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let times =
             preview_fire_times(&ScheduleCadence::Interval { interval_secs: 300 }, now, 3).unwrap();
@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn utc_cron_preview_is_monotonic() {
+    fn utc_cron_preview_monotonic() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let times = preview_fire_times(
             &ScheduleCadence::Cron {

@@ -49,7 +49,7 @@ mod tests {
     use crate::features::value::FeatureValue;
 
     #[test]
-    fn numeric_variants_project_to_decimal() {
+    fn numeric_variants_project_decimal() {
         assert_eq!(
             feature_scalar(&FeatureValue::Decimal(dec!(1.5))),
             Some(dec!(1.5))
@@ -69,7 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn categorical_values_reject_ordinal_projection() {
+    fn categorical_values_reject_projection() {
         assert_eq!(
             feature_scalar(&FeatureValue::Category(MarketCategory::Other,)),
             None
@@ -77,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn finite_f64_converts_ordinary_values() {
+    fn finite_f64_converts_values() {
         assert_eq!(finite_f64(dec!(1.25)), Some(1.25));
         assert_eq!(finite_f64(dec!(0)), Some(0.0));
         assert_eq!(finite_f64(dec!(-3.5)), Some(-3.5));

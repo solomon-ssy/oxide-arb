@@ -727,7 +727,7 @@ mod tests {
     };
 
     #[test]
-    fn discover_instruments_respects_deploy_enablement() {
+    fn discover_instruments_respects_enablement() {
         let config = DomainSourcesConfig::default();
         let map = discover_instruments(&config);
         assert!(map.contains_key(&DomainSourceId::binance()));
@@ -756,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_point_bootstraps_without_cursor() {
+    fn resume_point_without_cursor() {
         let from = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let (start, bootstrap, _) = resume_point(None, from, from).expect("resume point");
         assert_eq!(start, from);
@@ -764,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_point_is_incremental_after_live_cursor() {
+    fn resume_point_after_cursor() {
         let last = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let cursor = cursor(last, DomainCursorStatus::Live);
         let (start, bootstrap, prior) =
@@ -775,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_point_keeps_backfilling_and_error_cursors_in_bootstrap_mode() {
+    fn resume_keeps_error_mode() {
         let last = Utc.with_ymd_and_hms(2026, 7, 1, 10, 0, 0).unwrap();
         let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         for status in [DomainCursorStatus::Backfilling, DomainCursorStatus::Failed] {
@@ -789,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_point_rejects_future_checkpoint() {
+    fn resume_point_rejects_checkpoint() {
         let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let mut cursor = cursor(now, DomainCursorStatus::Live);
         cursor.checkpoint_json = DomainSourceCheckpoint::BinanceKline {
@@ -801,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn dedup_observations_keeps_first_occurrence() {
+    fn dedup_observations_keeps_occurrence() {
         let key = DomainInstrumentKey::binance_kline(
             &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
             KlineInterval::OneMinute,
@@ -822,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_batches_must_cover_bootstrap_and_continue_the_durable_cursor() {
+    fn archive_batches_cover_cursor() {
         let key = DomainInstrumentKey::binance_kline(
             &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
             KlineInterval::OneMinute,
@@ -865,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_status_uses_the_interval_closed_bar_frontier() {
+    fn checkpoint_status_uses_frontier() {
         let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 24, 48).unwrap();
         let one_minute_frontier =
             latest_closed_kline_time(KlineInterval::OneMinute, now).expect("1m frontier");
@@ -906,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_closed_kline_time_is_stable_at_interval_boundaries() {
+    fn latest_closed_kline_boundaries() {
         let boundary = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         assert_eq!(
             latest_closed_kline_time(KlineInterval::OneHour, boundary).expect("boundary frontier"),
@@ -1107,7 +1107,7 @@ mod isolation_tests {
     }
 
     #[tokio::test]
-    async fn archive_cursor_advances_only_after_each_successful_fact_batch() {
+    async fn archive_advances_after_batch() {
         let domain_sources = DomainSourcesConfig::default();
         let cursor_repo = Arc::new(FakeCursorRepo::default());
         let writer = Arc::new(FailSecondWrite {
@@ -1184,7 +1184,7 @@ mod isolation_tests {
     }
 
     #[tokio::test]
-    async fn one_instrument_failure_does_not_abort_the_tick() {
+    async fn failure_never_aborts_tick() {
         let domain_sources = DomainSourcesConfig::default();
         let instruments = discover_instruments(&domain_sources);
         let binance_instruments = instruments

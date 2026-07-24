@@ -117,7 +117,7 @@ pub(in crate::migrations) async fn create_constraint(
     manager: &SchemaManager<'_>,
     spec: ConstraintSpec,
 ) -> Result<(), DbErr> {
-    validate_constraint_definition(spec)?;
+    (spec).validate_constraint_definition()?;
     execute(
         manager,
         format!(
@@ -184,19 +184,21 @@ pub(in crate::migrations) fn index_predicate(predicate: &'static str) -> Result<
     Ok(Expr::cust(predicate))
 }
 
-fn validate_constraint_definition(spec: ConstraintSpec) -> Result<(), DbErr> {
-    let valid = match spec.kind {
-        ConstraintKind::Check => spec.definition.starts_with("CHECK ("),
-        ConstraintKind::ForeignKey => spec.definition.starts_with("FOREIGN KEY ("),
-        ConstraintKind::Unique => spec.definition.starts_with("UNIQUE ("),
-    };
-    if !valid || spec.definition.contains(';') {
-        return Err(DbErr::Custom(format!(
-            "invalid {:?} definition for constraint `{}`",
-            spec.kind, spec.name
-        )));
+impl ConstraintSpec {
+    fn validate_constraint_definition(self) -> Result<(), DbErr> {
+        let valid = match self.kind {
+            ConstraintKind::Check => self.definition.starts_with("CHECK ("),
+            ConstraintKind::ForeignKey => self.definition.starts_with("FOREIGN KEY ("),
+            ConstraintKind::Unique => self.definition.starts_with("UNIQUE ("),
+        };
+        if !valid || self.definition.contains(';') {
+            return Err(DbErr::Custom(format!(
+                "invalid {:?} definition for constraint `{}`",
+                self.kind, self.name
+            )));
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn qualified_table(table: &str) -> String {
@@ -217,17 +219,17 @@ async fn execute(manager: &SchemaManager<'_>, sql: String) -> Result<(), DbErr> 
 
 #[cfg(test)]
 mod tests {
-    use super::{ConstraintKind, ConstraintSpec, index_predicate, validate_constraint_definition};
+    use super::{ConstraintKind, ConstraintSpec, index_predicate};
 
     #[test]
-    fn rejects_constraint_kind_mismatch_and_statement_separator() {
+    fn rejects_constraint_mismatch_separator() {
         let unique_as_check = ConstraintSpec {
             name: "bad",
             table: "sample",
             kind: ConstraintKind::Check,
             definition: "UNIQUE (id)",
         };
-        assert!(validate_constraint_definition(unique_as_check).is_err());
+        assert!((unique_as_check).validate_constraint_definition().is_err());
 
         let injected = ConstraintSpec {
             name: "bad",
@@ -235,11 +237,11 @@ mod tests {
             kind: ConstraintKind::Check,
             definition: "CHECK (id > 0); DROP TABLE sample",
         };
-        assert!(validate_constraint_definition(injected).is_err());
+        assert!((injected).validate_constraint_definition().is_err());
     }
 
     #[test]
-    fn rejects_empty_or_multi_statement_index_predicate() {
+    fn rejects_empty_multi_predicate() {
         assert!(index_predicate("").is_err());
         assert!(index_predicate("status = 'active'; DROP TABLE sample").is_err());
     }

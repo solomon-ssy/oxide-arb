@@ -1074,9 +1074,9 @@ impl ClassicalModelArtifact {
 
     /// Validate all metadata-only invariants before estimator bytes are loaded.
     pub fn validate(&self) -> QuantResult<()> {
-        validate_classical_identity(self)?;
+        (self).validate_classical_identity()?;
         validate_fitted_inputs(&self.input_transform.inputs)?;
-        let encoded_names = validate_encoded_transform(&self.input_transform)?;
+        let encoded_names = self.input_transform.validate_encoded_transform()?;
         validate_classical_metrics(self, &encoded_names)?;
         Ok(())
     }
@@ -1089,66 +1089,68 @@ fn invalid_classical_artifact(detail: impl Into<String>) -> QuantError {
     .into()
 }
 
-fn validate_classical_identity(artifact: &ClassicalModelArtifact) -> QuantResult<()> {
-    if artifact.header.model_family != ModelFamily::from_classical(artifact.kind) {
-        return Err(invalid_classical_artifact(format!(
-            "classical artifact family {:?} does not match kind {}",
-            artifact.header.model_family, artifact.kind
-        )));
+impl ClassicalModelArtifact {
+    fn validate_classical_identity(&self) -> QuantResult<()> {
+        if self.header.model_family != ModelFamily::from_classical(self.kind) {
+            return Err(invalid_classical_artifact(format!(
+                "classical artifact family {:?} does not match kind {}",
+                self.header.model_family, self.kind
+            )));
+        }
+        if self.input_transform.inputs.is_empty() || self.input_transform.encoded_columns.is_empty()
+        {
+            return Err(invalid_classical_artifact(
+                "classical input transform must contain inputs and encoded columns",
+            ));
+        }
+        if self.prediction_horizon_secs == 0 {
+            return Err(invalid_classical_artifact(
+                "classical artifact prediction horizon must be positive",
+            ));
+        }
+        let expected_semantics = if self.kind == ClassicalKind::LogisticRegression {
+            ClassicalOutputSemantics::SettlementProbability
+        } else {
+            ClassicalOutputSemantics::ForwardReturnBps
+        };
+        if self.output_semantics != expected_semantics {
+            return Err(invalid_classical_artifact(format!(
+                "classical kind {} requires {:?} output semantics, got {:?}",
+                self.kind, expected_semantics, self.output_semantics
+            )));
+        }
+        self.multipliers.validate_score_multipliers()?;
+        self.substitution_confidence_rules
+            .validate_substitution_rules()?;
+        validate_frozen_input_contract(
+            "classical",
+            &self.input_contract,
+            &self.input_contract_hash,
+        )?;
+        if self.input_transform.inputs.len() != self.input_contract.inputs.len()
+            || !self
+                .input_transform
+                .inputs
+                .iter()
+                .zip(&self.input_contract.inputs)
+                .all(|(fitted, raw)| {
+                    fitted.feature.as_str() == raw.feature_name
+                        && fitted.required == (raw.requiredness == ModelInputRequiredness::Required)
+                })
+        {
+            return Err(invalid_classical_artifact(
+                "classical fitted inputs differ from the frozen typed input contract",
+            ));
+        }
+        let transform_hash = self.input_transform.transform_hash()?;
+        if transform_hash != self.input_transform_hash {
+            return Err(invalid_classical_artifact(format!(
+                "classical input-transform hash mismatch: expected {}, got {transform_hash}",
+                self.input_transform_hash
+            )));
+        }
+        Ok(())
     }
-    if artifact.input_transform.inputs.is_empty()
-        || artifact.input_transform.encoded_columns.is_empty()
-    {
-        return Err(invalid_classical_artifact(
-            "classical input transform must contain inputs and encoded columns",
-        ));
-    }
-    if artifact.prediction_horizon_secs == 0 {
-        return Err(invalid_classical_artifact(
-            "classical artifact prediction horizon must be positive",
-        ));
-    }
-    let expected_semantics = if artifact.kind == ClassicalKind::LogisticRegression {
-        ClassicalOutputSemantics::SettlementProbability
-    } else {
-        ClassicalOutputSemantics::ForwardReturnBps
-    };
-    if artifact.output_semantics != expected_semantics {
-        return Err(invalid_classical_artifact(format!(
-            "classical kind {} requires {:?} output semantics, got {:?}",
-            artifact.kind, expected_semantics, artifact.output_semantics
-        )));
-    }
-    validate_score_multipliers(&artifact.multipliers)?;
-    validate_substitution_rules(&artifact.substitution_confidence_rules)?;
-    validate_frozen_input_contract(
-        "classical",
-        &artifact.input_contract,
-        &artifact.input_contract_hash,
-    )?;
-    if artifact.input_transform.inputs.len() != artifact.input_contract.inputs.len()
-        || !artifact
-            .input_transform
-            .inputs
-            .iter()
-            .zip(&artifact.input_contract.inputs)
-            .all(|(fitted, raw)| {
-                fitted.feature.as_str() == raw.feature_name
-                    && fitted.required == (raw.requiredness == ModelInputRequiredness::Required)
-            })
-    {
-        return Err(invalid_classical_artifact(
-            "classical fitted inputs differ from the frozen typed input contract",
-        ));
-    }
-    let transform_hash = artifact.input_transform.transform_hash()?;
-    if transform_hash != artifact.input_transform_hash {
-        return Err(invalid_classical_artifact(format!(
-            "classical input-transform hash mismatch: expected {}, got {transform_hash}",
-            artifact.input_transform_hash
-        )));
-    }
-    Ok(())
 }
 
 fn validate_unit_interval(label: &str, value: Decimal) -> QuantResult<()> {
@@ -1160,60 +1162,66 @@ fn validate_unit_interval(label: &str, value: Decimal) -> QuantResult<()> {
     Ok(())
 }
 
-fn validate_score_multipliers(spec: &ScoreMultiplierSpec) -> QuantResult<()> {
-    for (label, value) in [
-        ("data_quality.fresh", spec.data_quality.fresh),
-        ("data_quality.acceptable", spec.data_quality.acceptable),
-        ("data_quality.degraded", spec.data_quality.degraded),
-        ("data_quality.stale", spec.data_quality.stale),
-        ("data_quality.insufficient", spec.data_quality.insufficient),
-        ("liquidity.floor", spec.liquidity.floor),
-        ("horizon.in_window", spec.horizon.in_window),
-        ("horizon.too_soon", spec.horizon.too_soon),
-        ("horizon.too_late", spec.horizon.too_late),
-    ] {
-        validate_unit_interval(label, value)?;
-    }
-    if spec.horizon.min_ratio <= Decimal::ZERO || spec.horizon.max_ratio < spec.horizon.min_ratio {
-        return Err(invalid_classical_artifact(
-            "classical horizon multiplier ratios must satisfy 0 < min_ratio <= max_ratio",
-        ));
-    }
-    let mut previous = None;
-    for tier in &spec.liquidity.tiers {
-        if tier.min_liquidity_usd < Decimal::ZERO
-            || previous.is_some_and(|bound| tier.min_liquidity_usd <= bound)
+impl ScoreMultiplierSpec {
+    fn validate_score_multipliers(&self) -> QuantResult<()> {
+        for (label, value) in [
+            ("data_quality.fresh", self.data_quality.fresh),
+            ("data_quality.acceptable", self.data_quality.acceptable),
+            ("data_quality.degraded", self.data_quality.degraded),
+            ("data_quality.stale", self.data_quality.stale),
+            ("data_quality.insufficient", self.data_quality.insufficient),
+            ("liquidity.floor", self.liquidity.floor),
+            ("horizon.in_window", self.horizon.in_window),
+            ("horizon.too_soon", self.horizon.too_soon),
+            ("horizon.too_late", self.horizon.too_late),
+        ] {
+            validate_unit_interval(label, value)?;
+        }
+        if self.horizon.min_ratio <= Decimal::ZERO
+            || self.horizon.max_ratio < self.horizon.min_ratio
         {
             return Err(invalid_classical_artifact(
-                "classical liquidity tiers must have non-negative, strictly increasing bounds",
+                "classical horizon multiplier ratios must satisfy 0 < min_ratio <= max_ratio",
             ));
         }
-        validate_unit_interval("liquidity.tier.multiplier", tier.multiplier)?;
-        previous = Some(tier.min_liquidity_usd);
+        let mut previous = None;
+        for tier in &self.liquidity.tiers {
+            if tier.min_liquidity_usd < Decimal::ZERO
+                || previous.is_some_and(|bound| tier.min_liquidity_usd <= bound)
+            {
+                return Err(invalid_classical_artifact(
+                    "classical liquidity tiers must have non-negative, strictly increasing bounds",
+                ));
+            }
+            validate_unit_interval("liquidity.tier.multiplier", tier.multiplier)?;
+            previous = Some(tier.min_liquidity_usd);
+        }
+        Ok(())
     }
-    Ok(())
 }
 
-fn validate_substitution_rules(rules: &SubstitutionConfidenceRules) -> QuantResult<()> {
-    for (label, value) in [
-        ("source_unavailable", rules.source_unavailable),
-        ("stale_beyond_policy", rules.stale_beyond_policy),
-        ("out_of_valid_range", rules.out_of_valid_range),
-        ("insufficient_history", rules.insufficient_history),
-        ("not_applicable", rules.not_applicable),
-        ("leg_book_missing", rules.leg_book_missing),
-        ("trade_tape_unavailable", rules.trade_tape_unavailable),
-        ("insufficient_trade_tape", rules.insufficient_trade_tape),
-        (
-            "insufficient_role_coverage",
-            rules.insufficient_role_coverage,
-        ),
-        ("domain_source_unavailable", rules.domain_source_unavailable),
-        ("linkage_unresolved", rules.linkage_unresolved),
-    ] {
-        validate_unit_interval(label, value)?;
+impl SubstitutionConfidenceRules {
+    fn validate_substitution_rules(&self) -> QuantResult<()> {
+        for (label, value) in [
+            ("source_unavailable", self.source_unavailable),
+            ("stale_beyond_policy", self.stale_beyond_policy),
+            ("out_of_valid_range", self.out_of_valid_range),
+            ("insufficient_history", self.insufficient_history),
+            ("not_applicable", self.not_applicable),
+            ("leg_book_missing", self.leg_book_missing),
+            ("trade_tape_unavailable", self.trade_tape_unavailable),
+            ("insufficient_trade_tape", self.insufficient_trade_tape),
+            (
+                "insufficient_role_coverage",
+                self.insufficient_role_coverage,
+            ),
+            ("domain_source_unavailable", self.domain_source_unavailable),
+            ("linkage_unresolved", self.linkage_unresolved),
+        ] {
+            validate_unit_interval(label, value)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn validate_fitted_inputs(inputs: &[FittedInputColumn]) -> QuantResult<()> {
@@ -1225,101 +1233,105 @@ fn validate_fitted_inputs(inputs: &[FittedInputColumn]) -> QuantResult<()> {
                 input.feature
             )));
         }
-        validate_input_state_rates(input)?;
-        validate_input_transform(input)?;
+        (input).validate_input_state_rates()?;
+        (input).validate_input_transform()?;
     }
     Ok(())
 }
 
-fn validate_input_state_rates(input: &FittedInputColumn) -> QuantResult<()> {
-    let rates = &input.state_rates;
-    let rate_sum = rates.observed + rates.missing + rates.not_applicable + rates.substituted;
-    let invalid_rate = [
-        rates.observed,
-        rates.missing,
-        rates.not_applicable,
-        rates.substituted,
-    ]
-    .into_iter()
-    .any(|rate| !(Decimal::ZERO..=Decimal::ONE).contains(&rate));
-    if invalid_rate || (rate_sum - Decimal::ONE).abs() > Decimal::new(1, 12) {
-        return Err(invalid_classical_artifact(format!(
-            "input `{}` carries invalid training state rates",
-            input.feature
-        )));
-    }
-    Ok(())
-}
-
-fn validate_input_transform(input: &FittedInputColumn) -> QuantResult<()> {
-    if input.value_kind != FeatureValueKind::Category {
-        if input.required != input.median.is_none()
-            || input.mean.is_none()
-            || input.std.is_none_or(|std| std <= Decimal::ZERO)
-            || !input.category_vocabulary.is_empty()
-        {
+impl FittedInputColumn {
+    fn validate_input_state_rates(&self) -> QuantResult<()> {
+        let rates = &self.state_rates;
+        let rate_sum = rates.observed + rates.missing + rates.not_applicable + rates.substituted;
+        let invalid_rate = [
+            rates.observed,
+            rates.missing,
+            rates.not_applicable,
+            rates.substituted,
+        ]
+        .into_iter()
+        .any(|rate| !(Decimal::ZERO..=Decimal::ONE).contains(&rate));
+        if invalid_rate || (rate_sum - Decimal::ONE).abs() > Decimal::new(1, 12) {
             return Err(invalid_classical_artifact(format!(
-                "numeric input `{}` carries an invalid fitted transform",
-                input.feature
+                "input `{}` carries invalid training state rates",
+                self.feature
             )));
         }
-        return Ok(());
+        Ok(())
     }
-    if input.unit != FeatureUnit::None
-        || input.median.is_some()
-        || input.mean.is_some()
-        || input.std.is_some()
-        || input.category_vocabulary.is_empty()
-    {
-        return Err(invalid_classical_artifact(format!(
-            "categorical input `{}` carries invalid numeric statistics, unit, or empty vocabulary",
-            input.feature
-        )));
-    }
-    let vocabulary = input
-        .category_vocabulary
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    if vocabulary.len() != input.category_vocabulary.len()
-        || !input
+}
+
+impl FittedInputColumn {
+    fn validate_input_transform(&self) -> QuantResult<()> {
+        if self.value_kind != FeatureValueKind::Category {
+            if self.required != self.median.is_none()
+                || self.mean.is_none()
+                || self.std.is_none_or(|std| std <= Decimal::ZERO)
+                || !self.category_vocabulary.is_empty()
+            {
+                return Err(invalid_classical_artifact(format!(
+                    "numeric input `{}` carries an invalid fitted transform",
+                    self.feature
+                )));
+            }
+            return Ok(());
+        }
+        if self.unit != FeatureUnit::None
+            || self.median.is_some()
+            || self.mean.is_some()
+            || self.std.is_some()
+            || self.category_vocabulary.is_empty()
+        {
+            return Err(invalid_classical_artifact(format!(
+                "categorical input `{}` carries invalid numeric statistics, unit, or empty vocabulary",
+                self.feature
+            )));
+        }
+        let vocabulary = self
             .category_vocabulary
-            .windows(2)
-            .all(|pair| pair[0] < pair[1])
-    {
-        return Err(invalid_classical_artifact(format!(
-            "categorical input `{}` vocabulary must be unique and sorted",
-            input.feature
-        )));
-    }
-    Ok(())
-}
-
-fn validate_encoded_transform(
-    transform: &FittedInputTransform,
-) -> QuantResult<BTreeSet<EncodedColumnName>> {
-    let names = validate_encoded_references(&transform.inputs, &transform.encoded_columns)?;
-    let expected = expected_encoded_columns(&transform.inputs);
-    if transform.encoded_columns.len() != expected.len() {
-        return Err(invalid_classical_artifact(format!(
-            "classical encoded width mismatch: expected {}, got {}",
-            expected.len(),
-            transform.encoded_columns.len()
-        )));
-    }
-    for (column, (feature, kind, suffix)) in transform.encoded_columns.iter().zip(expected) {
-        let expected_name = format!("{}.__{suffix}", feature.as_str());
-        if column.source_feature != feature
-            || column.kind != kind
-            || column.name.as_str() != expected_name
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if vocabulary.len() != self.category_vocabulary.len()
+            || !self
+                .category_vocabulary
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
         {
             return Err(invalid_classical_artifact(format!(
-                "encoded column `{}` does not match the deterministic transform contract `{expected_name}`",
-                column.name
+                "categorical input `{}` vocabulary must be unique and sorted",
+                self.feature
             )));
         }
+        Ok(())
     }
-    Ok(names)
+}
+
+impl FittedInputTransform {
+    fn validate_encoded_transform(&self) -> QuantResult<BTreeSet<EncodedColumnName>> {
+        let names = validate_encoded_references(&self.inputs, &self.encoded_columns)?;
+        let expected = expected_encoded_columns(&self.inputs);
+        if self.encoded_columns.len() != expected.len() {
+            return Err(invalid_classical_artifact(format!(
+                "classical encoded width mismatch: expected {}, got {}",
+                expected.len(),
+                self.encoded_columns.len()
+            )));
+        }
+        for (column, (feature, kind, suffix)) in self.encoded_columns.iter().zip(expected) {
+            let expected_name = format!("{}.__{suffix}", feature.as_str());
+            if column.source_feature != feature
+                || column.kind != kind
+                || column.name.as_str() != expected_name
+            {
+                return Err(invalid_classical_artifact(format!(
+                    "encoded column `{}` does not match the deterministic transform contract `{expected_name}`",
+                    column.name
+                )));
+            }
+        }
+        Ok(names)
+    }
 }
 
 fn validate_encoded_references(
@@ -1648,50 +1660,54 @@ mod tests {
         (contract, hash)
     }
 
-    fn sample_artifact() -> WeightedFactorModelArtifact {
-        let (input_contract, input_contract_hash) = input_contract();
-        WeightedFactorModelArtifact {
-            header: ModelArtifactHeader {
-                model_version_id: ModelVersionId::from_v7(),
-                model_spec_definition_hash: hash("spec"),
-                profile_ref: builtin_research_profiles()
-                    .expect("built-in profiles")
-                    .remove(0)
-                    .profile_ref,
-                model_family: ModelFamily::WeightedFactor,
-                feature_schema_hash: hash("aaa"),
-                factor_schema_hash: hash("bbb"),
-                trade_policy_artifact_id: None,
-                trade_policy_hash: None,
-            },
-            training_dataset_hash: hash("ccc"),
-            training_input_hash: hash("ddd"),
-            input_contract,
-            input_contract_hash,
-            weights: vec![
-                FactorWeight {
-                    factor: LIQUIDITY_DEPTH,
-                    weight: dec!(0.6),
+    impl WeightedFactorModelArtifact {
+        fn artifact_fixture() -> Self {
+            let (input_contract, input_contract_hash) = input_contract();
+            Self {
+                header: ModelArtifactHeader {
+                    model_version_id: ModelVersionId::from_v7(),
+                    model_spec_definition_hash: hash("spec"),
+                    profile_ref: builtin_research_profiles()
+                        .expect("built-in profiles")
+                        .remove(0)
+                        .profile_ref,
+                    model_family: ModelFamily::WeightedFactor,
+                    feature_schema_hash: hash("aaa"),
+                    factor_schema_hash: hash("bbb"),
+                    trade_policy_artifact_id: None,
+                    trade_policy_hash: None,
                 },
-                FactorWeight {
-                    factor: MOMENTUM_ROC,
-                    weight: dec!(0.4),
-                },
-            ],
-            prediction_horizon_secs: 86_400,
-            multipliers: ScoreMultiplierSpec::conservative(),
-            substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-            return_model: ReturnModelSpec::heuristic_default(),
-            factor_cross_section: FactorCrossSectionConfig::default(),
-            frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
-            objective_report: None,
-            category_scope: None,
+                training_dataset_hash: hash("ccc"),
+                training_input_hash: hash("ddd"),
+                input_contract,
+                input_contract_hash,
+                weights: vec![
+                    FactorWeight {
+                        factor: LIQUIDITY_DEPTH,
+                        weight: dec!(0.6),
+                    },
+                    FactorWeight {
+                        factor: MOMENTUM_ROC,
+                        weight: dec!(0.4),
+                    },
+                ],
+                prediction_horizon_secs: 86_400,
+                multipliers: ScoreMultiplierSpec::conservative(),
+                substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+                return_model: ReturnModelSpec::heuristic_default(),
+                factor_cross_section: FactorCrossSectionConfig::default(),
+                frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
+                objective_report: None,
+                category_scope: None,
+            }
         }
     }
 
     #[test]
-    fn weighted_artifact_serde_roundtrip_stable_hash() {
-        let artifact = ModelArtifact::WeightedFactor(Box::new(sample_artifact()));
+    fn weighted_artifact_serde_hash() {
+        let artifact = ModelArtifact::WeightedFactor(Box::new(
+            WeightedFactorModelArtifact::artifact_fixture(),
+        ));
         let bytes = artifact.to_bytes().expect("serialize");
         let back = ModelArtifact::from_bytes(&bytes).expect("deserialize");
         assert_eq!(back, artifact);
@@ -1703,15 +1719,19 @@ mod tests {
     }
 
     #[test]
-    fn model_artifact_rejects_legacy_unversioned_bytes() {
-        let artifact = ModelArtifact::WeightedFactor(Box::new(sample_artifact()));
+    fn model_artifact_rejects_bytes() {
+        let artifact = ModelArtifact::WeightedFactor(Box::new(
+            WeightedFactorModelArtifact::artifact_fixture(),
+        ));
         let legacy = serde_json::to_vec(&artifact).expect("legacy serialization");
         assert!(ModelArtifact::from_bytes(&legacy).is_err());
     }
 
     #[test]
-    fn model_artifact_rejects_unknown_envelope_version() {
-        let artifact = ModelArtifact::WeightedFactor(Box::new(sample_artifact()));
+    fn model_rejects_unknown_version() {
+        let artifact = ModelArtifact::WeightedFactor(Box::new(
+            WeightedFactorModelArtifact::artifact_fixture(),
+        ));
         let bytes = serde_json::to_vec(&StoredModelArtifactRef {
             format_version: MODEL_ARTIFACT_FORMAT_VERSION + 1,
             artifact: &artifact,
@@ -1721,12 +1741,14 @@ mod tests {
     }
 
     #[test]
-    fn calibrator_ref_present_only_for_calibrated_weighted_factor() {
-        let heuristic = ModelArtifact::WeightedFactor(Box::new(sample_artifact()));
+    fn calibrator_ref_present_factor() {
+        let heuristic = ModelArtifact::WeightedFactor(Box::new(
+            WeightedFactorModelArtifact::artifact_fixture(),
+        ));
         assert!(heuristic.calibrator_ref().is_none());
 
         let calibrator_ref = CalibrationArtifactId::from_v7();
-        let mut calibrated = sample_artifact();
+        let mut calibrated = WeightedFactorModelArtifact::artifact_fixture();
         calibrated.return_model = ReturnModelSpec::Calibrated(CalibratedReturnModel {
             calibrator_ref,
             downside_source: DownsideSource::MfeMae,
@@ -1741,16 +1763,20 @@ mod tests {
 
     #[test]
     fn weighted_rejects_unnormalized_weights() {
-        let mut artifact = sample_artifact();
+        let mut artifact = WeightedFactorModelArtifact::artifact_fixture();
         artifact.weights[0].weight = dec!(0.9);
         assert!(artifact.validate().is_err(), "weights must sum to 1");
 
-        let mut negative = sample_artifact();
+        let mut negative = WeightedFactorModelArtifact::artifact_fixture();
         negative.weights[0].weight = dec!(-0.1);
         negative.weights[1].weight = dec!(1.1);
         assert!(negative.validate().is_err(), "no negative weight allowed");
 
-        assert!(sample_artifact().validate().is_ok());
+        assert!(
+            WeightedFactorModelArtifact::artifact_fixture()
+                .validate()
+                .is_ok()
+        );
     }
 
     fn sell_artifact(family: ModelFamily) -> SellScorerArtifact {
@@ -1791,15 +1817,15 @@ mod tests {
     }
 
     #[test]
-    fn weighted_rejects_contract_mutation_without_matching_hash() {
-        let mut artifact = sample_artifact();
+    fn weighted_rejects_without_hash() {
+        let mut artifact = WeightedFactorModelArtifact::artifact_fixture();
         artifact.input_contract.inputs[0].requiredness = ModelInputRequiredness::Optional;
         assert!(artifact.validate().is_err());
     }
 
     #[test]
-    fn weighted_required_features_are_derived_from_typed_requiredness() {
-        let mut artifact = sample_artifact();
+    fn weighted_required_features_requiredness() {
+        let mut artifact = WeightedFactorModelArtifact::artifact_fixture();
         artifact.input_contract = ModelInputContract {
             inputs: vec![
                 ModelInputSpec::required("book.mid"),
@@ -1816,7 +1842,7 @@ mod tests {
     }
 
     #[test]
-    fn sell_rejects_malformed_or_swapped_contract_hash() {
+    fn sell_rejects_malformed_hash() {
         let mut malformed = sell_artifact(ModelFamily::HoldVsExitWeighted);
         malformed
             .input_contract
@@ -1831,7 +1857,7 @@ mod tests {
     }
 
     #[test]
-    fn sell_artifact_validates_and_rejects_wrong_family() {
+    fn sell_validates_rejects_family() {
         // A correctly-tagged exit scorer validates.
         assert!(
             sell_artifact(ModelFamily::HoldVsExitWeighted)
@@ -1849,7 +1875,7 @@ mod tests {
     }
 
     #[test]
-    fn sell_artifact_rejects_non_positive_alpha_scale() {
+    fn sell_rejects_non_scale() {
         let mut artifact = sell_artifact(ModelFamily::HoldVsExitWeighted);
         artifact.output_spec.max_exit_alpha_bps = Decimal::ZERO;
         assert!(
@@ -1859,15 +1885,17 @@ mod tests {
     }
 
     #[test]
-    fn artifact_key_is_content_addressed() {
-        let artifact = ModelArtifact::WeightedFactor(Box::new(sample_artifact()));
+    fn artifact_key_content_addressed() {
+        let artifact = ModelArtifact::WeightedFactor(Box::new(
+            WeightedFactorModelArtifact::artifact_fixture(),
+        ));
         let digest = artifact.content_hash().expect("hash");
         let key = ModelArtifact::artifact_key(&digest).expect("key");
         assert_eq!(key.relative_path(), format!("models/{}.json", digest.hex()));
     }
 
     #[test]
-    fn multipliers_are_exhaustive_and_monotone() {
+    fn multipliers_exhaustive_monotone() {
         let dq = DataQualityMultipliers::conservative();
         assert!(
             dq.multiplier_for(DataQualityStatus::Fresh)
@@ -1888,7 +1916,7 @@ mod tests {
     }
 
     #[test]
-    fn return_model_heuristic_and_calibrated() {
+    fn return_model_heuristic_calibrated() {
         let heuristic = ReturnModelSpec::Heuristic(HeuristicReturnModel {
             max_expected_return_bps: dec!(400),
             max_downside_bps: dec!(600),

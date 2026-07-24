@@ -119,10 +119,12 @@ impl From<ChDigest> for ContentHash {
 impl ChSchemaVersion {
     /// The first valid `ClickHouse` fact-row schema version.
     pub const FIRST: Self = Self(1);
+}
 
-    /// Fallible conversion from a domain [`SchemaVersion`], rejecting non-positive
-    /// values and any `i32` that does not fit in `u32`.
-    pub fn try_from_schema_version(value: SchemaVersion) -> Result<Self, CanonicalDigestError> {
+impl TryFrom<SchemaVersion> for ChSchemaVersion {
+    type Error = CanonicalDigestError;
+
+    fn try_from(value: SchemaVersion) -> Result<Self, Self::Error> {
         let raw = value.get();
         if raw < 1 {
             return Err(CanonicalDigestError::InvalidSchemaVersion { value: raw });
@@ -148,24 +150,10 @@ impl From<NaiveDate> for ChEpochDay {
     }
 }
 
-impl From<SchemaVersion> for ChSchemaVersion {
-    /// Infallible conversion for validated schema versions at the `ClickHouse` write boundary.
-    ///
-    /// Prefer [`Self::try_from_schema_version`] for untrusted input.
-    fn from(value: SchemaVersion) -> Self {
-        Self::try_from_schema_version(value).unwrap_or(Self::FIRST)
-    }
-}
-
 impl ChPrice {
     #[must_use]
     pub const fn scaled_i128(self) -> i128 {
         self.0 as i128
-    }
-
-    #[must_use]
-    pub fn to_price(self) -> Price {
-        Price::new(decimal_from_i64(self.0, PRICE_SCALE))
     }
 }
 
@@ -175,10 +163,9 @@ impl From<Price> for ChPrice {
     }
 }
 
-impl ChProbability {
-    #[must_use]
-    pub fn to_probability(self) -> Probability {
-        Probability::new(decimal_from_i64(self.0, PRICE_SCALE))
+impl From<ChPrice> for Price {
+    fn from(value: ChPrice) -> Self {
+        Self::new(decimal_from_i64(value.0, PRICE_SCALE))
     }
 }
 
@@ -194,10 +181,9 @@ impl From<Probability> for ChProbability {
     }
 }
 
-impl ChFactor {
-    #[must_use]
-    pub fn to_decimal(self) -> Decimal {
-        decimal_from_i64(self.0, PRICE_SCALE)
+impl From<ChProbability> for Probability {
+    fn from(value: ChProbability) -> Self {
+        Self::new(decimal_from_i64(value.0, PRICE_SCALE))
     }
 }
 
@@ -207,15 +193,16 @@ impl From<Decimal> for ChFactor {
     }
 }
 
+impl From<ChFactor> for Decimal {
+    fn from(value: ChFactor) -> Self {
+        decimal_from_i64(value.0, PRICE_SCALE)
+    }
+}
+
 impl ChBps {
     #[must_use]
     pub const fn scaled_i128(self) -> i128 {
         self.0 as i128
-    }
-
-    #[must_use]
-    pub fn to_bps(self) -> Bps {
-        Bps::new(decimal_from_i64(self.0, BPS_SCALE))
     }
 }
 
@@ -231,10 +218,9 @@ impl From<Decimal> for ChBps {
     }
 }
 
-impl ChUsd {
-    #[must_use]
-    pub fn to_usd(self) -> Usd {
-        Usd::new(decimal_from_i128(self.0, MONEY_SCALE))
+impl From<ChBps> for Bps {
+    fn from(value: ChBps) -> Self {
+        Self::new(decimal_from_i64(value.0, BPS_SCALE))
     }
 }
 
@@ -250,15 +236,16 @@ impl From<Decimal> for ChUsd {
     }
 }
 
+impl From<ChUsd> for Usd {
+    fn from(value: ChUsd) -> Self {
+        Self::new(decimal_from_i128(value.0, MONEY_SCALE))
+    }
+}
+
 impl ChShares {
     #[must_use]
     pub const fn scaled_i128(self) -> i128 {
         self.0
-    }
-
-    #[must_use]
-    pub fn to_shares(self) -> Shares {
-        Shares::new(decimal_from_i128(self.0, MONEY_SCALE))
     }
 }
 
@@ -274,6 +261,12 @@ impl From<Decimal> for ChShares {
     }
 }
 
+impl From<ChShares> for Shares {
+    fn from(value: ChShares) -> Self {
+        Self::new(decimal_from_i128(value.0, MONEY_SCALE))
+    }
+}
+
 impl ChPayoutRatio {
     #[must_use]
     pub const fn scaled_i128(self) -> i128 {
@@ -284,15 +277,19 @@ impl ChPayoutRatio {
     pub const fn is_one(self) -> bool {
         self.0 == PAYOUT_RATIO_ONE_SCALED
     }
-
-    pub fn try_to_payout_ratio(self) -> Result<PayoutRatio, PayoutRatioError> {
-        PayoutRatio::try_new(decimal_from_i128(self.0, PAYOUT_RATIO_SCALE))
-    }
 }
 
 impl From<PayoutRatio> for ChPayoutRatio {
     fn from(value: PayoutRatio) -> Self {
         Self(decimal_to_i128(value.inner(), PAYOUT_RATIO_SCALE))
+    }
+}
+
+impl TryFrom<ChPayoutRatio> for PayoutRatio {
+    type Error = PayoutRatioError;
+
+    fn try_from(value: ChPayoutRatio) -> Result<Self, Self::Error> {
+        Self::try_new(decimal_from_i128(value.0, PAYOUT_RATIO_SCALE))
     }
 }
 
@@ -385,34 +382,33 @@ impl<'de> Deserialize<'de> for ChPayoutRatio {
     }
 }
 
-impl ChDecimal64 {
-    #[must_use]
-    pub fn to_decimal(self) -> Decimal {
-        decimal_from_i64(self.0, PRICE_SCALE)
-    }
-}
-
 impl From<Decimal> for ChDecimal64 {
     fn from(value: Decimal) -> Self {
         Self(decimal_to_i64(value, PRICE_SCALE))
     }
 }
 
+impl From<ChDecimal64> for Decimal {
+    fn from(value: ChDecimal64) -> Self {
+        decimal_from_i64(value.0, PRICE_SCALE)
+    }
+}
+
 impl Display for ChPrice {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}", self.to_price())
+        write!(f, "{}", Price::from(*self))
     }
 }
 
 impl Display for ChUsd {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}", self.to_usd())
+        write!(f, "{}", Usd::from(*self))
     }
 }
 
 impl Display for ChShares {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}", self.to_shares())
+        write!(f, "{}", Shares::from(*self))
     }
 }
 
@@ -452,7 +448,7 @@ mod tests {
     use crate::types::{ContentHash, PayoutRatio, Price, SchemaVersion, Shares, Usd};
 
     #[test]
-    fn digest_maps_content_hash_to_fixed_32_bytes() {
+    fn digest_maps_content_bytes() {
         let content_hash = ContentHash::from_bytes([0xa5; 32]);
         let digest = ChDigest::from(content_hash);
 
@@ -463,29 +459,27 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_roundtrips_positive_values() {
+    fn schema_version_roundtrips_values() {
         let version = SchemaVersion::new(3);
-        assert_eq!(ChSchemaVersion::from(version), ChSchemaVersion(3));
         assert_eq!(
-            ChSchemaVersion::try_from_schema_version(version).expect("valid"),
+            ChSchemaVersion::try_from(version).expect("valid"),
             ChSchemaVersion(3)
         );
     }
 
     #[test]
-    fn schema_version_rejects_non_positive() {
-        let err =
-            ChSchemaVersion::try_from_schema_version(SchemaVersion::new(0)).expect_err("zero");
+    fn schema_rejects_non_positive() {
+        let err = ChSchemaVersion::try_from(SchemaVersion::new(0)).expect_err("zero");
         assert_eq!(err, CanonicalDigestError::InvalidSchemaVersion { value: 0 });
     }
 
     #[test]
-    fn schema_version_rejects_i32_min() {
-        assert!(ChSchemaVersion::try_from_schema_version(SchemaVersion::new(i32::MIN)).is_err());
+    fn schema_version_rejects_min() {
+        assert!(ChSchemaVersion::try_from(SchemaVersion::new(i32::MIN)).is_err());
     }
 
     #[test]
-    fn epoch_day_roundtrips_pre_1900_and_modern_dates() {
+    fn epoch_day_roundtrips_dates() {
         for date in [
             NaiveDate::from_ymd_opt(1880, 1, 1).expect("historical date"),
             NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch"),
@@ -498,31 +492,30 @@ mod tests {
     #[test]
     fn price_roundtrips_scaled_decimal64() {
         let price = Price::new(dec!(0.12345678));
-        assert_eq!(ChPrice::from(price).to_price(), price);
+        assert_eq!(Price::from(ChPrice::from(price)), price);
     }
 
     #[test]
     fn usd_roundtrips_scaled_decimal128() {
         let usd = Usd::new(dec!(123.456789123456789123));
-        assert_eq!(ChUsd::from(usd).to_usd(), usd);
+        assert_eq!(Usd::from(ChUsd::from(usd)), usd);
     }
 
     #[test]
     fn shares_roundtrips_scaled_decimal128() {
         let shares = Shares::new(dec!(1000.000000000000000001));
-        assert_eq!(ChShares::from(shares).to_shares(), shares);
+        assert_eq!(Shares::from(ChShares::from(shares)), shares);
     }
 
     #[test]
-    fn payout_ratio_roundtrips_decimal128_without_range_drift() {
+    fn payout_ratio_without_drift() {
         for payout in [
             PayoutRatio::ZERO,
             PayoutRatio::try_new(dec!(0.5)).expect("half payout"),
             PayoutRatio::ONE,
         ] {
             assert_eq!(
-                ChPayoutRatio::from(payout)
-                    .try_to_payout_ratio()
+                PayoutRatio::try_from(ChPayoutRatio::from(payout))
                     .expect("valid ClickHouse payout"),
                 payout
             );
@@ -530,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn payout_ratio_clickhouse_wire_rejects_out_of_range_scaled_values() {
+    fn payout_ratio_rejects_values() {
         let encoded = serde_json::to_string(&ChPayoutRatio::from(
             PayoutRatio::try_new(dec!(0.5)).expect("half payout"),
         ))
@@ -541,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn decimal128_json_uses_lossless_strings() {
+    fn decimal128_json_uses_strings() {
         let usd = ChUsd::from(Usd::new(dec!(123.456789123456789123)));
         let shares = ChShares::from(Shares::new(dec!(1000.000000000000000001)));
         let encoded = serde_json::to_value((usd, shares)).expect("serialize exact decimals");

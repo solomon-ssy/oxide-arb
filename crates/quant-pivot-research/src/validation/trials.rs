@@ -85,7 +85,7 @@ impl TrialGridSpec {
     pub fn generate(&self, base_objective: &TrainingObjectiveSpec) -> QuantResult<Vec<Trial>> {
         match self {
             Self::WeightedFactor(grid) => generate_weighted_factor(grid, base_objective),
-            Self::Classical(grid) => generate_classical(grid),
+            Self::Classical(grid) => (grid).generate_classical(),
         }
     }
 }
@@ -127,98 +127,102 @@ fn generate_weighted_factor(
 }
 
 #[cfg(feature = "ml-classical")]
-fn generate_classical(grid: &ClassicalTrialGrid) -> QuantResult<Vec<Trial>> {
-    // Sum, not Cartesian product: forest and linear params apply to disjoint
-    // ClassicalKind families. Crossing them inflated DSR N with inert dimensions.
-    let expanded = grid
-        .forest_n_trees_multipliers
-        .len()
-        .checked_add(grid.linear_alpha_multipliers.len())
-        .ok_or_else(|| methodology("classical trial grid size overflowed usize"))?;
-    validate_grid_size(expanded, grid.max_trials)?;
+impl ClassicalTrialGrid {
+    fn generate_classical(&self) -> QuantResult<Vec<Trial>> {
+        // Sum, not Cartesian product: forest and linear params apply to disjoint
+        // ClassicalKind families. Crossing them inflated DSR N with inert dimensions.
+        let expanded = self
+            .forest_n_trees_multipliers
+            .len()
+            .checked_add(self.linear_alpha_multipliers.len())
+            .ok_or_else(|| methodology("classical trial grid size overflowed usize"))?;
+        validate_grid_size(expanded, self.max_trials)?;
 
-    let base = ClassicalParams {
-        forest: ForestParams::default(),
-        linear: LinearParams::default(),
-    };
-    let mut trials = Vec::with_capacity(expanded);
-    for &forest_multiplier in &grid.forest_n_trees_multipliers {
-        if forest_multiplier <= Decimal::ZERO {
-            return Err(methodology(format!(
-                "forest n_trees multiplier must be positive, got {forest_multiplier}"
-            )));
+        let base = ClassicalParams {
+            forest: ForestParams::default(),
+            linear: LinearParams::default(),
+        };
+        let mut trials = Vec::with_capacity(expanded);
+        for &forest_multiplier in &self.forest_n_trees_multipliers {
+            if forest_multiplier <= Decimal::ZERO {
+                return Err(methodology(format!(
+                    "forest n_trees multiplier must be positive, got {forest_multiplier}"
+                )));
+            }
+            let trial_id = u32::try_from(trials.len())
+                .map_err(|error| methodology(format!("classical trial id exceeds u32: {error}")))?;
+            let base_n_trees = u64::try_from(base.forest.n_trees).map_err(|error| {
+                methodology(format!("base forest n_trees does not fit u64: {error}"))
+            })?;
+            let scaled_n_trees = Decimal::from(base_n_trees)
+                .checked_mul(forest_multiplier)
+                .ok_or_else(|| methodology("forest n_trees scaling overflowed Decimal"))?
+                .round();
+            let n_trees = scaled_n_trees.to_usize().ok_or_else(|| {
+                methodology(format!(
+                    "scaled forest n_trees {scaled_n_trees} does not fit usize"
+                ))
+            })?;
+            if n_trees == 0 {
+                return Err(methodology(
+                    "scaled forest n_trees must be positive".to_owned(),
+                ));
+            }
+            trials.push(Trial {
+                trial_id,
+                label: format!("forest_x{forest_multiplier}"),
+                weighted_factor_objective: None,
+                classical_params: Some(ClassicalParams {
+                    forest: ForestParams {
+                        n_trees,
+                        ..base.forest
+                    },
+                    linear: base.linear,
+                }),
+            });
         }
-        let trial_id = u32::try_from(trials.len())
-            .map_err(|error| methodology(format!("classical trial id exceeds u32: {error}")))?;
-        let base_n_trees = u64::try_from(base.forest.n_trees).map_err(|error| {
-            methodology(format!("base forest n_trees does not fit u64: {error}"))
-        })?;
-        let scaled_n_trees = Decimal::from(base_n_trees)
-            .checked_mul(forest_multiplier)
-            .ok_or_else(|| methodology("forest n_trees scaling overflowed Decimal"))?
-            .round();
-        let n_trees = scaled_n_trees.to_usize().ok_or_else(|| {
-            methodology(format!(
-                "scaled forest n_trees {scaled_n_trees} does not fit usize"
-            ))
-        })?;
-        if n_trees == 0 {
-            return Err(methodology(
-                "scaled forest n_trees must be positive".to_owned(),
-            ));
+        for &linear_multiplier in &self.linear_alpha_multipliers {
+            if linear_multiplier <= Decimal::ZERO {
+                return Err(methodology(format!(
+                    "linear alpha multiplier must be positive, got {linear_multiplier}"
+                )));
+            }
+            let trial_id = u32::try_from(trials.len())
+                .map_err(|error| methodology(format!("classical trial id exceeds u32: {error}")))?;
+            let linear_scale = linear_multiplier.to_f64().ok_or_else(|| {
+                methodology(format!(
+                    "linear alpha multiplier {linear_multiplier} cannot be represented as f64"
+                ))
+            })?;
+            let alpha = base.linear.alpha * linear_scale;
+            if !alpha.is_finite() {
+                return Err(methodology("scaled linear alpha is non-finite".to_owned()));
+            }
+            trials.push(Trial {
+                trial_id,
+                label: format!("linear_x{linear_multiplier}"),
+                weighted_factor_objective: None,
+                classical_params: Some(ClassicalParams {
+                    forest: base.forest,
+                    linear: LinearParams {
+                        alpha,
+                        ..base.linear
+                    },
+                }),
+            });
         }
-        trials.push(Trial {
-            trial_id,
-            label: format!("forest_x{forest_multiplier}"),
-            weighted_factor_objective: None,
-            classical_params: Some(ClassicalParams {
-                forest: ForestParams {
-                    n_trees,
-                    ..base.forest
-                },
-                linear: base.linear,
-            }),
-        });
+        Ok(trials)
     }
-    for &linear_multiplier in &grid.linear_alpha_multipliers {
-        if linear_multiplier <= Decimal::ZERO {
-            return Err(methodology(format!(
-                "linear alpha multiplier must be positive, got {linear_multiplier}"
-            )));
-        }
-        let trial_id = u32::try_from(trials.len())
-            .map_err(|error| methodology(format!("classical trial id exceeds u32: {error}")))?;
-        let linear_scale = linear_multiplier.to_f64().ok_or_else(|| {
-            methodology(format!(
-                "linear alpha multiplier {linear_multiplier} cannot be represented as f64"
-            ))
-        })?;
-        let alpha = base.linear.alpha * linear_scale;
-        if !alpha.is_finite() {
-            return Err(methodology("scaled linear alpha is non-finite".to_owned()));
-        }
-        trials.push(Trial {
-            trial_id,
-            label: format!("linear_x{linear_multiplier}"),
-            weighted_factor_objective: None,
-            classical_params: Some(ClassicalParams {
-                forest: base.forest,
-                linear: LinearParams {
-                    alpha,
-                    ..base.linear
-                },
-            }),
-        });
-    }
-    Ok(trials)
 }
 
-#[cfg(not(feature = "ml-classical"))]
-fn generate_classical(_grid: &ClassicalTrialGrid) -> QuantResult<Vec<Trial>> {
-    Err(ResearchError::ValidationMethodology {
-        detail: "classical trial grid requires the `ml-classical` feature".to_owned(),
+impl ClassicalTrialGrid {
+    #[cfg(not(feature = "ml-classical"))]
+    fn generate_classical(&self) -> QuantResult<Vec<Trial>> {
+        Err(ResearchError::ValidationMethodology {
+            detail: "classical trial grid requires the `ml-classical` feature".to_owned(),
+        }
+        .into())
     }
-    .into())
 }
 
 fn validate_grid_size(expanded: usize, max_trials: u32) -> QuantResult<()> {
@@ -263,7 +267,7 @@ mod tests {
     use super::{Trial, TrialGridSpec, WeightedFactorTrialGrid};
 
     #[test]
-    fn weighted_factor_grid_expands_to_cartesian_product() {
+    fn weighted_factor_expands_product() {
         let grid = TrialGridSpec::WeightedFactor(WeightedFactorTrialGrid {
             lambda_multipliers: vec![dec!(0.5), dec!(1), dec!(2)],
             rank_loss_kinds: vec![
@@ -289,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn weighted_factor_grid_scales_lambdas_from_base() {
+    fn weighted_factor_grid_base() {
         let base = TrainingObjectiveSpec {
             lambda_tail: dec!(0.5),
             lambda_turnover: dec!(0.2),
@@ -312,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn grid_exceeding_max_trials_is_rejected_not_truncated() {
+    fn grid_rejected_not_truncated() {
         let grid = TrialGridSpec::WeightedFactor(WeightedFactorTrialGrid {
             lambda_multipliers: vec![dec!(0.5), dec!(1), dec!(2)],
             rank_loss_kinds: vec![
@@ -326,7 +330,7 @@ mod tests {
 
     #[cfg(feature = "ml-classical")]
     #[test]
-    fn classical_grid_sums_forest_and_linear_not_cartesian() {
+    fn classical_grid_not_cartesian() {
         let grid = TrialGridSpec::Classical(ClassicalTrialGrid {
             forest_n_trees_multipliers: vec![dec!(0.5), dec!(1), dec!(2)],
             linear_alpha_multipliers: vec![dec!(0.5), dec!(1)],

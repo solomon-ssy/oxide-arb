@@ -119,7 +119,7 @@ mod tests {
     use crate::domain::ws::channel::WsChannel;
 
     #[test]
-    fn channel_envelope_serializes_type_and_millis_timestamp() {
+    fn channel_envelope_serializes_timestamp() {
         let envelope = WsEnvelope::channel(WsChannel::MarketBookUpdate, serde_json::json!({}));
         let json: Value = serde_json::from_str(&envelope.to_text()).expect("valid json");
         assert_eq!(json["type"], "market.book_update");
@@ -131,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn control_replies_serialize_fixed_type_strings() {
+    fn control_replies_serialize_strings() {
         assert_eq!(ServerMessageKind::Sync.as_str(), "sync");
         assert_eq!(ServerMessageKind::Pong.as_str(), "pong");
         assert_eq!(ServerMessageKind::Error.as_str(), "error");

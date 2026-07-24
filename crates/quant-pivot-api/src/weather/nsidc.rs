@@ -139,8 +139,8 @@ fn parse_extent(
         let day = parse_component(&row, 2, "day")?;
         let date = NaiveDate::from_ymd_opt(year, month, day)
             .ok_or_else(|| parse_error("invalid daily extent date"))?;
-        let extent = parse_decimal(&row, 3, "extent")?;
-        let missing = parse_decimal(&row, 4, "missing")?;
+        let extent = parse_component::<Decimal>(&row, 3, "extent")?;
+        let missing = parse_component::<Decimal>(&row, 4, "missing")?;
         if extent < Decimal::ZERO || missing < Decimal::ZERO {
             return Err(parse_error("extent/missing area cannot be negative").into());
         }
@@ -204,10 +204,6 @@ where
         .map_err(|error| parse_error(format!("invalid {name}: {error}")).into())
 }
 
-fn parse_decimal(row: &StringRecord, index: usize, name: &str) -> QuantResult<Decimal> {
-    parse_component(row, index, name)
-}
-
 fn parse_error(detail: impl Into<String>) -> ApiError {
     ApiError::Deserialize {
         context: "NOAA/NSIDC Sea Ice Index v4 CSV".to_owned(),
@@ -227,7 +223,7 @@ mod tests {
     use super::{NsidcSeaIceSource, SeaIceHemisphere};
 
     #[tokio::test]
-    async fn parses_extent_and_preserves_missing_area_quality() {
+    async fn parses_preserves_missing_quality() {
         let server = MockServer::start().await;
         let body = concat!(
             "Year, Month, Day, Extent, Missing, Source Data\n",
