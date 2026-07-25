@@ -9,6 +9,7 @@
 //! forward from `decision_at`, and the whole dataset is content-hashed for
 //! reproducibility.
 
+mod cohort;
 mod labeler;
 mod leakage;
 mod lot_hold_value;
@@ -23,12 +24,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+pub use cohort::ModelLearningCohortCodec;
 pub use labeler::{
     HOLD_VS_EXIT_ALPHA_BPS, HoldVsExitProceedsLabeler, LIQUIDITY_EXIT_POSSIBLE,
     LiquidityExitLabeler, MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS,
     MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, POLICY_ENTRY_FILL_RATIO,
     POLICY_EXIT_FILL_RATIO, POLICY_NET_POSITIVE, POLICY_NET_RETURN_BPS, RETURN_TO_HORIZON,
-    ReturnToHorizonLabeler, SETTLEMENT_OUTCOME, SettlementOutcomeLabeler, label_names,
+    ReturnToHorizonLabeler, TOKEN_PAYOUT_RATIO, TokenPayoutRatioLabeler, label_names,
     label_names_for_sources,
 };
 pub use leakage::{
@@ -56,11 +58,11 @@ pub(crate) use quant_pivot_models::{
     },
     enums::{feature::EvidenceSourceKind, quant::DatasetPurpose},
     types::{
-        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
-        DatasetManifest, DecisionPolicySnapshotId, MarketId, ModelSpecId, OrderIntentId,
-        PayoutRatio, PositionId, Price, ResearchProfileRef, SchemaVersion, Shares,
-        SourceSliceManifestRef, TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload,
-        TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd, default_sample_sources,
+        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCohortManifest,
+        DatasetCoverage, DatasetManifest, DatasetSourceLineage, MarketId, ModelSpecId,
+        OrderIntentId, PayoutRatio, PositionId, Price, SchemaVersion, Shares, TokenId,
+        TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId,
+        TrainingSampleSource, Usd, default_sample_sources,
     },
 };
 use rust_decimal::Decimal;
@@ -88,20 +90,15 @@ stable_name! {
 pub struct DatasetPlanRequest {
     /// Model spec the dataset is built for.
     pub model_spec_id: ModelSpecId,
-    /// Immutable research contract governing every row.
-    pub profile_ref: ResearchProfileRef,
-    /// Hash of profile + candidate set + declared experiment family.
-    pub research_program_hash: ContentHash,
-    /// Immutable PIT source slice consumed by this build.
-    pub source_slice: SourceSliceManifestRef,
-    /// Config version governing selection / feature / factor / label schemas.
-    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    /// Server-derived identity of the verified PIT source graph.
+    pub source_lineage: DatasetSourceLineage,
+    /// Optional feedback cohort frozen before any rows are materialized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cohort_manifest: Option<DatasetCohortManifest>,
     /// Inclusive window start (first sample `as_of`).
     pub window_start: DateTime<Utc>,
     /// Exclusive window end (samples are strictly before this).
     pub window_end: DateTime<Utc>,
-    /// Frozen information-availability cutoff for every source and label fact.
-    pub pit_cutoff: DateTime<Utc>,
     /// Deterministic sampling cadence within the window, in seconds (`>= 1`).
     pub sample_interval_secs: u64,
     /// Forward label horizons, in seconds (one label column per horizon).
@@ -238,7 +235,7 @@ pub struct TrainingLabel {
     /// The instant this label's forward-looking window closes and its value
     /// becomes knowable (`label_horizon_end`): `as_of + horizon_secs`
     /// for horizon-dependent labels, the settlement `resolved_at` for
-    /// `settlement_outcome`, or the owning lot's `closed_at` for
+    /// `token_payout_ratio`, or the owning lot's `closed_at` for
     /// `hold_vs_exit_alpha_bps`. This is the conservative upper bound
     /// `PurgedSplitter` purges against — a training row whose `matured_at`
     /// overlaps a test window's span leaks the test outcome into training.
@@ -1035,10 +1032,13 @@ pub(crate) mod fixtures {
             quant::DataQualityStatus,
         },
         types::{
-            BookSnapshotRef, BookSnapshotSource, Bps, CatalogEventChangeId, CatalogMarketChangeId,
-            CatalogSyncBatchId, ContentHash, EventId, MarketContext, MarketId, Price, Probability,
-            RecommendationIdentity, SchemaVersion, TokenId, TrainingExampleId,
-            TrainingSampleSource, Usd,
+            ArtifactUri, BookSnapshotRef, BookSnapshotSource, Bps, CapabilityRegistryHashes,
+            CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId, ContentHash,
+            DATASET_SOURCE_LINEAGE_FORMAT_VERSION, DatasetSourceLineage, DecisionPolicySnapshotId,
+            EventId, MarketContext, MarketId, Price, Probability, ReaderContractVersion,
+            RecommendationIdentity, ResearchProfileArtifactId, SchemaContractVersion,
+            SchemaVersion, SourceSliceId, SourceSliceManifestRef, TokenId, TrainingExampleId,
+            TrainingSampleSource, Usd, builtin_research_profiles,
         },
     };
     use rust_decimal::Decimal;
@@ -1052,6 +1052,44 @@ pub(crate) mod fixtures {
         },
         selection::SelectedMarket,
     };
+
+    /// Canonical source-lineage fixture shared by dataset planner/codec tests.
+    pub fn source_lineage(
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+    ) -> DatasetSourceLineage {
+        let hash = |seed: char| {
+            ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64)))
+                .expect("fixture content hash")
+        };
+        let profile_ref = builtin_research_profiles()
+            .expect("built-in profiles")
+            .remove(0)
+            .profile_ref;
+        let pit_cutoff = window_end + Duration::seconds(60);
+        DatasetSourceLineage {
+            format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+            source_slice_id: SourceSliceId::from_v7(),
+            source_slice_identity_hash: hash('4'),
+            research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile_ref),
+            research_program_hash: hash('5'),
+            source_slice: SourceSliceManifestRef {
+                manifest_uri: ArtifactUri::parse("s3://fixture/source-slice.json")
+                    .expect("fixture source URI"),
+                manifest_hash: hash('6'),
+            },
+            source_window_start: window_start,
+            source_window_end: pit_cutoff,
+            pit_cutoff,
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            runtime_config_hash: hash('7'),
+            reader_contract_version: ReaderContractVersion::v1(),
+            schema_contract_version: SchemaContractVersion::v1(),
+            source_schema_hash: hash('8'),
+            capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![hash('9')])
+                .expect("canonical capability set"),
+        }
+    }
 
     pub fn selected_market(
         market_id: &MarketId,
@@ -1158,6 +1196,7 @@ pub(crate) mod fixtures {
                     },
                     book_effective_at,
                     book_available_at: decision_at,
+                    selection: (&self.selected_market).into(),
                 },
                 identity: RecommendationIdentity {
                     category: MarketCategory::Sports,

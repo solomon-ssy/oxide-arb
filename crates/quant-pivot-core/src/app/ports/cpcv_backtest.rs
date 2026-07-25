@@ -697,8 +697,7 @@ impl CpcvBacktestPort for CoreCpcvBacktestPort {
         let contract = self
             .resolve_cpcv_contract(&model_version_id, &request)
             .await?;
-        self.execute_cpcv_job(contract, request, progress, cancel)
-            .await
+        Box::pin(self.execute_cpcv_job(contract, request, progress, cancel)).await
     }
 
     async fn find_path_set(

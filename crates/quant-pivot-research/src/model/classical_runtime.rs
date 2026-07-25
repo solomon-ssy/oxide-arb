@@ -279,7 +279,7 @@ impl ClassicalRuntime {
         };
         let semantics = match self.artifact.output_semantics {
             ClassicalOutputSemantics::ForwardReturnBps => "forward_return_bps",
-            ClassicalOutputSemantics::SettlementProbability => "settlement_probability",
+            ClassicalOutputSemantics::FullPayoutProbability => "full_payout_probability",
         };
 
         Ok(Some(SignalCandidate {
@@ -391,8 +391,8 @@ impl ClassicalRuntime {
             ClassicalOutputSemantics::ForwardReturnBps => {
                 project_forward_return(raw_prediction, row)
             }
-            ClassicalOutputSemantics::SettlementProbability => {
-                project_settlement_probability(raw_prediction, row)
+            ClassicalOutputSemantics::FullPayoutProbability => {
+                project_full_payout_probability(raw_prediction, row)
             }
         }
     }
@@ -593,7 +593,7 @@ fn project_forward_return(
     Ok(stronger_projection(yes, no))
 }
 
-fn project_settlement_probability(
+fn project_full_payout_probability(
     yes_probability: Decimal,
     row: &InferenceMatrixRow,
 ) -> QuantResult<Option<ClassicalEconomicProjection>> {
@@ -615,7 +615,7 @@ fn project_settlement_probability(
     let no = resolve_entry(row, OutcomeSide::No)
         .map(|(token_id, entry_price)| {
             let no_probability = checked_sub(
-                "classical NO settlement probability",
+                "classical NO full-payout probability",
                 Decimal::ONE,
                 yes_probability,
             )?;
@@ -837,7 +837,7 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use super::{ClassicalRuntime, project_settlement_probability};
+    use super::{ClassicalRuntime, project_full_payout_probability};
     use crate::{
         features::{
             FeatureCell, FeatureName, FeatureStaleness, FeatureUnit, FeatureValue, FeatureValueKind,
@@ -985,16 +985,16 @@ mod tests {
     fn classical_no_requires_ask() {
         let mut row = inference_row(dec!(0.1));
         row.context.no_price = None;
-        let missing =
-            project_settlement_probability(dec!(0.1), &row).expect("valid settlement probability");
+        let missing = project_full_payout_probability(dec!(0.1), &row)
+            .expect("valid full-payout probability");
         assert!(
             missing.is_none(),
             "a bearish prediction must be rejected when the NO ask is missing"
         );
 
         row.context.no_price = Some(Price::new(dec!(0.57)));
-        let no = project_settlement_probability(dec!(0.1), &row)
-            .expect("valid settlement probability")
+        let no = project_full_payout_probability(dec!(0.1), &row)
+            .expect("valid full-payout probability")
             .expect("quoted NO side has positive edge");
         assert_eq!(no.outcome_side, OutcomeSide::No);
         assert_eq!(no.entry_price_ref.inner(), dec!(0.57));
@@ -1155,10 +1155,10 @@ mod tests {
         );
 
         let mut wrong_semantics = output.artifact();
-        wrong_semantics.output_semantics = ClassicalOutputSemantics::SettlementProbability;
+        wrong_semantics.output_semantics = ClassicalOutputSemantics::FullPayoutProbability;
         assert!(
             ClassicalRuntime::load(wrong_semantics, &output.model_bytes).is_err(),
-            "regressor artifact cannot masquerade as a settlement probability"
+            "regressor artifact cannot masquerade as a full-payout probability"
         );
     }
 }

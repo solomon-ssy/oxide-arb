@@ -333,6 +333,7 @@ pub fn capture_market_decision(
             book_snapshot_ref,
             book_effective_at,
             book_available_at,
+            selection: selected.into(),
         },
     })
 }

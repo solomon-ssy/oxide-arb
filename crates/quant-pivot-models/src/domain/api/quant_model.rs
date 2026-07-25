@@ -157,7 +157,7 @@ mod tests {
             "model_family": "weighted_factor",
             "prediction_horizon_secs": 86_400,
             "training_contract": {
-                "target_label_name": "settlement_outcome",
+                "target_label_name": "token_payout_ratio",
                 "target_label_horizon_secs": 0,
                 "validation_folds": 3
             },

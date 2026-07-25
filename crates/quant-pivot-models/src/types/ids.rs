@@ -349,6 +349,15 @@ pub struct TrainingDatasetId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TrainingExampleId(Uuid);
 
+impl TrainingExampleId {
+    /// Deterministically project immutable example lineage into its row id.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_1190);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
+
 /// Stored model artifact (serialized weights / model) identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelArtifactId(Uuid);

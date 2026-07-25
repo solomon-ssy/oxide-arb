@@ -268,7 +268,7 @@ mod tests {
     fn scan_rejects_label_before() {
         let mut ex = example(-5);
         ex.labels.push(TrainingLabel {
-            label_name: LabelName::from_static("settlement_outcome"),
+            label_name: LabelName::from_static("token_payout_ratio"),
             horizon_secs: 0,
             value: Decimal::ZERO,
             is_resolved: true,

@@ -1,6 +1,6 @@
 //! Report lifecycle seeding owned by system tests.
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use quant_pivot_models::{
     domain::quant::{NewReportTransaction, RecommendationReportInfo, ReportRunClaim},
     entities::quant_report_run::ActiveModel,
@@ -24,7 +24,10 @@ pub async fn persist_and_publish_report(
     knowledge_lag_secs: i64,
 ) -> RecommendationReportInfo {
     let prepared = persist_prepared_report(db, transaction, trigger_key, knowledge_lag_secs).await;
-    let now = Utc::now();
+    let now = PgReportRunRepository::new(db.clone())
+        .database_time()
+        .await
+        .expect("read database time for report publication");
     let report_id = prepared.recommendation_report_id;
     let repository = PgRecommendationReportRepository::new(db.clone());
     let delivery_worker = WorkerId::from_v7();

@@ -14,7 +14,7 @@
 //!
 //! 1. Build a `ready` training dataset through the Admin API.
 //! 2. **train** → save the returned `model_version_id`.
-//! 3. **backtest** with a (holdout) `training_dataset_id` + `calibrate` flag.
+//! 3. **backtest** with a frozen, read-only `evaluation_dataset_id`.
 //! 4. Poll **GET** the version / report.
 //!
 //! Training, backtest, and CPCV requests enqueue durable research jobs. The SPA

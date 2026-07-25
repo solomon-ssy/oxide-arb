@@ -664,6 +664,34 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
+        name: "uq_quant_backtest_report_run",
+        table: "quant_backtest_report",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "model_run_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_backtest_report_dataset_created",
+        table: "quant_backtest_report",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "evaluation_dataset_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
         name: "idx_quant_basis_alert_as_of",
         table: "quant_basis_alert",
         method: IndexMethod::BTree,
@@ -1597,17 +1625,6 @@ const INDEXES: &[IndexSpec] = &[
             direction: IndexDirection::Asc,
         }],
         predicate: Some("(parent_model_version_id IS NOT NULL)"),
-    },
-    IndexSpec {
-        name: "idx_quant_model_version_source_backtest",
-        table: "quant_model_version",
-        method: IndexMethod::BTree,
-        unique: false,
-        columns: &[IndexColumnSpec {
-            name: "source_backtest_report_id",
-            direction: IndexDirection::Asc,
-        }],
-        predicate: Some("(source_backtest_report_id IS NOT NULL)"),
     },
     IndexSpec {
         name: "idx_quant_model_version_calibration_artifact",

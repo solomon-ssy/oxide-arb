@@ -99,6 +99,8 @@ pub mod entity {
     pub const QUANT_MODEL_VERSION: &str = "quant_model_version";
     /// `quant_model_run`.
     pub const QUANT_MODEL_RUN: &str = "quant_model_run";
+    /// `quant_backtest_report`.
+    pub const QUANT_BACKTEST_REPORT: &str = "quant_backtest_report";
     /// `decision_policy_snapshot`.
     pub const DECISION_POLICY_SNAPSHOT: &str = "decision_policy_snapshot";
     /// `policy_activation`.

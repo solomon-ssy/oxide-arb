@@ -25,9 +25,8 @@ use quant_pivot_models::{
         data_plane::DecisionClock,
         ports::{GovernanceActor, ModelGovernancePort, PublishModelCommand, RetireModelCommand},
         quant::{
-            CompleteTrainingDatasetBuild, ModelGovernanceAuditDetail, NewBacktestPathSet,
-            NewBacktestReport, NewModelRun, NewModelVersion, NewShadowComparison,
-            NewTrainingDatasetPlan,
+            ModelGovernanceAuditDetail, NewBacktestPathSet, NewBacktestReport, NewModelRun,
+            NewModelVersion, NewShadowComparison,
         },
     },
     enums::{
@@ -42,12 +41,11 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::{DecisionPolicySnapshot, FactorCrossSectionConfig, ModelVersionRef},
     types::{
-        ArtifactUri, BacktestPathSetId, BacktestReportId, ContentHash,
-        DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage, DatasetManifest,
+        ArtifactUri, BacktestPathSetId, BacktestReportId, ContentHash, DatasetCoverage,
         DecisionPolicySnapshotId, EventId, FactorDefinitionId, MarketId, ModelInputContract,
         ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, Probability, SchemaVersion,
-        ShadowComparisonId, TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
-        TrainingSampleSource, TrainingSampleSources,
+        ShadowComparisonId, TokenId, TrainingDatasetId, TrainingExampleId, TrainingSampleSource,
+        TrainingSampleSources,
         backtest::{
             BacktestPaths, CategoryMetrics, ExpectedVsRealized, PnlSimulation, SharpeDistribution,
         },
@@ -86,18 +84,20 @@ use quant_pivot_research::{
     selection::SelectedMarket,
     training::{
         DatasetHashContract, DatasetParquetCodec, LabelName, TrainingDatasetArtifact,
-        TrainingExample, TrainingLabel, dataset_manifest_hash, dataset_source_fingerprint,
+        TrainingExample, TrainingLabel, dataset_source_fingerprint,
     },
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
-        execution_pg_seed,
         execution_pg_seed::{fixture_profile_ref, seed_score_calibration},
         fact_sink::DiscardFactWriter,
         model_spec_fixtures,
         policy_fixtures::{bootstrap_default_policy_bundle, bootstrap_policy_bundle},
-        research_fixtures::bind_fixture_decision_capture,
+        research_fixtures::{
+            DatasetLedgerFixture, DatasetLedgerSeed, DatasetSourceSeed, EvaluationDatasetSeed,
+            bind_fixture_decision_capture, seed_dataset_source, seed_evaluation_dataset,
+        },
     },
 };
 use rust_decimal_macros::dec;
@@ -195,16 +195,16 @@ async fn seed_spec(db: &DatabaseConnection) -> ModelSpecId {
     id
 }
 
-/// A dataset coverage that clears the gate (label 0.90, build 0.99).
+/// A dataset coverage that clears the gate with exact materialized-row accounting.
 fn healthy_coverage() -> DatasetCoverage {
     DatasetCoverage {
-        planned_samples: 1_000,
-        built_examples: 990,
+        planned_samples: 505,
+        built_examples: 500,
         markets: 50,
-        labels_available: 900,
-        labels_not_mature: 50,
-        labels_unavailable: 50,
-        samples_dropped_insufficient: 10,
+        labels_available: 500,
+        labels_not_mature: 0,
+        labels_unavailable: 0,
+        samples_dropped_insufficient: 5,
         book_decode_failures: 0,
         matrix_probe: None,
         ..DatasetCoverage::default()
@@ -216,20 +216,23 @@ fn healthy_coverage() -> DatasetCoverage {
 /// split clears `SellL2BookFidelity`/`SellFallbackRatio`.
 fn healthy_sell_coverage() -> DatasetCoverage {
     DatasetCoverage {
-        exit_decision_built: 990,
-        exit_fill_l2_rows: 900,
-        exit_fill_fallback_rows: 90,
+        exit_decision_built: 500,
+        exit_fill_l2_rows: 450,
+        exit_fill_fallback_rows: 50,
         ..healthy_coverage()
     }
 }
 
 fn healthy_training_examples(as_of: DateTime<Utc>) -> Vec<TrainingExample> {
-    [dec!(0.25), dec!(0.75)]
-        .into_iter()
-        .enumerate()
-        .map(|(index, score)| {
+    (0..500)
+        .map(|index| {
+            let score = if index % 2 == 0 {
+                dec!(0.25)
+            } else {
+                dec!(0.75)
+            };
             let market_id = MarketId::new(format!("0xhealthy{index}"));
-            let token_id = TokenId::new("yes");
+            let token_id = TokenId::new(format!("healthy-token-{index}"));
             let mut example = leaking_training_example();
             example.example_id = TrainingExampleId::from_v7();
             example.market_id = market_id.clone();
@@ -265,38 +268,84 @@ fn healthy_training_examples(as_of: DateTime<Utc>) -> Vec<TrainingExample> {
         .collect()
 }
 
+struct FrozenDatasetSeed {
+    model_spec_id: ModelSpecId,
+    model_spec_definition_hash: ContentHash,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    examples: Vec<TrainingExample>,
+    knowledge_lag_secs: u64,
+}
+
 struct FrozenDatasetFixture {
     id: TrainingDatasetId,
-    window_start: DateTime<Utc>,
-    window_end: DateTime<Utc>,
-    feature_schema_hash: ContentHash,
-    factor_schema_hash: ContentHash,
-    label_schema_hash: ContentHash,
-    dataset_hash: ContentHash,
-    manifest_hash: ContentHash,
-    manifest: DatasetManifest,
+    ledger: DatasetLedgerFixture,
     artifact_bytes_hash: ContentHash,
     parquet_uri: ArtifactUri,
-    sample_count: i64,
+}
+
+impl FrozenDatasetFixture {
+    async fn persist(
+        self,
+        repository: &PgTrainingDatasetRepository,
+        coverage: DatasetCoverage,
+    ) -> TrainingDatasetId {
+        repository
+            .create_plan(self.ledger.plan.clone())
+            .await
+            .expect("dataset plan");
+        repository
+            .start_build(&self.id)
+            .await
+            .expect("start dataset build");
+        let completion = self
+            .ledger
+            .completion(
+                TrainingDatasetStatus::Ready,
+                self.artifact_bytes_hash,
+                self.parquet_uri,
+                coverage,
+                None,
+            )
+            .expect("dataset completion");
+        repository
+            .complete_build(&self.id, completion)
+            .await
+            .expect("complete dataset");
+        self.id
+    }
 }
 
 async fn build_frozen_dataset_fixture(
+    db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
-    spec: &ModelSpecId,
-    model_spec_definition_hash: &ContentHash,
-    rc_id: &DecisionPolicySnapshotId,
+    seed: FrozenDatasetSeed,
 ) -> FrozenDatasetFixture {
+    let FrozenDatasetSeed {
+        model_spec_id,
+        model_spec_definition_hash,
+        decision_policy_snapshot_id,
+        examples,
+        knowledge_lag_secs,
+    } = seed;
     let id = TrainingDatasetId::from_v7();
-    let window_start = Utc::now() - ChronoDuration::hours(2);
-    let window_end = window_start + ChronoDuration::hours(1);
-    let examples = healthy_training_examples(window_start + ChronoDuration::minutes(1));
-    let sample_count = i64::try_from(examples.len()).expect("sample count");
+    let window_start = examples
+        .iter()
+        .map(TrainingExample::decision_at)
+        .min()
+        .expect("dataset examples")
+        - ChronoDuration::minutes(1);
+    let window_end = examples
+        .iter()
+        .map(TrainingExample::decision_at)
+        .max()
+        .expect("dataset examples")
+        + ChronoDuration::hours(1);
     let feature_schema_hash = content_hash(u32::from('f'));
     let factor_schema_hash = content_hash(u32::from('g'));
     let label_schema_hash = content_hash(u32::from('l'));
     let dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
         DatasetHashContract {
-            model_spec_id: spec,
+            model_spec_id: &model_spec_id,
             window_start,
             window_end,
             purpose: DatasetPurpose::Training,
@@ -307,33 +356,44 @@ async fn build_frozen_dataset_fixture(
         &examples,
     )
     .expect("semantic dataset hash");
-    let manifest = DatasetManifest {
-        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+    let source_lineage = seed_dataset_source(
+        db,
+        DatasetSourceSeed {
+            scope: format!("governance-dataset-{id}"),
+            profile_ref: fixture_profile_ref(),
+            decision_policy_snapshot_id,
+            window_start,
+            window_end,
+            pit_cutoff: window_end + ChronoDuration::hours(1),
+        },
+    )
+    .await
+    .expect("dataset source lineage");
+    let sample_count = u64::try_from(examples.len()).expect("sample count");
+    let ledger = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
         training_dataset_id: id,
-        profile_ref: fixture_profile_ref(),
-        research_program_hash: content_hash(u32::from('p')),
-        source_slice: execution_pg_seed::source_slice_ref('s'),
-        model_spec_id: *spec,
-        model_spec_definition_hash: *model_spec_definition_hash,
-        trade_policy_artifact_id: None,
-        trade_policy_hash: None,
-        decision_policy_snapshot_id: *rc_id,
+        model_spec_id,
+        model_spec_definition_hash,
+        source_lineage,
+        cohort_manifest: None,
         window_start,
         window_end,
         purpose: DatasetPurpose::Training,
-        knowledge_lag_secs: 10,
+        knowledge_lag_secs,
         sample_interval_secs: 3_600,
-        horizons_secs: vec![3_600],
+        horizons_secs: vec![0],
+        feature_schema_version: Some(SchemaVersion::FIRST),
+        sample_sources: Some(TrainingSampleSources(default_sample_sources())),
         feature_schema_hash,
         factor_schema_hash,
         label_schema_hash,
         semantic_dataset_hash: dataset_hash,
         source_fingerprint: dataset_source_fingerprint(&examples).expect("source fingerprint"),
-        sample_count: u64::try_from(sample_count).expect("manifest sample count"),
-    };
+        sample_count,
+    })
+    .expect("dataset ledger fixture");
     // Real Parquet so publish-time leakage rescan (#9) can decode bytes.
-    let bytes = DatasetParquetCodec::encode(&examples, &manifest).expect("encode parquet");
-    let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
+    let bytes = DatasetParquetCodec::encode(&examples, &ledger.manifest).expect("encode parquet");
     let artifact_bytes_hash = CanonicalDigest::content_hash_bytes(&bytes);
     let key = ArtifactKey::new(
         ArtifactNamespace::Dataset,
@@ -348,58 +408,10 @@ async fn build_frozen_dataset_fixture(
 
     FrozenDatasetFixture {
         id,
-        window_start,
-        window_end,
-        feature_schema_hash,
-        factor_schema_hash,
-        label_schema_hash,
-        dataset_hash,
-        manifest_hash,
-        manifest,
+        ledger,
         artifact_bytes_hash,
         parquet_uri,
-        sample_count,
     }
-}
-
-async fn complete_seeded_dataset(
-    dataset_repo: &PgTrainingDatasetRepository,
-    fixture: FrozenDatasetFixture,
-    status: TrainingDatasetStatus,
-    coverage_json: DatasetCoverage,
-) -> TrainingDatasetId {
-    let terminal_status = if status == TrainingDatasetStatus::Expired {
-        TrainingDatasetStatus::Ready
-    } else {
-        status
-    };
-    dataset_repo
-        .complete_build(
-            &fixture.id,
-            CompleteTrainingDatasetBuild {
-                status: terminal_status,
-                feature_schema_hash: fixture.feature_schema_hash,
-                factor_schema_hash: fixture.factor_schema_hash,
-                label_schema_hash: fixture.label_schema_hash,
-                dataset_hash: fixture.dataset_hash,
-                manifest_hash: fixture.manifest_hash,
-                manifest_json: fixture.manifest,
-                artifact_bytes_hash: fixture.artifact_bytes_hash,
-                parquet_uri: fixture.parquet_uri,
-                sample_count: fixture.sample_count,
-                coverage_json,
-                failure_detail: None,
-            },
-        )
-        .await
-        .expect("complete dataset");
-    if status == TrainingDatasetStatus::Expired {
-        dataset_repo
-            .expire(&fixture.id)
-            .await
-            .expect("expire dataset");
-    }
-    fixture.id
 }
 
 async fn seed_dataset(
@@ -407,59 +419,28 @@ async fn seed_dataset(
     artifact_store: &Arc<dyn ArtifactStore>,
     spec: &ModelSpecId,
     rc_id: &DecisionPolicySnapshotId,
-    status: TrainingDatasetStatus,
-    coverage_json: DatasetCoverage,
-    dataset_hash_seed: char,
+    coverage: DatasetCoverage,
 ) -> TrainingDatasetId {
-    let _ = dataset_hash_seed;
     let model_spec_definition_hash = PgModelRegistryRepository::new(db.clone())
         .find_model_spec(spec)
         .await
         .expect("model spec lookup")
         .expect("model spec")
         .definition_hash;
-    let fixture =
-        build_frozen_dataset_fixture(artifact_store, spec, &model_spec_definition_hash, rc_id)
-            .await;
-    let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
-    dataset_repo
-        .create_plan(NewTrainingDatasetPlan {
-            training_dataset_id: fixture.id,
+    let fixture = build_frozen_dataset_fixture(
+        db,
+        artifact_store,
+        FrozenDatasetSeed {
             model_spec_id: *spec,
             model_spec_definition_hash,
-            window_start: fixture.window_start,
-            window_end: fixture.window_end,
-            purpose: DatasetPurpose::Training,
-            knowledge_lag_secs: 10,
-            sample_interval_secs: 3_600,
-            horizons_secs: TrainingHorizonsSecs(vec![3600]),
-            feature_schema_version: Some(SchemaVersion::FIRST),
-            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
             decision_policy_snapshot_id: *rc_id,
-        })
-        .await
-        .expect("dataset plan");
-    if status != TrainingDatasetStatus::Planned {
-        dataset_repo
-            .start_build(&fixture.id)
-            .await
-            .expect("start dataset build");
-    }
-    match status {
-        TrainingDatasetStatus::Ready
-        | TrainingDatasetStatus::InsufficientLabels
-        | TrainingDatasetStatus::Expired => {
-            return complete_seeded_dataset(&dataset_repo, fixture, status, coverage_json).await;
-        }
-        TrainingDatasetStatus::Failed => {
-            dataset_repo
-                .fail_build(&fixture.id, "seeded dataset failure".to_owned())
-                .await
-                .expect("fail dataset");
-        }
-        TrainingDatasetStatus::Planned | TrainingDatasetStatus::Building => {}
-    }
-    fixture.id
+            examples: healthy_training_examples(Utc::now() - ChronoDuration::hours(1)),
+            knowledge_lag_secs: 10,
+        },
+    )
+    .await;
+    let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
+    fixture.persist(&dataset_repo, coverage).await
 }
 
 async fn seed_version(
@@ -507,7 +488,7 @@ async fn seed_version(
             let input_hash = weighted_training_input_hash(
                 &examples,
                 &LabelSelector {
-                    name: LabelName::new("settlement_outcome"),
+                    name: LabelName::new("token_payout_ratio"),
                     horizon_secs: 0,
                 },
                 &[LIQUIDITY_DEPTH],
@@ -657,7 +638,7 @@ async fn seed_sell_version(
             let input_hash = weighted_training_input_hash(
                 &examples,
                 &LabelSelector {
-                    name: LabelName::new("settlement_outcome"),
+                    name: LabelName::new("token_payout_ratio"),
                     horizon_secs: 0,
                 },
                 &[LIQUIDITY_DEPTH],
@@ -740,9 +721,37 @@ async fn seed_backtest(
     rc_id: &DecisionPolicySnapshotId,
     hash_seed: char,
 ) {
+    let registry = PgModelRegistryRepository::new(db.clone());
+    let version_info = registry
+        .find_model_version(version)
+        .await
+        .expect("model version lookup")
+        .expect("model version");
+    let model_spec = registry
+        .find_model_spec(&version_info.model_spec_id)
+        .await
+        .expect("model spec lookup")
+        .expect("model spec");
     let model_run_id = ModelRunId::from_v7();
     let window_start = Utc::now() - ChronoDuration::hours(2);
-    PgModelRunRepository::new(db.clone())
+    let window_end = window_start + ChronoDuration::hours(1);
+    let evaluation_dataset_id = seed_evaluation_dataset(
+        db,
+        EvaluationDatasetSeed {
+            scope: format!("governance-backtest-{version}-{hash_seed}"),
+            model_spec_id: version_info.model_spec_id,
+            model_spec_definition_hash: model_spec.definition_hash,
+            profile_ref: version_info.profile_ref,
+            decision_policy_snapshot_id: *rc_id,
+            window_start,
+            window_end,
+            sample_count: 1_000,
+        },
+    )
+    .await
+    .expect("evaluation dataset");
+    let model_run_repo = PgModelRunRepository::new(db.clone());
+    model_run_repo
         .create(NewModelRun {
             model_run_id,
             run_kind: ModelRunKind::Backtest,
@@ -750,14 +759,14 @@ async fn seed_backtest(
             decision_policy_snapshot_id: *rc_id,
             market_selection_id: None,
             window_start,
-            window_end: window_start + ChronoDuration::hours(1),
-            status: ModelRunStatus::Succeeded,
+            window_end,
+            status: ModelRunStatus::Running,
             input_hash: content_hash(u32::from(hash_seed)),
-            output_hash: Some(content_hash(u32::from(hash_seed) + 1)),
+            output_hash: None,
             error_code: None,
             error_message: None,
             started_at: window_start,
-            finished_at: Some(Utc::now()),
+            finished_at: None,
         })
         .await
         .expect("model run");
@@ -775,14 +784,16 @@ async fn seed_backtest(
         pnl_curve: Vec::new(),
     };
 
+    let report_hash = content_hash(u32::from(hash_seed) + 2);
     PgBacktestReportRepository::new(db.clone())
         .create(NewBacktestReport {
             backtest_report_id: BacktestReportId::from_v7(),
             model_version_id: *version,
+            evaluation_dataset_id,
             model_run_id,
             decision_policy_snapshot_id: *rc_id,
             window_start,
-            window_end: window_start + ChronoDuration::hours(1),
+            window_end,
             coverage: dec!(0.99),
             sample_count: 1_000,
             missing_feature_count: 0,
@@ -796,11 +807,15 @@ async fn seed_backtest(
             category_breakdown: CategoryMetrics::default(),
             tail_loss: dec!(-50),
             report_pnl_simulation: pnl_simulation,
-            report_hash: content_hash(u32::from(hash_seed) + 2),
+            report_hash,
             parquet_uri: None,
         })
         .await
         .expect("backtest report");
+    model_run_repo
+        .succeed(&model_run_id, report_hash, Utc::now(), Some(*version))
+        .await
+        .expect("finalize backtest model run");
 }
 
 /// Seed a stable shadow history for `version` (as shadow) spanning > 24h.
@@ -853,9 +868,7 @@ pub async fn publish_requires_quality_pass() {
         &harness.artifact_store,
         &spec,
         &rc_id,
-        TrainingDatasetStatus::Ready,
         healthy_coverage(),
-        '1',
     )
     .await;
     let candidate = seed_version(
@@ -953,9 +966,7 @@ pub async fn publish_requires_backtest_report() {
         &harness.artifact_store,
         &spec,
         &rc_id,
-        TrainingDatasetStatus::Ready,
         healthy_coverage(),
-        '1',
     )
     .await;
     let candidate = seed_version(
@@ -1003,9 +1014,7 @@ pub async fn publish_requires_shadow_stability() {
         &harness.artifact_store,
         &spec,
         &rc_id,
-        TrainingDatasetStatus::Ready,
         healthy_coverage(),
-        '1',
     )
     .await;
     let candidate = seed_version(
@@ -1048,9 +1057,7 @@ pub async fn publish_succeeds_without_immutable() {
         &harness.artifact_store,
         &spec,
         &rc_id,
-        TrainingDatasetStatus::Ready,
         healthy_coverage(),
-        '1',
     )
     .await;
     let candidate = seed_version(
@@ -1270,9 +1277,7 @@ pub async fn retire_unrouted_without_routing() {
         &harness.artifact_store,
         &spec,
         &rc_id,
-        TrainingDatasetStatus::Ready,
         healthy_coverage(),
-        '1',
     )
     .await;
     let version = seed_version(
@@ -1342,9 +1347,7 @@ pub async fn rejects_routed_model_retirement() {
         &harness.artifact_store,
         &spec,
         &rc_id,
-        TrainingDatasetStatus::Ready,
         healthy_coverage(),
-        '1',
     )
     .await;
     let version = seed_version(
@@ -1445,9 +1448,7 @@ pub async fn uncalibrated_return_cannot_publish() {
         &harness.artifact_store,
         &spec,
         &rc_id,
-        TrainingDatasetStatus::Ready,
         healthy_coverage(),
-        '1',
     )
     .await;
     let candidate = seed_version(
@@ -1504,9 +1505,7 @@ pub async fn bind_calibration_creates_model() {
         &harness.artifact_store,
         &spec,
         &rc_id,
-        TrainingDatasetStatus::Ready,
         healthy_coverage(),
-        '1',
     )
     .await;
     let candidate = seed_version(
@@ -1639,7 +1638,7 @@ fn leaking_training_example() -> TrainingExample {
         },
         factor_values: Vec::new(),
         labels: vec![TrainingLabel {
-            label_name: LabelName::new("settlement_outcome"),
+            label_name: LabelName::new("token_payout_ratio"),
             horizon_secs: 0,
             value: dec!(1),
             is_resolved: true,
@@ -1662,113 +1661,40 @@ async fn seed_leaking_dataset(
     spec: &ModelSpecId,
     rc_id: &DecisionPolicySnapshotId,
 ) -> TrainingDatasetId {
-    let dataset_id = TrainingDatasetId::from_v7();
-    let window_start = Utc::now() - ChronoDuration::hours(2);
-    let window_end = window_start + ChronoDuration::hours(1);
-    let first = leaking_training_example();
-    let mut second = first.clone();
-    second.example_id = TrainingExampleId::from_v7();
-    second.market_id = MarketId::new("0xleak2");
-    second.selected_market.market_id = second.market_id.clone();
-    second.feature_vector.market_id = second.market_id.clone();
-    bind_fixture_decision_capture(&mut second);
-    let examples = vec![first, second];
-    let sample_count = i64::try_from(examples.len()).expect("leaking sample count");
-    let feature_schema_hash = content_hash(u32::from('f'));
-    let factor_schema_hash = content_hash(u32::from('g'));
-    let label_schema_hash = content_hash(u32::from('l'));
-    let dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
-        DatasetHashContract {
-            model_spec_id: spec,
-            window_start,
-            window_end,
-            purpose: DatasetPurpose::Training,
-            feature_schema_hash: &feature_schema_hash,
-            factor_schema_hash: &factor_schema_hash,
-            label_schema_hash: &label_schema_hash,
-        },
-        &examples,
-    )
-    .expect("semantic dataset hash");
     let model_spec_definition_hash = PgModelRegistryRepository::new(db.clone())
         .find_model_spec(spec)
         .await
         .expect("model spec lookup")
         .expect("model spec")
         .definition_hash;
-    let manifest = DatasetManifest {
-        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
-        training_dataset_id: dataset_id,
-        profile_ref: fixture_profile_ref(),
-        research_program_hash: content_hash(u32::from('p')),
-        source_slice: execution_pg_seed::source_slice_ref('s'),
-        model_spec_id: *spec,
-        model_spec_definition_hash,
-        trade_policy_artifact_id: None,
-        trade_policy_hash: None,
-        decision_policy_snapshot_id: *rc_id,
-        window_start,
-        window_end,
-        purpose: DatasetPurpose::Training,
-        knowledge_lag_secs: 0,
-        sample_interval_secs: 3_600,
-        horizons_secs: vec![0],
-        feature_schema_hash,
-        factor_schema_hash,
-        label_schema_hash,
-        semantic_dataset_hash: dataset_hash,
-        source_fingerprint: dataset_source_fingerprint(&examples).expect("source fingerprint"),
-        sample_count: u64::try_from(sample_count).expect("manifest sample count"),
-    };
-    let bytes = DatasetParquetCodec::encode(&examples, &manifest).expect("encode");
-    let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
-    let artifact_bytes_hash = CanonicalDigest::content_hash_bytes(&bytes);
-    let hex = dataset_id.as_uuid().simple().to_string();
-    let key = ArtifactKey::new(ArtifactNamespace::Dataset, hex, "parquet").expect("key");
-    let parquet_uri = artifact_store.put(key, &bytes).await.expect("store");
-    let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
-    dataset_repo
-        .create_plan(NewTrainingDatasetPlan {
-            training_dataset_id: dataset_id,
+    let examples = (0..500)
+        .map(|index| {
+            let mut example = leaking_training_example();
+            example.example_id = TrainingExampleId::from_v7();
+            example.market_id = MarketId::new(format!("0xleak{index}"));
+            example.token_id = TokenId::new(format!("leak-token-{index}"));
+            example.selected_market.market_id = example.market_id.clone();
+            example.selected_market.primary_token_id = example.token_id.clone();
+            example.feature_vector.market_id = example.market_id.clone();
+            example.feature_vector.token_id = Some(example.token_id.clone());
+            bind_fixture_decision_capture(&mut example);
+            example
+        })
+        .collect();
+    let fixture = build_frozen_dataset_fixture(
+        db,
+        artifact_store,
+        FrozenDatasetSeed {
             model_spec_id: *spec,
             model_spec_definition_hash,
-            window_start,
-            window_end,
-            purpose: DatasetPurpose::Training,
-            knowledge_lag_secs: 0,
-            sample_interval_secs: 3_600,
-            horizons_secs: TrainingHorizonsSecs(vec![0]),
-            feature_schema_version: Some(SchemaVersion::FIRST),
-            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
             decision_policy_snapshot_id: *rc_id,
-        })
-        .await
-        .expect("dataset plan");
-    dataset_repo
-        .start_build(&dataset_id)
-        .await
-        .expect("start dataset");
-    dataset_repo
-        .complete_build(
-            &dataset_id,
-            CompleteTrainingDatasetBuild {
-                status: TrainingDatasetStatus::Ready,
-                feature_schema_hash,
-                factor_schema_hash,
-                label_schema_hash,
-                dataset_hash,
-                manifest_hash,
-                manifest_json: manifest,
-                artifact_bytes_hash,
-                parquet_uri,
-                sample_count,
-                coverage_json: healthy_coverage(),
-                failure_detail: None,
-            },
-        )
-        .await
-        .expect("dataset");
-    dataset_id
+            examples,
+            knowledge_lag_secs: 0,
+        },
+    )
+    .await;
+    let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
+    fixture.persist(&dataset_repo, healthy_coverage()).await
 }
 
 /// Sell (`HoldVsExitWeighted`) publish requires a bound CPCV
@@ -1785,9 +1711,7 @@ pub async fn sell_publish_requires_set() {
         &harness.artifact_store,
         &spec,
         &rc_id,
-        TrainingDatasetStatus::Ready,
         healthy_sell_coverage(),
-        '1',
     )
     .await;
     let candidate = seed_sell_version(&db, &harness.artifact_store, &spec, 1, Some(dataset)).await;
@@ -1841,9 +1765,7 @@ pub async fn sell_publish_succeeds_set() {
         &harness.artifact_store,
         &spec,
         &rc_id,
-        TrainingDatasetStatus::Ready,
         healthy_sell_coverage(),
-        '1',
     )
     .await;
     let candidate = seed_sell_version(&db, &harness.artifact_store, &spec, 1, Some(dataset)).await;

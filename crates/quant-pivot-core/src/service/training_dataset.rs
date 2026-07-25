@@ -35,7 +35,7 @@ use quant_pivot_models::{
     },
     enums::{
         common::MarketCategory,
-        quant::{DatasetPurpose, TradePolicyStatus, TrainingDatasetStatus},
+        quant::{DatasetPurpose, FeedbackCohort, TradePolicyStatus, TrainingDatasetStatus},
     },
     hashing::CanonicalDigest,
     runtime_config::{
@@ -58,7 +58,7 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     execution_semantics::BookFidelity,
-    factors::{FactorEligibility, FactorEngine, FactorValue, MarketFactorOutcome},
+    factors::{FactorEligibility, FactorEngine, FactorSet, FactorValue, MarketFactorOutcome},
     features::ConfiguredFeatureBuilder,
     hashing::ResearchHasher,
     model::{
@@ -73,10 +73,11 @@ use quant_pivot_research::{
         LabelBuildOutput, LabelName, Labeler, LiquidityExitLabeler, LotSamplePlan,
         LotTerminalSnapshot, LotTrainingContext, MaxAdverseExcursionLabeler,
         MaxFavorableExcursionLabeler, PlanMarket, ReturnToHorizonLabeler, SamplePlan,
-        SettlementOutcomeLabeler, TrainingDatasetArtifact, TrainingDatasetBuilder,
-        TrainingDatasetPlanner, TrainingExample, TrainingLabel, assert_no_future_leakage,
-        count_samples, dataset_manifest_hash, dataset_source_fingerprint, label_names_for_sources,
-        plan_lot_timeline_samples, plan_samples, probe_matrix_coverage, remaining_shares_at,
+        TOKEN_PAYOUT_RATIO, TokenPayoutRatioLabeler, TrainingDatasetArtifact,
+        TrainingDatasetBuilder, TrainingDatasetPlanner, TrainingExample, TrainingLabel,
+        assert_no_future_leakage, count_samples, dataset_source_fingerprint,
+        label_names_for_sources, plan_lot_timeline_samples, plan_samples, probe_matrix_coverage,
+        remaining_shares_at,
     },
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -299,7 +300,7 @@ pub fn default_labelers() -> Vec<Box<dyn Labeler>> {
         Box::new(MaxFavorableExcursionLabeler),
         Box::new(MaxAdverseExcursionLabeler),
         Box::new(LiquidityExitLabeler),
-        Box::new(SettlementOutcomeLabeler),
+        Box::new(TokenPayoutRatioLabeler),
     ]
 }
 
@@ -312,7 +313,7 @@ pub fn exit_decision_labelers() -> Vec<Box<dyn Labeler>> {
     ]
 }
 
-/// Verify exact bytes, the embedded v4 manifest and semantic rows against the
+/// Verify exact bytes, the embedded v2 manifest and semantic rows against the
 /// immutable dataset ledger.
 ///
 /// This gate runs before any trainer, calibrator or backtest consumes the
@@ -344,7 +345,10 @@ pub fn verify_frozen_dataset_artifact(
 
     let decoded = DatasetParquetCodec::decode_with_manifest(bytes)?;
     let expected_manifest_hash = materialization.manifest_hash;
-    let actual_manifest_hash = dataset_manifest_hash(&decoded.manifest)?;
+    let actual_manifest_hash = decoded
+        .manifest
+        .content_hash()
+        .map_err(|detail| ResearchError::DatasetBuild { detail })?;
     if &actual_manifest_hash != expected_manifest_hash {
         return Err(ResearchError::DatasetBuild {
             detail: format!(
@@ -381,7 +385,14 @@ pub fn verify_frozen_dataset_artifact(
     let bindings_match = manifest.training_dataset_id == dataset.training_dataset_id
         && manifest.model_spec_id == dataset.model_spec_id
         && manifest.model_spec_definition_hash == dataset.model_spec_definition_hash
-        && manifest.decision_policy_snapshot_id == dataset.decision_policy_snapshot_id
+        && manifest.source_lineage == dataset.source_lineage
+        && manifest.cohort_manifest == dataset.cohort_manifest
+        && manifest.source_lineage.research_profile_artifact_id
+            == dataset.research_profile_artifact_id
+        && manifest.source_lineage.source_slice_id == dataset.source_slice_id
+        && manifest.source_lineage.pit_cutoff == dataset.pit_cutoff
+        && manifest.source_lineage.decision_policy_snapshot_id
+            == dataset.decision_policy_snapshot_id
         && manifest.window_start == dataset.window_start
         && manifest.window_end == dataset.window_end
         && manifest.purpose == dataset.purpose
@@ -533,6 +544,64 @@ pub struct TrainingDatasetService {
 }
 
 impl TrainingDatasetService {
+    /// Freeze a cohort-owned event-driven plan with no synthetic sample grid.
+    pub async fn plan_feedback(&self, request: DatasetPlanRequest) -> QuantResult<DatasetPlan> {
+        require_half_open_window(request.window_start, request.window_end)?;
+        let cohort =
+            request
+                .cohort_manifest
+                .as_ref()
+                .ok_or_else(|| ResearchError::DatasetPlan {
+                    detail: "feedback dataset requires an immutable cohort manifest".to_owned(),
+                })?;
+        cohort
+            .validate()
+            .map_err(|error| ResearchError::DatasetPlan {
+                detail: error.to_string(),
+            })?;
+        if cohort.cohort != FeedbackCohort::ModelLearning
+            || request.sample_sources != [TrainingSampleSource::RecommendationFeedback]
+            || request.sample_interval_secs != 0
+            || request.horizons_secs != [0]
+            || request.training_dataset_id.is_none()
+            || request.window_start != cohort.window.window_start()
+            || request.window_end != cohort.window.cutoff()
+            || request.source_lineage.pit_cutoff != cohort.window.cutoff()
+        {
+            return Err(ResearchError::DatasetPlan {
+                detail: "feedback plan must bind one frozen ModelLearning cohort, a preassigned dataset id, event-driven cadence, and the exact cutoff"
+                    .to_owned(),
+            }
+            .into());
+        }
+        request
+            .source_lineage
+            .validate()
+            .map_err(|error| ResearchError::DatasetPlan {
+                detail: error.to_string(),
+            })?;
+        let (model_spec_definition_hash, trade_policy_artifact_id, trade_policy_hash, trade_policy) =
+            self.resolve_trade_policy_binding(&request).await?;
+        let training_dataset_id =
+            request
+                .training_dataset_id
+                .ok_or_else(|| ResearchError::DatasetPlan {
+                    detail: "feedback dataset id disappeared after validation".to_owned(),
+                })?;
+        Ok(DatasetPlan {
+            request,
+            training_dataset_id,
+            model_spec_definition_hash,
+            samples: Vec::new(),
+            lot_samples: Vec::new(),
+            exit_training_lots: Vec::new(),
+            label_names: vec![TOKEN_PAYOUT_RATIO],
+            trade_policy_artifact_id,
+            trade_policy_hash,
+            trade_policy,
+        })
+    }
+
     /// Plan exclusively from a verified Source Slice. Dynamic repository reads
     /// for candidate discovery are structurally absent from this path.
     pub async fn plan_with_frozen_source(
@@ -541,6 +610,12 @@ impl TrainingDatasetService {
         source: &FrozenSourceSlice,
     ) -> QuantResult<DatasetPlan> {
         require_half_open_window(request.window_start, request.window_end)?;
+        request
+            .source_lineage
+            .verify_manifest(&source.manifest)
+            .map_err(|error| ResearchError::DatasetPlan {
+                detail: error.to_string(),
+            })?;
         if request
             .sample_sources
             .iter()
@@ -1224,6 +1299,123 @@ impl TrainingDatasetBuilder for TrainingDatasetService {
 }
 
 impl TrainingDatasetService {
+    /// Materialize only the exact rows admitted by a frozen feedback cohort.
+    pub async fn build_feedback(
+        &self,
+        plan: DatasetPlan,
+        examples: Vec<TrainingExample>,
+        factor_set: FactorSet,
+        coverage: DatasetCoverage,
+    ) -> QuantResult<TrainingDatasetArtifact> {
+        if plan
+            .request
+            .cohort_manifest
+            .as_ref()
+            .map(|manifest| manifest.cohort)
+            != Some(FeedbackCohort::ModelLearning)
+            || plan.request.sample_sources != [TrainingSampleSource::RecommendationFeedback]
+            || plan.request.sample_interval_secs != 0
+            || !plan.samples.is_empty()
+            || !plan.lot_samples.is_empty()
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: "feedback build received a non-cohort plan or a synthetic sample grid"
+                    .to_owned(),
+            }
+            .into());
+        }
+        if let Some(existing) = self.load_completed_feedback(&plan).await? {
+            return Ok(existing);
+        }
+        self.prepare_build_ledger(&plan).await?;
+        let training_dataset_id = plan.training_dataset_id;
+        let result = async {
+            self.ensure_factors_enabled()?;
+            let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain)?;
+            if builder.schema().version() != plan.request.feature_schema_version {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "feedback feature schema version {} does not match active profile schema {}",
+                        plan.request.feature_schema_version,
+                        builder.schema().version()
+                    ),
+                }
+                .into());
+            }
+            self.finalize_with_factors(&builder, &factor_set, plan, examples, coverage)
+                .await
+        }
+        .await;
+        self.persist_build_failure(&training_dataset_id, result)
+            .await
+    }
+
+    async fn load_completed_feedback(
+        &self,
+        plan: &DatasetPlan,
+    ) -> QuantResult<Option<TrainingDatasetArtifact>> {
+        let Some(dataset) = self
+            .dataset_repo
+            .find_by_id(&plan.training_dataset_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if !matches!(
+            dataset.status,
+            TrainingDatasetStatus::Ready | TrainingDatasetStatus::InsufficientLabels
+        ) {
+            return Ok(None);
+        }
+        let plan_matches = dataset.model_spec_id == plan.request.model_spec_id
+            && dataset.model_spec_definition_hash == plan.model_spec_definition_hash
+            && dataset.source_lineage == plan.request.source_lineage
+            && dataset.cohort_manifest == plan.request.cohort_manifest
+            && dataset.window_start == plan.request.window_start
+            && dataset.window_end == plan.request.window_end
+            && dataset.purpose == plan.request.purpose
+            && dataset.knowledge_lag_secs
+                == i64::try_from(plan.request.knowledge_lag_secs).map_err(|error| {
+                    ResearchError::DatasetBuild {
+                        detail: format!(
+                            "feedback knowledge lag exceeds PostgreSQL bigint: {error}"
+                        ),
+                    }
+                })?
+            && dataset.sample_interval_secs == 0
+            && dataset.horizons_secs.0 == plan.request.horizons_secs
+            && dataset.feature_schema_version == Some(plan.request.feature_schema_version)
+            && dataset.sample_sources.as_ref().map(|sources| &sources.0)
+                == Some(&plan.request.sample_sources);
+        if !plan_matches {
+            return Err(StorageError::state_conflict(
+                "quant_training_dataset",
+                Some(&plan.training_dataset_id),
+                "completed feedback dataset id is bound to a different frozen plan",
+            )
+            .into());
+        }
+        let materialization = require_dataset_materialization(&dataset)?;
+        let bytes = self.artifact_store.get(materialization.parquet_uri).await?;
+        let examples = verify_frozen_dataset_artifact(&dataset, &bytes)?;
+        Ok(Some(TrainingDatasetArtifact {
+            format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+            training_dataset_id: dataset.training_dataset_id,
+            model_spec_id: dataset.model_spec_id,
+            window_start: dataset.window_start,
+            window_end: dataset.window_end,
+            examples,
+            feature_schema_hash: *materialization.feature_schema_hash,
+            factor_schema_hash: *materialization.factor_schema_hash,
+            label_schema_hash: *materialization.label_schema_hash,
+            dataset_hash: *materialization.dataset_hash,
+            manifest: materialization.manifest.clone(),
+            artifact_bytes_hash: *materialization.artifact_bytes_hash,
+            parquet_uri: materialization.parquet_uri.clone(),
+            coverage: materialization.coverage.clone(),
+        }))
+    }
+
     /// Build a dataset, streaming per-cross-section progress to `sink` and
     /// polling `cancel` at each cross-section boundary.
     pub async fn build_with_progress(
@@ -1416,7 +1608,7 @@ impl TrainingDatasetService {
                 &market_ids,
                 plan.request.window_start,
                 plan.request.window_end,
-                plan.request.pit_cutoff,
+                plan.request.source_lineage.pit_cutoff,
             )
             .await
             .map_err(Into::into)
@@ -1448,6 +1640,20 @@ impl TrainingDatasetService {
                     training_dataset_id: plan.training_dataset_id,
                     model_spec_id: plan.request.model_spec_id,
                     model_spec_definition_hash: plan.model_spec_definition_hash,
+                    research_profile_artifact_id: plan
+                        .request
+                        .source_lineage
+                        .research_profile_artifact_id
+                        .clone(),
+                    source_slice_id: plan.request.source_lineage.source_slice_id,
+                    pit_cutoff: plan.request.source_lineage.pit_cutoff,
+                    source_lineage: plan.request.source_lineage.clone(),
+                    feedback_cohort: plan
+                        .request
+                        .cohort_manifest
+                        .as_ref()
+                        .map(|manifest| manifest.cohort),
+                    cohort_manifest: plan.request.cohort_manifest.clone(),
                     window_start: plan.request.window_start,
                     window_end: plan.request.window_end,
                     purpose: plan.request.purpose,
@@ -1458,7 +1664,10 @@ impl TrainingDatasetService {
                     sample_sources: Some(TrainingSampleSources(
                         plan.request.sample_sources.clone(),
                     )),
-                    decision_policy_snapshot_id: plan.request.decision_policy_snapshot_id,
+                    decision_policy_snapshot_id: plan
+                        .request
+                        .source_lineage
+                        .decision_policy_snapshot_id,
                 })
                 .await;
             match create_result {
@@ -1479,7 +1688,20 @@ impl TrainingDatasetService {
         };
         let binding_matches = row.model_spec_id == plan.request.model_spec_id
             && row.model_spec_definition_hash == plan.model_spec_definition_hash
-            && row.decision_policy_snapshot_id == plan.request.decision_policy_snapshot_id
+            && row.research_profile_artifact_id
+                == plan.request.source_lineage.research_profile_artifact_id
+            && row.source_slice_id == plan.request.source_lineage.source_slice_id
+            && row.pit_cutoff == plan.request.source_lineage.pit_cutoff
+            && row.source_lineage == plan.request.source_lineage
+            && row.feedback_cohort
+                == plan
+                    .request
+                    .cohort_manifest
+                    .as_ref()
+                    .map(|manifest| manifest.cohort)
+            && row.cohort_manifest == plan.request.cohort_manifest
+            && row.decision_policy_snapshot_id
+                == plan.request.source_lineage.decision_policy_snapshot_id
             && row.window_start == plan.request.window_start
             && row.window_end == plan.request.window_end
             && row.purpose == plan.request.purpose
@@ -1543,7 +1765,7 @@ impl TrainingDatasetService {
     ) -> QuantResult<TrainingDatasetArtifact> {
         self.prepare_build_ledger(&plan).await?;
         let training_dataset_id = plan.training_dataset_id;
-        let result = self.materialize_with_pit_source(plan, pit).await;
+        let result = Box::pin(self.materialize_with_pit_source(plan, pit)).await;
         self.persist_build_failure(&training_dataset_id, result)
             .await
     }
@@ -1755,7 +1977,7 @@ impl TrainingDatasetService {
             &self.selection,
             &self.data_quality,
             &self.features,
-            request.decision_policy_snapshot_id,
+            request.source_lineage.decision_policy_snapshot_id,
             request.knowledge_lag_secs,
             model_requirements,
         )
@@ -1997,10 +2219,23 @@ impl TrainingDatasetService {
         examples: Vec<TrainingExample>,
         coverage: DatasetCoverage,
     ) -> QuantResult<TrainingDatasetArtifact> {
+        let factor_set = engine.factor_set();
+        self.finalize_with_factors(builder, &factor_set, plan, examples, coverage)
+            .await
+    }
+
+    async fn finalize_with_factors(
+        &self,
+        builder: &ConfiguredFeatureBuilder,
+        factor_set: &FactorSet,
+        plan: DatasetPlan,
+        examples: Vec<TrainingExample>,
+        coverage: DatasetCoverage,
+    ) -> QuantResult<TrainingDatasetArtifact> {
         self.validate_finalization_input(&plan, &examples).await?;
 
         let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
-        let factor_schema_hash = ResearchHasher::factor_schema(&engine.factor_set())?;
+        let factor_schema_hash = ResearchHasher::factor_schema(factor_set)?;
         let label_schema_hash = ResearchHasher::label_schema(&plan.label_names)?;
         let coverage = self
             .complete_integrity_coverage(&plan.request.model_spec_id, &examples, builder, coverage)
@@ -2032,28 +2267,19 @@ impl TrainingDatasetService {
             )
             .await?;
 
-        let sample_count_i64 =
-            i64::try_from(examples.len()).map_err(|error| ResearchError::DatasetBuild {
-                detail: format!("dataset sample count exceeds Postgres bigint: {error}"),
-            })?;
+        let completion = CompleteTrainingDatasetBuild::try_new(
+            integrity.status,
+            persisted.manifest.clone(),
+            persisted.artifact_bytes_hash,
+            persisted.parquet_uri.clone(),
+            coverage.clone(),
+            integrity.failure_detail,
+        )
+        .map_err(|error| ResearchError::DatasetBuild {
+            detail: error.to_string(),
+        })?;
         self.dataset_repo
-            .complete_build(
-                &plan.training_dataset_id,
-                CompleteTrainingDatasetBuild {
-                    status: integrity.status,
-                    feature_schema_hash,
-                    factor_schema_hash,
-                    label_schema_hash,
-                    dataset_hash,
-                    manifest_hash: persisted.manifest_hash,
-                    manifest_json: persisted.manifest.clone(),
-                    artifact_bytes_hash: persisted.artifact_bytes_hash,
-                    parquet_uri: persisted.parquet_uri.clone(),
-                    sample_count: sample_count_i64,
-                    coverage_json: coverage.clone(),
-                    failure_detail: integrity.failure_detail,
-                },
-            )
+            .complete_build(&plan.training_dataset_id, completion)
             .await
             .map_err(QuantError::from)?;
 
@@ -2167,14 +2393,12 @@ impl TrainingDatasetService {
         let manifest = DatasetManifest {
             format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             training_dataset_id: plan.training_dataset_id,
-            profile_ref: plan.request.profile_ref.clone(),
-            research_program_hash: plan.request.research_program_hash,
-            source_slice: plan.request.source_slice.clone(),
+            source_lineage: plan.request.source_lineage.clone(),
+            cohort_manifest: plan.request.cohort_manifest.clone(),
             model_spec_id: plan.request.model_spec_id,
             model_spec_definition_hash: plan.model_spec_definition_hash,
             trade_policy_artifact_id: plan.trade_policy_artifact_id,
             trade_policy_hash: plan.trade_policy_hash,
-            decision_policy_snapshot_id: plan.request.decision_policy_snapshot_id,
             window_start: plan.request.window_start,
             window_end: plan.request.window_end,
             purpose: plan.request.purpose,
@@ -2188,7 +2412,9 @@ impl TrainingDatasetService {
             source_fingerprint: dataset_source_fingerprint(examples)?,
             sample_count,
         };
-        let manifest_hash = dataset_manifest_hash(&manifest)?;
+        let manifest_hash = manifest
+            .content_hash()
+            .map_err(|detail| ResearchError::DatasetBuild { detail })?;
         let parquet_bytes = DatasetParquetCodec::encode(examples, &manifest)?;
         let artifact_bytes_hash = CanonicalDigest::content_hash_bytes(&parquet_bytes);
         let key = ArtifactKey::new(
@@ -2208,9 +2434,11 @@ impl TrainingDatasetService {
             .into());
         }
         let decoded = DatasetParquetCodec::decode_with_manifest(&persisted_bytes)?;
-        if decoded.manifest != manifest
-            || dataset_manifest_hash(&decoded.manifest)? != manifest_hash
-        {
+        let decoded_manifest_hash = decoded
+            .manifest
+            .content_hash()
+            .map_err(|detail| ResearchError::DatasetBuild { detail })?;
+        if decoded.manifest != manifest || decoded_manifest_hash != manifest_hash {
             return Err(ResearchError::DatasetBuild {
                 detail: "dataset manifest changed during Parquet persistence".to_owned(),
             }
@@ -2218,7 +2446,6 @@ impl TrainingDatasetService {
         }
         Ok(PersistedDatasetArtifact {
             manifest,
-            manifest_hash,
             artifact_bytes_hash,
             parquet_uri,
         })
@@ -2249,7 +2476,14 @@ fn dataset_integrity_outcome(coverage: &DatasetCoverage) -> QuantResult<DatasetI
     if probe.label_rows == 0 {
         return Ok(DatasetIntegrityOutcome {
             status: TrainingDatasetStatus::InsufficientLabels,
-            failure_detail: None,
+            failure_detail: Some(format!(
+                "deterministic integrity gate found no mature target labels: target={}/{}, built_examples={}, labels_not_mature={}, labels_unavailable={}",
+                probe.label_name,
+                probe.label_horizon_secs,
+                coverage.built_examples,
+                coverage.labels_not_mature,
+                coverage.labels_unavailable,
+            )),
         });
     }
     if probe.accepted_rows == 0 {
@@ -2294,7 +2528,6 @@ struct DatasetSchemaHashes {
 
 struct PersistedDatasetArtifact {
     manifest: DatasetManifest,
-    manifest_hash: ContentHash,
     artifact_bytes_hash: ContentHash,
     parquet_uri: ArtifactUri,
 }
@@ -2474,7 +2707,7 @@ async fn run_historical_spine(
         params.selection,
         params.data_quality,
         params.features,
-        params.request.decision_policy_snapshot_id,
+        params.request.source_lineage.decision_policy_snapshot_id,
         params.request.knowledge_lag_secs,
         params.model_requirements.clone(),
     );
@@ -2940,7 +3173,7 @@ impl ReplayContext {
         WindowSpec {
             window_start: plan.request.window_start,
             window_end: plan.request.window_end,
-            available_by: plan.request.pit_cutoff,
+            available_by: plan.request.source_lineage.pit_cutoff,
             samples: plan
                 .samples
                 .iter()
@@ -3030,11 +3263,16 @@ fn record_exit_fill_fidelity(coverage: &mut DatasetCoverage, book_fidelity: Opti
 
 #[cfg(test)]
 mod keep_rate_tests {
-    use chrono::{Duration, TimeZone, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
         domain::data_plane::DecisionSource,
         enums::quant::DatasetPurpose,
-        types::{DecisionPolicySnapshotId, ModelSpecId, SchemaVersion, default_sample_sources},
+        types::{
+            CapabilityRegistryHashes, DATASET_SOURCE_LINEAGE_FORMAT_VERSION, DatasetSourceLineage,
+            DecisionPolicySnapshotId, ModelSpecId, ReaderContractVersion,
+            ResearchProfileArtifactId, SchemaContractVersion, SchemaVersion, SourceSliceId,
+            default_sample_sources,
+        },
     };
 
     use super::{DatasetPlanRequest, KeepRateEstimate, KeepRateGrid};
@@ -3042,17 +3280,41 @@ mod keep_rate_tests {
         content_hash, fixture_profile_ref, source_slice_ref,
     };
 
-    fn request() -> DatasetPlanRequest {
-        let window_start = Utc.timestamp_opt(1_000, 0).single().expect("start");
-        DatasetPlanRequest {
-            model_spec_id: ModelSpecId::from_v7(),
-            profile_ref: fixture_profile_ref(),
+    fn source_lineage(
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+    ) -> DatasetSourceLineage {
+        let profile_ref = fixture_profile_ref();
+        let pit_cutoff = window_end + Duration::seconds(60);
+        DatasetSourceLineage {
+            format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+            source_slice_id: SourceSliceId::from_v7(),
+            source_slice_identity_hash: content_hash('3'),
+            research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile_ref),
             research_program_hash: content_hash('4'),
             source_slice: source_slice_ref('5'),
+            source_window_start: window_start,
+            source_window_end: pit_cutoff,
+            pit_cutoff,
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            runtime_config_hash: content_hash('6'),
+            reader_contract_version: ReaderContractVersion::v1(),
+            schema_contract_version: SchemaContractVersion::v1(),
+            source_schema_hash: content_hash('7'),
+            capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![content_hash('8')])
+                .expect("canonical capabilities"),
+        }
+    }
+
+    fn request() -> DatasetPlanRequest {
+        let window_start = Utc.timestamp_opt(1_000, 0).single().expect("start");
+        let window_end = window_start + Duration::seconds(100);
+        DatasetPlanRequest {
+            model_spec_id: ModelSpecId::from_v7(),
+            source_lineage: source_lineage(window_start, window_end),
+            cohort_manifest: None,
             window_start,
-            window_end: window_start + Duration::seconds(100),
-            pit_cutoff: window_start + Duration::seconds(160),
+            window_end,
             sample_interval_secs: 10,
             horizons_secs: vec![60],
             knowledge_lag_secs: 10,

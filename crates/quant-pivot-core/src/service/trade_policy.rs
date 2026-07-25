@@ -703,11 +703,15 @@ impl TradePolicyService {
             dataset.decision_policy_snapshot_id == *decision_policy_snapshot_id
                 && dataset.window_start <= fit_window_start
                 && dataset.window_end >= fit_window_end
-                && dataset.manifest_json.as_ref().is_some_and(|manifest| {
+                && dataset.manifest.as_ref().is_some_and(|manifest| {
                     manifest.format_version == DATASET_ARTIFACT_FORMAT_VERSION
                         && manifest.training_dataset_id == dataset.training_dataset_id
-                        && manifest.profile_ref == profile.profile_ref
-                        && &manifest.research_program_hash == program_hash
+                        && manifest
+                            .source_lineage
+                            .research_profile_artifact_id
+                            .profile_ref()
+                            == profile.profile_ref
+                        && &manifest.source_lineage.research_program_hash == program_hash
                 })
         }))
     }
@@ -745,16 +749,20 @@ impl TradePolicyService {
             .zip(input.profile)
             .zip(input.research_program_hash)
             .is_some_and(|((row, profile), program_hash)| {
-                row.manifest_json.as_ref().is_some_and(|manifest| {
+                row.manifest.as_ref().is_some_and(|manifest| {
                     manifest.format_version == DATASET_ARTIFACT_FORMAT_VERSION
                         && manifest.training_dataset_id == row.training_dataset_id
-                        && manifest.profile_ref == profile.profile_ref
-                        && &manifest.research_program_hash == program_hash
+                        && manifest
+                            .source_lineage
+                            .research_profile_artifact_id
+                            .profile_ref()
+                            == profile.profile_ref
+                        && &manifest.source_lineage.research_program_hash == program_hash
                 })
             });
         if !profile_lineage_valid {
             messages.push(
-                "dataset v1 profile/program lineage does not match the fit request".to_owned(),
+                "dataset v2 profile/program lineage does not match the fit request".to_owned(),
             );
         }
         let source_slice = self.evaluate_source_slice(&input).await;
@@ -815,9 +823,8 @@ impl TradePolicyService {
         &self,
         input: &DatasetEvaluationInput<'_>,
     ) -> SourceSlicePreflight {
-        let Some(dataset_manifest) = input.dataset.and_then(|row| row.manifest_json.as_ref())
-        else {
-            return SourceSlicePreflight::blocked("dataset v1 manifest is unavailable");
+        let Some(dataset_manifest) = input.dataset.and_then(|row| row.manifest.as_ref()) else {
+            return SourceSlicePreflight::blocked("dataset v2 manifest is unavailable");
         };
         let Some(source_slice_info) = input.source_slice else {
             return SourceSlicePreflight::blocked(
@@ -825,9 +832,9 @@ impl TradePolicyService {
             );
         };
         if source_slice_info.manifest_uri.as_ref()
-            != Some(&dataset_manifest.source_slice.manifest_uri)
+            != Some(&dataset_manifest.source_lineage.source_slice.manifest_uri)
             || source_slice_info.manifest_hash.as_ref()
-                != Some(&dataset_manifest.source_slice.manifest_hash)
+                != Some(&dataset_manifest.source_lineage.source_slice.manifest_hash)
         {
             return SourceSlicePreflight::blocked(
                 "dataset Source Slice reference differs from the canonical ledger binding",
@@ -844,7 +851,7 @@ impl TradePolicyService {
                 ));
             }
         };
-        let Some(manifest) = source_slice_info.manifest_json.as_ref() else {
+        let Some(manifest) = source_slice_info.manifest.as_ref() else {
             return SourceSlicePreflight::blocked("Ready Source Slice has no manifest payload");
         };
         let (
@@ -1351,7 +1358,7 @@ impl TradePolicyService {
     ) -> QuantResult<FrozenSourceSlice> {
         let dataset_manifest =
             dataset
-                .manifest_json
+                .manifest
                 .as_ref()
                 .ok_or_else(|| ResearchError::ValidationMethodology {
                     detail: format!(
@@ -1361,8 +1368,8 @@ impl TradePolicyService {
                 })?;
         let bytes = self
             .read_and_hash_manifest(
-                &dataset_manifest.source_slice.manifest_uri,
-                &dataset_manifest.source_slice.manifest_hash,
+                &dataset_manifest.source_lineage.source_slice.manifest_uri,
+                &dataset_manifest.source_lineage.source_slice.manifest_hash,
             )
             .await?;
         let manifest = serde_json::from_slice::<SourceSliceManifest>(&bytes).map_err(|error| {
@@ -1388,9 +1395,10 @@ impl TradePolicyService {
                 entity: "source_slice",
                 id: identity.identity_hash.to_string(),
             })?;
-        if source_slice.manifest_hash.as_ref() != Some(&dataset_manifest.source_slice.manifest_hash)
+        if source_slice.manifest_hash.as_ref()
+            != Some(&dataset_manifest.source_lineage.source_slice.manifest_hash)
             || source_slice.manifest_uri.as_ref()
-                != Some(&dataset_manifest.source_slice.manifest_uri)
+                != Some(&dataset_manifest.source_lineage.source_slice.manifest_uri)
         {
             return Err(ResearchError::ValidationMethodology {
                 detail: "source-slice ledger binding differs from the Dataset manifest".to_owned(),
@@ -1533,7 +1541,7 @@ impl TradePolicyService {
             feature_schema_hash: *materialization.feature_schema_hash,
             factor_schema_hash: *materialization.factor_schema_hash,
             label_schema_hash: *materialization.label_schema_hash,
-            source_slice_ref: materialization.manifest.source_slice.clone(),
+            source_slice_ref: materialization.manifest.source_lineage.source_slice.clone(),
             examples,
             frozen_source,
             latency_evidence_id: latency_item.evidence_id,
@@ -1928,14 +1936,18 @@ impl TradePolicyService {
         }
         let dataset_manifest =
             dataset
-                .manifest_json
+                .manifest
                 .ok_or_else(|| ResearchError::ValidationMethodology {
                     detail: format!(
-                        "policy {artifact_id} source dataset has no Dataset v1 manifest"
+                        "policy {artifact_id} source dataset has no Dataset v2 manifest"
                     ),
                 })?;
-        if dataset_manifest.profile_ref != policy.payload_json.fit_contract.profile_ref
-            || dataset_manifest.research_program_hash
+        if dataset_manifest
+            .source_lineage
+            .research_profile_artifact_id
+            .profile_ref()
+            != policy.payload_json.fit_contract.profile_ref
+            || dataset_manifest.source_lineage.research_program_hash
                 != policy.payload_json.fit_contract.research_program_hash
         {
             return Err(ResearchError::ValidationMethodology {
@@ -1945,7 +1957,7 @@ impl TradePolicyService {
             }
             .into());
         }
-        let manifest_ref = dataset_manifest.source_slice;
+        let manifest_ref = dataset_manifest.source_lineage.source_slice;
         let bytes = self
             .read_and_hash_manifest(&manifest_ref.manifest_uri, &manifest_ref.manifest_hash)
             .await?;
@@ -1991,7 +2003,7 @@ impl TradePolicyService {
         if ledger.status != SourceSliceStatus::Ready
             || ledger.manifest_uri.as_ref() != Some(&manifest_ref.manifest_uri)
             || ledger.manifest_hash.as_ref() != Some(&manifest_ref.manifest_hash)
-            || ledger.manifest_json.as_ref() != Some(&manifest)
+            || ledger.manifest.as_ref() != Some(&manifest)
         {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
@@ -2062,7 +2074,11 @@ impl TradePolicyService {
         }
         let materialization = require_dataset_materialization(&dataset)?;
         if materialization.dataset_hash != &validation.source_dataset_hash
-            || materialization.manifest.source_slice.manifest_hash
+            || materialization
+                .manifest
+                .source_lineage
+                .source_slice
+                .manifest_hash
                 != validation.source_slice_manifest_hash
         {
             return Err(ResearchError::ValidationMethodology {
@@ -2075,9 +2091,9 @@ impl TradePolicyService {
         verify_frozen_dataset_artifact(&dataset, &dataset_bytes)?;
 
         let source_manifest = dataset
-            .manifest_json
+            .manifest
             .as_ref()
-            .map(|manifest| &manifest.source_slice)
+            .map(|manifest| &manifest.source_lineage.source_slice)
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: "Ready PolicyFit dataset has no Source Slice binding".to_owned(),
             })?;
@@ -2259,7 +2275,7 @@ impl TradePolicyService {
     ) -> QuantResult<()> {
         let materialization = require_dataset_materialization(dataset)?;
         require_durable_artifact(&self.artifacts, materialization.parquet_uri).await?;
-        let source_ref = &materialization.manifest.source_slice;
+        let source_ref = &materialization.manifest.source_lineage.source_slice;
         require_durable_artifact(&self.artifacts, &source_ref.manifest_uri).await?;
         let manifest_bytes = self
             .read_and_hash_manifest(&source_ref.manifest_uri, &source_ref.manifest_hash)
@@ -2346,9 +2362,9 @@ impl TradePolicyService {
             .into());
         }
         let source_slice_manifest_hash = dataset
-            .manifest_json
+            .manifest
             .as_ref()
-            .map(|manifest| manifest.source_slice.manifest_hash)
+            .map(|manifest| manifest.source_lineage.source_slice.manifest_hash)
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: "Ready PolicyFit dataset has no manifest".to_owned(),
             })?;
@@ -3420,7 +3436,7 @@ fn append_contract_dataset_blockers(
         TradePolicyPreflightBlockerDetail::DatasetNotReady {
             actual_status: context.dataset_info.map(|row| row.status),
         },
-        "Build and integrity-verify the exact Dataset v1 source before fitting.",
+        "Build and integrity-verify the exact Dataset v2 source before fitting.",
         blocker_dataset_link(context),
     );
     push_blocker(
@@ -3429,7 +3445,7 @@ fn append_contract_dataset_blockers(
         TradePolicyPreflightBlockerDetail::DatasetPurposeMismatch {
             actual_purpose: context.dataset_info.map(|row| row.purpose),
         },
-        "Select a Dataset v1 materialized specifically for PolicyFit.",
+        "Select a Dataset v2 materialized specifically for PolicyFit.",
         blocker_dataset_link(context),
     );
     push_blocker(
@@ -3439,7 +3455,7 @@ fn append_contract_dataset_blockers(
             labels_matured_by_cutoff: dataset.labels_matured_by_cutoff,
             labels_excluded_after_cutoff: dataset.labels_excluded_after_cutoff,
         },
-        "Rebuild the source slice and Dataset v1 with mature row-level trajectory labels.",
+        "Rebuild the source slice and Dataset v2 with mature row-level trajectory labels.",
         blocker_dataset_link(context),
     );
     push_blocker(
@@ -3448,8 +3464,13 @@ fn append_contract_dataset_blockers(
         TradePolicyPreflightBlockerDetail::ProfileLineageMismatch {
             actual_profile_ref: context
                 .dataset_info
-                .and_then(|row| row.manifest_json.as_ref())
-                .map(|manifest| manifest.profile_ref.clone()),
+                .and_then(|row| row.manifest.as_ref())
+                .map(|manifest| {
+                    manifest
+                        .source_lineage
+                        .research_profile_artifact_id
+                        .profile_ref()
+                }),
             required_profile_ref: context.request.selection.profile_ref.clone(),
         },
         "Select or rebuild a dataset whose immutable profile reference matches exactly.",

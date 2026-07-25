@@ -3646,7 +3646,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "model_run_id",
+      "name": "evaluation_dataset_id",
       "nullable": false,
       "ordinal": 3,
       "storage": "p",
@@ -3659,7 +3659,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "decision_policy_snapshot_id",
+      "name": "model_run_id",
       "nullable": false,
       "ordinal": 4,
       "storage": "p",
@@ -3672,12 +3672,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "window_start",
+      "name": "decision_policy_snapshot_id",
       "nullable": false,
       "ordinal": 5,
       "storage": "p",
       "table": "quant_backtest_report",
-      "type": "timestamp with time zone"
+      "type": "uuid"
     },
     {
       "collation": null,
@@ -3685,7 +3685,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "window_end",
+      "name": "window_start",
       "nullable": false,
       "ordinal": 6,
       "storage": "p",
@@ -3698,9 +3698,22 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "coverage",
+      "name": "window_end",
       "nullable": false,
       "ordinal": 7,
+      "storage": "p",
+      "table": "quant_backtest_report",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "coverage",
+      "nullable": false,
+      "ordinal": 8,
       "storage": "m",
       "table": "quant_backtest_report",
       "type": "numeric"
@@ -3713,7 +3726,7 @@
       "identity": "",
       "name": "sample_count",
       "nullable": false,
-      "ordinal": 8,
+      "ordinal": 9,
       "storage": "p",
       "table": "quant_backtest_report",
       "type": "bigint"
@@ -3726,7 +3739,7 @@
       "identity": "",
       "name": "missing_feature_count",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 10,
       "storage": "p",
       "table": "quant_backtest_report",
       "type": "bigint"
@@ -3739,7 +3752,7 @@
       "identity": "",
       "name": "rank_ic",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 11,
       "storage": "m",
       "table": "quant_backtest_report",
       "type": "numeric"
@@ -3752,7 +3765,7 @@
       "identity": "",
       "name": "sharpe",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 12,
       "storage": "m",
       "table": "quant_backtest_report",
       "type": "numeric"
@@ -3765,7 +3778,7 @@
       "identity": "",
       "name": "hit_rate",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 13,
       "storage": "m",
       "table": "quant_backtest_report",
       "type": "numeric"
@@ -3778,7 +3791,7 @@
       "identity": "",
       "name": "expected_vs_realized",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 14,
       "storage": "x",
       "table": "quant_backtest_report",
       "type": "jsonb"
@@ -3791,7 +3804,7 @@
       "identity": "",
       "name": "max_drawdown",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 15,
       "storage": "m",
       "table": "quant_backtest_report",
       "type": "numeric"
@@ -3804,7 +3817,7 @@
       "identity": "",
       "name": "turnover",
       "nullable": false,
-      "ordinal": 15,
+      "ordinal": 16,
       "storage": "m",
       "table": "quant_backtest_report",
       "type": "numeric"
@@ -3817,7 +3830,7 @@
       "identity": "",
       "name": "liquidity_feasibility",
       "nullable": false,
-      "ordinal": 16,
+      "ordinal": 17,
       "storage": "m",
       "table": "quant_backtest_report",
       "type": "numeric"
@@ -3830,7 +3843,7 @@
       "identity": "",
       "name": "category_breakdown",
       "nullable": false,
-      "ordinal": 17,
+      "ordinal": 18,
       "storage": "x",
       "table": "quant_backtest_report",
       "type": "jsonb"
@@ -3843,7 +3856,7 @@
       "identity": "",
       "name": "tail_loss",
       "nullable": false,
-      "ordinal": 18,
+      "ordinal": 19,
       "storage": "m",
       "table": "quant_backtest_report",
       "type": "numeric"
@@ -3856,7 +3869,7 @@
       "identity": "",
       "name": "report_pnl_simulation",
       "nullable": false,
-      "ordinal": 19,
+      "ordinal": 20,
       "storage": "x",
       "table": "quant_backtest_report",
       "type": "jsonb"
@@ -3869,7 +3882,7 @@
       "identity": "",
       "name": "report_hash",
       "nullable": false,
-      "ordinal": 20,
+      "ordinal": 21,
       "storage": "x",
       "table": "quant_backtest_report",
       "type": "text"
@@ -3882,7 +3895,7 @@
       "identity": "",
       "name": "parquet_uri",
       "nullable": true,
-      "ordinal": 21,
+      "ordinal": 22,
       "storage": "x",
       "table": "quant_backtest_report",
       "type": "character varying"
@@ -3895,7 +3908,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 22,
+      "ordinal": 23,
       "storage": "p",
       "table": "quant_backtest_report",
       "type": "timestamp with time zone"
@@ -9054,38 +9067,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "source_backtest_report_id",
+      "name": "calibration_artifact_id",
       "nullable": true,
       "ordinal": 13,
       "storage": "p",
       "table": "quant_model_version",
       "type": "uuid"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "calibration_artifact_id",
-      "nullable": true,
-      "ordinal": 14,
-      "storage": "p",
-      "table": "quant_model_version",
-      "type": "uuid"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "score_multiplier_calibration_report",
-      "nullable": true,
-      "ordinal": 15,
-      "storage": "x",
-      "table": "quant_model_version",
-      "type": "jsonb"
     },
     {
       "collation": "default",
@@ -9095,7 +9082,7 @@
       "identity": "",
       "name": "derivation_evidence_hash",
       "nullable": true,
-      "ordinal": 16,
+      "ordinal": 14,
       "storage": "x",
       "table": "quant_model_version",
       "type": "text"
@@ -9108,7 +9095,7 @@
       "identity": "",
       "name": "metrics",
       "nullable": false,
-      "ordinal": 17,
+      "ordinal": 15,
       "storage": "x",
       "table": "quant_model_version",
       "type": "jsonb"
@@ -9121,7 +9108,7 @@
       "identity": "",
       "name": "training_objective",
       "nullable": false,
-      "ordinal": 18,
+      "ordinal": 16,
       "storage": "x",
       "table": "quant_model_version",
       "type": "jsonb"
@@ -9134,7 +9121,7 @@
       "identity": "",
       "name": "quality_gate_report",
       "nullable": true,
-      "ordinal": 19,
+      "ordinal": 17,
       "storage": "x",
       "table": "quant_model_version",
       "type": "jsonb"
@@ -9147,7 +9134,7 @@
       "identity": "",
       "name": "publication_status",
       "nullable": false,
-      "ordinal": 20,
+      "ordinal": 18,
       "storage": "p",
       "table": "quant_model_version",
       "type": "qp_publication_status"
@@ -9160,7 +9147,7 @@
       "identity": "",
       "name": "published_at",
       "nullable": true,
-      "ordinal": 21,
+      "ordinal": 19,
       "storage": "p",
       "table": "quant_model_version",
       "type": "timestamp with time zone"
@@ -9173,7 +9160,7 @@
       "identity": "",
       "name": "retired_at",
       "nullable": true,
-      "ordinal": 22,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_model_version",
       "type": "timestamp with time zone"
@@ -9186,7 +9173,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 23,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_model_version",
       "type": "timestamp with time zone"
@@ -15320,7 +15307,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "manifest_json",
+      "name": "manifest",
       "nullable": true,
       "ordinal": 16,
       "storage": "x",
@@ -16381,6 +16368,84 @@
       "type": "character varying"
     },
     {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_profile_artifact_id",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_training_dataset",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_slice_id",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_training_dataset",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "pit_cutoff",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_training_dataset",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "source_lineage",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_training_dataset",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_cohort",
+      "nullable": true,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_training_dataset",
+      "type": "qp_feedback_cohort"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "cohort_manifest",
+      "nullable": true,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_training_dataset",
+      "type": "jsonb"
+    },
+    {
       "collation": null,
       "compression": "",
       "default": null,
@@ -16388,7 +16453,7 @@
       "identity": "",
       "name": "window_start",
       "nullable": false,
-      "ordinal": 4,
+      "ordinal": 10,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "timestamp with time zone"
@@ -16401,7 +16466,7 @@
       "identity": "",
       "name": "window_end",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 11,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "timestamp with time zone"
@@ -16414,7 +16479,7 @@
       "identity": "",
       "name": "status",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 12,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "qp_training_dataset_status"
@@ -16427,7 +16492,7 @@
       "identity": "",
       "name": "purpose",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 13,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "qp_dataset_purpose"
@@ -16440,7 +16505,7 @@
       "identity": "",
       "name": "feature_schema_hash",
       "nullable": true,
-      "ordinal": 8,
+      "ordinal": 14,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16453,7 +16518,7 @@
       "identity": "",
       "name": "factor_schema_hash",
       "nullable": true,
-      "ordinal": 9,
+      "ordinal": 15,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16466,7 +16531,7 @@
       "identity": "",
       "name": "label_schema_hash",
       "nullable": true,
-      "ordinal": 10,
+      "ordinal": 16,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16479,7 +16544,7 @@
       "identity": "",
       "name": "dataset_hash",
       "nullable": true,
-      "ordinal": 11,
+      "ordinal": 17,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16492,7 +16557,7 @@
       "identity": "",
       "name": "manifest_hash",
       "nullable": true,
-      "ordinal": 12,
+      "ordinal": 18,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16503,9 +16568,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "manifest_json",
+      "name": "manifest",
       "nullable": true,
-      "ordinal": 13,
+      "ordinal": 19,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -16518,7 +16583,7 @@
       "identity": "",
       "name": "artifact_bytes_hash",
       "nullable": true,
-      "ordinal": 14,
+      "ordinal": 20,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16531,7 +16596,7 @@
       "identity": "",
       "name": "parquet_uri",
       "nullable": true,
-      "ordinal": 15,
+      "ordinal": 21,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16544,7 +16609,7 @@
       "identity": "",
       "name": "sample_count",
       "nullable": true,
-      "ordinal": 16,
+      "ordinal": 22,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "bigint"
@@ -16557,7 +16622,7 @@
       "identity": "",
       "name": "knowledge_lag_secs",
       "nullable": false,
-      "ordinal": 17,
+      "ordinal": 23,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "bigint"
@@ -16570,7 +16635,7 @@
       "identity": "",
       "name": "sample_interval_secs",
       "nullable": false,
-      "ordinal": 18,
+      "ordinal": 24,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "bigint"
@@ -16583,7 +16648,7 @@
       "identity": "",
       "name": "horizons_secs",
       "nullable": false,
-      "ordinal": 19,
+      "ordinal": 25,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -16596,7 +16661,7 @@
       "identity": "",
       "name": "feature_schema_version",
       "nullable": true,
-      "ordinal": 20,
+      "ordinal": 26,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "integer"
@@ -16609,7 +16674,7 @@
       "identity": "",
       "name": "sample_sources",
       "nullable": true,
-      "ordinal": 21,
+      "ordinal": 27,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -16620,9 +16685,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "coverage_json",
+      "name": "coverage",
       "nullable": true,
-      "ordinal": 22,
+      "ordinal": 28,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -16635,7 +16700,7 @@
       "identity": "",
       "name": "decision_policy_snapshot_id",
       "nullable": false,
-      "ordinal": 23,
+      "ordinal": 29,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "uuid"
@@ -16648,7 +16713,7 @@
       "identity": "",
       "name": "failure_detail",
       "nullable": true,
-      "ordinal": 24,
+      "ordinal": 30,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "character varying"
@@ -16661,7 +16726,7 @@
       "identity": "",
       "name": "completed_at",
       "nullable": true,
-      "ordinal": 25,
+      "ordinal": 31,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "timestamp with time zone"
@@ -16674,7 +16739,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 26,
+      "ordinal": 32,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "timestamp with time zone"
@@ -18556,6 +18621,15 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((window_start < window_end) AND (coverage >= (0)::numeric) AND (coverage <= (1)::numeric) AND (sample_count >= 0) AND (missing_feature_count >= 0) AND (hit_rate >= (0)::numeric) AND (hit_rate <= (1)::numeric) AND (liquidity_feasibility >= (0)::numeric) AND (liquidity_feasibility <= (1)::numeric) AND (jsonb_typeof(expected_vs_realized) = 'object'::text) AND (jsonb_typeof(category_breakdown) = 'array'::text) AND (jsonb_typeof(report_pnl_simulation) = 'object'::text) AND (report_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_backtest_report_evaluation",
+      "table": "quant_backtest_report",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
       "initially_deferred": false,
       "name": "fk-quant_backtest_report-decision_policy_snapshot_id",
@@ -18577,6 +18651,15 @@
       "definition": "FOREIGN KEY (model_version_id) REFERENCES quant_model_version(model_version_id)",
       "initially_deferred": false,
       "name": "fk-quant_backtest_report-model_version_id",
+      "table": "quant_backtest_report",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (evaluation_dataset_id) REFERENCES quant_training_dataset(training_dataset_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_backtest_report_evaluation_dataset",
       "table": "quant_backtest_report",
       "type": "f",
       "validated": true
@@ -19483,7 +19566,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK ((((derivation_kind = 'training'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NULL) AND (source_backtest_report_id IS NULL) AND (calibration_artifact_id IS NULL) AND (score_multiplier_calibration_report IS NULL) AND (derivation_evidence_hash IS NULL)) OR ((derivation_kind = 'score_multiplier_calibration'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NOT NULL) AND (parent_model_version_id <> model_version_id) AND (source_backtest_report_id IS NOT NULL) AND (calibration_artifact_id IS NULL) AND (jsonb_typeof(score_multiplier_calibration_report) = 'object'::text) AND (((score_multiplier_calibration_report ->> 'methodology_version'::text))::integer = 1) AND (((score_multiplier_calibration_report ->> 'minimum_stratum_samples'::text))::bigint > 0) AND (((score_multiplier_calibration_report ->> 'total_samples'::text))::bigint > 0) AND (derivation_evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text)) OR ((derivation_kind = 'return_calibration'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NOT NULL) AND (parent_model_version_id <> model_version_id) AND (source_backtest_report_id IS NULL) AND (calibration_artifact_id IS NOT NULL) AND (score_multiplier_calibration_report IS NULL) AND (derivation_evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text))))",
+      "definition": "CHECK ((((derivation_kind = 'training'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NULL) AND (calibration_artifact_id IS NULL) AND (derivation_evidence_hash IS NULL)) OR ((derivation_kind = 'return_calibration'::qp_model_version_derivation_kind) AND (parent_model_version_id IS NOT NULL) AND (parent_model_version_id <> model_version_id) AND (calibration_artifact_id IS NOT NULL) AND (derivation_evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text))))",
       "initially_deferred": false,
       "name": "ck_quant_model_version_derivation",
       "table": "quant_model_version",
@@ -19549,15 +19632,6 @@
       "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
       "initially_deferred": false,
       "name": "fk-quant_model_version-research_profile_artifact_id",
-      "table": "quant_model_version",
-      "type": "f",
-      "validated": true
-    },
-    {
-      "deferrable": false,
-      "definition": "FOREIGN KEY (source_backtest_report_id) REFERENCES quant_backtest_report(backtest_report_id)",
-      "initially_deferred": false,
-      "name": "fk-quant_model_version-source_backtest_report_id",
       "table": "quant_model_version",
       "type": "f",
       "validated": true
@@ -21256,6 +21330,15 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'profile_ref'::text, 'evaluation_track'::text, 'research_program_hash'::text, 'window_start'::text, 'window_end'::text, 'pit_cutoff'::text, 'reader_contract_version'::text, 'schema_contract_version'::text, 'decision_policy_snapshot_id'::text, 'runtime_config_hash'::text, 'dataset_format_version'::text, 'capability_registry_hashes'::text, 'objects'::text]) AND (((manifest ->> 'format_version'::text))::integer = 3) AND ((manifest -> 'profile_ref'::text) = profile_ref) AND ((manifest ->> 'evaluation_track'::text) = (evaluation_track)::text) AND ((manifest ->> 'research_program_hash'::text) = research_program_hash) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND (((manifest ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND ((manifest ->> 'reader_contract_version'::text) = (reader_contract_version)::text) AND ((manifest ->> 'schema_contract_version'::text) = (schema_contract_version)::text) AND (((manifest ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND ((manifest ->> 'runtime_config_hash'::text) = runtime_config_hash) AND (((manifest ->> 'dataset_format_version'::text))::integer = 2) AND (jsonb_typeof((manifest -> 'capability_registry_hashes'::text)) = 'array'::text) AND (jsonb_typeof((manifest -> 'objects'::text)) = 'array'::text) AND (jsonb_array_length((manifest -> 'objects'::text)) > 0))))",
+      "initially_deferred": false,
+      "name": "ck_quant_source_slice_manifest",
+      "table": "quant_source_slice",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
       "initially_deferred": false,
       "name": "fk-quant_source_slice-decision_policy_snapshot_id",
@@ -21265,7 +21348,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND ((reader_contract_version)::text ~ '^[A-Za-z0-9_.@-]{1,64}$'::text) AND ((schema_contract_version)::text ~ '^[A-Za-z0-9_.@-]{1,64}$'::text) AND (((status = 'materializing'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = 'ready'::qp_source_slice_status) AND (manifest_uri IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest_json IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'failed'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (failure_detail IS NOT NULL) AND (completed_at IS NOT NULL)))))",
+      "definition": "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND ((reader_contract_version)::text ~ '^[A-Za-z0-9_.@-]{1,64}$'::text) AND ((schema_contract_version)::text ~ '^[A-Za-z0-9_.@-]{1,64}$'::text) AND (((status = 'materializing'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = 'ready'::qp_source_slice_status) AND (manifest_uri IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'failed'::qp_source_slice_status) AND (manifest_uri IS NULL) AND (manifest_hash IS NULL) AND (manifest IS NULL) AND (failure_detail IS NOT NULL) AND ((char_length(btrim((failure_detail)::text)) >= 1) AND (char_length(btrim((failure_detail)::text)) <= 4096)) AND (completed_at IS NOT NULL)))))",
       "initially_deferred": false,
       "name": "quant_source_slice_check",
       "table": "quant_source_slice",
@@ -21436,6 +21519,51 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((((feedback_cohort IS NULL) AND (cohort_manifest IS NULL)) OR ((feedback_cohort IS NOT NULL) AND (cohort_manifest IS NOT NULL) AND (jsonb_typeof(cohort_manifest) = 'object'::text) AND (cohort_manifest ?& ARRAY['format_version'::text, 'cohort'::text, 'window'::text, 'artifact'::text, 'counts'::text, 'capability_registry_hashes'::text]) AND (((cohort_manifest ->> 'format_version'::text))::integer = 1) AND ((cohort_manifest ->> 'cohort'::text) = (feedback_cohort)::text) AND (jsonb_typeof((cohort_manifest -> 'window'::text)) = 'object'::text) AND (jsonb_typeof((cohort_manifest -> 'artifact'::text)) = 'object'::text) AND (jsonb_typeof((cohort_manifest -> 'counts'::text)) = 'object'::text) AND (jsonb_typeof((cohort_manifest -> 'capability_registry_hashes'::text)) = 'array'::text) AND (((cohort_manifest #>> '{window,window_start}'::text[]))::timestamp with time zone = window_start) AND (((cohort_manifest #>> '{window,cutoff}'::text[]))::timestamp with time zone = window_end) AND (((cohort_manifest #>> '{artifact,row_count}'::text[]))::bigint = ((cohort_manifest #>> '{counts,included_count}'::text[]))::bigint) AND ((sample_count IS NULL) OR (((cohort_manifest #>> '{counts,included_count}'::text[]))::bigint = sample_count)))) AND ((purpose <> 'evaluation'::qp_dataset_purpose) OR ((feedback_cohort IS NOT NULL) AND (cohort_manifest IS NOT NULL))) AND ((purpose <> 'policy_fit'::qp_dataset_purpose) OR ((feedback_cohort IS NULL) AND (cohort_manifest IS NULL)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_training_dataset_cohort",
+      "table": "quant_training_dataset",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((coverage IS NULL) OR ((jsonb_typeof(coverage) = 'object'::text) AND (coverage ? 'built_examples'::text) AND (((coverage ->> 'built_examples'::text))::bigint = sample_count))))",
+      "initially_deferred": false,
+      "name": "ck_quant_training_dataset_coverage",
+      "table": "quant_training_dataset",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((model_spec_definition_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((feature_schema_hash IS NULL) OR (feature_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((factor_schema_hash IS NULL) OR (factor_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((label_schema_hash IS NULL) OR (label_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((dataset_hash IS NULL) OR (dataset_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((manifest_hash IS NULL) OR (manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((artifact_bytes_hash IS NULL) OR (artifact_bytes_hash ~ '^blake3:[0-9a-f]{64}$'::text))))",
+      "initially_deferred": false,
+      "name": "ck_quant_training_dataset_hashes",
+      "table": "quant_training_dataset",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND (knowledge_lag_secs >= 0) AND ((sample_interval_secs > 0) OR ((sample_interval_secs = 0) AND (cohort_manifest IS NOT NULL))) AND (jsonb_typeof(horizons_secs) = 'array'::text) AND (jsonb_array_length(horizons_secs) > 0) AND (jsonb_typeof(source_lineage) = 'object'::text) AND (source_lineage ?& ARRAY['format_version'::text, 'source_slice_id'::text, 'research_profile_artifact_id'::text, 'source_window_start'::text, 'source_window_end'::text, 'pit_cutoff'::text, 'decision_policy_snapshot_id'::text, 'capability_registry_hashes'::text]) AND (((source_lineage ->> 'format_version'::text))::integer = 1) AND (((source_lineage ->> 'source_slice_id'::text))::uuid = source_slice_id) AND ((source_lineage ->> 'research_profile_artifact_id'::text) = research_profile_artifact_id) AND (((source_lineage ->> 'source_window_start'::text))::timestamp with time zone <= window_start) AND (((source_lineage ->> 'source_window_end'::text))::timestamp with time zone >= window_end) AND (((source_lineage ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND (((source_lineage ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND (jsonb_typeof((source_lineage -> 'capability_registry_hashes'::text)) = 'array'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_training_dataset_lineage",
+      "table": "quant_training_dataset",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'training_dataset_id'::text, 'source_lineage'::text, 'cohort_manifest'::text, 'model_spec_id'::text, 'model_spec_definition_hash'::text, 'window_start'::text, 'window_end'::text, 'purpose'::text, 'knowledge_lag_secs'::text, 'sample_interval_secs'::text, 'horizons_secs'::text, 'feature_schema_hash'::text, 'factor_schema_hash'::text, 'label_schema_hash'::text, 'semantic_dataset_hash'::text, 'sample_count'::text]) AND (((manifest ->> 'format_version'::text))::integer = 2) AND (((manifest ->> 'training_dataset_id'::text))::uuid = training_dataset_id) AND ((manifest -> 'source_lineage'::text) = source_lineage) AND (((cohort_manifest IS NULL) AND ((manifest -> 'cohort_manifest'::text) = 'null'::jsonb)) OR ((cohort_manifest IS NOT NULL) AND ((manifest -> 'cohort_manifest'::text) = cohort_manifest))) AND (((manifest ->> 'model_spec_id'::text))::uuid = model_spec_id) AND ((manifest ->> 'model_spec_definition_hash'::text) = (model_spec_definition_hash)::text) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND ((manifest ->> 'purpose'::text) = (purpose)::text) AND (((manifest ->> 'knowledge_lag_secs'::text))::bigint = knowledge_lag_secs) AND (((manifest ->> 'sample_interval_secs'::text))::bigint = sample_interval_secs) AND ((manifest -> 'horizons_secs'::text) = horizons_secs) AND ((manifest ->> 'feature_schema_hash'::text) = feature_schema_hash) AND ((manifest ->> 'factor_schema_hash'::text) = factor_schema_hash) AND ((manifest ->> 'label_schema_hash'::text) = label_schema_hash) AND ((manifest ->> 'semantic_dataset_hash'::text) = dataset_hash) AND (((manifest ->> 'sample_count'::text))::bigint = sample_count))))",
+      "initially_deferred": false,
+      "name": "ck_quant_training_dataset_manifest",
+      "table": "quant_training_dataset",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
       "initially_deferred": false,
       "name": "fk-quant_training_dataset-decision_policy_snapshot_id",
@@ -21454,7 +21582,25 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK ((((status <> ALL (ARRAY['planned'::qp_training_dataset_status, 'building'::qp_training_dataset_status])) OR ((feature_schema_version IS NOT NULL) AND (sample_sources IS NOT NULL) AND (feature_schema_hash IS NULL) AND (factor_schema_hash IS NULL) AND (label_schema_hash IS NULL) AND (dataset_hash IS NULL) AND (manifest_hash IS NULL) AND (manifest_json IS NULL) AND (artifact_bytes_hash IS NULL) AND (parquet_uri IS NULL) AND (sample_count IS NULL) AND (coverage_json IS NULL) AND (completed_at IS NULL))) AND ((status <> ALL (ARRAY['ready'::qp_training_dataset_status, 'insufficient_labels'::qp_training_dataset_status])) OR ((feature_schema_version IS NOT NULL) AND (sample_sources IS NOT NULL) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest_json IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage_json IS NOT NULL) AND (completed_at IS NOT NULL))) AND ((status <> 'failed'::qp_training_dataset_status) OR (completed_at IS NOT NULL))))",
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_training_dataset_profile",
+      "table": "quant_training_dataset",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (source_slice_id) REFERENCES quant_source_slice(source_slice_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_training_dataset_source_slice",
+      "table": "quant_training_dataset",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((status = ANY (ARRAY['planned'::qp_training_dataset_status, 'building'::qp_training_dataset_status])) AND (feature_schema_hash IS NULL) AND (factor_schema_hash IS NULL) AND (label_schema_hash IS NULL) AND (dataset_hash IS NULL) AND (manifest_hash IS NULL) AND (manifest IS NULL) AND (artifact_bytes_hash IS NULL) AND (parquet_uri IS NULL) AND (sample_count IS NULL) AND (coverage IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = ANY (ARRAY['ready'::qp_training_dataset_status, 'expired'::qp_training_dataset_status])) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'insufficient_labels'::qp_training_dataset_status) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL) AND (failure_detail IS NOT NULL) AND ((char_length(btrim((failure_detail)::text)) >= 1) AND (char_length(btrim((failure_detail)::text)) <= 4096)) AND (completed_at IS NOT NULL)) OR ((status = 'failed'::qp_training_dataset_status) AND (failure_detail IS NOT NULL) AND ((char_length(btrim((failure_detail)::text)) >= 1) AND (char_length(btrim((failure_detail)::text)) <= 4096)) AND (completed_at IS NOT NULL) AND (((feature_schema_hash IS NULL) AND (factor_schema_hash IS NULL) AND (label_schema_hash IS NULL) AND (dataset_hash IS NULL) AND (manifest_hash IS NULL) AND (manifest IS NULL) AND (artifact_bytes_hash IS NULL) AND (parquet_uri IS NULL) AND (sample_count IS NULL) AND (coverage IS NULL)) OR ((feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL))))))",
       "initially_deferred": false,
       "name": "quant_training_dataset_check",
       "table": "quant_training_dataset",
@@ -21815,6 +21961,7 @@
       "labels": [
         "training",
         "calibration",
+        "evaluation",
         "policy_fit"
       ],
       "name": "qp_dataset_purpose"
@@ -22043,6 +22190,14 @@
     },
     {
       "labels": [
+        "model_learning",
+        "execution_learning",
+        "policy_evaluation"
+      ],
+      "name": "qp_feedback_cohort"
+    },
+    {
+      "labels": [
         "closed",
         "execution_halted",
         "exit_only",
@@ -22136,6 +22291,7 @@
         "artifact_load_failed",
         "schema_binding_failed",
         "training_failed",
+        "calibration_failed",
         "cancelled_by_operator"
       ],
       "name": "qp_model_run_error_code"
@@ -22144,6 +22300,7 @@
       "labels": [
         "training",
         "backtest",
+        "calibration",
         "cpcv",
         "shadow",
         "live_inference"
@@ -22162,7 +22319,6 @@
     {
       "labels": [
         "training",
-        "score_multiplier_calibration",
         "return_calibration"
       ],
       "name": "qp_model_version_derivation_kind"
@@ -22836,6 +22992,26 @@
       "volatility": "v"
     },
     {
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_source_slice()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'source-slice ledger is immutable; DELETE is not permitted'; END IF; IF (to_jsonb(NEW) - ARRAY['status', 'manifest_uri', 'manifest_hash', 'manifest', 'failure_detail', 'completed_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'manifest_uri', 'manifest_hash', 'manifest', 'failure_detail', 'completed_at']) THEN RAISE EXCEPTION 'source-slice identity is immutable'; END IF; IF OLD.status <> 'materializing'::public.qp_source_slice_status OR NEW.status NOT IN ('ready'::public.qp_source_slice_status, 'failed'::public.qp_source_slice_status) THEN RAISE EXCEPTION 'illegal source-slice transition from % to %', OLD.status, NEW.status; END IF; RETURN NEW; END; $function$\n",
+      "identity_arguments": "",
+      "language": "plpgsql",
+      "name": "trigger_guard_source_slice",
+      "owner": "$schema_owner",
+      "result": "trigger",
+      "security_definer": false,
+      "volatility": "v"
+    },
+    {
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_training_dataset()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'training-dataset ledger is immutable; DELETE is not permitted'; END IF; IF (to_jsonb(NEW) - ARRAY['status', 'feature_schema_hash', 'factor_schema_hash', 'label_schema_hash', 'dataset_hash', 'manifest_hash', 'manifest', 'artifact_bytes_hash', 'parquet_uri', 'sample_count', 'coverage', 'failure_detail', 'completed_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'feature_schema_hash', 'factor_schema_hash', 'label_schema_hash', 'dataset_hash', 'manifest_hash', 'manifest', 'artifact_bytes_hash', 'parquet_uri', 'sample_count', 'coverage', 'failure_detail', 'completed_at']) THEN RAISE EXCEPTION 'training-dataset plan identity is immutable'; END IF; IF OLD.status = 'planned'::public.qp_training_dataset_status AND NEW.status = 'building'::public.qp_training_dataset_status THEN IF (to_jsonb(NEW) - 'status') IS DISTINCT FROM (to_jsonb(OLD) - 'status') THEN RAISE EXCEPTION 'planned-to-building may only change status'; END IF; ELSIF OLD.status = 'planned'::public.qp_training_dataset_status AND NEW.status = 'failed'::public.qp_training_dataset_status THEN IF (to_jsonb(NEW) - ARRAY['status', 'failure_detail', 'completed_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'failure_detail', 'completed_at']) THEN RAISE EXCEPTION 'planned-to-failed may only add terminal diagnostics'; END IF; ELSIF OLD.status = 'building'::public.qp_training_dataset_status AND NEW.status IN ('ready'::public.qp_training_dataset_status, 'insufficient_labels'::public.qp_training_dataset_status, 'failed'::public.qp_training_dataset_status) THEN NULL; ELSIF OLD.status = 'ready'::public.qp_training_dataset_status AND NEW.status = 'expired'::public.qp_training_dataset_status THEN IF (to_jsonb(NEW) - 'status') IS DISTINCT FROM (to_jsonb(OLD) - 'status') THEN RAISE EXCEPTION 'ready-to-expired may only change status'; END IF; ELSE RAISE EXCEPTION 'illegal training-dataset transition from % to %', OLD.status, NEW.status; END IF; RETURN NEW; END; $function$\n",
+      "identity_arguments": "",
+      "language": "plpgsql",
+      "name": "trigger_guard_training_dataset",
+      "owner": "$schema_owner",
+      "result": "trigger",
+      "security_definer": false,
+      "volatility": "v"
+    },
+    {
       "definition": "CREATE OR REPLACE FUNCTION public.trigger_set_updated_at()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF (to_jsonb(NEW) - 'updated_at') IS DISTINCT FROM (to_jsonb(OLD) - 'updated_at') THEN NEW.updated_at = statement_timestamp(); ELSE NEW.updated_at = OLD.updated_at; END IF; RETURN NEW; END; $function$\n",
       "identity_arguments": "",
       "language": "plpgsql",
@@ -22852,6 +23028,20 @@
       "grantee": "$schema_owner",
       "object_kind": "function",
       "object_name": "trigger_deny_write()",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "trigger_guard_source_slice()",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "trigger_guard_training_dataset()",
       "privilege": "EXECUTE"
     },
     {
@@ -28423,6 +28613,16 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_backtest_report_dataset_created ON public.quant_backtest_report USING btree (evaluation_dataset_id, created_at DESC)",
+      "method": "btree",
+      "name": "idx_quant_backtest_report_dataset_created",
+      "primary": false,
+      "ready": true,
+      "table": "quant_backtest_report",
+      "unique": false,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_backtest_report_version_created ON public.quant_backtest_report USING btree (model_version_id, created_at DESC)",
       "method": "btree",
       "name": "idx_quant_backtest_report_version_created",
@@ -28446,6 +28646,16 @@
       "definition": "CREATE UNIQUE INDEX uq_quant_backtest_report_hash ON public.quant_backtest_report USING btree (report_hash)",
       "method": "btree",
       "name": "uq_quant_backtest_report_hash",
+      "primary": false,
+      "ready": true,
+      "table": "quant_backtest_report",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_backtest_report_run ON public.quant_backtest_report USING btree (model_run_id)",
+      "method": "btree",
+      "name": "uq_quant_backtest_report_run",
       "primary": false,
       "ready": true,
       "table": "quant_backtest_report",
@@ -29476,16 +29686,6 @@
       "definition": "CREATE INDEX idx_quant_model_version_parent ON public.quant_model_version USING btree (parent_model_version_id) WHERE (parent_model_version_id IS NOT NULL)",
       "method": "btree",
       "name": "idx_quant_model_version_parent",
-      "primary": false,
-      "ready": true,
-      "table": "quant_model_version",
-      "unique": false,
-      "valid": true
-    },
-    {
-      "definition": "CREATE INDEX idx_quant_model_version_source_backtest ON public.quant_model_version USING btree (source_backtest_report_id) WHERE (source_backtest_report_id IS NOT NULL)",
-      "method": "btree",
-      "name": "idx_quant_model_version_source_backtest",
       "primary": false,
       "ready": true,
       "table": "quant_model_version",
@@ -31690,6 +31890,12 @@
       "table": "policy_profile_artifact"
     },
     {
+      "definition": "CREATE TRIGGER trg_quant_backtest_report_append_only BEFORE DELETE OR UPDATE ON public.quant_backtest_report FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_backtest_report_append_only",
+      "table": "quant_backtest_report"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_calibration_artifact_publication_append_only BEFORE DELETE OR UPDATE ON public.quant_calibration_artifact_publication FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_quant_calibration_artifact_publication_append_only",
@@ -31900,6 +32106,12 @@
       "table": "quant_shadow_comparison"
     },
     {
+      "definition": "CREATE TRIGGER trg_quant_source_slice_lifecycle_guard BEFORE DELETE OR UPDATE ON public.quant_source_slice FOR EACH ROW EXECUTE FUNCTION trigger_guard_source_slice()",
+      "enabled": "O",
+      "name": "trg_quant_source_slice_lifecycle_guard",
+      "table": "quant_source_slice"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_trade_policy_artifact_updated_at BEFORE UPDATE ON public.quant_trade_policy_artifact FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
       "enabled": "O",
       "name": "trg_quant_trade_policy_artifact_updated_at",
@@ -31928,6 +32140,12 @@
       "enabled": "O",
       "name": "trg_quant_trade_tape_block_cursor_updated_at",
       "table": "quant_trade_tape_block_cursor"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_training_dataset_lifecycle_guard BEFORE DELETE OR UPDATE ON public.quant_training_dataset FOR EACH ROW EXECUTE FUNCTION trigger_guard_training_dataset()",
+      "enabled": "O",
+      "name": "trg_quant_training_dataset_lifecycle_guard",
+      "table": "quant_training_dataset"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_weather_daily_temperature_projection_updated_at BEFORE UPDATE ON public.quant_weather_daily_temperature_projection FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",

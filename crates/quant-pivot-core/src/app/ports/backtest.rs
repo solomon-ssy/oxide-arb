@@ -139,9 +139,8 @@ impl BacktestPort for CoreBacktestPort {
             .await?;
         let input = BacktestInput {
             model_version_id,
-            training_dataset_id: request.training_dataset_id,
+            evaluation_dataset_id: request.evaluation_dataset_id,
             decision_policy_snapshot_id: request.decision_policy_snapshot_id,
-            calibrate: request.calibrate,
             backtest_report_id: request.backtest_report_id,
         };
         let result = match request.comparison_model_version_id {

@@ -4,7 +4,7 @@
 //!
 //! 1. `POST /research/models/{id}/backtest` — replay the model over a historical
 //!    window (PIT only, never the live `BookStore`), persist a
-//!    [`BacktestReportView`], and optionally fit a calibrated return curve.
+//!    [`BacktestReportView`] without changing any model artifact.
 //! 2. `GET /research/backtest-reports/{id}` — fetch a stored report.
 
 use chrono::{DateTime, Utc};
@@ -25,25 +25,18 @@ use crate::{
 /// Inbound body for `POST /research/models/{id}/backtest` (the model version id
 /// is taken from the path).
 ///
-/// The replay window and tick grid are defined by the frozen training dataset
+/// The replay window and tick grid are defined by the frozen Evaluation dataset
 /// (PIT-materialized), so the request only selects the dataset + config.
 ///
 /// `Serialize` is derived so the request can be frozen into a durable research
 /// job's `params_json` and replayed on execute.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct RunBacktestRequest {
-    /// Frozen, PIT-materialized dataset to replay the model over.
-    pub training_dataset_id: TrainingDatasetId,
+    /// Frozen, reusable Evaluation holdout to replay the model over.
+    pub evaluation_dataset_id: TrainingDatasetId,
     /// Frozen runtime-config version governing portfolio caps + provenance.
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    /// Whether to tighten the governed score multipliers (data-quality /
-    /// liquidity / horizon / substitution penalties) from this backtest's
-    /// realized stratified outcomes and register a tightened child candidate
-    /// version. Does **not** calibrate the return model — that requires an
-    /// independent held-out split via `ProbabilityCalibrator` and
-    /// `POST /research/calibration-artifacts/fit-model-calibrator`.
-    #[serde(default)]
-    pub calibrate: bool,
     /// When set, run **pair mode**: replay this baseline over the same window
     /// alongside the path model (the candidate), persist both backtest reports,
     /// and persist a `ModelComparisonReportView` of candidate − baseline. The
@@ -65,6 +58,7 @@ pub struct RunBacktestRequest {
 pub struct BacktestReportView {
     pub backtest_report_id: BacktestReportId,
     pub model_version_id: ModelVersionId,
+    pub evaluation_dataset_id: TrainingDatasetId,
     pub model_run_id: ModelRunId,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
@@ -123,6 +117,7 @@ impl BacktestReportView {
         Self {
             backtest_report_id: info.backtest_report_id,
             model_version_id: info.model_version_id,
+            evaluation_dataset_id: info.evaluation_dataset_id,
             model_run_id: info.model_run_id,
             decision_policy_snapshot_id: info.decision_policy_snapshot_id,
             window_start: info.window_start,
@@ -145,5 +140,27 @@ impl BacktestReportView {
             created_at: info.created_at,
             comparison_report_id,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::RunBacktestRequest;
+
+    #[test]
+    fn rejects_legacy_authority() {
+        let legacy = json!({
+            "evaluation_dataset_id": "01900000-0000-7000-8000-000000000001",
+            "decision_policy_snapshot_id": "01900000-0000-7000-8000-000000000002",
+            "calibrate": true,
+            "reason": "evaluation only"
+        });
+
+        assert!(
+            serde_json::from_value::<RunBacktestRequest>(legacy).is_err(),
+            "Evaluation backtests must reject the retired calibration authority"
+        );
     }
 }

@@ -1133,6 +1133,7 @@ fn backtest_report_from_info(info: BacktestReportInfo) -> QuantResult<BacktestRe
     Ok(BacktestReport {
         backtest_report_id: info.backtest_report_id,
         model_version_id: info.model_version_id,
+        dataset_id: info.evaluation_dataset_id,
         decision_policy_snapshot_id: info.decision_policy_snapshot_id,
         window_start: info.window_start,
         window_end: info.window_end,

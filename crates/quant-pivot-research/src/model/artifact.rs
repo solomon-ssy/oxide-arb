@@ -1002,8 +1002,8 @@ pub enum ClassicalOutputSemantics {
     /// Regressor output is the predicted YES-token return over the frozen
     /// horizon, expressed in basis points.
     ForwardReturnBps,
-    /// Logistic output is the uncalibrated probability that YES settles at 1.
-    SettlementProbability,
+    /// Logistic output is the uncalibrated probability that the token pays exactly 1.
+    FullPayoutProbability,
 }
 
 /// Classical-ML artifact (smartcore-backed).
@@ -1109,7 +1109,7 @@ impl ClassicalModelArtifact {
             ));
         }
         let expected_semantics = if self.kind == ClassicalKind::LogisticRegression {
-            ClassicalOutputSemantics::SettlementProbability
+            ClassicalOutputSemantics::FullPayoutProbability
         } else {
             ClassicalOutputSemantics::ForwardReturnBps
         };

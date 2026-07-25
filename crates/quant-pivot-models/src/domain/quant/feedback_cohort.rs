@@ -15,17 +15,18 @@ use crate::{
     enums::{
         common::MarketCategory,
         quant::{
-            CohortCensorReason, CohortExclusionReason, FeedbackCohort, QuantRuntimeMode,
-            RecommendationExecutionNoFillReason, RecommendationExecutionTerminalState,
-            RecommendationReportStatus, RecommendationResolutionKind, RecommendationStatus,
-            ReportKind,
+            CohortCensorReason, CohortExclusionReason, FeedbackCohort, OutcomeSide,
+            QuantRuntimeMode, RecommendationExecutionNoFillReason,
+            RecommendationExecutionTerminalState, RecommendationReportStatus,
+            RecommendationResolutionKind, RecommendationStatus, ReportKind,
         },
     },
     types::{
-        ContentHash, DecisionPolicySnapshotId, ExecutionOrderId, FactorDefinitionId,
-        FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, OrderIntentId,
-        PayoutRatio, RecommendationId, RecommendationReportId, ReportDataQualitySnapshotId,
-        ResearchProfileRef, Shares, TokenId,
+        BookSnapshotRef, ContentHash, DecisionPolicySnapshotId, EventId, ExecutionOrderId,
+        FactorDefinitionId, FeatureVectorId, MarketContext, MarketId, MarketSelectionId,
+        ModelRunId, ModelVersionId, OrderIntentId, PayoutRatio, RecommendationFactorBreakdown,
+        RecommendationId, RecommendationIdentity, RecommendationReportId,
+        ReportDataQualitySnapshotId, ResearchProfileRef, Shares, TokenId,
     },
 };
 
@@ -119,7 +120,9 @@ pub struct FeedbackRecommendationContext {
     runtime_mode: QuantRuntimeMode,
     category: MarketCategory,
     market_id: MarketId,
+    event_id: EventId,
     token_id: TokenId,
+    outcome_side: OutcomeSide,
     decision_at: DateTime<Utc>,
     available_at: DateTime<Utc>,
     published_at: Option<DateTime<Utc>>,
@@ -129,6 +132,10 @@ pub struct FeedbackRecommendationContext {
     market_selection_id: MarketSelectionId,
     feature_vector_id: FeatureVectorId,
     factor_definition_versions: Vec<FactorDefinitionId>,
+    book_snapshot_ref: BookSnapshotRef,
+    identity: RecommendationIdentity,
+    market_context: MarketContext,
+    factor_breakdown: RecommendationFactorBreakdown,
     data_quality_snapshot_id: ReportDataQualitySnapshotId,
 }
 
@@ -183,7 +190,9 @@ impl FeedbackRecommendationContext {
             runtime_mode: report.runtime_mode,
             category: recommendation.identity.category,
             market_id: recommendation.market_id.clone(),
+            event_id: recommendation.event_id.clone(),
             token_id: recommendation.token_id.clone(),
+            outcome_side: recommendation.outcome_side,
             decision_at: report.decision_at,
             available_at: recommendation.created_at,
             published_at: report.published_at,
@@ -196,6 +205,10 @@ impl FeedbackRecommendationContext {
                 .evidence_refs
                 .factor_definition_versions
                 .clone(),
+            book_snapshot_ref: recommendation.evidence_refs.book_snapshot_ref.clone(),
+            identity: recommendation.identity.clone(),
+            market_context: recommendation.market_context.clone(),
+            factor_breakdown: recommendation.factor_breakdown.clone(),
             data_quality_snapshot_id: report.data_quality_snapshot_ref,
         })
     }
@@ -236,8 +249,18 @@ impl FeedbackRecommendationContext {
     }
 
     #[must_use]
+    pub const fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+
+    #[must_use]
     pub const fn token_id(&self) -> &TokenId {
         &self.token_id
+    }
+
+    #[must_use]
+    pub const fn outcome_side(&self) -> OutcomeSide {
+        self.outcome_side
     }
 
     #[must_use]
@@ -283,6 +306,26 @@ impl FeedbackRecommendationContext {
     #[must_use]
     pub fn factor_definition_versions(&self) -> &[FactorDefinitionId] {
         &self.factor_definition_versions
+    }
+
+    #[must_use]
+    pub const fn book_snapshot_ref(&self) -> &BookSnapshotRef {
+        &self.book_snapshot_ref
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> &RecommendationIdentity {
+        &self.identity
+    }
+
+    #[must_use]
+    pub const fn market_context(&self) -> &MarketContext {
+        &self.market_context
+    }
+
+    #[must_use]
+    pub const fn factor_breakdown(&self) -> &RecommendationFactorBreakdown {
+        &self.factor_breakdown
     }
 
     #[must_use]
@@ -565,6 +608,7 @@ impl FeedbackCohortPage {
 pub struct FeedbackResolutionEvidence {
     pub resolution_kind: RecommendationResolutionKind,
     pub token_payout_ratio: PayoutRatio,
+    pub resolved_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub outcome_hash: ContentHash,
 }
@@ -701,6 +745,7 @@ pub enum FeedbackCohortContractError {
 mod tests {
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use serde_json::json;
+    use uuid::Uuid;
 
     use super::{
         FEEDBACK_COHORT_PAGE_LIMIT, FeedbackCohortCandidate, FeedbackCohortContractError,
@@ -709,17 +754,19 @@ mod tests {
     };
     use crate::{
         enums::{
-            common::MarketCategory,
+            common::{MarketCategory, TickSize},
+            market::MarketStatus,
             quant::{
-                CohortCensorReason, CohortExclusionReason, FeedbackCohort, QuantRuntimeMode,
-                ReportKind,
+                CohortCensorReason, CohortExclusionReason, FeedbackCohort, OutcomeSide,
+                QuantRuntimeMode, ReportKind,
             },
         },
         types::{
-            DecisionPolicySnapshotId, ExecutionOrderId, FactorDefinitionId, FeatureVectorId,
-            MarketId, MarketSelectionId, ModelRunId, ModelVersionId, OrderIntentId,
-            RecommendationId, RecommendationReportId, ReportDataQualitySnapshotId, TokenId,
-            builtin_research_profiles,
+            BookSnapshotRef, BookSnapshotSource, ContentHash, DecisionPolicySnapshotId, EventId,
+            ExecutionOrderId, FeatureVectorId, MarketContext, MarketId, MarketSelectionId,
+            ModelRunId, ModelVersionId, OrderIntentId, RecommendationFactorBreakdown,
+            RecommendationId, RecommendationIdentity, RecommendationReportId,
+            ReportDataQualitySnapshotId, TokenId, Usd, builtin_research_profiles,
         },
     };
 
@@ -730,6 +777,8 @@ mod tests {
             .next()
             .expect("profile")
             .profile_ref;
+        let token_id = TokenId::new("1");
+        let source_hash = ContentHash::from_bytes([7; 32]);
         FeedbackRecommendationContext {
             recommendation_id: RecommendationId::from_v7(),
             recommendation_report_id: RecommendationReportId::from_v7(),
@@ -738,7 +787,9 @@ mod tests {
             runtime_mode: QuantRuntimeMode::SemiAuto,
             category: MarketCategory::Crypto,
             market_id: MarketId::new("feedback-page-market"),
-            token_id: TokenId::new("1"),
+            event_id: EventId::new("feedback-page-event"),
+            token_id: token_id.clone(),
+            outcome_side: OutcomeSide::Yes,
             decision_at: available_at - Duration::minutes(1),
             available_at,
             published_at: Some(available_at + Duration::seconds(1)),
@@ -747,7 +798,38 @@ mod tests {
             model_version_id: ModelVersionId::from_v7(),
             market_selection_id: MarketSelectionId::from_v7(),
             feature_vector_id: FeatureVectorId::from_v7(),
-            factor_definition_versions: vec![FactorDefinitionId::from_v7()],
+            factor_definition_versions: Vec::new(),
+            book_snapshot_ref: BookSnapshotRef {
+                token_id,
+                source: BookSnapshotSource::CanonicalL2 {
+                    stream_session_id: Uuid::nil(),
+                    token_sequence: 1,
+                    source_event_hash: source_hash,
+                    event_time_ms: (available_at - Duration::minutes(1)).timestamp_millis(),
+                    ingestion_time_ms: available_at.timestamp_millis(),
+                },
+                content_hash: source_hash,
+            },
+            identity: RecommendationIdentity {
+                category: MarketCategory::Crypto,
+                question: "Feedback page fixture?".to_owned(),
+                outcome_name: "Yes".to_owned(),
+            },
+            market_context: MarketContext {
+                best_bid: None,
+                best_ask: None,
+                mid_price: None,
+                spread_bps: None,
+                depth_usd: Usd::ZERO,
+                volume_24h_usd: None,
+                book_age_ms: 60_000,
+                time_to_resolution_secs: None,
+                market_status: MarketStatus::Active,
+                neg_risk: false,
+                tick_size: TickSize::Hundredth,
+                fee_rate: None,
+            },
+            factor_breakdown: RecommendationFactorBreakdown(Vec::new()),
             data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
         }
     }

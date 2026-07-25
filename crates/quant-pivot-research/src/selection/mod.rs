@@ -33,7 +33,8 @@ use quant_pivot_models::{
     runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
     types::{
         ContentHash, DecisionPolicySnapshotId, EventId, MarketId, MarketSelectionId,
-        ModelInputContract, ModelInputRequiredness, SelectionExclusionSummary, TokenId, Usd,
+        ModelInputContract, ModelInputRequiredness, SelectionExclusionSummary,
+        SelectionMemberEvidence, TokenId, Usd,
     },
 };
 pub use selector::ConfiguredMarketSelector;
@@ -222,6 +223,36 @@ impl From<&MarketCandidate> for SelectedMarket {
             liquidity_usd: candidate.liquidity_usd,
             volume_24h_usd: candidate.volume_24h_usd,
             source_refs: Vec::new(),
+        }
+    }
+}
+
+impl From<&SelectedMarket> for SelectionMemberEvidence {
+    fn from(market: &SelectedMarket) -> Self {
+        Self {
+            market_id: market.market_id.clone(),
+            event_id: market.event_id.clone(),
+            category: market.category,
+            primary_token_id: market.primary_token_id.clone(),
+            secondary_token_id: market.secondary_token_id.clone(),
+            liquidity_usd: market.liquidity_usd,
+            volume_24h_usd: market.volume_24h_usd,
+            source_refs: market.source_refs.clone(),
+        }
+    }
+}
+
+impl From<&SelectionMemberEvidence> for SelectedMarket {
+    fn from(market: &SelectionMemberEvidence) -> Self {
+        Self {
+            market_id: market.market_id.clone(),
+            event_id: market.event_id.clone(),
+            category: market.category,
+            primary_token_id: market.primary_token_id.clone(),
+            secondary_token_id: market.secondary_token_id.clone(),
+            liquidity_usd: market.liquidity_usd,
+            volume_24h_usd: market.volume_24h_usd,
+            source_refs: market.source_refs.clone(),
         }
     }
 }

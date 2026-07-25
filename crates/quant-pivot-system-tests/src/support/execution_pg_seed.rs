@@ -124,7 +124,8 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, IntoActiveModel,
+    QueryFilter, QueryOrder, Statement,
 };
 use uuid::Uuid;
 
@@ -144,9 +145,22 @@ use super::{
 pub const EXECUTION_NOTIONAL: Decimal = dec!(25);
 /// Venue-confirmed shares derived from the prepared order's gross cash amount.
 pub const ENTRY_FILLED_SHARES: Decimal = dec!(40);
+/// Reports used by the feedback keyset scale fixture.
+pub const FEEDBACK_SCALE_REPORT_COUNT: usize = 11;
+/// Recommendations retained in each scaled report.
+pub const FEEDBACK_SCALE_PER_REPORT: usize = 1_000;
+/// Total recommendations admitted by the scaled feedback fixture.
+pub const FEEDBACK_SCALE_TOTAL: usize = FEEDBACK_SCALE_REPORT_COUNT * FEEDBACK_SCALE_PER_REPORT;
 const ENTRY_GROSS_USD: Decimal = dec!(24);
 const ENTRY_FEE_USD: Decimal = dec!(1);
 const ENTRY_PRICE: Decimal = dec!(0.6);
+
+/// Derive the catalog's opposite token as a deterministic canonical decimal U256.
+#[must_use]
+pub fn fixture_no_token_id(market_id: &str, token_id: &str) -> TokenId {
+    let identity = format!("catalog-token:no:{market_id}:{token_id}");
+    TokenId::new(seeded_uuid(&identity).as_u128().to_string())
+}
 
 #[must_use]
 pub fn fixture_execution_account() -> NewExecutionAccount {
@@ -268,6 +282,17 @@ pub struct SharedDemoInfra {
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_version_id: ModelVersionId,
     pub model_run_id: ModelRunId,
+    pub trade_policy: TradePolicyCohortProvenance,
+}
+
+/// Immutable inputs for one loadable system-test model artifact.
+pub struct ExecutionModelArtifactSeed {
+    pub model_version_id: ModelVersionId,
+    pub model_spec_definition_hash: ContentHash,
+    pub training_dataset_hash: ContentHash,
+    pub training_input_hash: ContentHash,
+    pub feature_schema_hash: ContentHash,
+    pub factor_schema_hash: ContentHash,
     pub trade_policy: TradePolicyCohortProvenance,
 }
 
@@ -467,7 +492,7 @@ pub async fn seed_report_on_infra(
     infra: &SharedDemoInfra,
     config: ReportSeedConfig,
 ) -> ExecutionTxnIds {
-    let ids = prepare_report_seed(db, infra, &config).await;
+    let ids = prepare_report_on_infra(db, infra, &config).await;
     persist_and_publish_report(db, ids.build_report_transaction(), &config.trigger_key, 10).await;
     ids
 }
@@ -499,7 +524,7 @@ async fn seed_price_by_mode(
     config: ReportSeedConfig,
     runtime_mode: QuantRuntimeMode,
 ) -> ExecutionTxnIds {
-    let ids = prepare_report_seed(db, infra, &config).await;
+    let ids = prepare_report_on_infra(db, infra, &config).await;
     let mut options = ReportBuildOptions::published_single(&ids);
     options.runtime_mode = runtime_mode;
     let artifact = ids.price_condition_artifact();
@@ -531,7 +556,11 @@ async fn seed_price_by_mode(
     ids
 }
 
-async fn prepare_report_seed(
+/// Prepare catalog and immutable report lineage without committing the report.
+///
+/// Feedback system tests use this boundary to persist the exact serving feature
+/// evidence before the recommendation transaction makes that evidence visible.
+pub async fn prepare_report_on_infra(
     db: &DatabaseConnection,
     infra: &SharedDemoInfra,
     config: &ReportSeedConfig,
@@ -543,6 +572,7 @@ async fn prepare_report_seed(
         &config.market_id,
         &config.market_question,
         &config.market_slug,
+        &config.token_id,
     )
     .await;
     let market_selection_id =
@@ -568,6 +598,147 @@ async fn prepare_report_seed(
         event: config.event_id.clone(),
         token: config.token_id.clone(),
     }
+}
+
+/// Expand the prepared report set to more than ten thousand recommendations.
+///
+/// The inserted rows intentionally retain the production recommendation schema
+/// while referring to unresolved catalog markets, so the feedback cohort must
+/// page and classify every row without attempting to materialize censored rows.
+pub async fn seed_feedback_scale(
+    db: &DatabaseConnection,
+    reports: &[ExecutionTxnIds],
+    window_start: DateTime<Utc>,
+    report_cutoff: DateTime<Utc>,
+) {
+    assert_eq!(
+        reports.len(),
+        FEEDBACK_SCALE_REPORT_COUNT,
+        "feedback scale fixture requires its canonical report count"
+    );
+    let profile_artifact_id = fixture_profile_ref().artifact_id();
+    let shared_event_id = EventId::new(&reports[0].event);
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r"
+        INSERT INTO market (
+            market_id, event_id, question, slug, description, categories, status,
+            filter_reasons, outcome, yes_token_id, no_token_id, tick_size, neg_risk,
+            start_date, end_date, resolved_at, content_hash, created_at, updated_at
+        )
+        SELECT
+            'feedback-scale-market-' || ordinal,
+            template.event_id,
+            'Feedback scale market ' || ordinal,
+            'feedback-scale-market-' || ordinal,
+            template.description,
+            template.categories,
+            template.status,
+            template.filter_reasons,
+            template.outcome,
+            'feedback-scale-yes-' || ordinal,
+            'feedback-scale-no-' || ordinal,
+            template.tick_size,
+            template.neg_risk,
+            template.start_date,
+            template.end_date,
+            template.resolved_at,
+            template.content_hash,
+            template.created_at,
+            template.updated_at
+        FROM market AS template
+        CROSS JOIN generate_series(2, 1000) AS ordinal
+        WHERE template.market_id = $1
+        ",
+        [reports[1].market.clone().into()],
+    ))
+    .await
+    .expect("seed scale catalog FK rows");
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r"
+        UPDATE quant_recommendation_report
+        SET top_n = 1000
+        WHERE research_profile_artifact_id = $1
+          AND decision_at >= $2
+          AND decision_at <= $3
+        ",
+        [
+            profile_artifact_id.clone().into(),
+            window_start.into(),
+            report_cutoff.into(),
+        ],
+    ))
+    .await
+    .expect("align scale report cardinality");
+    let result = db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r"
+            WITH templates AS (
+                SELECT recommendation.*
+                FROM quant_recommendation AS recommendation
+                INNER JOIN quant_recommendation_report AS report
+                    ON report.recommendation_report_id =
+                       recommendation.recommendation_report_id
+                WHERE recommendation.research_profile_artifact_id = $1
+                  AND recommendation.rank = 1
+                  AND report.decision_at >= $2
+                  AND report.decision_at <= $3
+            )
+            INSERT INTO quant_recommendation (
+                recommendation_id, research_profile_artifact_id,
+                recommendation_report_id, rank, market_id, event_id, token_id,
+                outcome_side, composite_score, risk_adjusted_score, confidence,
+                expected_return_bps, downside_bps, identity, market_context,
+                rank_before_portfolio, liquidity_score, data_quality_score,
+                model_score_percentile, trade_plan, factor_breakdown, evidence_refs,
+                execution_eligibility, valid_from, valid_until, status, created_at
+            )
+            SELECT
+                md5(template.recommendation_report_id::text || ':' || ordinal)::uuid,
+                template.research_profile_artifact_id,
+                template.recommendation_report_id,
+                ordinal,
+                'feedback-scale-market-' || ordinal,
+                $4,
+                'feedback-scale-yes-' || ordinal,
+                template.outcome_side,
+                template.composite_score,
+                template.risk_adjusted_score,
+                template.confidence,
+                template.expected_return_bps,
+                template.downside_bps,
+                template.identity,
+                template.market_context,
+                ordinal,
+                template.liquidity_score,
+                template.data_quality_score,
+                template.model_score_percentile,
+                template.trade_plan,
+                template.factor_breakdown,
+                template.evidence_refs,
+                template.execution_eligibility,
+                template.valid_from,
+                template.valid_until,
+                template.status,
+                template.created_at
+            FROM templates AS template
+            CROSS JOIN generate_series(2, 1000) AS ordinal
+            ",
+            [
+                profile_artifact_id.into(),
+                window_start.into(),
+                report_cutoff.into(),
+                shared_event_id.into(),
+            ],
+        ))
+        .await
+        .expect("seed scale recommendations");
+    assert_eq!(
+        usize::try_from(result.rows_affected()).expect("bounded affected rows"),
+        FEEDBACK_SCALE_REPORT_COUNT * (FEEDBACK_SCALE_PER_REPORT - 1)
+    );
 }
 
 /// Seed the one inference run owned by a report fixture.
@@ -1326,6 +1497,7 @@ async fn seed_market_catalog(
     market_id: &str,
     market_question: &str,
     market_slug: &str,
+    token_id: &str,
 ) {
     PgEventRepository::new(db.clone())
         .upsert(make_event(
@@ -1336,15 +1508,18 @@ async fn seed_market_catalog(
         ))
         .await
         .expect("seed event");
+    let mut market = make_market(
+        market_id,
+        event_id,
+        market_question,
+        market_slug,
+        MarketCategory::Politics,
+        None,
+    );
+    market.yes_token_id = TokenId::new(token_id);
+    market.no_token_id = fixture_no_token_id(market_id, token_id);
     PgMarketRepository::new(db.clone())
-        .upsert(make_market(
-            market_id,
-            event_id,
-            market_question,
-            market_slug,
-            MarketCategory::Politics,
-            None,
-        ))
+        .upsert(market)
         .await
         .expect("seed market");
 }
@@ -1731,31 +1906,30 @@ pub async fn seed_score_calibration(
     calibration_id
 }
 
-async fn seed_execution_model(
+/// Persist a loadable calibrated model artifact with exact Dataset lineage.
+pub async fn store_execution_model(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
-    model_version_id: &ModelVersionId,
-    model_spec_definition_hash: &ContentHash,
-    trade_policy: &TradePolicyCohortProvenance,
+    seed: ExecutionModelArtifactSeed,
 ) -> ContentHash {
-    let calibration_id = seed_score_calibration(db, model_version_id).await;
+    let calibration_id = seed_score_calibration(db, &seed.model_version_id).await;
 
     let input_contract = ModelInputContract::single_required("book.mid");
     let input_contract_hash =
         model_input_contract_hash(&input_contract).expect("hash demo model input contract");
     let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
         header: ModelArtifactHeader {
-            model_version_id: *model_version_id,
-            model_spec_definition_hash: *model_spec_definition_hash,
+            model_version_id: seed.model_version_id,
+            model_spec_definition_hash: seed.model_spec_definition_hash,
             profile_ref: fixture_profile_ref(),
             model_family: ModelFamily::WeightedFactor,
-            feature_schema_hash: content_hash('f'),
-            factor_schema_hash: content_hash('6'),
-            trade_policy_artifact_id: Some(trade_policy.artifact_id),
-            trade_policy_hash: Some(trade_policy.artifact_hash),
+            feature_schema_hash: seed.feature_schema_hash,
+            factor_schema_hash: seed.factor_schema_hash,
+            trade_policy_artifact_id: Some(seed.trade_policy.artifact_id),
+            trade_policy_hash: Some(seed.trade_policy.artifact_hash),
         },
-        training_dataset_hash: content_hash('d'),
-        training_input_hash: content_hash('7'),
+        training_dataset_hash: seed.training_dataset_hash,
+        training_input_hash: seed.training_input_hash,
         input_contract,
         input_contract_hash,
         weights: vec![FactorWeight {
@@ -1822,12 +1996,18 @@ async fn seed_model_version_named(
     let model_version_id = ModelVersionId::from_v7();
     let artifact_hash = match artifact_store {
         Some(store) => {
-            seed_execution_model(
+            store_execution_model(
                 db,
                 store,
-                &model_version_id,
-                &model_spec_definition_hash,
-                &trade_policy,
+                ExecutionModelArtifactSeed {
+                    model_version_id,
+                    model_spec_definition_hash,
+                    training_dataset_hash: content_hash('d'),
+                    training_input_hash: content_hash('7'),
+                    feature_schema_hash: content_hash('f'),
+                    factor_schema_hash: content_hash('6'),
+                    trade_policy: trade_policy.clone(),
+                },
             )
             .await
         }

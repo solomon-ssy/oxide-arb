@@ -27,10 +27,7 @@ pub struct Model {
     pub publish_path_set_id: Option<Uuid>,
     pub derivation_kind: QpModelVersionDerivationKind,
     pub parent_model_version_id: Option<Uuid>,
-    pub source_backtest_report_id: Option<Uuid>,
     pub calibration_artifact_id: Option<Uuid>,
-    #[sea_orm(column_type = "JsonBinary", nullable)]
-    pub score_multiplier_calibration_report: Option<Json>,
     #[sea_orm(column_type = "Text", nullable)]
     pub derivation_evidence_hash: Option<String>,
     #[sea_orm(column_type = "JsonBinary")]
@@ -70,9 +67,6 @@ pub struct Model {
         on_delete = "NoAction"
     )]
     pub parent_model_version: BelongsTo<Option<super::quant_model_version::Entity>>,
-    // The source-backtest FK is applied by the typed deferred-constraint
-    // registry after all Entity First tables exist, breaking the intentional
-    // model-version <-> backtest-report schema cycle.
     #[sea_orm(
         belongs_to,
         relation_enum = "CalibrationArtifact",

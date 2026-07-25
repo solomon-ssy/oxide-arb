@@ -4,9 +4,8 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    quant_backtest_report, quant_calibration_artifact, quant_model_run, quant_model_spec,
-    quant_model_version, quant_trade_policy_artifact, quant_training_dataset,
-    research_profile_artifact,
+    quant_calibration_artifact, quant_model_run, quant_model_spec, quant_model_version,
+    quant_trade_policy_artifact, quant_training_dataset, research_profile_artifact,
 };
 use crate::{
     enums::{
@@ -14,10 +13,10 @@ use crate::{
         quant::{ModelVersionDerivationKind, PublicationStatus},
     },
     types::{
-        BacktestPathSetId, BacktestReportId, CalibrationArtifactId, ContentHash, ModelSpecId,
-        ModelVersionId, ResearchProfileArtifactId, TradePolicyArtifactId, TrainingDatasetId,
-        calibration::ScoreMultiplierCalibrationReport, model_metrics::ModelVersionMetrics,
-        model_quality::QualityGateReport, model_training::ModelTrainingObjective,
+        BacktestPathSetId, CalibrationArtifactId, ContentHash, ModelSpecId, ModelVersionId,
+        ResearchProfileArtifactId, TradePolicyArtifactId, TrainingDatasetId,
+        model_metrics::ModelVersionMetrics, model_quality::QualityGateReport,
+        model_training::ModelTrainingObjective,
     },
 };
 
@@ -41,10 +40,7 @@ pub struct Model {
     pub publish_path_set_id: Option<BacktestPathSetId>,
     pub derivation_kind: ModelVersionDerivationKind,
     pub parent_model_version_id: Option<ModelVersionId>,
-    pub source_backtest_report_id: Option<BacktestReportId>,
     pub calibration_artifact_id: Option<CalibrationArtifactId>,
-    #[sea_orm(column_type = "JsonBinary", nullable)]
-    pub score_multiplier_calibration_report: Option<ScoreMultiplierCalibrationReport>,
     pub derivation_evidence_hash: Option<ContentHash>,
     #[sea_orm(column_type = "JsonBinary")]
     pub metrics: ModelVersionMetrics,
@@ -93,13 +89,6 @@ pub struct Model {
         to = "model_version_id"
     )]
     pub parent_model_version: BelongsTo<Option<quant_model_version::Entity>>,
-    #[sea_orm(
-        belongs_to,
-        relation_enum = "SourceBacktestReport",
-        from = "source_backtest_report_id",
-        to = "backtest_report_id"
-    )]
-    pub source_backtest_report: BelongsTo<Option<quant_backtest_report::Entity>>,
     #[sea_orm(
         belongs_to,
         relation_enum = "CalibrationArtifact",

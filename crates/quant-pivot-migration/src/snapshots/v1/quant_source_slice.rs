@@ -31,7 +31,7 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub manifest_hash: Option<String>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
-    pub manifest_json: Option<Json>,
+    pub manifest: Option<Json>,
     pub failure_detail: Option<String>,
     pub completed_at: Option<DateTimeWithTimeZone>,
     pub created_at: DateTimeWithTimeZone,

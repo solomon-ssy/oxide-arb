@@ -4,10 +4,12 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 
-use super::{decision_policy_snapshot, quant_model_run, quant_model_version};
+use super::{
+    decision_policy_snapshot, quant_model_run, quant_model_version, quant_training_dataset,
+};
 use crate::types::{
     BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
-    Probability,
+    Probability, TrainingDatasetId,
     backtest::{CategoryMetrics, ExpectedVsRealized, PnlSimulation},
 };
 
@@ -18,6 +20,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub backtest_report_id: BacktestReportId,
     pub model_version_id: ModelVersionId,
+    pub evaluation_dataset_id: TrainingDatasetId,
     pub model_run_id: ModelRunId,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
@@ -49,6 +52,13 @@ pub struct Model {
         to = "model_version_id"
     )]
     pub model_version: BelongsTo<quant_model_version::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "EvaluationDataset",
+        from = "evaluation_dataset_id",
+        to = "training_dataset_id"
+    )]
+    pub evaluation_dataset: BelongsTo<quant_training_dataset::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "ModelRun",

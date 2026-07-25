@@ -39,7 +39,7 @@ use quant_pivot_models::{
     runtime_config::PortfolioConfig,
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, EventId, MarketId, ModelVersionId,
-        PayoutRatio, Price, Probability, Shares, TokenId, Usd,
+        PayoutRatio, Price, Probability, Shares, TokenId, TrainingDatasetId, Usd,
         backtest::{CategoryMetric, ExpectedVsRealized, PnlSimulation},
     },
 };
@@ -77,6 +77,8 @@ pub struct BacktestRequest {
     pub backtest_report_id: BacktestReportId,
     /// Model version under test.
     pub model_version_id: ModelVersionId,
+    /// Exact frozen dataset consumed by this replay.
+    pub dataset_id: TrainingDatasetId,
     /// Frozen runtime-config version governing the replay.
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Inclusive window start.
@@ -203,6 +205,8 @@ pub struct BacktestReport {
     pub backtest_report_id: BacktestReportId,
     /// Model version under test.
     pub model_version_id: ModelVersionId,
+    /// Exact frozen dataset consumed by this replay.
+    pub dataset_id: TrainingDatasetId,
     /// Frozen decision-policy snapshot governing the replay.
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     /// Inclusive window start.
@@ -243,10 +247,10 @@ pub struct BacktestReport {
     pub report_hash: ContentHash,
 }
 
-/// One resolved candidate outcome, retained for calibration + optional Parquet.
+/// One resolved candidate outcome retained for purpose-bound calibration replay.
 ///
 /// Not part of the persisted summary (so it does not enter `report_hash`); the
-/// core calibration step maps these to `CalibrationSample`s.
+/// independent calibration pipeline consumes these score/outcome pairs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SampleOutcome {
     /// Decision time.

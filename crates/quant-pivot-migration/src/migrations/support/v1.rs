@@ -76,6 +76,8 @@ pub(in crate::migrations) struct ConstraintSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::migrations) enum TriggerProgram {
     DenyWrite,
+    GuardSourceSlice,
+    GuardTrainingDataset,
     SetUpdatedAt,
 }
 
@@ -83,6 +85,8 @@ impl TriggerProgram {
     const fn function_name(self) -> &'static str {
         match self {
             Self::DenyWrite => "trigger_deny_write",
+            Self::GuardSourceSlice => "trigger_guard_source_slice",
+            Self::GuardTrainingDataset => "trigger_guard_training_dataset",
             Self::SetUpdatedAt => "trigger_set_updated_at",
         }
     }
@@ -137,6 +141,60 @@ pub(in crate::migrations) async fn create_trigger_programs(
         "CREATE FUNCTION public.trigger_deny_write() RETURNS trigger LANGUAGE plpgsql AS \
          $function$ BEGIN RAISE EXCEPTION 'table % is append-only (WORM); % is not permitted', \
          TG_TABLE_NAME, TG_OP; END; $function$",
+        "CREATE FUNCTION public.trigger_guard_source_slice() RETURNS trigger LANGUAGE plpgsql AS \
+         $function$ BEGIN \
+         IF TG_OP = 'DELETE' THEN \
+         RAISE EXCEPTION 'source-slice ledger is immutable; DELETE is not permitted'; \
+         END IF; \
+         IF (to_jsonb(NEW) - ARRAY['status', 'manifest_uri', 'manifest_hash', 'manifest', \
+         'failure_detail', 'completed_at']) IS DISTINCT FROM \
+         (to_jsonb(OLD) - ARRAY['status', 'manifest_uri', 'manifest_hash', 'manifest', \
+         'failure_detail', 'completed_at']) THEN \
+         RAISE EXCEPTION 'source-slice identity is immutable'; \
+         END IF; \
+         IF OLD.status <> 'materializing'::public.qp_source_slice_status OR \
+         NEW.status NOT IN ('ready'::public.qp_source_slice_status, \
+         'failed'::public.qp_source_slice_status) THEN \
+         RAISE EXCEPTION 'illegal source-slice transition from % to %', OLD.status, NEW.status; \
+         END IF; \
+         RETURN NEW; END; $function$",
+        "CREATE FUNCTION public.trigger_guard_training_dataset() RETURNS trigger LANGUAGE plpgsql AS \
+         $function$ BEGIN \
+         IF TG_OP = 'DELETE' THEN \
+         RAISE EXCEPTION 'training-dataset ledger is immutable; DELETE is not permitted'; \
+         END IF; \
+         IF (to_jsonb(NEW) - ARRAY['status', 'feature_schema_hash', 'factor_schema_hash', \
+         'label_schema_hash', 'dataset_hash', 'manifest_hash', 'manifest', \
+         'artifact_bytes_hash', 'parquet_uri', 'sample_count', 'coverage', \
+         'failure_detail', 'completed_at']) IS DISTINCT FROM \
+         (to_jsonb(OLD) - ARRAY['status', 'feature_schema_hash', 'factor_schema_hash', \
+         'label_schema_hash', 'dataset_hash', 'manifest_hash', 'manifest', \
+         'artifact_bytes_hash', 'parquet_uri', 'sample_count', 'coverage', \
+         'failure_detail', 'completed_at']) THEN \
+         RAISE EXCEPTION 'training-dataset plan identity is immutable'; \
+         END IF; \
+         IF OLD.status = 'planned'::public.qp_training_dataset_status AND \
+         NEW.status = 'building'::public.qp_training_dataset_status THEN \
+         IF (to_jsonb(NEW) - 'status') IS DISTINCT FROM (to_jsonb(OLD) - 'status') THEN \
+         RAISE EXCEPTION 'planned-to-building may only change status'; END IF; \
+         ELSIF OLD.status = 'planned'::public.qp_training_dataset_status AND \
+         NEW.status = 'failed'::public.qp_training_dataset_status THEN \
+         IF (to_jsonb(NEW) - ARRAY['status', 'failure_detail', 'completed_at']) IS DISTINCT FROM \
+         (to_jsonb(OLD) - ARRAY['status', 'failure_detail', 'completed_at']) THEN \
+         RAISE EXCEPTION 'planned-to-failed may only add terminal diagnostics'; END IF; \
+         ELSIF OLD.status = 'building'::public.qp_training_dataset_status AND \
+         NEW.status IN ('ready'::public.qp_training_dataset_status, \
+         'insufficient_labels'::public.qp_training_dataset_status, \
+         'failed'::public.qp_training_dataset_status) THEN \
+         NULL; \
+         ELSIF OLD.status = 'ready'::public.qp_training_dataset_status AND \
+         NEW.status = 'expired'::public.qp_training_dataset_status THEN \
+         IF (to_jsonb(NEW) - 'status') IS DISTINCT FROM (to_jsonb(OLD) - 'status') THEN \
+         RAISE EXCEPTION 'ready-to-expired may only change status'; END IF; \
+         ELSE \
+         RAISE EXCEPTION 'illegal training-dataset transition from % to %', OLD.status, NEW.status; \
+         END IF; \
+         RETURN NEW; END; $function$",
         "CREATE FUNCTION public.trigger_set_updated_at() RETURNS trigger LANGUAGE plpgsql AS \
          $function$ BEGIN IF (to_jsonb(NEW) - 'updated_at') IS DISTINCT FROM \
          (to_jsonb(OLD) - 'updated_at') THEN NEW.updated_at = statement_timestamp(); ELSE \
@@ -150,7 +208,12 @@ pub(in crate::migrations) async fn create_trigger_programs(
 pub(in crate::migrations) async fn drop_trigger_programs(
     manager: &SchemaManager<'_>,
 ) -> Result<(), DbErr> {
-    for name in ["trigger_set_updated_at", "trigger_deny_write"] {
+    for name in [
+        "trigger_set_updated_at",
+        "trigger_guard_training_dataset",
+        "trigger_guard_source_slice",
+        "trigger_deny_write",
+    ] {
         execute(
             manager,
             format!("DROP FUNCTION public.{}()", quote_identifier(name)),

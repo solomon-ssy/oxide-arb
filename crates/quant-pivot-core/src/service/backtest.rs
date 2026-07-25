@@ -1,13 +1,13 @@
 //! Offline backtest orchestration.
 //!
-//! Replays a registered model over exact immutable v1 Parquet rows plus their
+//! Replays a registered model over exact immutable v2 Parquet rows plus their
 //! Dataset-bound Source Slice execution facts. Frozen
 //! selection context, `FeatureCell`s, factor values, and labels are the sole
 //! evaluation input. Historical rematerialization is a separate parity job and
 //! can never replace bytes consumed by training, CPCV, or backtest.
 //!
-//! Per run it persists a `quant_backtest_report` + a `Backtest` `quant_model_run`
-//! and optionally fits a calibrated return curve into a fresh Candidate version.
+//! Per run it persists a `quant_backtest_report` + a `Backtest` `quant_model_run`.
+//! Evaluation is read-only with respect to model artifacts.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -21,18 +21,17 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storag
 use quant_pivot_models::{
     domain::quant::{
         BacktestReportInfo, JobProgressSink, ModelComparisonReportInfo, ModelVersionInfo,
-        NewBacktestReport, NewModelComparisonReport, NewModelRun, NewModelVersion,
-        TrainingDatasetInfo,
+        NewBacktestReport, NewModelComparisonReport, NewModelRun, TrainingDatasetInfo,
     },
     enums::quant::{
-        ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
+        DatasetPurpose, ModelRunErrorCode, ModelRunKind, ModelRunStatus, TrainingDatasetStatus,
     },
     hashing::CanonicalDigest,
     runtime_config::PortfolioConfig,
     types::{
         BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, MarketId,
         ModelComparisonReportId, ModelRunId, ModelVersionId, PayoutRatio, ResearchJobProgress,
-        TokenId, TrainingDatasetId, Usd, model_lineage::ModelVersionDerivation,
+        TokenId, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::traits::{
@@ -47,10 +46,7 @@ use quant_pivot_research::{
         ModelComparisonReport, PortfolioCaps, PortfolioReplayBacktester, SampleOutcome,
     },
     execution_semantics::{PitFeeSchedule, aggressive_buy_limit},
-    model::{
-        ActiveSchemaBinding, CalibrationSample, ModelArtifact, ModelRuntimeFactoryBuilder,
-        QuantModelRuntime, calibrate_weighted_artifact,
-    },
+    model::{ActiveSchemaBinding, ModelRuntimeFactoryBuilder, QuantModelRuntime},
     training::{LabelName, TrainingExample},
 };
 use rust_decimal::Decimal;
@@ -74,7 +70,7 @@ pub struct BacktestServiceDeps {
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
     /// Content-addressed artifact store.
     pub artifact_store: Arc<dyn ArtifactStore>,
-    /// Model registry (version lookup + calibrated re-registration).
+    /// Model registry (version lookup).
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     /// Model-run ledger.
     pub model_run_repo: Arc<dyn ModelRunRepository>,
@@ -90,14 +86,26 @@ pub struct BacktestServiceDeps {
 pub struct BacktestInput {
     /// Model version under test.
     pub model_version_id: ModelVersionId,
-    /// Frozen dataset whose schedule + settlement truth the replay uses.
-    pub training_dataset_id: TrainingDatasetId,
+    /// Frozen reusable holdout whose schedule + settlement truth the replay uses.
+    pub evaluation_dataset_id: TrainingDatasetId,
     /// Frozen decision-policy snapshot (provenance + portfolio caps).
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    /// Whether to fit a calibrated return curve and register a child candidate.
-    pub calibrate: bool,
     /// Pre-assigned candidate report id (async job engine); minted when absent.
     pub backtest_report_id: Option<BacktestReportId>,
+}
+
+/// Internal replay request for model-score calibration evidence.
+///
+/// Calibration reuses the deterministic replay computation but does not write
+/// a `quant_backtest_report`: that ledger is reserved for reusable evaluation
+/// evidence and its `evaluation_dataset_id` invariant.
+pub struct CalibrationReplayInput {
+    /// Model version whose scores are being calibrated.
+    pub model_version_id: ModelVersionId,
+    /// Independent purpose-bound calibration dataset.
+    pub calibration_dataset_id: TrainingDatasetId,
+    /// Frozen decision-policy snapshot governing the replay.
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
 }
 
 /// Offline backtest service, bound to one frozen runtime-config snapshot.
@@ -137,7 +145,13 @@ impl BacktestService {
         cancel: CancellationToken,
     ) -> QuantResult<BacktestReportInfo> {
         let version = self.find_version(&input.model_version_id).await?;
-        let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
+        let dataset = self
+            .load_ready_dataset(
+                &input.evaluation_dataset_id,
+                DatasetPurpose::Evaluation,
+                "backtest",
+            )
+            .await?;
         Ok(self
             .run_recorded(&version, &dataset, &input, &progress, &cancel)
             .await?
@@ -157,16 +171,21 @@ impl BacktestService {
     ) -> QuantResult<(BacktestReportInfo, ModelComparisonReportInfo)> {
         let candidate_version = self.find_version(&input.model_version_id).await?;
         let baseline_version = self.find_version(&baseline_version_id).await?;
-        let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
+        let dataset = self
+            .load_ready_dataset(
+                &input.evaluation_dataset_id,
+                DatasetPurpose::Evaluation,
+                "backtest comparison",
+            )
+            .await?;
 
         let candidate = self
             .run_recorded(&candidate_version, &dataset, &input, &progress, &cancel)
             .await?;
         let baseline_input = BacktestInput {
             model_version_id: baseline_version_id,
-            training_dataset_id: input.training_dataset_id,
+            evaluation_dataset_id: input.evaluation_dataset_id,
             decision_policy_snapshot_id: input.decision_policy_snapshot_id,
-            calibrate: false,
             backtest_report_id: None,
         };
         let baseline = self
@@ -186,27 +205,76 @@ impl BacktestService {
         Ok((candidate.info, info))
     }
 
-    /// Run a backtest purely to harvest per-sample `(score, outcome)` pairs for
-    /// `ProbabilityCalibrator` fitting.
+    /// Replay a calibration dataset to harvest per-sample `(score, outcome)`
+    /// pairs for `ProbabilityCalibrator` fitting.
     ///
-    /// Persists the same backtest-report / model-run ledger rows as [`Self::run`]
-    /// (a full audit trail of the exact PIT replay that produced the
-    /// calibration evidence — recomputed features/factors, never trusted from
-    /// Parquet, so the calibrator fits the identical computation graph the
-    /// live plane scores), and additionally returns the raw per-sample
-    /// outcomes `run` discards.
+    /// The replay writes a purpose-specific `Calibration` model run, while the
+    /// resulting calibration artifact owns the exact dataset lineage. It does
+    /// not write an evaluation backtest report.
     pub async fn run_for_calibration(
         &self,
-        input: BacktestInput,
+        input: CalibrationReplayInput,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
-    ) -> QuantResult<(BacktestReportInfo, Vec<SampleOutcome>)> {
+    ) -> QuantResult<Vec<SampleOutcome>> {
         let version = self.find_version(&input.model_version_id).await?;
-        let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
-        let recorded = self
-            .run_recorded(&version, &dataset, &input, &progress, &cancel)
+        let dataset = self
+            .load_ready_dataset(
+                &input.calibration_dataset_id,
+                DatasetPurpose::Calibration,
+                "model calibration replay",
+            )
             .await?;
-        Ok((recorded.info, recorded.result.sample_outcomes))
+        let model_run_id = ModelRunId::from_v7();
+        self.create_run(
+            &model_run_id,
+            input.model_version_id,
+            input.decision_policy_snapshot_id,
+            &dataset,
+            ModelRunKind::Calibration,
+        )
+        .await?;
+
+        let replay = self
+            .replay(
+                ReplayCtx {
+                    backtest_report_id: &BacktestReportId::from_v7(),
+                    model_run_id: &model_run_id,
+                    version: &version,
+                    dataset: &dataset,
+                    decision_policy_snapshot_id: input.decision_policy_snapshot_id,
+                },
+                &progress,
+                &cancel,
+            )
+            .await;
+        match replay {
+            Ok(result) => {
+                self.deps
+                    .model_run_repo
+                    .succeed(
+                        &model_run_id,
+                        result.report.report_hash,
+                        Utc::now(),
+                        Some(version.model_version_id),
+                    )
+                    .await?;
+                Ok(result.sample_outcomes)
+            }
+            Err(error) => {
+                let _ = self
+                    .deps
+                    .model_run_repo
+                    .fail(
+                        &model_run_id,
+                        ModelRunErrorCode::CalibrationFailed,
+                        error.to_string(),
+                        Utc::now(),
+                    )
+                    .await;
+                Err(error)
+            }
+        }
     }
 
     /// Resolve a registered model version or fail with a not-found error.
@@ -241,7 +309,14 @@ impl BacktestService {
         let backtest_report_id = input
             .backtest_report_id
             .unwrap_or_else(BacktestReportId::from_v7);
-        self.create_run(&model_run_id, input, dataset).await?;
+        self.create_run(
+            &model_run_id,
+            input.model_version_id,
+            input.decision_policy_snapshot_id,
+            dataset,
+            ModelRunKind::Backtest,
+        )
+        .await?;
 
         match self
             .run_inner(
@@ -296,6 +371,12 @@ impl BacktestService {
         baseline: &RecordedRun,
         comparison: &ModelComparisonReport,
     ) -> QuantResult<ModelComparisonReportInfo> {
+        let common_samples = i64::try_from(comparison.common_samples).map_err(|_| {
+            ResearchError::EvidenceCountOverflow {
+                field: "comparison.common_samples",
+                value: comparison.common_samples,
+            }
+        })?;
         self.deps
             .comparison_report_repo
             .create(NewModelComparisonReport {
@@ -310,7 +391,7 @@ impl BacktestService {
                 realized_pnl_delta: comparison.realized_pnl_delta,
                 score_correlation: comparison.score_correlation,
                 side_disagreement_rate: comparison.side_disagreement_rate,
-                common_samples: i64::try_from(comparison.common_samples).unwrap_or(i64::MAX),
+                common_samples,
                 category_breakdown_diff: comparison.category_breakdown_diff.clone().into(),
                 comparison_hash: comparison.comparison_hash,
             })
@@ -332,6 +413,40 @@ impl BacktestService {
             dataset,
             input,
         } = ctx;
+        let result = self
+            .replay(
+                ReplayCtx {
+                    backtest_report_id,
+                    model_run_id,
+                    version,
+                    dataset,
+                    decision_policy_snapshot_id: input.decision_policy_snapshot_id,
+                },
+                progress,
+                cancel,
+            )
+            .await?;
+
+        progress.report(ResearchJobProgress::indeterminate("finalize", 0));
+        let info = self.persist_report(model_run_id, &result.report).await?;
+        Ok((info, result))
+    }
+
+    /// Execute one deterministic replay without deciding which evidence ledger
+    /// owns the result.
+    async fn replay(
+        &self,
+        ctx: ReplayCtx<'_>,
+        progress: &Arc<dyn JobProgressSink>,
+        cancel: &CancellationToken,
+    ) -> QuantResult<BacktestRunResult> {
+        let ReplayCtx {
+            backtest_report_id,
+            model_run_id,
+            version,
+            dataset,
+            decision_policy_snapshot_id,
+        } = ctx;
         let materialization = require_dataset_materialization(dataset)?;
         // Load the model under test, bound to the dataset's frozen schema.
         let binding = ActiveSchemaBinding {
@@ -352,11 +467,12 @@ impl BacktestService {
             .await?;
         let examples = verify_frozen_dataset_artifact(dataset, &bytes)?;
         let source_slice = dataset
-            .manifest_json
+            .manifest
             .as_ref()
             .ok_or_else(|| ResearchError::DatasetBuild {
-                detail: "backtest dataset has no immutable v1 manifest".to_owned(),
+                detail: "backtest dataset has no immutable v2 manifest".to_owned(),
             })?
+            .source_lineage
             .source_slice
             .clone();
         let frozen_source = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
@@ -366,7 +482,8 @@ impl BacktestService {
         let request = BacktestRequest {
             backtest_report_id: *backtest_report_id,
             model_version_id: version.model_version_id,
-            decision_policy_snapshot_id: input.decision_policy_snapshot_id,
+            dataset_id: dataset.training_dataset_id,
+            decision_policy_snapshot_id,
             window_start: dataset.window_start,
             window_end: dataset.window_end,
         };
@@ -401,14 +518,7 @@ impl BacktestService {
             .into());
         };
 
-        progress.report(ResearchJobProgress::indeterminate("finalize", 0));
-        let info = self.persist_report(model_run_id, &result.report).await?;
-
-        if input.calibrate {
-            self.maybe_calibrate(version, &info, &result.sample_outcomes)
-                .await?;
-        }
-        Ok((info, result))
+        Ok(result)
     }
 
     /// Persist the backtest report ledger row.
@@ -417,20 +527,32 @@ impl BacktestService {
         model_run_id: &ModelRunId,
         report: &BacktestReport,
     ) -> QuantResult<BacktestReportInfo> {
+        let sample_count = i64::try_from(report.sample_count).map_err(|_| {
+            ResearchError::EvidenceCountOverflow {
+                field: "backtest.sample_count",
+                value: report.sample_count,
+            }
+        })?;
+        let missing_feature_count = i64::try_from(report.missing_feature_count).map_err(|_| {
+            ResearchError::EvidenceCountOverflow {
+                field: "backtest.missing_feature_count",
+                value: report.missing_feature_count,
+            }
+        })?;
         let info = self
             .deps
             .backtest_report_repo
             .create(NewBacktestReport {
                 backtest_report_id: report.backtest_report_id,
                 model_version_id: report.model_version_id,
+                evaluation_dataset_id: report.dataset_id,
                 model_run_id: *model_run_id,
                 decision_policy_snapshot_id: report.decision_policy_snapshot_id,
                 window_start: report.window_start,
                 window_end: report.window_end,
                 coverage: report.coverage,
-                sample_count: i64::try_from(report.sample_count).unwrap_or(i64::MAX),
-                missing_feature_count: i64::try_from(report.missing_feature_count)
-                    .unwrap_or(i64::MAX),
+                sample_count,
+                missing_feature_count,
                 rank_ic: report.rank_ic,
                 sharpe: report.sharpe,
                 hit_rate: report.hit_rate,
@@ -448,90 +570,11 @@ impl BacktestService {
         Ok(info)
     }
 
-    /// Tighten the governed score multipliers (data-quality / liquidity /
-    /// horizon / substitution penalties) from realized stratified outcomes and
-    /// register a fresh Candidate version (weighted models only). A `None` fit
-    /// (too little evidence) leaves the candidate untightened — the
-    /// conservative governed baseline stays in force. Does **not** touch
-    /// `return_model`: the return model is calibrated separately, from an
-    /// independent held-out split, via `ProbabilityCalibrator` +
-    /// `ModelGovernanceService::bind_calibration` — never as a
-    /// same-backtest side effect (that would be a leaked "calibration").
-    async fn maybe_calibrate(
-        &self,
-        version: &ModelVersionInfo,
-        source_backtest: &BacktestReportInfo,
-        samples: &[SampleOutcome],
-    ) -> QuantResult<()> {
-        let calibration: Vec<CalibrationSample> = samples.iter().map(calibration_sample).collect();
-
-        let bytes = self
-            .deps
-            .artifact_store
-            .get_by_key(&ModelArtifact::artifact_key(&version.artifact_hash)?)
-            .await?;
-        let ModelArtifact::WeightedFactor(mut weighted) = ModelArtifact::from_bytes(&bytes)? else {
-            return Ok(());
-        };
-
-        // Fail-closed: only re-register a tightened candidate when there is
-        // enough evidence.
-        let Some(result) = calibrate_weighted_artifact(&calibration, &weighted) else {
-            return Ok(());
-        };
-
-        let new_version_id = ModelVersionId::from_v7();
-        weighted.header.model_version_id = new_version_id;
-        weighted.multipliers = result.multipliers;
-        weighted.substitution_confidence_rules = result.substitution_rules;
-        let calibrated = ModelArtifact::WeightedFactor(weighted);
-        calibrated.validate()?;
-        let artifact_hash = calibrated.content_hash()?;
-        self.deps
-            .artifact_store
-            .put(
-                ModelArtifact::artifact_key(&artifact_hash)?,
-                &calibrated.to_bytes()?,
-            )
-            .await?;
-
-        let next = self
-            .deps
-            .model_registry_repo
-            .next_version_for_spec(&version.model_spec_id)
-            .await?;
-        self.deps
-            .model_registry_repo
-            .create_model_version(NewModelVersion {
-                model_version_id: new_version_id,
-                model_spec_id: version.model_spec_id,
-                version: next,
-                artifact_hash,
-                category_scope: calibrated.category_scope(),
-                profile_ref: version.profile_ref.clone(),
-                training_dataset_id: version.training_dataset_id,
-                trade_policy_artifact_id: calibrated.header().trade_policy_artifact_id,
-                trade_policy_hash: calibrated.header().trade_policy_hash,
-                publish_path_set_id: None,
-                derivation: ModelVersionDerivation::ScoreMultiplierCalibration {
-                    parent_model_version_id: version.model_version_id,
-                    source_backtest_report_id: source_backtest.backtest_report_id,
-                    report: result.report,
-                },
-                metrics: version.metrics.clone(),
-                training_objective: version.training_objective.clone(),
-                quality_gate_report: None,
-                publication_status: PublicationStatus::Candidate,
-                published_at: None,
-                retired_at: None,
-            })
-            .await?;
-        Ok(())
-    }
-
     async fn load_ready_dataset(
         &self,
         training_dataset_id: &TrainingDatasetId,
+        expected_purpose: DatasetPurpose,
+        operation: &'static str,
     ) -> QuantResult<TrainingDatasetInfo> {
         let dataset = self
             .deps
@@ -545,8 +588,18 @@ impl BacktestService {
         if dataset.status != TrainingDatasetStatus::Ready {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
-                    "backtest requires a Ready dataset, got {}",
+                    "{operation} requires a Ready dataset, got {}",
                     dataset.status.as_str()
+                ),
+            }
+            .into());
+        }
+        if dataset.purpose != expected_purpose {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "{operation} requires purpose={}, got {}",
+                    expected_purpose.as_str(),
+                    dataset.purpose.as_str()
                 ),
             }
             .into());
@@ -557,17 +610,19 @@ impl BacktestService {
     async fn create_run(
         &self,
         model_run_id: &ModelRunId,
-        input: &BacktestInput,
+        model_version_id: ModelVersionId,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
         dataset: &TrainingDatasetInfo,
+        run_kind: ModelRunKind,
     ) -> QuantResult<()> {
         let materialization = require_dataset_materialization(dataset)?;
         self.deps
             .model_run_repo
             .create(NewModelRun {
                 model_run_id: *model_run_id,
-                run_kind: ModelRunKind::Backtest,
-                model_version_id: Some(input.model_version_id),
-                decision_policy_snapshot_id: input.decision_policy_snapshot_id,
+                run_kind,
+                model_version_id: Some(model_version_id),
+                decision_policy_snapshot_id,
                 market_selection_id: None,
                 window_start: dataset.window_start,
                 window_end: dataset.window_end,
@@ -592,6 +647,15 @@ struct RunInnerCtx<'a> {
     version: &'a ModelVersionInfo,
     dataset: &'a TrainingDatasetInfo,
     input: &'a BacktestInput,
+}
+
+/// Borrowed inputs shared by evaluation and calibration replay execution.
+struct ReplayCtx<'a> {
+    backtest_report_id: &'a BacktestReportId,
+    model_run_id: &'a ModelRunId,
+    version: &'a ModelVersionInfo,
+    dataset: &'a TrainingDatasetInfo,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
 }
 
 /// A completed, recorded single replay: the run id, persisted report info, and
@@ -690,7 +754,7 @@ pub(crate) fn frozen_ticks(
         })?;
     let mut processed_sections: u64 = 0;
     let mut ticks = Vec::with_capacity(by_decision.len());
-    let settlement_label = LabelName::new("settlement_outcome");
+    let settlement_label = LabelName::new("token_payout_ratio");
     let mae_label = LabelName::new("max_adverse_excursion_bps");
     for (decision_at, group) in by_decision {
         if cancel.is_cancelled() {
@@ -923,19 +987,4 @@ fn max_adverse_excursion(example: &TrainingExample, label: &LabelName) -> Option
         .iter()
         .find(|row| row.label_name == *label && row.is_resolved)
         .map(|row| row.value)
-}
-
-/// Project a resolved backtest outcome into a calibration sample, carrying the
-/// **PIT-resolved** scoring strata (data-quality / liquidity / horizon /
-/// substitution) the candidate was actually scored under — never assumed.
-fn calibration_sample(sample: &SampleOutcome) -> CalibrationSample {
-    CalibrationSample {
-        composite_score: sample.composite_score.inner(),
-        realized_return_bps: sample.realized_return_bps,
-        data_quality: sample.data_quality,
-        liquidity_usd: sample.liquidity_usd.map(Usd::inner),
-        time_to_resolution_secs: sample.time_to_resolution_secs,
-        prediction_horizon_secs: sample.prediction_horizon_secs,
-        substitution_reasons: sample.substitution_reasons.clone(),
-    }
 }

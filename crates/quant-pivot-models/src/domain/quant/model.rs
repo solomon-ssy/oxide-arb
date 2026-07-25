@@ -17,11 +17,10 @@ use crate::{
         },
     },
     types::{
-        BacktestPathSetId, BacktestReportId, CalibrationArtifactId, ContentHash,
-        DecisionPolicySnapshotId, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, ResearchProfileRef, RoleCode, SchemaVersion,
-        TradePolicyArtifactId, TrainingDatasetId, UserId,
-        calibration::ScoreMultiplierCalibrationReport,
+        BacktestPathSetId, CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId,
+        MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
+        ModelVersionId, ResearchProfileRef, RoleCode, SchemaVersion, TradePolicyArtifactId,
+        TrainingDatasetId, UserId,
         model_lineage::{ModelVersionDerivation, ModelVersionDerivationError},
         model_metrics::ModelVersionMetrics,
         model_quality::QualityGateReport,
@@ -121,9 +120,7 @@ pub struct ModelVersionInfo {
     pub publish_path_set_id: Option<BacktestPathSetId>,
     pub derivation_kind: ModelVersionDerivationKind,
     pub parent_model_version_id: Option<ModelVersionId>,
-    pub source_backtest_report_id: Option<BacktestReportId>,
     pub calibration_artifact_id: Option<CalibrationArtifactId>,
-    pub score_multiplier_calibration_report: Option<ScoreMultiplierCalibrationReport>,
     pub derivation_evidence_hash: Option<ContentHash>,
     pub metrics: ModelVersionMetrics,
     pub training_objective: ModelTrainingObjective,
@@ -148,9 +145,7 @@ impl ModelVersionInfo {
         ModelVersionDerivation::from_persistence(
             self.derivation_kind,
             self.parent_model_version_id,
-            self.source_backtest_report_id,
             self.calibration_artifact_id,
-            self.score_multiplier_calibration_report.clone(),
             self.derivation_evidence_hash,
         )
     }
@@ -190,10 +185,7 @@ impl NewModelVersion {
         let derivation_evidence_hash = self.derivation.evidence_hash()?;
         let derivation_kind = self.derivation.kind();
         let parent_model_version_id = self.derivation.parent_model_version_id().copied();
-        let source_backtest_report_id = self.derivation.source_backtest_report_id().copied();
         let calibration_artifact_id = self.derivation.calibration_artifact_id().copied();
-        let score_multiplier_calibration_report =
-            self.derivation.score_multiplier_report().cloned();
 
         Ok(ActiveModel {
             model_version_id: Set(self.model_version_id),
@@ -208,9 +200,7 @@ impl NewModelVersion {
             publish_path_set_id: Set(self.publish_path_set_id),
             derivation_kind: Set(derivation_kind),
             parent_model_version_id: Set(parent_model_version_id),
-            source_backtest_report_id: Set(source_backtest_report_id),
             calibration_artifact_id: Set(calibration_artifact_id),
-            score_multiplier_calibration_report: Set(score_multiplier_calibration_report),
             derivation_evidence_hash: Set(derivation_evidence_hash),
             metrics: Set(self.metrics),
             training_objective: Set(self.training_objective),

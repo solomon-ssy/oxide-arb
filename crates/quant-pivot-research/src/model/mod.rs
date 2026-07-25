@@ -6,7 +6,6 @@
 //! weighted-factor runtime and the feature-gated classical trainer/runtime.
 
 pub mod artifact;
-pub mod calibration;
 pub mod calibrator;
 pub mod category_scope;
 #[cfg(feature = "ml-classical")]
@@ -37,11 +36,6 @@ pub use artifact::{
     ReturnEstimate, ReturnModelSpec, ScoreMultiplierSpec, SellScorerArtifact, SellScorerOutputSpec,
     SubstitutionConfidenceRules, TrainingObjectiveReport, WeightedFactorModelArtifact,
     model_input_contract_hash,
-};
-pub use calibration::{
-    CalibrationResult, CalibrationSample, calibrate_horizon_multipliers,
-    calibrate_liquidity_multipliers, calibrate_score_multipliers, calibrate_substitution_rules,
-    calibrate_weighted_artifact,
 };
 pub use calibrator::{
     CalibrationArtifactLoader, ProbabilityCalibrator, ResolvedCalibration, apply_mapping,

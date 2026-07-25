@@ -36,7 +36,7 @@ macro_rules! scenario {
     ($module:ident::$function:ident) => {{
         let name = concat!(stringify!($module), "::", stringify!($function));
         eprintln!("core business scenario started: {name}");
-        $module::$function().await;
+        Box::pin($module::$function()).await;
         eprintln!("core business scenario passed: {name}");
     }};
 }
@@ -85,7 +85,7 @@ async fn core_business_scenarios_server() {
         scenario!(model_runtime::inference_rejects_retired_model);
         scenario!(model_runtime::model_run_create_fail);
 
-        scenario!(model_training_backtest::train_backtest_calibrate_e2e);
+        scenario!(model_training_backtest::train_backtest_evaluation_e2e);
         scenario!(model_training_backtest::train_cpcv_persists_decomposition);
 
         scenario!(participant_concentration::whale_trade_tape_monitor);

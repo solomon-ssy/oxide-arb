@@ -908,7 +908,7 @@ mod tests {
         enums::model::ModelFamily,
         types::{
             BacktestReportId, ContentHash, DecisionPolicySnapshotId, MarketId, ModelVersionId,
-            Probability, TokenId,
+            Probability, TokenId, TrainingDatasetId,
             backtest::{ExpectedVsRealized, PnlSimulation},
         },
     };
@@ -935,6 +935,7 @@ mod tests {
             Self {
                 backtest_report_id: BacktestReportId::from_v7(),
                 model_version_id: ModelVersionId::from_v7(),
+                dataset_id: TrainingDatasetId::from_v7(),
                 decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
                 window_start: Utc::now(),
                 window_end: Utc::now(),

@@ -27,7 +27,7 @@ use quant_pivot_models::{
     enums::{factor::FactorValueState, quant::PublicationStatus},
     hashing::CanonicalDigest,
     types::{
-        FactorDefinitionId, MarketId, ModelRunId, ModelVersionId,
+        FactorDefinitionId, FeatureVectorId, MarketId, ModelRunId, ModelVersionId,
         factor::factor_definition_content_hash,
     },
 };
@@ -37,7 +37,11 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::{primitives, quant::condition_wake::notify_input_change, query::paginate_mapped},
+    postgres::{
+        primitives,
+        quant::condition_wake::notify_input_change,
+        query::{find_id_chunks, paginate_mapped},
+    },
     traits::FactorRepository,
 };
 
@@ -225,6 +229,19 @@ impl FactorRepository for PgFactorRepository {
             .await
             .map_err(StorageError::from)
             .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn find_values_by_vectors(
+        &self,
+        feature_vector_ids: &[FeatureVectorId],
+    ) -> Result<Vec<FactorValueInfo>, StorageError> {
+        find_id_chunks::<QuantFactorValueEntity, _, _>(
+            &self.db,
+            feature_vector_ids,
+            QuantFactorValueColumn::FeatureVectorId,
+        )
+        .await
+        .map(|rows| rows.into_iter().map(Into::into).collect())
     }
 
     async fn recent_values(

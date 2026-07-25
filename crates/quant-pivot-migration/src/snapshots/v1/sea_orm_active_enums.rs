@@ -231,6 +231,8 @@ pub enum QpDatasetPurpose {
     Training,
     #[sea_orm(string_value = "calibration")]
     Calibration,
+    #[sea_orm(string_value = "evaluation")]
+    Evaluation,
     #[sea_orm(string_value = "policy_fit")]
     PolicyFit,
 }
@@ -753,8 +755,6 @@ pub enum QpModelGovernanceAction {
 pub enum QpModelVersionDerivationKind {
     #[sea_orm(string_value = "training")]
     Training,
-    #[sea_orm(string_value = "score_multiplier_calibration")]
-    ScoreMultiplierCalibration,
     #[sea_orm(string_value = "return_calibration")]
     ReturnCalibration,
 }
@@ -781,6 +781,8 @@ pub enum QpModelRunErrorCode {
     SchemaBindingFailed,
     #[sea_orm(string_value = "training_failed")]
     TrainingFailed,
+    #[sea_orm(string_value = "calibration_failed")]
+    CalibrationFailed,
     #[sea_orm(string_value = "cancelled_by_operator")]
     CancelledByOperator,
 }
@@ -803,12 +805,24 @@ pub enum QpModelRunKind {
     Training,
     #[sea_orm(string_value = "backtest")]
     Backtest,
+    #[sea_orm(string_value = "calibration")]
+    Calibration,
     #[sea_orm(string_value = "cpcv")]
     Cpcv,
     #[sea_orm(string_value = "shadow")]
     Shadow,
     #[sea_orm(string_value = "live_inference")]
     LiveInference,
+}
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_feedback_cohort")]
+pub enum QpFeedbackCohort {
+    #[sea_orm(string_value = "model_learning")]
+    ModelLearning,
+    #[sea_orm(string_value = "execution_learning")]
+    ExecutionLearning,
+    #[sea_orm(string_value = "policy_evaluation")]
+    PolicyEvaluation,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_model_run_status")]

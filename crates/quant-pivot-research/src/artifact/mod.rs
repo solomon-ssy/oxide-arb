@@ -60,6 +60,8 @@ impl ArtifactDurability {
 pub enum ArtifactNamespace {
     /// Frozen training datasets (`datasets/`).
     Dataset,
+    /// Included rows and outcome lineage for frozen feedback cohorts.
+    FeedbackCohort,
     /// Serialized model artifacts (`models/`).
     Model,
     /// Point-in-time backtest reports (`backtests/`).
@@ -82,6 +84,7 @@ impl ArtifactNamespace {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Dataset => "datasets",
+            Self::FeedbackCohort => "feedback-cohorts",
             Self::Model => "models",
             Self::Backtest => "backtests",
             Self::PolicyEvidence => "policy-evidence",

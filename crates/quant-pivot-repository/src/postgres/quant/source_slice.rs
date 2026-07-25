@@ -112,7 +112,7 @@ impl SourceSliceRepository for PgSourceSliceRepository {
         active.status = ActiveValue::Set(SourceSliceStatus::Ready);
         active.manifest_uri = ActiveValue::Set(Some(completion.manifest_ref.manifest_uri));
         active.manifest_hash = ActiveValue::Set(Some(completion.manifest_ref.manifest_hash));
-        active.manifest_json = ActiveValue::Set(Some(completion.manifest));
+        active.manifest = ActiveValue::Set(Some(completion.manifest));
         active.completed_at = ActiveValue::Set(Some(Utc::now()));
         let updated = active
             .update(&transaction)
@@ -214,7 +214,7 @@ fn ensure_idempotent_completion(
 ) -> Result<(), StorageError> {
     if row.manifest_uri.as_ref() != Some(&completion.manifest_ref.manifest_uri)
         || row.manifest_hash.as_ref() != Some(&completion.manifest_ref.manifest_hash)
-        || row.manifest_json.as_ref() != Some(&completion.manifest)
+        || row.manifest.as_ref() != Some(&completion.manifest)
     {
         return Err(StorageError::state_conflict(
             QUANT_SOURCE_SLICE,

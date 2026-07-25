@@ -219,7 +219,13 @@ impl ClassicalTrialGrid {
     #[cfg(not(feature = "ml-classical"))]
     fn generate_classical(&self) -> QuantResult<Vec<Trial>> {
         Err(ResearchError::ValidationMethodology {
-            detail: "classical trial grid requires the `ml-classical` feature".to_owned(),
+            detail: format!(
+                "classical trial grid requires the `ml-classical` feature \
+                 (forest_multipliers={}, linear_multipliers={}, max_trials={})",
+                self.forest_n_trees_multipliers.len(),
+                self.linear_alpha_multipliers.len(),
+                self.max_trials
+            ),
         }
         .into())
     }

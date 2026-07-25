@@ -215,7 +215,7 @@ mod tests {
         },
         types::{
             BacktestReportId, DecisionPolicySnapshotId, MarketId, ModelVersionId, PayoutRatio,
-            Probability, Shares, TokenId, Usd,
+            Probability, Shares, TokenId, TrainingDatasetId, Usd,
             backtest::{CategoryMetric, ExpectedVsRealized, PnlCurvePoint, PnlSimulation},
         },
     };
@@ -272,6 +272,7 @@ mod tests {
         let report = BacktestReport {
             backtest_report_id: BacktestReportId::from_v7(),
             model_version_id: ModelVersionId::from_v7(),
+            dataset_id: TrainingDatasetId::from_v7(),
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             window_start: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             window_end: Utc.timestamp_opt(1_700_100_000, 0).unwrap(),

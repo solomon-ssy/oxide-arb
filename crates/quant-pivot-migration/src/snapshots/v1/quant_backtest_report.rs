@@ -9,6 +9,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub backtest_report_id: Uuid,
     pub model_version_id: Uuid,
+    pub evaluation_dataset_id: Uuid,
     pub model_run_id: Uuid,
     pub decision_policy_snapshot_id: Uuid,
     pub window_start: DateTimeWithTimeZone,

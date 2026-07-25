@@ -9,7 +9,7 @@ use crate::{
     entities::quant_backtest_report,
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
-        Probability,
+        Probability, TrainingDatasetId,
         backtest::{CategoryMetrics, ExpectedVsRealized, PnlSimulation},
     },
 };
@@ -20,6 +20,7 @@ use crate::{
 pub struct BacktestReportInfo {
     pub backtest_report_id: BacktestReportId,
     pub model_version_id: ModelVersionId,
+    pub evaluation_dataset_id: TrainingDatasetId,
     pub model_run_id: ModelRunId,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
@@ -48,6 +49,7 @@ info_from_model!(
     {
         backtest_report_id,
         model_version_id,
+        evaluation_dataset_id,
         model_run_id,
         decision_policy_snapshot_id,
         window_start,
@@ -79,6 +81,7 @@ info_from_model!(
 pub struct NewBacktestReport {
     pub backtest_report_id: BacktestReportId,
     pub model_version_id: ModelVersionId,
+    pub evaluation_dataset_id: TrainingDatasetId,
     pub model_run_id: ModelRunId,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,

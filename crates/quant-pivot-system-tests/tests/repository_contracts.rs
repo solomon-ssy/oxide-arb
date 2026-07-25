@@ -281,6 +281,30 @@ async fn feedback_cohort_repository_contracts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backtest_report_lineage_contracts() {
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(
+            backtest_report::quant_backtest_report_crud,
+            backtest_report::backtest_report_rejects_lineage,
+        );
+    }))
+    .await
+    .expect("start backtest-report lineage PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dataset_artifact_immutability_contracts() {
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(
+            training_dataset::dataset_artifacts_are_immutable,
+            backtest_report::backtest_report_is_worm,
+        );
+    }))
+    .await
+    .expect("start dataset-artifact immutability PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn domain_source_cursor_contracts() {
     Box::pin(with_postgres_suite(async {
         run_scenarios!(domain_source_cursor::compare_validates_concurrent_winner,);

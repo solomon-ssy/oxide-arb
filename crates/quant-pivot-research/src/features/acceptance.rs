@@ -35,7 +35,8 @@ use quant_pivot_models::{
         BookSnapshotRef, BookSnapshotSource, Bps, CatalogDecisionRef, CatalogEventChangeId,
         CatalogMarketChangeId, CatalogSyncBatchId, ContentHash, DecisionCaptureEvidence,
         DecisionPolicySnapshotId, DecisionSnapshotEvidence, EventId, MarketContext, MarketId,
-        Price, Probability, RecommendationIdentity, SchemaVersion, Shares, TokenId, Usd,
+        Price, Probability, RecommendationIdentity, SchemaVersion, SelectionMemberEvidence, Shares,
+        TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -679,7 +680,7 @@ fn test_decision_capture(
                 event_timestamp_quality: CatalogTimestampQuality::Source,
             },
             book_snapshot_ref: BookSnapshotRef {
-                token_id,
+                token_id: token_id.clone(),
                 source: BookSnapshotSource::CanonicalL2 {
                     stream_session_id: Uuid::nil(),
                     token_sequence: 1,
@@ -691,6 +692,16 @@ fn test_decision_capture(
             },
             book_effective_at: vector.decision_at,
             book_available_at: vector.decision_at,
+            selection: SelectionMemberEvidence {
+                market_id: vector.market_id.clone(),
+                event_id: EventId::new("test-event"),
+                category: MarketCategory::Other,
+                primary_token_id: token_id,
+                secondary_token_id: None,
+                liquidity_usd: None,
+                volume_24h_usd: None,
+                source_refs: Vec::new(),
+            },
         },
         identity: RecommendationIdentity {
             category: MarketCategory::Other,
@@ -1747,6 +1758,48 @@ fn category_feature_projects_index() {
     );
     assert_eq!(rows[0].source_kind, ChFeatureSourceKind::GammaMetadata);
     assert_eq!(rows[0].raw_value.as_deref(), Some("sports"));
+}
+
+#[test]
+fn persistence_roundtrip_rejects_tamper() {
+    let as_of = Utc
+        .with_ymd_and_hms(2025, 1, 2, 0, 0, 0)
+        .single()
+        .expect("as-of");
+    let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
+    let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
+    let mut values = BTreeMap::new();
+    values.insert(
+        CATEGORY,
+        FeatureCell::observed(
+            FeatureValue::Category(MarketCategory::Crypto),
+            Some(EvidenceSourceRef {
+                source_kind: EvidenceSourceKind::GammaMetadata,
+                reference: "catalog:persistence:v1".to_owned(),
+                effective_at: as_of,
+                available_at: Some(as_of),
+            }),
+            FeatureStaleness::Known { age_ms: 0 },
+        ),
+    );
+    let vector = FeatureVector {
+        market_id: MarketId::new("persistence-market"),
+        token_id: Some(TokenId::new("persistence-token")),
+        decision_at: as_of,
+        generic_schema_version: schema.version(),
+        generic: values,
+        domain: None,
+        data_quality: DataQualityStatus::Fresh,
+    };
+    let persisted = persisted_feature_at(&vector, &boundary);
+    assert_eq!(
+        FeatureVector::try_from(&persisted).expect("rehydrate feature"),
+        vector
+    );
+
+    let mut tampered = persisted;
+    tampered.feature_hash = ContentHash::from_bytes([9; 32]);
+    assert!(FeatureVector::try_from(&tampered).is_err());
 }
 
 fn parity_selected_market(market_id: &MarketId, token: &TokenId) -> SelectedMarket {

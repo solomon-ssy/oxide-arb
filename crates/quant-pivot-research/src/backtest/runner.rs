@@ -17,7 +17,7 @@ use quant_pivot_models::{
     enums::quant::{DataQualityStatus, FillRequirement, OutcomeSide},
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, ExposureBreakdown, ModelVersionId,
-        Probability, Usd,
+        Probability, TrainingDatasetId, Usd,
         backtest::{CategoryMetric, ExpectedVsRealized, PnlCurvePoint, PnlSimulation},
     },
 };
@@ -420,6 +420,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
     let report_hash = ContentHash::try_from(&ReportHashInput {
         backtest_report_id: &request.backtest_report_id,
         model_version_id: &request.model_version_id,
+        dataset_id: &request.dataset_id,
         decision_policy_snapshot_id: &request.decision_policy_snapshot_id,
         window_start: request.window_start,
         window_end: request.window_end,
@@ -441,6 +442,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
     Ok(BacktestReport {
         backtest_report_id: request.backtest_report_id,
         model_version_id: request.model_version_id,
+        dataset_id: request.dataset_id,
         decision_policy_snapshot_id: request.decision_policy_snapshot_id,
         window_start: request.window_start,
         window_end: request.window_end,
@@ -466,6 +468,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
 struct ReportHashInput<'a> {
     backtest_report_id: &'a BacktestReportId,
     model_version_id: &'a ModelVersionId,
+    dataset_id: &'a TrainingDatasetId,
     decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
@@ -506,7 +509,7 @@ mod tests {
         types::{
             BacktestReportId, Bps, DecisionPolicySnapshotId, FactorDefinitionId, MarketId,
             ModelInputContract, ModelRunId, ModelVersionId, PayoutRatio, Price, Probability,
-            Shares, TokenId, Usd, builtin_research_profiles,
+            Shares, TokenId, TrainingDatasetId, Usd, builtin_research_profiles,
         },
     };
     use rust_decimal::Decimal;
@@ -712,6 +715,7 @@ mod tests {
             Self {
                 backtest_report_id: BacktestReportId::from_v7(),
                 model_version_id: ModelVersionId::from_v7(),
+                dataset_id: TrainingDatasetId::from_v7(),
                 decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
                 window_start: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
                 window_end: Utc.timestamp_opt(1_700_100_000, 0).unwrap(),

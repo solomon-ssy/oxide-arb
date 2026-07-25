@@ -494,7 +494,6 @@ pg_enum! {
     /// when a candidate advances through shadow/published/retired lifecycle.
     pub enum ModelVersionDerivationKind {
         Training => "training",
-        ScoreMultiplierCalibration => "score_multiplier_calibration",
         ReturnCalibration => "return_calibration",
     }
 }
@@ -872,6 +871,8 @@ pg_enum! {
     pub enum ModelRunKind {
         Training => "training",
         Backtest => "backtest",
+        /// Calibration evidence replay over a purpose-bound held-out dataset.
+        Calibration => "calibration",
         /// Combinatorial Purged Cross-Validation + governed trial-grid run.
         /// Distinct from single-path [`Self::Backtest`] so the
         /// ledger can audit which validation methodology produced a path set.
@@ -908,6 +909,7 @@ pg_enum! {
         ArtifactLoadFailed => "artifact_load_failed",
         SchemaBindingFailed => "schema_binding_failed",
         TrainingFailed => "training_failed",
+        CalibrationFailed => "calibration_failed",
         CancelledByOperator => "cancelled_by_operator",
     }
 }
@@ -1028,22 +1030,6 @@ wire_enum! {
     pub enum CohortCensorReason {
         ResolutionUnavailableAtCutoff => "resolution_unavailable_at_cutoff",
         ExecutionOutcomeUnavailableAtCutoff => "execution_outcome_unavailable_at_cutoff",
-    }
-}
-
-pg_enum! {
-    type_name = "qp_recommendation_outcome",
-    /// Legacy ordinal label lifecycle pending replacement by payout-ratio labels.
-    @derive(Default)
-    pub enum RecommendationOutcome {
-        #[default]
-        Pending => "pending",
-        Won => "won",
-        Lost => "lost",
-        ExpiredUnfilled => "expired_unfilled",
-        SupersededUnfilled => "superseded_unfilled",
-        Cancelled => "cancelled",
-        Unknown => "unknown",
     }
 }
 
@@ -1281,6 +1267,8 @@ pg_enum! {
         #[default]
         Training => "training",
         Calibration => "calibration",
+        /// Frozen, reusable holdout used only for out-of-sample evaluation.
+        Evaluation => "evaluation",
         /// Raw PIT observations used exclusively to fit an executable policy.
         PolicyFit => "policy_fit",
     }

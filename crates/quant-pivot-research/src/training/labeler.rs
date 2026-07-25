@@ -2,9 +2,9 @@
 //!
 //! Four labels are horizon-dependent (`return_to_horizon`,
 //! `max_favorable_excursion_bps`, `max_adverse_excursion_bps`,
-//! `liquidity_exit_possible`); `settlement_outcome` is horizon-independent and
-//! reads the selected token's authoritative payout ratio. All forward data is pre-fetched
-//! into [`LabelBuildInput::forward`]; a labeler never reads a database.
+//! `liquidity_exit_possible`); `token_payout_ratio` is horizon-independent and
+//! reads the selected token's authoritative payout ratio. All forward data is
+//! pre-fetched into [`LabelBuildInput::forward`]; a labeler never reads a database.
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_models::{enums::quant::FillRequirement, types::Price};
@@ -28,8 +28,8 @@ pub const MAX_ADVERSE_EXCURSION_BPS: LabelName =
     LabelName::from_static("max_adverse_excursion_bps");
 /// `liquidity_exit_possible`: whether sufficient exit depth existed in-horizon.
 pub const LIQUIDITY_EXIT_POSSIBLE: LabelName = LabelName::from_static("liquidity_exit_possible");
-/// `settlement_outcome`: terminal payout ratio for the selected condition token.
-pub const SETTLEMENT_OUTCOME: LabelName = LabelName::from_static("settlement_outcome");
+/// `token_payout_ratio`: terminal payout ratio for the selected condition token.
+pub const TOKEN_PAYOUT_RATIO: LabelName = LabelName::from_static("token_payout_ratio");
 pub const POLICY_NET_RETURN_BPS: LabelName = LabelName::from_static("policy_net_return_bps");
 pub const POLICY_NET_POSITIVE: LabelName = LabelName::from_static("policy_net_positive");
 pub const POLICY_ENTRY_FILL_RATIO: LabelName = LabelName::from_static("policy_entry_fill_ratio");
@@ -46,7 +46,7 @@ pub fn label_names() -> Vec<LabelName> {
         MAX_FAVORABLE_EXCURSION_BPS,
         MAX_ADVERSE_EXCURSION_BPS,
         LIQUIDITY_EXIT_POSSIBLE,
-        SETTLEMENT_OUTCOME,
+        TOKEN_PAYOUT_RATIO,
     ]
 }
 
@@ -67,6 +67,9 @@ pub fn label_names_for_sources(
                 POLICY_EXIT_FILL_RATIO,
             ]);
         }
+    }
+    if sources.contains(&TrainingSampleSource::RecommendationFeedback) {
+        labels.push(TOKEN_PAYOUT_RATIO);
     }
     if sources.contains(&TrainingSampleSource::ExitDecision) {
         labels.extend([HOLD_VS_EXIT_ALPHA_BPS, LIQUIDITY_EXIT_POSSIBLE]);
@@ -383,12 +386,12 @@ impl Labeler for HoldVsExitProceedsLabeler {
     }
 }
 
-/// `settlement_outcome` labeler (horizon-independent token payout).
-pub struct SettlementOutcomeLabeler;
+/// `token_payout_ratio` labeler (horizon-independent token payout).
+pub struct TokenPayoutRatioLabeler;
 
-impl Labeler for SettlementOutcomeLabeler {
+impl Labeler for TokenPayoutRatioLabeler {
     fn label_name(&self) -> LabelName {
-        SETTLEMENT_OUTCOME
+        TOKEN_PAYOUT_RATIO
     }
 
     fn is_horizon_dependent(&self) -> bool {
@@ -583,20 +586,30 @@ mod tests {
         let yes = TokenId::new("101");
         let no = TokenId::new("202");
         let half = PayoutRatio::try_new(dec!(0.5)).expect("half payout");
-        let resolved = forward(
-            Vec::new(),
-            120,
-            Some(MarketResolution {
-                token_ids: vec![yes.clone(), no.clone()],
-                payout_ratios: vec![half, half],
-                resolved_at: at(30),
-                observed_at: at(30),
-            }),
-        );
-        let out = SettlementOutcomeLabeler.build_label(&input(&market, &yes, None, 60, &resolved));
-        assert!(
-            matches!(out, LabelBuildOutput::Available(l) if l.value == dec!(0.5) && l.horizon_secs == 0)
-        );
+        for (selected, opposite) in [
+            (PayoutRatio::ZERO, PayoutRatio::ONE),
+            (half, half),
+            (PayoutRatio::ONE, PayoutRatio::ZERO),
+        ] {
+            let resolved = forward(
+                Vec::new(),
+                120,
+                Some(MarketResolution {
+                    token_ids: vec![yes.clone(), no.clone()],
+                    payout_ratios: vec![selected, opposite],
+                    resolved_at: at(30),
+                    observed_at: at(30),
+                }),
+            );
+            let out =
+                TokenPayoutRatioLabeler.build_label(&input(&market, &yes, None, 60, &resolved));
+            let LabelBuildOutput::Available(label) = out else {
+                panic!("expected exact payout ratio label, got {out:?}");
+            };
+            assert_eq!(label.label_name.as_str(), "token_payout_ratio");
+            assert_eq!(label.value, selected.inner());
+            assert_eq!(label.horizon_secs, 0);
+        }
 
         let pre_as_of = forward(
             Vec::new(),
@@ -608,7 +621,7 @@ mod tests {
                 observed_at: at(-5),
             }),
         );
-        let out = SettlementOutcomeLabeler.build_label(&input(&market, &yes, None, 60, &pre_as_of));
+        let out = TokenPayoutRatioLabeler.build_label(&input(&market, &yes, None, 60, &pre_as_of));
         assert!(matches!(
             out,
             LabelBuildOutput::NotMature {
@@ -618,7 +631,7 @@ mod tests {
         ));
 
         let pending = forward(Vec::new(), 0, None);
-        let out = SettlementOutcomeLabeler.build_label(&input(&market, &yes, None, 60, &pending));
+        let out = TokenPayoutRatioLabeler.build_label(&input(&market, &yes, None, 60, &pending));
         assert!(matches!(
             out,
             LabelBuildOutput::NotMature {

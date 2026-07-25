@@ -9,14 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::{
     hashing::CanonicalDigest,
     types::{
-        ArtifactUri, CatalogSyncBatchId, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
-        DecisionPolicySnapshotId, ReaderContractVersion, ResearchEvaluationTrack,
-        ResearchProfileArtifact, ResearchProfileDataSource, ResearchProfileRef,
-        SchemaContractVersion,
+        ArtifactUri, CapabilityRegistryHashes, CatalogSyncBatchId, ContentHash,
+        DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId, ReaderContractVersion,
+        ResearchEvaluationTrack, ResearchInformationRegime, ResearchProfileArtifact,
+        ResearchProfileDataSource, ResearchProfileRef, SchemaContractVersion,
     },
 };
 
-pub const SOURCE_SLICE_MANIFEST_FORMAT_VERSION: u32 = 2;
+pub const SOURCE_SLICE_MANIFEST_FORMAT_VERSION: u32 = 3;
 
 /// Immutable artifact-store location and content identity of one source slice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +125,7 @@ pub struct SourceSliceManifest {
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
     pub dataset_format_version: u32,
+    pub capability_registry_hashes: CapabilityRegistryHashes,
     pub pit_cutoffs: SourceSlicePitCutoffs,
     pub invalid_sessions: Vec<SourceSliceInvalidSession>,
     pub objects: Vec<SourceSliceObjectRef>,
@@ -260,6 +261,13 @@ impl SourceSliceManifest {
             return Err(format!(
                 "source-slice requires dataset v{DATASET_ARTIFACT_FORMAT_VERSION}"
             ));
+        }
+        if profile.spec.information_regime != ResearchInformationRegime::PooledBinaryMarket
+            && self.capability_registry_hashes.as_slice().is_empty()
+        {
+            return Err(
+                "vertical source-slice must bind at least one capability-registry hash".to_owned(),
+            );
         }
         if self.pit_cutoff != pit_cutoff {
             return Err("source-slice PIT-cutoff binding mismatch".to_owned());
@@ -431,6 +439,8 @@ mod tests {
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             runtime_config_hash: hash(203),
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+            capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![hash(204)])
+                .expect("capability registry hashes"),
             pit_cutoffs: SourceSlicePitCutoffs {
                 catalog_available_at: materialized_at,
                 clob_market_info_available_at: materialized_at,
@@ -491,6 +501,7 @@ mod tests {
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             runtime_config_hash: hash,
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+            capability_registry_hashes: CapabilityRegistryHashes::default(),
             pit_cutoffs: SourceSlicePitCutoffs {
                 catalog_available_at: now,
                 clob_market_info_available_at: now,

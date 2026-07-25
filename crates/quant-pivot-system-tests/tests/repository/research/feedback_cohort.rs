@@ -24,7 +24,7 @@ use quant_pivot_models::{
         quant::{ExecutionOrderState, FeedbackCohort, OrderIntentStatus},
     },
     types::{
-        ContentHash, EventId, EvmBlockHash, EvmTransactionHash, ExecutionOrderId, OrderIntentId,
+        ContentHash, EvmBlockHash, EvmTransactionHash, ExecutionOrderId, OrderIntentId,
         PayoutRatio, RecommendationId, ReconciliationEvidence, ReconciliationEvidenceChain,
         ReconciliationId, Shares, TokenId, Usd,
     },
@@ -42,8 +42,9 @@ use quant_pivot_repository::{
 use quant_pivot_system_tests::{
     postgres::{PostgresClock, setup_pg},
     support::execution_pg_seed::{
-        ExecutionTxnIds, ReportSeedConfig, SharedDemoInfra, entry_execution_order,
-        fixture_profile_ref, seed_approved_intent, seed_report_fixture, seed_report_on_infra,
+        ExecutionTxnIds, FEEDBACK_SCALE_REPORT_COUNT, FEEDBACK_SCALE_TOTAL, ReportSeedConfig,
+        SharedDemoInfra, entry_execution_order, fixture_profile_ref, seed_approved_intent,
+        seed_feedback_scale, seed_report_fixture, seed_report_on_infra,
         seed_settlement_report_fixture, seed_shared_demo_infra,
     },
 };
@@ -51,10 +52,6 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
     IntoActiveModel, Statement,
 };
-
-const SCALE_REPORT_COUNT: usize = 11;
-const SCALE_RECOMMENDATIONS_PER_REPORT: usize = 1_000;
-const SCALE_EXPECTED_RECOMMENDATIONS: usize = SCALE_REPORT_COUNT * SCALE_RECOMMENDATIONS_PER_REPORT;
 
 pub async fn candidate_page_keyset_frozen() {
     let (pool, _database) = setup_pg().await;
@@ -285,8 +282,8 @@ pub async fn keyset_reads_without_duplicates() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let infra = seed_shared_demo_infra(&db).await;
-    let mut reports = Vec::with_capacity(SCALE_REPORT_COUNT);
-    for ordinal in 0..SCALE_REPORT_COUNT {
+    let mut reports = Vec::with_capacity(FEEDBACK_SCALE_REPORT_COUNT);
+    for ordinal in 0..FEEDBACK_SCALE_REPORT_COUNT {
         reports.push(seed_feedback_report(&db, &infra, ordinal + 100).await);
     }
     let window_start = reports
@@ -295,11 +292,12 @@ pub async fn keyset_reads_without_duplicates() {
         .min()
         .expect("scale reports")
         - Duration::minutes(1);
+    let report_cutoff = db.statement_time().await;
+    seed_feedback_scale(&db, &reports, window_start, report_cutoff).await;
     let cutoff = db.statement_time().await;
-    seed_scale_recommendations(&db, &reports, window_start, cutoff).await;
     let repository = PgFeedbackCohortRepository::new(db);
     let mut after = None;
-    let mut seen = HashSet::with_capacity(SCALE_EXPECTED_RECOMMENDATIONS);
+    let mut seen = HashSet::with_capacity(FEEDBACK_SCALE_TOTAL);
     let mut previous = None;
     let mut page_count = 0_usize;
 
@@ -336,8 +334,8 @@ pub async fn keyset_reads_without_duplicates() {
         after = Some(next);
     }
 
-    assert_eq!(seen.len(), SCALE_EXPECTED_RECOMMENDATIONS);
-    assert_eq!(page_count, SCALE_EXPECTED_RECOMMENDATIONS.div_ceil(257));
+    assert_eq!(seen.len(), FEEDBACK_SCALE_TOTAL);
+    assert_eq!(page_count, FEEDBACK_SCALE_TOTAL.div_ceil(257));
 }
 
 fn page_query(
@@ -515,135 +513,4 @@ async fn seed_feedback_report(
         },
     )
     .await
-}
-
-async fn seed_scale_recommendations(
-    db: &DatabaseConnection,
-    reports: &[ExecutionTxnIds],
-    window_start: DateTime<Utc>,
-    cutoff: DateTime<Utc>,
-) {
-    let profile_artifact_id = fixture_profile_ref().artifact_id();
-    let shared_event_id = EventId::new(&reports[0].event);
-    db.execute_raw(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        r"
-        INSERT INTO market (
-            market_id, event_id, question, slug, description, categories, status,
-            filter_reasons, outcome, yes_token_id, no_token_id, tick_size, neg_risk,
-            start_date, end_date, resolved_at, content_hash, created_at, updated_at
-        )
-        SELECT
-            'feedback-scale-market-' || ordinal,
-            template.event_id,
-            'Feedback scale market ' || ordinal,
-            'feedback-scale-market-' || ordinal,
-            template.description,
-            template.categories,
-            template.status,
-            template.filter_reasons,
-            template.outcome,
-            'feedback-scale-yes-' || ordinal,
-            'feedback-scale-no-' || ordinal,
-            template.tick_size,
-            template.neg_risk,
-            template.start_date,
-            template.end_date,
-            template.resolved_at,
-            template.content_hash,
-            template.created_at,
-            template.updated_at
-        FROM market AS template
-        CROSS JOIN generate_series(2, 1000) AS ordinal
-        WHERE template.market_id = $1
-        ",
-        [reports[0].market.clone().into()],
-    ))
-    .await
-    .expect("seed scale catalog FK rows");
-    db.execute_raw(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        r"
-        UPDATE quant_recommendation_report
-        SET top_n = 1000
-        WHERE research_profile_artifact_id = $1
-          AND decision_at >= $2
-          AND decision_at <= $3
-        ",
-        [
-            profile_artifact_id.clone().into(),
-            window_start.into(),
-            cutoff.into(),
-        ],
-    ))
-    .await
-    .expect("align scale report cardinality");
-    let result = db
-        .execute_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r"
-            WITH templates AS (
-                SELECT recommendation.*
-                FROM quant_recommendation AS recommendation
-                INNER JOIN quant_recommendation_report AS report
-                    ON report.recommendation_report_id =
-                       recommendation.recommendation_report_id
-                WHERE recommendation.research_profile_artifact_id = $1
-                  AND recommendation.rank = 1
-                  AND report.decision_at >= $2
-                  AND report.decision_at <= $3
-            )
-            INSERT INTO quant_recommendation (
-                recommendation_id, research_profile_artifact_id,
-                recommendation_report_id, rank, market_id, event_id, token_id,
-                outcome_side, composite_score, risk_adjusted_score, confidence,
-                expected_return_bps, downside_bps, identity, market_context,
-                rank_before_portfolio, liquidity_score, data_quality_score,
-                model_score_percentile, trade_plan, factor_breakdown, evidence_refs,
-                execution_eligibility, valid_from, valid_until, status, created_at
-            )
-            SELECT
-                md5(template.recommendation_report_id::text || ':' || ordinal)::uuid,
-                template.research_profile_artifact_id,
-                template.recommendation_report_id,
-                ordinal,
-                'feedback-scale-market-' || ordinal,
-                $4,
-                'feedback-scale-yes-' || ordinal,
-                template.outcome_side,
-                template.composite_score,
-                template.risk_adjusted_score,
-                template.confidence,
-                template.expected_return_bps,
-                template.downside_bps,
-                template.identity,
-                template.market_context,
-                ordinal,
-                template.liquidity_score,
-                template.data_quality_score,
-                template.model_score_percentile,
-                template.trade_plan,
-                template.factor_breakdown,
-                template.evidence_refs,
-                template.execution_eligibility,
-                template.valid_from,
-                template.valid_until,
-                template.status,
-                template.created_at
-            FROM templates AS template
-            CROSS JOIN generate_series(2, 1000) AS ordinal
-            ",
-            [
-                profile_artifact_id.into(),
-                window_start.into(),
-                cutoff.into(),
-                shared_event_id.into(),
-            ],
-        ))
-        .await
-        .expect("seed scale recommendations");
-    assert_eq!(
-        usize::try_from(result.rows_affected()).expect("bounded affected rows"),
-        SCALE_REPORT_COUNT * (SCALE_RECOMMENDATIONS_PER_REPORT - 1)
-    );
 }

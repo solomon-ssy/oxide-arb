@@ -803,8 +803,13 @@ mod tests {
         domain::market::CatalogWindowInfo,
         enums::clickhouse::ChCanonicalBookEventType,
         types::{
-            ContentHash, MarketId, SourceSliceInvalidSession, SourceSliceSessionInvalidationReason,
-            TokenId,
+            ArtifactUri, CapabilityRegistryHashes, CatalogSyncBatchId, ContentHash,
+            DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId, MarketId,
+            ReaderContractVersion, ResearchEvaluationTrack, SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
+            SchemaContractVersion, SourceSliceCatalogProof, SourceSliceInvalidSession,
+            SourceSliceManifest, SourceSliceObjectKind, SourceSliceObjectRef,
+            SourceSlicePitCutoffs, SourceSliceSessionInvalidationReason, TokenId,
+            builtin_research_profiles,
         },
     };
     use uuid::Uuid;
@@ -814,6 +819,65 @@ mod tests {
 
     fn hash(byte: char) -> ContentHash {
         ContentHash::parse(&format!("blake3:{}", byte.to_string().repeat(64))).expect("hash")
+    }
+
+    fn manifest(invalid_sessions: Vec<SourceSliceInvalidSession>) -> SourceSliceManifest {
+        let window_start = Utc.timestamp_opt(100, 0).single().expect("source start");
+        let window_end = Utc.timestamp_opt(120, 0).single().expect("source end");
+        let pit_cutoff = Utc.timestamp_opt(130, 0).single().expect("source cutoff");
+        let materialized_at = Utc.timestamp_opt(140, 0).single().expect("materialized at");
+        SourceSliceManifest {
+            format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
+            profile_ref: builtin_research_profiles()
+                .expect("built-in profiles")
+                .remove(0)
+                .profile_ref,
+            evaluation_track: ResearchEvaluationTrack::ResearchOnly,
+            research_program_hash: hash('1'),
+            window_start,
+            window_end,
+            pit_cutoff,
+            materialized_at,
+            catalog_proof: SourceSliceCatalogProof {
+                base_complete_batch_id: CatalogSyncBatchId::new(Uuid::from_u128(1)),
+                terminal_batch_id: CatalogSyncBatchId::new(Uuid::from_u128(2)),
+                committed_through: pit_cutoff,
+                ordered_batch_chain_hash: hash('2'),
+                market_count: 1,
+                event_count: 1,
+                snapshot_hash: hash('3'),
+            },
+            reader_contract_version: ReaderContractVersion::v1(),
+            schema_contract_version: SchemaContractVersion::v1(),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            runtime_config_hash: hash('4'),
+            dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+            capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![hash('5')])
+                .expect("canonical capabilities"),
+            pit_cutoffs: SourceSlicePitCutoffs {
+                catalog_available_at: pit_cutoff,
+                clob_market_info_available_at: pit_cutoff,
+                l2_available_at: pit_cutoff,
+                trade_tape_available_at: pit_cutoff,
+                weather_available_at: None,
+                calibration_available_at: None,
+                resolution_available_at: pit_cutoff,
+            },
+            invalid_sessions,
+            objects: vec![SourceSliceObjectRef {
+                kind: SourceSliceObjectKind::L2Ledger,
+                uri: ArtifactUri::parse("s3://fixture/source/l2.parquet")
+                    .expect("source object URI"),
+                object_version: "fixture-v1".to_owned(),
+                byte_hash: hash('6'),
+                schema_hash: hash('7'),
+                row_count: 3,
+                min_event_at: Some(window_start),
+                max_event_at: Some(window_end),
+                min_available_at: Some(window_start),
+                max_available_at: Some(pit_cutoff),
+            }],
+        }
     }
 
     fn event(token_id: &TokenId, session: Uuid, sequence: u64, at_ms: i64) -> BookL2LedgerRow {
@@ -892,7 +956,16 @@ mod tests {
             weather_calibrations: Vec::new(),
             linkages: HashMap::new(),
         };
+        let invalid_sessions = vec![SourceSliceInvalidSession {
+            token_id: token_id.to_string(),
+            session_id: session.to_string(),
+            invalidated_at: Utc.timestamp_opt(109, 0).single().expect("gap time"),
+            first_failure_sequence: Some(3),
+            reason: SourceSliceSessionInvalidationReason::SequenceGap,
+            diagnostic_hash: hash('b'),
+        }];
         let source = FrozenSourceSlice {
+            manifest: manifest(invalid_sessions.clone()),
             window_start: Utc.timestamp_opt(100, 0).single().expect("source start"),
             window_end: Utc.timestamp_opt(120, 0).single().expect("source end"),
             pit_cutoff: Utc.timestamp_opt(130, 0).single().expect("source cutoff"),
@@ -904,14 +977,7 @@ mod tests {
                 event(&token_id, session, 3, 115_000),
             ],
             sessions: Vec::new(),
-            invalid_sessions: vec![SourceSliceInvalidSession {
-                token_id: token_id.to_string(),
-                session_id: session.to_string(),
-                invalidated_at: Utc.timestamp_opt(109, 0).single().expect("gap time"),
-                first_failure_sequence: Some(3),
-                reason: SourceSliceSessionInvalidationReason::SequenceGap,
-                diagnostic_hash: hash('b'),
-            }],
+            invalid_sessions,
         };
         let page = source
             .replay_page(&ReplayPageRequest {

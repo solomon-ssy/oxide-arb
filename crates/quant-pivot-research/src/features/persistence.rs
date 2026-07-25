@@ -1,9 +1,12 @@
 //! Feature compute types → Postgres insert DTO projection.
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::{data_plane::DecisionBoundary, quant::NewFeatureVector},
+    domain::{
+        data_plane::DecisionBoundary,
+        quant::{FeatureVectorInfo, NewFeatureVector},
+    },
     enums::quant::DataQualityStatus,
     types::{
         ContentHash, DecisionCaptureEvidence, FeatureSourceRefs, FeatureVectorId,
@@ -103,5 +106,42 @@ impl FeatureVector {
             decision_capture: capture.clone(),
             decision_capture_hash,
         })
+    }
+}
+
+impl TryFrom<&FeatureVectorInfo> for FeatureVector {
+    type Error = QuantError;
+
+    fn try_from(info: &FeatureVectorInfo) -> Result<Self, Self::Error> {
+        info.payload
+            .validate()
+            .map_err(|detail| ResearchError::Serialization {
+                detail: format!(
+                    "persisted feature vector {} payload is invalid: {detail}",
+                    info.feature_vector_id
+                ),
+            })?;
+        let vector = Self {
+            market_id: info.market_id.clone(),
+            token_id: info.token_id.clone(),
+            decision_at: info.decision_at,
+            generic_schema_version: info.feature_schema_version,
+            generic: info.payload.generic.clone(),
+            domain: info.payload.domain.clone(),
+            data_quality: info.data_quality,
+        };
+        let expected_hash = ResearchHasher::feature_vector(&vector)?;
+        if expected_hash != info.feature_hash
+            || info.decision_at != info.decision_boundary.decision_at()
+        {
+            return Err(ResearchError::Serialization {
+                detail: format!(
+                    "persisted feature vector {} hash or decision boundary does not verify",
+                    info.feature_vector_id
+                ),
+            }
+            .into());
+        }
+        Ok(vector)
     }
 }

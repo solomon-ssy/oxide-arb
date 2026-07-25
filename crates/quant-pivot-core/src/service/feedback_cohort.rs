@@ -166,6 +166,7 @@ fn visible_resolution(
     Ok(Some(FeedbackResolutionEvidence {
         resolution_kind: outcome.resolution_kind,
         token_payout_ratio: outcome.token_payout_ratio,
+        resolved_at: outcome.resolved_at,
         available_at: outcome.available_at,
         outcome_hash: outcome.outcome_hash,
     }))

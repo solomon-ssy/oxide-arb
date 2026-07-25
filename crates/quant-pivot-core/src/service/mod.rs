@@ -14,6 +14,7 @@ pub mod feature_integrity;
 pub mod feature_parity_executor;
 pub mod feature_pipeline;
 pub mod feedback_cohort;
+pub mod feedback_dataset;
 pub mod frozen_model_parity;
 pub mod gamma;
 pub mod historical_replay;

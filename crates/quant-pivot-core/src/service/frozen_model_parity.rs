@@ -46,7 +46,7 @@ use quant_pivot_research::{
         SellScorerArtifact, WeightedFactorModelArtifact, fit_frozen_reference_quantiles,
         load_hash_verified_artifact, model_input_contract_hash, weighted_training_input_hash,
     },
-    training::{LabelName, RETURN_TO_HORIZON, SETTLEMENT_OUTCOME, TrainingExample},
+    training::{LabelName, RETURN_TO_HORIZON, TOKEN_PAYOUT_RATIO, TrainingExample},
 };
 #[cfg(feature = "ml-classical")]
 use quant_pivot_research::{
@@ -340,16 +340,15 @@ impl FrozenModelParityService {
         }
         let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
         let header = artifact.header();
-        let manifest =
-            dataset
-                .manifest_json
-                .as_ref()
-                .ok_or_else(|| ResearchError::Determinism {
-                    detail: format!(
-                        "dataset {} is missing its immutable manifest",
-                        dataset.training_dataset_id
-                    ),
-                })?;
+        let manifest = dataset
+            .manifest
+            .as_ref()
+            .ok_or_else(|| ResearchError::Determinism {
+                detail: format!(
+                    "dataset {} is missing its immutable manifest",
+                    dataset.training_dataset_id
+                ),
+            })?;
         let model_spec_definition_hash = &spec.definition_hash;
         if header.model_version_id != version.model_version_id
             || &manifest.model_spec_definition_hash != model_spec_definition_hash
@@ -594,9 +593,9 @@ fn verify_classical_artifact_binding(
     }
     let target = spec.training_contract.target_label_name.as_str();
     let target_semantics = if artifact.kind == ClassicalKind::LogisticRegression
-        && target == SETTLEMENT_OUTCOME.as_str()
+        && target == TOKEN_PAYOUT_RATIO.as_str()
     {
-        ClassicalOutputSemantics::SettlementProbability
+        ClassicalOutputSemantics::FullPayoutProbability
     } else if !matches!(artifact.kind, ClassicalKind::LogisticRegression)
         && target == RETURN_TO_HORIZON.as_str()
         && spec.training_contract.target_label_horizon_secs == prediction_horizon_secs
@@ -886,11 +885,14 @@ mod tests {
             },
         },
         types::{
-            ContentHash, DecisionPolicySnapshotId, EventId, FeatureParityDetail,
+            CapabilityRegistryHashes, ContentHash, DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+            DatasetSourceLineage, DecisionPolicySnapshotId, EventId, FeatureParityDetail,
             FeatureParityDetailSource, FeatureParityRunId, MarketId, ModelInputContract,
-            ModelInputSpec, ModelSpecId, ModelVersionId, RoleCode, SchemaVersion, TokenId,
-            TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource,
-            model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
+            ModelInputSpec, ModelSpecId, ModelVersionId, ReaderContractVersion,
+            ResearchProfileArtifactId, RoleCode, SchemaContractVersion, SchemaVersion,
+            SourceSliceId, TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
+            TrainingSampleSource, model_metrics::ModelVersionMetrics,
+            model_training::ModelTrainingObjective,
         },
     };
     use quant_pivot_research::{
@@ -903,7 +905,8 @@ mod tests {
         verify_input_contract_binding,
     };
     use crate::test_fixtures::{
-        execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
+        execution_pg_seed::{fixture_profile_ref, source_slice_ref},
+        model_spec_fixtures::model_spec_lineage_fixture,
     };
 
     fn hash(seed: char) -> ContentHash {
@@ -917,6 +920,27 @@ mod tests {
         let model_spec_id = ModelSpecId::from_v7();
         let training_dataset_id = TrainingDatasetId::from_v7();
         let feature_hash = hash('a');
+        let profile_ref = fixture_profile_ref();
+        let source_slice_id = SourceSliceId::from_v7();
+        let decision_policy_snapshot_id = DecisionPolicySnapshotId::from_v7();
+        let source_lineage = DatasetSourceLineage {
+            format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+            source_slice_id,
+            source_slice_identity_hash: hash('c'),
+            research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile_ref),
+            research_program_hash: hash('e'),
+            source_slice: source_slice_ref('f'),
+            source_window_start: now - Duration::hours(3),
+            source_window_end: now,
+            pit_cutoff: now,
+            decision_policy_snapshot_id,
+            runtime_config_hash: hash('1'),
+            reader_contract_version: ReaderContractVersion::v1(),
+            schema_contract_version: SchemaContractVersion::v1(),
+            source_schema_hash: hash('2'),
+            capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![hash('3')])
+                .expect("canonical capabilities"),
+        };
         let (model_spec_thesis, model_spec_definition_hash) =
             model_spec_lineage_fixture("frozen-parity-test-spec");
         let version = ModelVersionInfo {
@@ -929,16 +953,14 @@ mod tests {
             version: 1,
             artifact_hash: hash('b'),
             category_scope: None,
-            profile_ref: fixture_profile_ref(),
+            profile_ref,
             training_dataset_id: Some(training_dataset_id),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
             publish_path_set_id: None,
             derivation_kind: ModelVersionInfo::training_derivation_kind(),
             parent_model_version_id: None,
-            source_backtest_report_id: None,
             calibration_artifact_id: None,
-            score_multiplier_calibration_report: None,
             derivation_evidence_hash: None,
             metrics: ModelVersionMetrics::not_measured("test fixture"),
             training_objective: ModelTrainingObjective::hand_authored("test fixture"),
@@ -952,6 +974,12 @@ mod tests {
             training_dataset_id,
             model_spec_id,
             model_spec_definition_hash: hash('d'),
+            research_profile_artifact_id: source_lineage.research_profile_artifact_id.clone(),
+            source_slice_id,
+            pit_cutoff: source_lineage.pit_cutoff,
+            source_lineage,
+            feedback_cohort: None,
+            cohort_manifest: None,
             window_start: now - Duration::hours(2),
             window_end: now - Duration::hours(1),
             status: TrainingDatasetStatus::Ready,
@@ -961,7 +989,7 @@ mod tests {
             label_schema_hash: None,
             dataset_hash: None,
             manifest_hash: None,
-            manifest_json: None,
+            manifest: None,
             artifact_bytes_hash: None,
             parquet_uri: None,
             sample_count: None,
@@ -970,8 +998,8 @@ mod tests {
             horizons_secs: TrainingHorizonsSecs(Vec::new()),
             feature_schema_version: None,
             sample_sources: None,
-            coverage_json: None,
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            coverage: None,
+            decision_policy_snapshot_id,
             failure_detail: None,
             completed_at: Some(now),
             created_at: now - Duration::hours(3),

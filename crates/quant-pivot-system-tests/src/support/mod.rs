@@ -18,6 +18,7 @@ pub mod policy_fixtures;
 pub mod report_fixtures;
 pub mod report_lifecycle_seed;
 pub mod report_pipeline_harness;
+pub mod research_browser_seed;
 pub mod research_fixtures;
 pub mod storage;
 pub mod trade_tape_fixtures;

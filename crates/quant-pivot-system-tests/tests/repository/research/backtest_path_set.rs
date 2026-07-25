@@ -2,10 +2,7 @@
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
-    domain::quant::{
-        CompleteTrainingDatasetBuild, NewBacktestPathSet, NewModelRun, NewModelVersion,
-        NewTrainingDatasetPlan,
-    },
+    domain::quant::{NewBacktestPathSet, NewModelRun, NewModelVersion},
     enums::{
         model::ModelFamily,
         quant::{
@@ -13,10 +10,9 @@ use quant_pivot_models::{
         },
     },
     types::{
-        ArtifactUri, BacktestPathSetId, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
-        DatasetCoverage, DatasetManifest, DecisionPolicySnapshotId, ModelInputContract, ModelRunId,
-        ModelSpecId, ModelTrainingContract, ModelVersionId, SchemaVersion, TrainingDatasetId,
-        TrainingHorizonsSecs, TrainingSampleSources,
+        ArtifactUri, BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelInputContract,
+        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, SchemaVersion,
+        TrainingDatasetId, TrainingSampleSources,
         backtest::{BacktestPaths, SharpeDistribution},
         default_sample_sources,
         model_metrics::ModelVersionMetrics,
@@ -36,7 +32,11 @@ use quant_pivot_repository::{
 use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
-        execution_pg_seed, model_spec_fixtures, policy_fixtures::bootstrap_default_policy_bundle,
+        execution_pg_seed, model_spec_fixtures,
+        policy_fixtures::bootstrap_default_policy_bundle,
+        research_fixtures::{
+            DatasetLedgerFixture, DatasetLedgerSeed, DatasetSourceSeed, seed_dataset_source,
+        },
     },
 };
 use rust_decimal_macros::dec;
@@ -97,46 +97,44 @@ async fn seed_training_dataset(
         ModelTrainingContract::settlement_default(),
     )
     .definition_hash;
-    let manifest = DatasetManifest {
-        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+    let source_lineage = seed_dataset_source(
+        db,
+        DatasetSourceSeed {
+            scope: format!("pg-path-set:{training_dataset_id}"),
+            profile_ref: execution_pg_seed::fixture_profile_ref(),
+            decision_policy_snapshot_id: *rc_id,
+            window_start,
+            window_end,
+            pit_cutoff: window_end + ChronoDuration::hours(1),
+        },
+    )
+    .await
+    .expect("source lineage");
+    let fixture = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
         training_dataset_id,
-        profile_ref: execution_pg_seed::fixture_profile_ref(),
-        research_program_hash: content_hash('4'),
-        source_slice: execution_pg_seed::source_slice_ref('5'),
         model_spec_id: *model_spec_id,
         model_spec_definition_hash,
-        trade_policy_artifact_id: None,
-        trade_policy_hash: None,
-        decision_policy_snapshot_id: *rc_id,
+        source_lineage,
+        cohort_manifest: None,
         window_start,
         window_end,
         purpose: DatasetPurpose::Training,
         knowledge_lag_secs: 10,
         sample_interval_secs: 3_600,
         horizons_secs: vec![0],
+        feature_schema_version: Some(SchemaVersion::FIRST),
+        sample_sources: Some(TrainingSampleSources(default_sample_sources())),
         feature_schema_hash: content_hash('1'),
         factor_schema_hash: content_hash('2'),
         label_schema_hash: content_hash('3'),
         semantic_dataset_hash: content_hash('4'),
         source_fingerprint: content_hash('7'),
         sample_count: 10,
-    };
+    })
+    .expect("dataset fixture");
     let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
     dataset_repo
-        .create_plan(NewTrainingDatasetPlan {
-            training_dataset_id,
-            model_spec_id: *model_spec_id,
-            model_spec_definition_hash,
-            window_start,
-            window_end,
-            purpose: DatasetPurpose::Training,
-            knowledge_lag_secs: 10,
-            sample_interval_secs: 3_600,
-            horizons_secs: TrainingHorizonsSecs(vec![0]),
-            feature_schema_version: Some(SchemaVersion::FIRST),
-            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            decision_policy_snapshot_id: *rc_id,
-        })
+        .create_plan(fixture.plan.clone())
         .await
         .expect("dataset plan");
     dataset_repo
@@ -146,20 +144,15 @@ async fn seed_training_dataset(
     dataset_repo
         .complete_build(
             &training_dataset_id,
-            CompleteTrainingDatasetBuild {
-                status: TrainingDatasetStatus::Ready,
-                feature_schema_hash: content_hash('1'),
-                factor_schema_hash: content_hash('2'),
-                label_schema_hash: content_hash('3'),
-                dataset_hash: content_hash('4'),
-                manifest_hash: content_hash('5'),
-                manifest_json: manifest,
-                artifact_bytes_hash: content_hash('6'),
-                parquet_uri: ArtifactUri::parse("file:///tmp/pg-path-set-it.parquet").expect("uri"),
-                sample_count: 10,
-                coverage_json: DatasetCoverage::default(),
-                failure_detail: None,
-            },
+            fixture
+                .completion(
+                    TrainingDatasetStatus::Ready,
+                    content_hash('6'),
+                    ArtifactUri::parse("file:///tmp/pg-path-set-it.parquet").expect("uri"),
+                    fixture.coverage(),
+                    None,
+                )
+                .expect("dataset completion"),
         )
         .await
         .expect("dataset");

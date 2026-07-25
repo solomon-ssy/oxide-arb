@@ -293,6 +293,25 @@ pub struct DecisionSnapshotEvidence {
     pub book_snapshot_ref: BookSnapshotRef,
     pub book_effective_at: DateTime<Utc>,
     pub book_available_at: DateTime<Utc>,
+    /// Exact selection member admitted before feature/model computation.
+    ///
+    /// Feedback datasets reuse this immutable serving input instead of
+    /// reconstructing selection state from a mutable catalog projection.
+    pub selection: SelectionMemberEvidence,
+}
+
+/// Immutable selection member consumed by one serving decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectionMemberEvidence {
+    pub market_id: MarketId,
+    pub event_id: EventId,
+    pub category: MarketCategory,
+    pub primary_token_id: TokenId,
+    pub secondary_token_id: Option<TokenId>,
+    pub liquidity_usd: Option<Usd>,
+    pub volume_24h_usd: Option<Usd>,
+    pub source_refs: Vec<EvidenceSourceRef>,
 }
 
 /// Full business capture consumed by report composition and parity replay.

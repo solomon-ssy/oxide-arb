@@ -78,7 +78,7 @@ impl ModelTrainingContract {
     #[must_use]
     pub fn settlement_default() -> Self {
         Self {
-            target_label_name: "settlement_outcome".to_owned(),
+            target_label_name: "token_payout_ratio".to_owned(),
             target_label_horizon_secs: 0,
             validation_folds: 3,
             trade_policy_artifact_id: None,

@@ -14,9 +14,9 @@
 //! Leakage violations abort the build with an HTTP error and **do not** write a
 //! ledger row (distinct from terminal `failed`, which persists diagnostics).
 //!
-//! Terminal semantics mirror [`TrainingDatasetStatus`]: trainer/backtest gates in
-//! consume only `ready` datasets; `insufficient_labels` still persists the
-//! Parquet artifact for inspection.
+//! Terminal semantics mirror [`TrainingDatasetStatus`]: every consumer requires
+//! `ready` plus its exact [`DatasetPurpose`]; `insufficient_labels` still
+//! persists the Parquet artifact for inspection.
 
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
@@ -25,11 +25,12 @@ use validator::Validate;
 
 use crate::{
     domain::{pagination::PageRequest, quant::TrainingDatasetInfo},
-    enums::quant::{DatasetPurpose, TrainingDatasetStatus},
+    enums::quant::{DatasetPurpose, FeedbackCohort, TrainingDatasetStatus},
     half_open_window_request,
     types::{
-        ContentHash, DatasetCoverage, DatasetManifest, DecisionPolicySnapshotId, ModelSpecId,
-        ResearchProfileRef, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
+        ContentHash, DatasetCohortManifest, DatasetCoverage, DatasetManifest, DatasetSourceLineage,
+        DecisionPolicySnapshotId, ModelSpecId, ResearchProfileArtifactId, ResearchProfileRef,
+        SchemaVersion, SourceSliceId, TrainingDatasetId, TrainingHorizonsSecs,
         TrainingSampleSource, TrainingSampleSources, default_sample_sources,
     },
 };
@@ -127,6 +128,12 @@ pub struct TrainingDatasetView {
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
     pub model_spec_definition_hash: ContentHash,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    pub source_slice_id: SourceSliceId,
+    pub pit_cutoff: DateTime<Utc>,
+    pub source_lineage: DatasetSourceLineage,
+    pub feedback_cohort: Option<FeedbackCohort>,
+    pub cohort_manifest: Option<DatasetCohortManifest>,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     /// Lifecycle state — UI should map to badges and gate trainer actions on `ready`.
@@ -137,7 +144,7 @@ pub struct TrainingDatasetView {
     pub label_schema_hash: Option<ContentHash>,
     pub dataset_hash: Option<ContentHash>,
     pub manifest_hash: Option<ContentHash>,
-    /// Structured projection of the exact frozen v4 artifact manifest. `None`
+    /// Structured projection of the exact frozen v2 artifact manifest. `None`
     /// means materialization did not complete successfully.
     pub manifest: Option<DatasetManifestView>,
     pub artifact_bytes_hash: Option<ContentHash>,
@@ -152,7 +159,7 @@ pub struct TrainingDatasetView {
     pub feature_schema_version: Option<SchemaVersion>,
     pub sample_sources: Option<TrainingSampleSources>,
     /// Build diagnostics: planned vs built examples, decode failures, label skips, etc.
-    pub coverage_json: Option<DatasetCoverage>,
+    pub coverage: Option<DatasetCoverage>,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub failure_detail: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -187,6 +194,12 @@ impl From<TrainingDatasetInfo> for TrainingDatasetView {
             training_dataset_id: info.training_dataset_id,
             model_spec_id: info.model_spec_id,
             model_spec_definition_hash: info.model_spec_definition_hash,
+            research_profile_artifact_id: info.research_profile_artifact_id,
+            source_slice_id: info.source_slice_id,
+            pit_cutoff: info.pit_cutoff,
+            source_lineage: info.source_lineage,
+            feedback_cohort: info.feedback_cohort,
+            cohort_manifest: info.cohort_manifest,
             window_start: info.window_start,
             window_end: info.window_end,
             status: info.status,
@@ -196,7 +209,7 @@ impl From<TrainingDatasetInfo> for TrainingDatasetView {
             label_schema_hash: info.label_schema_hash,
             dataset_hash: info.dataset_hash,
             manifest_hash: info.manifest_hash,
-            manifest: info.manifest_json.map(DatasetManifestView),
+            manifest: info.manifest.map(DatasetManifestView),
             artifact_bytes_hash: info.artifact_bytes_hash,
             parquet_uri: info.parquet_uri.map(|uri| uri.to_string()),
             sample_count: info.sample_count,
@@ -205,7 +218,7 @@ impl From<TrainingDatasetInfo> for TrainingDatasetView {
             horizons_secs: info.horizons_secs,
             feature_schema_version: info.feature_schema_version,
             sample_sources: info.sample_sources,
-            coverage_json: info.coverage_json,
+            coverage: info.coverage,
             decision_policy_snapshot_id: info.decision_policy_snapshot_id,
             failure_detail: info.failure_detail,
             completed_at: info.completed_at,

@@ -9,7 +9,7 @@ use quant_pivot_models::{
             LatestFactorSnapshotInfo, NewFactorDefinition, NewFactorValue,
         },
     },
-    types::{FactorDefinitionId, MarketId, ModelRunId, ModelVersionId},
+    types::{FactorDefinitionId, FeatureVectorId, MarketId, ModelRunId, ModelVersionId},
 };
 
 /// Factor definition and value persistence port.
@@ -62,6 +62,12 @@ pub trait FactorRepository: Send + Sync {
     async fn list_values_for_run(
         &self,
         model_run_id: &ModelRunId,
+    ) -> Result<Vec<FactorValueInfo>, StorageError>;
+
+    /// Batch-load exact factor rows by their immutable source feature vectors.
+    async fn find_values_by_vectors(
+        &self,
+        feature_vector_ids: &[FeatureVectorId],
     ) -> Result<Vec<FactorValueInfo>, StorageError>;
 
     /// Factor values for the given definitions within `[from, until)`, ascending

@@ -21,9 +21,10 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::DecisionPolicySnapshot,
     types::{
-        ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId,
-        ResearchEvaluationTrack, ResearchProfileArtifact, SourceSliceManifest,
-        SourceSliceManifestRef, TrainingDatasetId, TrainingSampleSource,
+        ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+        DatasetSourceLineage, DecisionPolicySnapshotId, ResearchEvaluationTrack,
+        ResearchProfileArtifact, SourceSliceManifest, SourceSliceManifestRef, TrainingDatasetId,
+        TrainingSampleSource,
     },
 };
 use quant_pivot_repository::traits::{
@@ -70,6 +71,23 @@ pub struct CoreTrainingDatasetPort {
 }
 
 impl CoreTrainingDatasetPort {
+    fn normalize_public_sources(
+        sources: &[TrainingSampleSource],
+    ) -> QuantResult<Vec<TrainingSampleSource>> {
+        let mut sources = sources.to_vec();
+        sources.sort();
+        sources.dedup();
+        if sources.contains(&TrainingSampleSource::RecommendationFeedback) {
+            return Err(ResearchError::DatasetPlan {
+                detail:
+                    "recommendation_feedback datasets are internal artifacts of a frozen feedback cycle"
+                        .to_owned(),
+            }
+            .into());
+        }
+        Ok(sources)
+    }
+
     /// Assemble the port from an already-wired research bundle + deploy tunables.
     #[must_use]
     pub fn from_research(
@@ -152,37 +170,45 @@ impl CoreTrainingDatasetPort {
         verify_object_bytes: bool,
     ) -> QuantResult<()> {
         let profile = request
-            .profile_ref
+            .source_lineage
+            .research_profile_artifact_id
+            .profile_ref()
             .resolve_builtin_research_profile()
             .map_err(|detail| ResearchError::DatasetPlan { detail })?;
         let bytes = self
             .artifact_store
-            .get(&request.source_slice.manifest_uri)
+            .get(&request.source_lineage.source_slice.manifest_uri)
             .await?;
         let actual_manifest_hash = CanonicalDigest::content_hash_bytes(&bytes);
-        if actual_manifest_hash != request.source_slice.manifest_hash {
+        if actual_manifest_hash != request.source_lineage.source_slice.manifest_hash {
             return Err(ResearchError::DatasetPlan {
                 detail: format!(
                     "source-slice manifest byte hash mismatch: expected {}, got {actual_manifest_hash}",
-                    request.source_slice.manifest_hash
+                    request.source_lineage.source_slice.manifest_hash
                 ),
             }
             .into());
         }
         let manifest = serde_json::from_slice::<SourceSliceManifest>(&bytes).map_err(|error| {
             ResearchError::DatasetPlan {
-                detail: format!("source-slice manifest is not valid v2 JSON: {error}"),
+                detail: format!("source-slice manifest is not valid v3 JSON: {error}"),
             }
         })?;
         manifest
             .validate_for_profile(
                 &profile,
-                &request.research_program_hash,
+                &request.source_lineage.research_program_hash,
                 request.window_start,
                 request.window_end,
-                request.pit_cutoff,
+                request.source_lineage.pit_cutoff,
             )
             .map_err(|detail| ResearchError::DatasetPlan { detail })?;
+        request
+            .source_lineage
+            .verify_manifest(&manifest)
+            .map_err(|error| ResearchError::DatasetPlan {
+                detail: error.to_string(),
+            })?;
 
         for object in &manifest.objects {
             let metadata = self.artifact_store.metadata(&object.uri).await?;
@@ -278,6 +304,15 @@ impl CoreTrainingDatasetPort {
         materialize: Option<&CancellationToken>,
         policy_fit: Option<FrozenPolicyFitProgram<'_>>,
     ) -> QuantResult<(DatasetPlanRequest, SourceSliceInfo)> {
+        let sample_sources = Self::normalize_public_sources(&body.sample_sources)?;
+        if body.purpose == DatasetPurpose::Evaluation {
+            return Err(ResearchError::DatasetPlan {
+                detail:
+                    "Evaluation datasets are internal artifacts of a frozen FeedbackCycle cohort"
+                        .to_owned(),
+            }
+            .into());
+        }
         if body.purpose == DatasetPurpose::PolicyFit && policy_fit.is_none() {
             return Err(ResearchError::DatasetPlan {
                 detail:
@@ -305,9 +340,6 @@ impl CoreTrainingDatasetPort {
                 id: body.decision_policy_snapshot_id.to_string(),
             })?;
         let frozen_runtime = runtime.snapshot;
-        let mut sample_sources = body.sample_sources.clone();
-        sample_sources.sort_by_key(|source| sample_source_order(*source));
-        sample_sources.dedup();
         let (identity, research_program_hash) = derive_dataset_source_identity(
             body,
             &profile,
@@ -332,16 +364,45 @@ impl CoreTrainingDatasetPort {
                 )
             })?,
         };
+        let source_manifest = source_slice.manifest.as_ref().ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some("quant_source_slice"),
+                "ready source slice has no typed manifest",
+            )
+        })?;
+        let source_lineage = DatasetSourceLineage {
+            format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+            source_slice_id: source_slice.source_slice_id,
+            source_slice_identity_hash: source_slice.identity_hash,
+            research_profile_artifact_id: body.profile_ref.artifact_id(),
+            research_program_hash,
+            source_slice: source_slice_ref,
+            source_window_start: source_slice.window_start,
+            source_window_end: source_slice.window_end,
+            pit_cutoff: source_slice.pit_cutoff,
+            decision_policy_snapshot_id: source_slice.decision_policy_snapshot_id,
+            runtime_config_hash: source_slice.runtime_config_hash,
+            reader_contract_version: source_slice.reader_contract_version.clone(),
+            schema_contract_version: source_slice.schema_contract_version.clone(),
+            source_schema_hash: DatasetSourceLineage::derive_schema_hash(source_manifest).map_err(
+                |error| ResearchError::DatasetPlan {
+                    detail: error.to_string(),
+                },
+            )?,
+            capability_registry_hashes: source_manifest.capability_registry_hashes.clone(),
+        };
+        source_lineage
+            .validate()
+            .map_err(|error| ResearchError::DatasetPlan {
+                detail: error.to_string(),
+            })?;
         Ok((
             DatasetPlanRequest {
                 model_spec_id: body.model_spec_id,
-                profile_ref: body.profile_ref.clone(),
-                research_program_hash,
-                source_slice: source_slice_ref,
-                decision_policy_snapshot_id: body.decision_policy_snapshot_id,
+                source_lineage,
+                cohort_manifest: None,
                 window_start: body.window_start,
                 window_end: body.window_end,
-                pit_cutoff: body.pit_cutoff,
                 sample_interval_secs: body.sample_interval_secs,
                 horizons_secs: body.horizons_secs.clone(),
                 knowledge_lag_secs: body.knowledge_lag_secs,
@@ -352,6 +413,37 @@ impl CoreTrainingDatasetPort {
             },
             source_slice,
         ))
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use quant_pivot_error::{QuantError, research::ResearchError};
+    use quant_pivot_models::types::TrainingSampleSource;
+
+    use super::CoreTrainingDatasetPort;
+
+    #[test]
+    fn public_sources_reject_feedback() {
+        let error = CoreTrainingDatasetPort::normalize_public_sources(&[
+            TrainingSampleSource::HistoricalPit,
+            TrainingSampleSource::RecommendationFeedback,
+        ])
+        .expect_err("public API must not construct a feedback Dataset");
+        assert!(matches!(
+            error,
+            QuantError::Research(ResearchError::DatasetPlan { detail })
+                if detail.contains("internal artifacts of a frozen feedback cycle")
+        ));
+
+        assert_eq!(
+            CoreTrainingDatasetPort::normalize_public_sources(&[
+                TrainingSampleSource::HistoricalPit,
+                TrainingSampleSource::HistoricalPit,
+            ])
+            .expect("canonical public sources"),
+            [TrainingSampleSource::HistoricalPit]
+        );
     }
 }
 
@@ -438,13 +530,6 @@ fn derive_dataset_source_identity(
         pit_cutoff: body.pit_cutoff,
     })?;
     Ok((identity, research_program_hash))
-}
-
-const fn sample_source_order(source: TrainingSampleSource) -> u8 {
-    match source {
-        TrainingSampleSource::HistoricalPit => 0,
-        TrainingSampleSource::ExitDecision => 1,
-    }
 }
 
 #[async_trait]

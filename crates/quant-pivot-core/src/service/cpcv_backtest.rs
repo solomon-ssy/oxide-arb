@@ -23,7 +23,11 @@ use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::quant::{JobProgressSink, TrainingDatasetInfo},
-    enums::{common::MarketCategory, model::ModelFamily, quant::TrainingDatasetStatus},
+    enums::{
+        common::MarketCategory,
+        model::ModelFamily,
+        quant::{DatasetPurpose, TrainingDatasetStatus},
+    },
     runtime_config::{FactorCrossSectionConfig, PortfolioConfig, sections::FactorsConfig},
     types::{
         BacktestPathSetId, BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId,
@@ -433,29 +437,30 @@ impl CpcvBacktestService {
         let header_template = ModelArtifactHeader {
             model_version_id: ModelVersionId::from_v7(),
             model_spec_definition_hash: dataset
-                .manifest_json
+                .manifest
                 .as_ref()
                 .ok_or_else(|| ResearchError::ValidationMethodology {
                     detail: "v5 CPCV dataset is missing its manifest".to_owned(),
                 })?
                 .model_spec_definition_hash,
             profile_ref: dataset
-                .manifest_json
+                .manifest
                 .as_ref()
                 .ok_or_else(|| ResearchError::ValidationMethodology {
                     detail: "v5 CPCV dataset is missing its manifest".to_owned(),
                 })?
-                .profile_ref
-                .clone(),
+                .source_lineage
+                .research_profile_artifact_id
+                .profile_ref(),
             model_family: input.model_family,
             feature_schema_hash: *materialization.feature_schema_hash,
             factor_schema_hash: *materialization.factor_schema_hash,
             trade_policy_artifact_id: dataset
-                .manifest_json
+                .manifest
                 .as_ref()
                 .and_then(|manifest| manifest.trade_policy_artifact_id),
             trade_policy_hash: dataset
-                .manifest_json
+                .manifest
                 .as_ref()
                 .and_then(|manifest| manifest.trade_policy_hash),
         };
@@ -470,11 +475,12 @@ impl CpcvBacktestService {
             input_contract: input.input_contract.clone(),
         };
         let source_slice = dataset
-            .manifest_json
+            .manifest
             .as_ref()
             .ok_or_else(|| ResearchError::DatasetBuild {
-                detail: "CPCV dataset has no immutable v1 manifest".to_owned(),
+                detail: "CPCV dataset has no immutable v2 manifest".to_owned(),
             })?
+            .source_lineage
             .source_slice
             .clone();
         let frozen_source = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
@@ -503,6 +509,7 @@ impl CpcvBacktestService {
         );
         let handle = Handle::current();
         let replay_template = Arc::new(ReplayTemplate::Portfolio(PortfolioReplayTemplate {
+            dataset_id: input.training_dataset_id,
             ticks_by_as_of,
             groups: Arc::clone(&groups),
             caps: self.caps.clone(),
@@ -733,29 +740,30 @@ impl CpcvBacktestService {
         let header_template = ModelArtifactHeader {
             model_version_id: ModelVersionId::from_v7(),
             model_spec_definition_hash: dataset
-                .manifest_json
+                .manifest
                 .as_ref()
                 .ok_or_else(|| ResearchError::ValidationMethodology {
                     detail: "v5 sell CPCV dataset is missing its manifest".to_owned(),
                 })?
                 .model_spec_definition_hash,
             profile_ref: dataset
-                .manifest_json
+                .manifest
                 .as_ref()
                 .ok_or_else(|| ResearchError::ValidationMethodology {
                     detail: "v5 sell CPCV dataset is missing its manifest".to_owned(),
                 })?
-                .profile_ref
-                .clone(),
+                .source_lineage
+                .research_profile_artifact_id
+                .profile_ref(),
             model_family: input.model_family,
             feature_schema_hash: *materialization.feature_schema_hash,
             factor_schema_hash: *materialization.factor_schema_hash,
             trade_policy_artifact_id: dataset
-                .manifest_json
+                .manifest
                 .as_ref()
                 .and_then(|manifest| manifest.trade_policy_artifact_id),
             trade_policy_hash: dataset
-                .manifest_json
+                .manifest
                 .as_ref()
                 .and_then(|manifest| manifest.trade_policy_hash),
         };
@@ -883,6 +891,15 @@ impl CpcvBacktestService {
                 detail: format!(
                     "cpcv backtest requires a Ready dataset, got {}",
                     dataset.status.as_str()
+                ),
+            }
+            .into());
+        }
+        if dataset.purpose != DatasetPurpose::Training {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "CPCV requires purpose=training, got {}",
+                    dataset.purpose.as_str()
                 ),
             }
             .into());
@@ -1398,6 +1415,7 @@ enum ReplayTemplate {
 }
 
 struct PortfolioReplayTemplate {
+    dataset_id: TrainingDatasetId,
     ticks_by_as_of: Arc<BTreeMap<DateTime<Utc>, BacktestTick>>,
     groups: Arc<[TimelineGroup]>,
     caps: PortfolioCaps,
@@ -1731,6 +1749,7 @@ fn evaluate_portfolio_groups(
     let request = BacktestRequest {
         backtest_report_id: BacktestReportId::from_v7(),
         model_version_id: model.model_version_id(),
+        dataset_id: template.dataset_id,
         decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
         window_start: ticks.first().map_or_else(Utc::now, |tick| tick.decision_at),
         window_end: ticks.last().map_or_else(Utc::now, |tick| tick.decision_at),
@@ -2469,7 +2488,7 @@ mod tests {
     fn selected_label_returns_example() {
         let example = lot_decision(PositionId::from_v7(), ts(0), ts(100));
         let other = LabelSelector {
-            name: LabelName::new("settlement_outcome"),
+            name: LabelName::new("token_payout_ratio"),
             horizon_secs: 0,
         };
         assert!(selected_label_matured_at(&example, &other).is_none());

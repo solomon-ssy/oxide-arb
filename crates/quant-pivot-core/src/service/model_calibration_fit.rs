@@ -50,7 +50,7 @@ use crate::{
     app::ports::backtest::CoreBacktestPort,
     governance::model_score_content_hash,
     service::{
-        backtest::BacktestInput,
+        backtest::CalibrationReplayInput,
         calibration_shared::{
             assert_dataset_disjoint, assert_embargoed_after, calibration_split_hash,
         },
@@ -417,14 +417,12 @@ impl ModelCalibrationFitService {
             .backtest_port
             .backtest_service_for(decision_policy_snapshot_id)
             .await?;
-        let (_report, samples) = backtest
+        let samples = backtest
             .run_for_calibration(
-                BacktestInput {
+                CalibrationReplayInput {
                     model_version_id: request.model_version_id,
-                    training_dataset_id: request.calibration_dataset_id,
+                    calibration_dataset_id: request.calibration_dataset_id,
                     decision_policy_snapshot_id: *decision_policy_snapshot_id,
-                    calibrate: false,
-                    backtest_report_id: None,
                 },
                 progress,
                 cancel,

@@ -1,6 +1,7 @@
 //! Trainer and backtest system contracts: train a weighted model from a
 //! frozen dataset, register a Candidate, replay its exact frozen input, and
-//! fit a calibrated child version — all without ever touching a live `BookStore`.
+//! persist immutable Evaluation evidence — all without ever touching a live
+//! `BookStore` or deriving a child model from the holdout.
 //!
 //! Frozen Parquet is the sole source of the selected market, `FeatureCell`,
 //! factor, and label bytes consumed by both training and backtest.
@@ -25,10 +26,7 @@ use quant_pivot_models::{
         api::{BacktestPathSetView, RunCpcvBacktestRequest},
         data_plane::DecisionClock,
         ports::CpcvBacktestPort,
-        quant::{
-            CompleteTrainingDatasetBuild, ModelVersionInfo, NewTrainingDatasetPlan,
-            NoopProgressSink,
-        },
+        quant::{ModelVersionInfo, NoopProgressSink},
     },
     entities::{
         market::{Column as MarketColumn, Entity as MarketEntity},
@@ -51,13 +49,11 @@ use quant_pivot_models::{
         TrainingOptimizerKind, wire::DecimalValue,
     },
     types::{
-        BacktestPathSetId, Bps, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
-        DatasetManifest, DecisionPolicySnapshotId, EventId, FactorDefinitionId, FeatureCell,
-        FeatureStaleness, FeatureValue, MarketId, ModelInputContract, ModelSpecId,
+        BacktestPathSetId, Bps, ContentHash, DecisionPolicySnapshotId, EventId, FactorDefinitionId,
+        FeatureCell, FeatureStaleness, FeatureValue, MarketId, ModelInputContract, ModelSpecId,
         ModelTrainingContract, ModelVersionId, POOLED_1H_CONTROL_PROFILE_ID, Probability,
-        SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
-        TrainingSampleSource, TrainingSampleSources, Usd, builtin_research_profiles,
-        default_sample_sources,
+        SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId, TrainingSampleSource,
+        TrainingSampleSources, Usd, builtin_research_profiles, default_sample_sources,
         factor::FactorExplanation,
         model_metrics::{HeldOutMetricKind, ModelVersionMetricsDefinition},
         model_training::ModelTrainingObjectiveDefinition,
@@ -94,7 +90,7 @@ use quant_pivot_research::{
     selection::SelectedMarket,
     training::{
         DatasetHashContract, DatasetParquetCodec, LabelName, TrainingDatasetArtifact,
-        TrainingExample, TrainingLabel, dataset_manifest_hash, dataset_source_fingerprint,
+        TrainingExample, TrainingLabel, dataset_source_fingerprint,
     },
     validation::PurgeConfig,
 };
@@ -105,8 +101,9 @@ use quant_pivot_system_tests::{
         model_spec_fixtures,
         policy_fixtures::bootstrap_policy_bundle,
         research_fixtures::{
-            ReplayableSourceSliceFixture, bind_fixture_decision_capture,
-            persist_replayable_source_slice,
+            DatasetLedgerFixture, DatasetLedgerSeed, ReplayableSourceSliceFixture,
+            bind_fixture_decision_capture, model_learning_cohort, persist_replayable_source_slice,
+            seed_source_manifest,
         },
     },
 };
@@ -132,7 +129,7 @@ fn content_hash(seed: char) -> ContentHash {
 }
 
 fn settlement() -> LabelName {
-    LabelName::new("settlement_outcome")
+    LabelName::new("token_payout_ratio")
 }
 
 fn market_id(tick: i64, i: usize) -> MarketId {
@@ -259,6 +256,28 @@ fn examples() -> Vec<TrainingExample> {
         }
     }
     out
+}
+
+/// Independent later-window examples used only by reusable evaluation.
+fn evaluation_examples() -> Vec<TrainingExample> {
+    let shift = ChronoDuration::days(30);
+    examples()
+        .into_iter()
+        .map(|mut example| {
+            let decision_at = example.decision_at() + shift;
+            example.example_id = TrainingExampleId::from_v7();
+            example.decision_boundary =
+                DecisionClock::new(u64::try_from(KNOWLEDGE_LAG_SECS).expect("knowledge lag"))
+                    .boundary(decision_at)
+                    .expect("evaluation boundary");
+            example.feature_vector.decision_at = decision_at;
+            for label in &mut example.labels {
+                label.matured_at = decision_at + ChronoDuration::seconds(1);
+            }
+            bind_fixture_decision_capture(&mut example);
+            example
+        })
+        .collect()
 }
 
 // ── Postgres catalog + ledger seeding ───────────────────────────────────────────────────────────────────────────────
@@ -479,11 +498,22 @@ async fn seed_dataset(
     store: &Arc<dyn ArtifactStore>,
     model_spec_id: &ModelSpecId,
     rc_id: &DecisionPolicySnapshotId,
+    examples: Vec<TrainingExample>,
+    purpose: DatasetPurpose,
+    scope: &str,
 ) -> (TrainingDatasetId, ContentHash) {
     let dataset_id = TrainingDatasetId::from_v7();
-    let examples = examples();
-    let window_start = as_of_for(0);
-    let window_end = window_start + ChronoDuration::hours(4);
+    let window_start = examples
+        .iter()
+        .map(TrainingExample::decision_at)
+        .min()
+        .expect("dataset examples");
+    let window_end = examples
+        .iter()
+        .map(TrainingExample::decision_at)
+        .max()
+        .expect("dataset examples")
+        + ChronoDuration::hours(1);
     let replay = replay_config();
     let feature_schema = FeatureSchema::build(&replay.features).expect("feature schema");
     let feature_schema_hash =
@@ -499,7 +529,7 @@ async fn seed_dataset(
             model_spec_id,
             window_start,
             window_end,
-            purpose: DatasetPurpose::Training,
+            purpose,
             feature_schema_hash: &feature_schema_hash,
             factor_schema_hash: &factor_schema_hash,
             label_schema_hash: &label_schema_hash,
@@ -514,7 +544,7 @@ async fn seed_dataset(
         .expect("pooled research profile")
         .profile_ref;
     let research_program_hash = content_hash('p');
-    let source_slice = persist_replayable_source_slice(
+    let stored_source = persist_replayable_source_slice(
         store,
         &examples,
         ReplayableSourceSliceFixture {
@@ -528,38 +558,53 @@ async fn seed_dataset(
     )
     .await
     .expect("persist replayable Source Slice");
+    let source_lineage = seed_source_manifest(db, &stored_source)
+        .await
+        .expect("seed source-slice ledger");
     let model_spec_definition_hash = PgModelRegistryRepository::new(db.clone())
         .find_model_spec(model_spec_id)
         .await
         .expect("model spec lookup")
         .expect("model spec")
         .definition_hash;
-    let manifest = DatasetManifest {
-        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+    let sample_count = u64::try_from(examples.len()).expect("sample count");
+    let cohort_manifest = if purpose == DatasetPurpose::Evaluation {
+        Some(
+            model_learning_cohort(
+                scope,
+                &source_lineage,
+                window_start,
+                window_end,
+                sample_count,
+            )
+            .expect("evaluation cohort"),
+        )
+    } else {
+        None
+    };
+    let fixture = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
         training_dataset_id: dataset_id,
-        profile_ref,
-        research_program_hash,
-        source_slice,
         model_spec_id: *model_spec_id,
         model_spec_definition_hash,
-        trade_policy_artifact_id: None,
-        trade_policy_hash: None,
-        decision_policy_snapshot_id: *rc_id,
+        source_lineage,
+        cohort_manifest,
         window_start,
         window_end,
-        purpose: DatasetPurpose::Training,
+        purpose,
         knowledge_lag_secs: u64::try_from(KNOWLEDGE_LAG_SECS).expect("knowledge lag"),
         sample_interval_secs: u64::try_from(TICK_INTERVAL_SECS).expect("sample interval"),
         horizons_secs: vec![0],
+        feature_schema_version: Some(SchemaVersion::FIRST),
+        sample_sources: Some(TrainingSampleSources(default_sample_sources())),
         feature_schema_hash,
         factor_schema_hash,
         label_schema_hash,
         semantic_dataset_hash: dataset_hash,
         source_fingerprint: dataset_source_fingerprint(&examples).expect("source fingerprint"),
-        sample_count: u64::try_from(examples.len()).expect("sample count"),
-    };
-    let bytes = DatasetParquetCodec::encode(&examples, &manifest).expect("encode parquet");
-    let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
+        sample_count,
+    })
+    .expect("dataset fixture");
+    let bytes = DatasetParquetCodec::encode(&examples, &fixture.manifest).expect("encode parquet");
     let artifact_bytes_hash = CanonicalDigest::content_hash_bytes(&bytes);
     let hex = dataset_id.as_uuid().simple().to_string();
     let key = ArtifactKey::new(ArtifactNamespace::Dataset, hex, "parquet").expect("key");
@@ -567,20 +612,7 @@ async fn seed_dataset(
 
     let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
     dataset_repo
-        .create_plan(NewTrainingDatasetPlan {
-            training_dataset_id: dataset_id,
-            model_spec_id: *model_spec_id,
-            model_spec_definition_hash,
-            window_start,
-            window_end,
-            purpose: DatasetPurpose::Training,
-            knowledge_lag_secs: KNOWLEDGE_LAG_SECS,
-            sample_interval_secs: TICK_INTERVAL_SECS,
-            horizons_secs: TrainingHorizonsSecs(vec![0]),
-            feature_schema_version: Some(SchemaVersion::FIRST),
-            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            decision_policy_snapshot_id: *rc_id,
-        })
+        .create_plan(fixture.plan.clone())
         .await
         .expect("dataset plan");
     dataset_repo
@@ -590,20 +622,15 @@ async fn seed_dataset(
     dataset_repo
         .complete_build(
             &dataset_id,
-            CompleteTrainingDatasetBuild {
-                status: TrainingDatasetStatus::Ready,
-                feature_schema_hash,
-                factor_schema_hash,
-                label_schema_hash,
-                dataset_hash,
-                manifest_hash,
-                manifest_json: manifest,
-                artifact_bytes_hash,
-                parquet_uri: uri,
-                sample_count: TICKS * i64::try_from(MARKETS_PER_TICK).expect("count"),
-                coverage_json: DatasetCoverage::default(),
-                failure_detail: None,
-            },
+            fixture
+                .completion(
+                    TrainingDatasetStatus::Ready,
+                    artifact_bytes_hash,
+                    uri,
+                    fixture.coverage(),
+                    None,
+                )
+                .expect("dataset completion"),
         )
         .await
         .expect("dataset ledger");
@@ -783,7 +810,7 @@ fn make_trainer(
     )
 }
 
-pub async fn train_backtest_calibrate_e2e() {
+pub async fn train_backtest_evaluation_e2e() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
@@ -793,7 +820,26 @@ pub async fn train_backtest_calibrate_e2e() {
     let rc_id = seed_runtime_config(&db).await;
     let model_spec_id = seed_model_spec(&db).await;
     seed_catalog(&db).await;
-    let (dataset_id, dataset_hash) = seed_dataset(&db, &store, &model_spec_id, &rc_id).await;
+    let (dataset_id, dataset_hash) = seed_dataset(
+        &db,
+        &store,
+        &model_spec_id,
+        &rc_id,
+        examples(),
+        DatasetPurpose::Training,
+        "train-backtest-training",
+    )
+    .await;
+    let (evaluation_dataset_id, _) = seed_dataset(
+        &db,
+        &store,
+        &model_spec_id,
+        &rc_id,
+        evaluation_examples(),
+        DatasetPurpose::Evaluation,
+        "train-backtest-evaluation",
+    )
+    .await;
 
     let registry: Arc<dyn ModelRegistryRepository> =
         Arc::new(PgModelRegistryRepository::new(db.clone()));
@@ -842,9 +888,8 @@ pub async fn train_backtest_calibrate_e2e() {
         .run(
             BacktestInput {
                 model_version_id: version.model_version_id,
-                training_dataset_id: dataset_id,
+                evaluation_dataset_id,
                 decision_policy_snapshot_id: rc_id,
-                calibrate: true,
                 backtest_report_id: None,
             },
             Arc::new(NoopProgressSink),
@@ -867,9 +912,9 @@ pub async fn train_backtest_calibrate_e2e() {
         .next_version_for_spec(&model_spec_id)
         .await
         .expect("count");
-    assert!(
-        next >= 3,
-        "calibration should have registered a calibrated child version (next={next})"
+    assert_eq!(
+        next, 2,
+        "Evaluation backtests must not register a derived model version"
     );
 }
 
@@ -883,7 +928,16 @@ pub async fn train_cpcv_persists_decomposition() {
     let rc_id = seed_runtime_config(&db).await;
     let model_spec_id = seed_model_spec(&db).await;
     seed_catalog(&db).await;
-    let (dataset_id, _dataset_hash) = seed_dataset(&db, &store, &model_spec_id, &rc_id).await;
+    let (dataset_id, _dataset_hash) = seed_dataset(
+        &db,
+        &store,
+        &model_spec_id,
+        &rc_id,
+        examples(),
+        DatasetPurpose::Training,
+        "train-cpcv-training",
+    )
+    .await;
 
     let registry: Arc<dyn ModelRegistryRepository> =
         Arc::new(PgModelRegistryRepository::new(db.clone()));

@@ -183,7 +183,7 @@ impl ResearchJobExecutor {
                         kind: ResearchJobResultKind::TrainingDataset,
                         id: view.training_dataset_id.as_uuid(),
                     }),
-                    coverage: view.coverage_json,
+                    coverage: view.coverage,
                 })
             }
             ResearchJobParams::ModelTrain(params) => {

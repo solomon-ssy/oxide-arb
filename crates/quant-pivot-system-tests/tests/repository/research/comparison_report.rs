@@ -1,6 +1,6 @@
 //! Pairwise model-comparison report ledger persistence system contract.
 
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
     domain::quant::{NewBacktestReport, NewModelComparisonReport, NewModelRun, NewModelVersion},
     enums::{
@@ -10,7 +10,7 @@ use quant_pivot_models::{
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelComparisonReportId,
         ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        Probability,
+        Probability, TrainingDatasetId,
         backtest::{CategoryMetrics, CategoryRankIcDeltas, ExpectedVsRealized, PnlSimulation},
         model_metrics::ModelVersionMetrics,
         model_training::ModelTrainingObjective,
@@ -29,7 +29,9 @@ use quant_pivot_repository::{
 use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
-        execution_pg_seed, model_spec_fixtures, policy_fixtures::bootstrap_default_policy_bundle,
+        execution_pg_seed, model_spec_fixtures,
+        policy_fixtures::bootstrap_default_policy_bundle,
+        research_fixtures::{EvaluationDatasetSeed, seed_evaluation_dataset},
     },
 };
 use rust_decimal_macros::dec;
@@ -75,61 +77,68 @@ async fn seed_model_version(
     model_version_id
 }
 
-async fn seed_backtest_report(
-    db: &DatabaseConnection,
-    model_version_id: &ModelVersionId,
-    model_run_id: &ModelRunId,
-    rc_id: &DecisionPolicySnapshotId,
-    report_seed: &str,
-) -> BacktestReportId {
-    let id = BacktestReportId::from_v7();
-    let window_start = Utc::now() - ChronoDuration::hours(2);
-    PgBacktestReportRepository::new(db.clone())
-        .create(NewBacktestReport {
-            backtest_report_id: id,
-            model_version_id: *model_version_id,
-            model_run_id: *model_run_id,
-            decision_policy_snapshot_id: *rc_id,
-            window_start,
-            window_end: window_start + ChronoDuration::hours(1),
-            coverage: dec!(1),
-            sample_count: 10,
-            missing_feature_count: 0,
-            rank_ic: dec!(0.3),
-            sharpe: dec!(0.8),
-            hit_rate: Probability::new(dec!(0.6)),
-            expected_vs_realized: ExpectedVsRealized {
-                mean_expected_bps: dec!(30),
-                mean_realized_bps: dec!(28),
-                correlation: dec!(0.9),
-                bias_bps: dec!(2),
-            },
-            max_drawdown: dec!(0.1),
-            turnover: dec!(0.2),
-            liquidity_feasibility: Probability::new(dec!(1)),
-            category_breakdown: CategoryMetrics::default(),
-            tail_loss: dec!(-50),
-            report_pnl_simulation: PnlSimulation {
-                total_allocated_usd: dec!(100),
-                realized_pnl_usd: dec!(8),
-                gross_return: dec!(0.08),
-                pnl_curve: Vec::new(),
-            },
-            report_hash: content_hash(report_seed),
-            parquet_uri: None,
-        })
-        .await
-        .expect("backtest report");
-    id
+struct BacktestReportSeed<'a> {
+    model_version_id: ModelVersionId,
+    evaluation_dataset_id: TrainingDatasetId,
+    model_run_id: ModelRunId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    report_seed: &'a str,
+}
+
+impl BacktestReportSeed<'_> {
+    async fn persist(self, db: &DatabaseConnection) -> BacktestReportId {
+        let id = BacktestReportId::from_v7();
+        PgBacktestReportRepository::new(db.clone())
+            .create(NewBacktestReport {
+                backtest_report_id: id,
+                model_version_id: self.model_version_id,
+                evaluation_dataset_id: self.evaluation_dataset_id,
+                model_run_id: self.model_run_id,
+                decision_policy_snapshot_id: self.decision_policy_snapshot_id,
+                window_start: self.window_start,
+                window_end: self.window_end,
+                coverage: dec!(1),
+                sample_count: 10,
+                missing_feature_count: 0,
+                rank_ic: dec!(0.3),
+                sharpe: dec!(0.8),
+                hit_rate: Probability::new(dec!(0.6)),
+                expected_vs_realized: ExpectedVsRealized {
+                    mean_expected_bps: dec!(30),
+                    mean_realized_bps: dec!(28),
+                    correlation: dec!(0.9),
+                    bias_bps: dec!(2),
+                },
+                max_drawdown: dec!(0.1),
+                turnover: dec!(0.2),
+                liquidity_feasibility: Probability::new(dec!(1)),
+                category_breakdown: CategoryMetrics::default(),
+                tail_loss: dec!(-50),
+                report_pnl_simulation: PnlSimulation {
+                    total_allocated_usd: dec!(100),
+                    realized_pnl_usd: dec!(8),
+                    gross_return: dec!(0.08),
+                    pnl_curve: Vec::new(),
+                },
+                report_hash: content_hash(self.report_seed),
+                parquet_uri: None,
+            })
+            .await
+            .expect("backtest report");
+        id
+    }
 }
 
 async fn seed_run(
     db: &DatabaseConnection,
     model_version_id: &ModelVersionId,
     rc_id: &DecisionPolicySnapshotId,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
 ) -> ModelRunId {
     let model_run_id = ModelRunId::from_v7();
-    let window_start = Utc::now() - ChronoDuration::hours(2);
     PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
             model_run_id,
@@ -138,7 +147,7 @@ async fn seed_run(
             decision_policy_snapshot_id: *rc_id,
             market_selection_id: None,
             window_start,
-            window_end: window_start + ChronoDuration::hours(1),
+            window_end,
             status: ModelRunStatus::Running,
             input_hash: content_hash("d"),
             output_hash: None,
@@ -158,25 +167,64 @@ pub async fn quant_model_comparison_crud() {
     let rc_id = seed_runtime_config(&db).await;
 
     let model_spec_id = ModelSpecId::from_v7();
+    let model_spec = model_spec_fixtures::new_model_spec_fixture(
+        model_spec_id,
+        "pg-comparison-it",
+        ModelFamily::WeightedFactor,
+        86_400,
+        ModelInputContract::single_required("book.mid"),
+        ModelTrainingContract::settlement_default(),
+    );
+    let model_spec_definition_hash = model_spec.definition_hash;
     PgModelRegistryRepository::new(db.clone())
-        .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-            model_spec_id,
-            "pg-comparison-it",
-            ModelFamily::WeightedFactor,
-            86_400,
-            ModelInputContract::single_required("book.mid"),
-            ModelTrainingContract::settlement_default(),
-        ))
+        .create_model_spec(model_spec)
         .await
         .expect("model spec");
 
+    let window_start = Utc::now() - ChronoDuration::hours(2);
+    let window_end = window_start + ChronoDuration::hours(1);
+    let evaluation_dataset_id = seed_evaluation_dataset(
+        &db,
+        EvaluationDatasetSeed {
+            scope: "pg-comparison".to_owned(),
+            model_spec_id,
+            model_spec_definition_hash,
+            profile_ref: execution_pg_seed::fixture_profile_ref(),
+            decision_policy_snapshot_id: rc_id,
+            window_start,
+            window_end,
+            sample_count: 10,
+        },
+    )
+    .await
+    .expect("evaluation dataset");
     let baseline_version = seed_model_version(&db, &model_spec_id, 1, "a").await;
     let candidate_version = seed_model_version(&db, &model_spec_id, 2, "b").await;
-    let model_run_id = seed_run(&db, &candidate_version, &rc_id).await;
-    let baseline_report =
-        seed_backtest_report(&db, &baseline_version, &model_run_id, &rc_id, "e1").await;
-    let candidate_report =
-        seed_backtest_report(&db, &candidate_version, &model_run_id, &rc_id, "e2").await;
+    let baseline_run_id = seed_run(&db, &baseline_version, &rc_id, window_start, window_end).await;
+    let candidate_run_id =
+        seed_run(&db, &candidate_version, &rc_id, window_start, window_end).await;
+    let baseline_report = BacktestReportSeed {
+        model_version_id: baseline_version,
+        evaluation_dataset_id,
+        model_run_id: baseline_run_id,
+        decision_policy_snapshot_id: rc_id,
+        window_start,
+        window_end,
+        report_seed: "e1",
+    }
+    .persist(&db)
+    .await;
+    let candidate_report = BacktestReportSeed {
+        model_version_id: candidate_version,
+        evaluation_dataset_id,
+        model_run_id: candidate_run_id,
+        decision_policy_snapshot_id: rc_id,
+        window_start,
+        window_end,
+        report_seed: "e2",
+    }
+    .persist(&db)
+    .await;
 
     let repo = PgModelComparisonReportRepository::new(db.clone());
     let comparison_report_id = ModelComparisonReportId::from_v7();
@@ -187,7 +235,7 @@ pub async fn quant_model_comparison_crud() {
             candidate_model_version_id: candidate_version,
             baseline_report_id: baseline_report,
             candidate_report_id: candidate_report,
-            model_run_id,
+            model_run_id: candidate_run_id,
             rank_ic_delta: dec!(0.15),
             hit_rate_delta: dec!(0.05),
             realized_pnl_delta: dec!(80),

@@ -100,7 +100,7 @@ pub use feature::{
     CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, DomainFeatureSlice,
     EvidenceSourceRef, FeatureCell, FeatureCellState, FeatureParityDetail,
     FeatureParityDetailSource, FeatureSourceRefs, FeatureStaleness, FeatureValue,
-    FeatureVectorPayload, NullReason,
+    FeatureVectorPayload, NullReason, SelectionMemberEvidence,
 };
 pub use ids::{
     AccountSnapshotId, AuditEventId, BacktestPathSetId, BacktestReportId, BasisAlertId,
@@ -217,7 +217,11 @@ pub use trade_policy_evidence::{
     TradePolicyStatisticalSummaryRow,
 };
 pub use training::{
-    DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest, TrainingSampleSource, TrainingSampleSources,
-    default_sample_sources,
+    CapabilityRegistryHashes, CohortCensorCount, CohortExclusionCount,
+    DATASET_ARTIFACT_FORMAT_VERSION, DATASET_COHORT_MANIFEST_FORMAT_VERSION,
+    DATASET_SOURCE_LINEAGE_FORMAT_VERSION, DatasetCohortArtifactRef, DatasetCohortCounts,
+    DatasetCohortManifest, DatasetManifest, DatasetManifestContractError, DatasetSourceLineage,
+    MODEL_LEARNING_COHORT_FORMAT_VERSION, ModelLearningCohortArtifact, ModelLearningCohortRow,
+    NewModelLearningCohortRow, TrainingSampleSource, TrainingSampleSources, default_sample_sources,
 };
 pub use venue_fill::{FeeEvidence, FeeEvidencePriority, VenueFillObservation};

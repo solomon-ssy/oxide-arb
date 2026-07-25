@@ -58,6 +58,24 @@ impl From<SourceSlicePolarsError> for QuantError {
 
 impl SourceSliceParquetCodec {
     #[cfg(feature = "research-jobs")]
+    fn validate_timestamp(
+        record: &SourceSliceRecord,
+        name: &str,
+        value: Option<DateTime<Utc>>,
+    ) -> QuantResult<()> {
+        if value.is_some_and(|timestamp| timestamp.timestamp_subsec_nanos() % 1_000_000 != 0) {
+            return Err(ResearchError::ParquetCodec {
+                detail: format!(
+                    "source-slice record {} {name} must be millisecond-aligned",
+                    record.record_key
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "research-jobs")]
     pub fn encode(records: &[SourceSliceRecord]) -> QuantResult<Vec<u8>> {
         let mut ordered = records.to_vec();
         ordered.sort_by(|left, right| {
@@ -77,6 +95,10 @@ impl SourceSliceParquetCodec {
                 }
                 .into());
             }
+        }
+        for record in &ordered {
+            Self::validate_timestamp(record, "event_at", record.event_at)?;
+            Self::validate_timestamp(record, "available_at", record.available_at)?;
         }
 
         let format_versions = vec![SOURCE_SLICE_MANIFEST_FORMAT_VERSION; ordered.len()];
@@ -256,7 +278,8 @@ fn timestamp(millis: Option<i64>, index: usize, name: &str) -> QuantResult<Optio
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use chrono::{Duration, TimeZone, Utc};
+    use quant_pivot_error::{QuantError, research::ResearchError};
 
     use super::{SourceSliceParquetCodec, SourceSliceRecord};
 
@@ -296,5 +319,34 @@ mod tests {
     fn duplicate_source_identity_rejected() {
         let row = record("same", 1);
         assert!(SourceSliceParquetCodec::encode(&[row.clone(), row]).is_err());
+    }
+
+    #[cfg(feature = "research-jobs")]
+    #[test]
+    fn sub_millisecond_timestamp_rejected() {
+        let mut row = record("sub-millisecond", 1);
+        row.event_at = row.event_at.map(|value| value + Duration::microseconds(1));
+
+        let error = SourceSliceParquetCodec::encode(&[row])
+            .expect_err("sub-millisecond timestamp must fail closed");
+        assert!(matches!(
+            error,
+            QuantError::Research(ResearchError::ParquetCodec { detail })
+                if detail
+                    == "source-slice record sub-millisecond event_at must be millisecond-aligned"
+        ));
+
+        let mut row = record("sub-millisecond", 1);
+        row.available_at = row
+            .available_at
+            .map(|value| value + Duration::microseconds(1));
+        let error = SourceSliceParquetCodec::encode(&[row])
+            .expect_err("sub-millisecond timestamp must fail closed");
+        assert!(matches!(
+            error,
+            QuantError::Research(ResearchError::ParquetCodec { detail })
+                if detail
+                    == "source-slice record sub-millisecond available_at must be millisecond-aligned"
+        ));
     }
 }

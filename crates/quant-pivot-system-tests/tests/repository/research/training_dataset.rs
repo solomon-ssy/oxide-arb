@@ -3,18 +3,16 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::quant::{CompleteTrainingDatasetBuild, NewModelVersion, NewTrainingDatasetPlan},
+    domain::quant::{CompleteTrainingDatasetBuild, NewModelVersion},
     enums::{
         model::ModelFamily,
         quant::{DatasetPurpose, PublicationStatus, TrainingDatasetStatus},
     },
-    hashing::CanonicalDigest,
     types::{
-        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
-        DatasetManifest, DecisionPolicySnapshotId, ModelInputContract, ModelSpecId,
+        ArtifactUri, ContentHash, DecisionPolicySnapshotId, ModelInputContract, ModelSpecId,
         ModelTrainingContract, ModelVersionId, SchemaVersion, TrainingDatasetId,
-        TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
-        model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
+        TrainingSampleSources, default_sample_sources, model_metrics::ModelVersionMetrics,
+        model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
@@ -24,10 +22,14 @@ use quant_pivot_repository::{
 use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
-        execution_pg_seed, model_spec_fixtures, policy_fixtures::bootstrap_default_policy_bundle,
+        execution_pg_seed, model_spec_fixtures,
+        policy_fixtures::bootstrap_default_policy_bundle,
+        research_fixtures::{
+            DatasetLedgerFixture, DatasetLedgerSeed, DatasetSourceSeed, seed_dataset_source,
+        },
     },
 };
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 
 fn content_hash(seed: char) -> ContentHash {
     ContentHash::parse(&format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
@@ -60,12 +62,14 @@ fn dataset_hash(dataset_id: &TrainingDatasetId) -> ContentHash {
     ContentHash::parse(&format!("blake3:{hex}")).expect("hash")
 }
 
-fn new_plan(
+async fn new_fixture(
+    db: &DatabaseConnection,
     dataset_id: TrainingDatasetId,
     model_spec_id: ModelSpecId,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
-) -> NewTrainingDatasetPlan {
+) -> DatasetLedgerFixture {
     let window_start = Utc::now() - ChronoDuration::hours(2);
+    let window_end = window_start + ChronoDuration::hours(1);
     let model_spec_definition_hash = model_spec_fixtures::new_model_spec_fixture(
         model_spec_id,
         "pg-dataset-it",
@@ -75,84 +79,82 @@ fn new_plan(
         ModelTrainingContract::settlement_default(),
     )
     .definition_hash;
-    NewTrainingDatasetPlan {
+    let source_lineage = seed_dataset_source(
+        db,
+        DatasetSourceSeed {
+            scope: format!("pg-dataset-it:{dataset_id}"),
+            profile_ref: execution_pg_seed::fixture_profile_ref(),
+            decision_policy_snapshot_id,
+            window_start,
+            window_end,
+            pit_cutoff: window_end + ChronoDuration::hours(1),
+        },
+    )
+    .await
+    .expect("source lineage");
+    let hash = dataset_hash(&dataset_id);
+    DatasetLedgerFixture::try_new(DatasetLedgerSeed {
         training_dataset_id: dataset_id,
         model_spec_id,
         model_spec_definition_hash,
+        source_lineage,
+        cohort_manifest: None,
         window_start,
-        window_end: window_start + ChronoDuration::hours(1),
+        window_end,
         purpose: DatasetPurpose::Training,
         knowledge_lag_secs: 10,
         sample_interval_secs: 3600,
-        horizons_secs: TrainingHorizonsSecs(vec![3600]),
+        horizons_secs: vec![3600],
         feature_schema_version: Some(SchemaVersion::FIRST),
         sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-        decision_policy_snapshot_id,
-    }
-}
-
-fn completion(
-    plan: &NewTrainingDatasetPlan,
-    status: TrainingDatasetStatus,
-) -> CompleteTrainingDatasetBuild {
-    let hash = dataset_hash(&plan.training_dataset_id);
-    let manifest = DatasetManifest {
-        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
-        training_dataset_id: plan.training_dataset_id,
-        profile_ref: execution_pg_seed::fixture_profile_ref(),
-        research_program_hash: content_hash('4'),
-        source_slice: execution_pg_seed::source_slice_ref('5'),
-        model_spec_id: plan.model_spec_id,
-        model_spec_definition_hash: plan.model_spec_definition_hash,
-        trade_policy_artifact_id: None,
-        trade_policy_hash: None,
-        decision_policy_snapshot_id: plan.decision_policy_snapshot_id,
-        window_start: plan.window_start,
-        window_end: plan.window_end,
-        purpose: plan.purpose,
-        knowledge_lag_secs: u64::try_from(plan.knowledge_lag_secs).expect("knowledge lag"),
-        sample_interval_secs: u64::try_from(plan.sample_interval_secs).expect("sample interval"),
-        horizons_secs: plan.horizons_secs.0.clone(),
         feature_schema_hash: hash,
         factor_schema_hash: hash,
         label_schema_hash: hash,
         semantic_dataset_hash: hash,
         source_fingerprint: content_hash('f'),
         sample_count: 42,
-    };
-    let manifest_hash =
-        CanonicalDigest::content_hash_json(&manifest).expect("canonical manifest hash");
-    CompleteTrainingDatasetBuild {
+    })
+    .expect("dataset fixture")
+}
+
+fn completion(
+    fixture: &DatasetLedgerFixture,
+    status: TrainingDatasetStatus,
+) -> CompleteTrainingDatasetBuild {
+    let failure_detail = matches!(
         status,
-        feature_schema_hash: hash,
-        factor_schema_hash: hash,
-        label_schema_hash: hash,
-        dataset_hash: hash,
-        manifest_hash,
-        manifest_json: manifest,
-        artifact_bytes_hash: hash,
-        parquet_uri: ArtifactUri::parse("file:///tmp/pg-training-dataset.parquet").expect("uri"),
-        sample_count: 42,
-        coverage_json: DatasetCoverage {
-            planned_samples: 42,
-            ..DatasetCoverage::default()
-        },
-        failure_detail: None,
-    }
+        TrainingDatasetStatus::InsufficientLabels | TrainingDatasetStatus::Failed
+    )
+    .then(|| "fixture terminal diagnostic".to_owned());
+    fixture
+        .completion(
+            status,
+            dataset_hash(&fixture.plan.training_dataset_id),
+            ArtifactUri::parse("file:///tmp/pg-training-dataset.parquet").expect("uri"),
+            fixture.coverage(),
+            failure_detail,
+        )
+        .expect("valid completion")
 }
 
 async fn create_ready(
+    db: &DatabaseConnection,
     repo: &PgTrainingDatasetRepository,
     dataset_id: TrainingDatasetId,
     model_spec_id: ModelSpecId,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
 ) {
-    let plan = new_plan(dataset_id, model_spec_id, decision_policy_snapshot_id);
-    repo.create_plan(plan.clone()).await.expect("create plan");
-    repo.start_build(&dataset_id).await.expect("start build");
-    repo.complete_build(&dataset_id, completion(&plan, TrainingDatasetStatus::Ready))
+    let fixture = new_fixture(db, dataset_id, model_spec_id, decision_policy_snapshot_id).await;
+    repo.create_plan(fixture.plan.clone())
         .await
-        .expect("complete build");
+        .expect("create plan");
+    repo.start_build(&dataset_id).await.expect("start build");
+    repo.complete_build(
+        &dataset_id,
+        completion(&fixture, TrainingDatasetStatus::Ready),
+    )
+    .await
+    .expect("complete build");
 }
 
 pub async fn quant_training_dataset_crud() {
@@ -163,12 +165,17 @@ pub async fn quant_training_dataset_crud() {
     let dataset_id = TrainingDatasetId::from_v7();
     let repo = PgTrainingDatasetRepository::new(db.clone());
 
-    let plan = new_plan(dataset_id, model_spec_id, rc_id);
-    repo.create_plan(plan.clone()).await.expect("create plan");
+    let fixture = new_fixture(&db, dataset_id, model_spec_id, rc_id).await;
+    repo.create_plan(fixture.plan.clone())
+        .await
+        .expect("create plan");
     let building = repo.start_build(&dataset_id).await.expect("start build");
     assert!(building.dataset_hash.is_none());
     let created = repo
-        .complete_build(&dataset_id, completion(&plan, TrainingDatasetStatus::Ready))
+        .complete_build(
+            &dataset_id,
+            completion(&fixture, TrainingDatasetStatus::Ready),
+        )
         .await
         .expect("complete build");
     assert_eq!(created.training_dataset_id, dataset_id);
@@ -183,13 +190,76 @@ pub async fn quant_training_dataset_crud() {
     assert_eq!(found.dataset_hash, created.dataset_hash);
 }
 
+pub async fn dataset_artifacts_are_immutable() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let model_spec_id = seed_model_spec(&db).await;
+    let dataset_id = TrainingDatasetId::from_v7();
+    let repo = PgTrainingDatasetRepository::new(db.clone());
+    let fixture = new_fixture(&db, dataset_id, model_spec_id, rc_id).await;
+    let source_slice_id = fixture.plan.source_slice_id;
+
+    repo.create_plan(fixture.plan.clone())
+        .await
+        .expect("create immutable plan");
+    repo.start_build(&dataset_id)
+        .await
+        .expect("start immutable build");
+    repo.complete_build(
+        &dataset_id,
+        completion(&fixture, TrainingDatasetStatus::Ready),
+    )
+    .await
+    .expect("complete immutable build");
+
+    let dataset_tamper = db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE quant_training_dataset SET manifest_hash = $1 \
+             WHERE training_dataset_id = $2",
+            [
+                content_hash('e').to_string().into(),
+                dataset_id.as_uuid().into(),
+            ],
+        ))
+        .await;
+    assert!(
+        dataset_tamper.is_err(),
+        "terminal dataset evidence must reject direct SQL tampering"
+    );
+
+    let source_tamper = db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE quant_source_slice SET manifest_hash = $1 WHERE source_slice_id = $2",
+            [
+                content_hash('e').to_string().into(),
+                source_slice_id.as_uuid().into(),
+            ],
+        ))
+        .await;
+    assert!(
+        source_tamper.is_err(),
+        "terminal source-slice evidence must reject direct SQL tampering"
+    );
+
+    let expired = repo
+        .expire(&dataset_id)
+        .await
+        .expect("ready dataset must retain its controlled expiry transition");
+    assert_eq!(expired.status, TrainingDatasetStatus::Expired);
+}
+
 pub async fn training_dataset_rejects_drift() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let model_spec_id = seed_model_spec(&db).await;
-    let repo = PgTrainingDatasetRepository::new(db);
-    let mut plan = new_plan(TrainingDatasetId::from_v7(), model_spec_id, rc_id);
+    let repo = PgTrainingDatasetRepository::new(db.clone());
+    let mut plan = new_fixture(&db, TrainingDatasetId::from_v7(), model_spec_id, rc_id)
+        .await
+        .plan;
     plan.model_spec_definition_hash = content_hash('f');
 
     assert!(matches!(
@@ -209,21 +279,24 @@ pub async fn training_dataset_status_machine() {
     let dataset_id = TrainingDatasetId::from_v7();
     let repo = PgTrainingDatasetRepository::new(db.clone());
 
-    let plan = new_plan(dataset_id, model_spec_id, rc_id);
-    repo.create_plan(plan.clone())
+    let fixture = new_fixture(&db, dataset_id, model_spec_id, rc_id).await;
+    repo.create_plan(fixture.plan.clone())
         .await
         .expect("create planned");
 
     repo.start_build(&dataset_id)
         .await
         .expect("planned -> building");
-    repo.complete_build(&dataset_id, completion(&plan, TrainingDatasetStatus::Ready))
-        .await
-        .expect("building -> ready");
+    repo.complete_build(
+        &dataset_id,
+        completion(&fixture, TrainingDatasetStatus::Ready),
+    )
+    .await
+    .expect("building -> ready");
 
     let insufficient_id = TrainingDatasetId::from_v7();
-    let insufficient_plan = new_plan(insufficient_id, model_spec_id, rc_id);
-    repo.create_plan(insufficient_plan.clone())
+    let insufficient_fixture = new_fixture(&db, insufficient_id, model_spec_id, rc_id).await;
+    repo.create_plan(insufficient_fixture.plan.clone())
         .await
         .expect("create insufficient plan");
     repo.start_build(&insufficient_id)
@@ -232,7 +305,7 @@ pub async fn training_dataset_status_machine() {
     repo.complete_build(
         &insufficient_id,
         completion(
-            &insufficient_plan,
+            &insufficient_fixture,
             TrainingDatasetStatus::InsufficientLabels,
         ),
     )
@@ -242,7 +315,7 @@ pub async fn training_dataset_status_machine() {
     let err = repo
         .complete_build(
             &insufficient_id,
-            completion(&insufficient_plan, TrainingDatasetStatus::Ready),
+            completion(&insufficient_fixture, TrainingDatasetStatus::Ready),
         )
         .await
         .expect_err("insufficient -> ready must conflict");
@@ -267,7 +340,7 @@ pub async fn model_version_training_key() {
     let repo = PgTrainingDatasetRepository::new(db.clone());
     let registry = PgModelRegistryRepository::new(db.clone());
 
-    create_ready(&repo, dataset_id, model_spec_id, rc_id).await;
+    create_ready(&db, &repo, dataset_id, model_spec_id, rc_id).await;
 
     let hash = content_hash('a');
     registry

@@ -183,6 +183,16 @@ pub enum ResearchError {
         detail: String,
     },
 
+    /// A materialized evidence count cannot be represented by the normalized
+    /// Signed 64-bit database column without truncation or saturation.
+    #[error("research evidence count `{field}` exceeds PostgreSQL bigint: {value}")]
+    EvidenceCountOverflow {
+        /// Stable evidence field whose exact cardinality could not be stored.
+        field: &'static str,
+        /// Original in-memory count, preserved for diagnostics.
+        value: u64,
+    },
+
     /// Portfolio optimizer inputs or outputs could not cross the solver's
     /// checked `Decimal`/`f64` boundary without fabricating a monetary value.
     #[error("portfolio optimization failed: {detail}")]

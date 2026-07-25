@@ -69,7 +69,7 @@ use crate::{
 /// Which forward label a trainer targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelSelector {
-    /// Label name (e.g. `settlement_outcome`).
+    /// Label name (e.g. `token_payout_ratio`).
     pub name: LabelName,
     /// Label horizon in seconds (`0` for horizon-independent labels).
     pub horizon_secs: u64,
@@ -206,7 +206,7 @@ pub struct TrainModelRequest {
     pub multipliers: ScoreMultiplierSpec,
     /// Governed substitution confidence penalties.
     pub substitution_rules: SubstitutionConfidenceRules,
-    /// Return model (heuristic until calibrated by a backtest).
+    /// Return model (heuristic until the independent calibration pipeline binds a calibrator).
     pub return_model: ReturnModelSpec,
     /// Exact ordered raw-input contract frozen by the owning model spec.
     pub input_contract: ModelInputContract,
@@ -1420,7 +1420,7 @@ mod tests {
     };
 
     fn label_name() -> LabelName {
-        LabelName::new("settlement_outcome")
+        LabelName::new("token_payout_ratio")
     }
 
     fn example(
@@ -1548,6 +1548,44 @@ mod tests {
                 example(i, liq, mom, FactorDirection::Positive, y)
             })
             .collect()
+    }
+
+    #[test]
+    fn weighted_trainer_keeps_split() {
+        let zero_examples = momentum_dataset();
+        let mut split_examples = zero_examples.clone();
+        split_examples[1].labels[0].value = dec!(0.5);
+        let mut full_examples = zero_examples.clone();
+        full_examples[1].labels[0].value = dec!(1);
+        let factors = vec![LIQUIDITY_DEPTH, MOMENTUM_ROC];
+        let references = FrozenReferenceQuantiles::empty();
+        let cross_section = FactorCrossSectionConfig::default();
+        let input_hash = |examples: &[TrainingExample]| {
+            weighted_training_input_hash(
+                examples,
+                &LabelSelector {
+                    name: label_name(),
+                    horizon_secs: 0,
+                },
+                &factors,
+                &references,
+                Some(&cross_section),
+            )
+            .expect("payout-ratio training input hash")
+        };
+
+        let zero_hash = input_hash(&zero_examples);
+        let split_hash = input_hash(&split_examples);
+        let full_hash = input_hash(&full_examples);
+        assert_ne!(
+            split_hash, zero_hash,
+            "split payout must not coerce to zero"
+        );
+        assert_ne!(split_hash, full_hash, "split payout must not coerce to one");
+
+        request(split_examples)
+            .train_weighted()
+            .expect("continuous trainer must accept a split payout");
     }
 
     #[tokio::test]
@@ -1878,9 +1916,7 @@ mod tests {
     fn argmin_without_optimize_rejects() {
         let mut req = request(momentum_dataset());
         req.objective.optimizer = TrainingOptimizerKind::Argmin;
-        let err = (&req)
-            .train_weighted()
-            .expect_err("argmin must fail closed");
+        let err = req.train_weighted().expect_err("argmin must fail closed");
         let detail = err.to_string();
         assert!(
             detail.contains("optimize"),

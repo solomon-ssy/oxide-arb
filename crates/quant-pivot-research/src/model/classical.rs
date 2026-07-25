@@ -502,7 +502,25 @@ fn fit_kind(
             SmartcoreModel::ElasticNet(fit(ElasticNetModel::fit(x, &y.to_vec(), parameters))?)
         }
         ClassicalKind::LogisticRegression => {
-            let classes: Vec<i64> = y.iter().map(|v| i64::from(*v >= 0.5)).collect();
+            let classes = y
+                .iter()
+                .enumerate()
+                .map(|(row, value)| {
+                    if *value == 0.0 {
+                        Ok(0_i64)
+                    } else if value.to_bits() == 1.0_f64.to_bits() {
+                        Ok(1_i64)
+                    } else {
+                        Err(ResearchError::MatrixBuild {
+                            detail: format!(
+                                "logistic regression requires exact binary token payout ratios \
+                                 0 or 1; row {row} has split payout {value}"
+                            ),
+                        }
+                        .into())
+                    }
+                })
+                .collect::<QuantResult<Vec<_>>>()?;
             if classes.iter().all(|c| *c == classes[0]) {
                 return Err(ResearchError::MatrixBuild {
                     detail: "logistic regression needs both classes present in the label"
@@ -1072,5 +1090,20 @@ mod tests {
             "probabilities"
         );
         assert!(proba[0] > proba[1], "high feature ⇒ higher yes-probability");
+    }
+
+    #[test]
+    fn logistic_rejects_split_payout() {
+        let mut matrix = TrainingMatrix::classical_fixture();
+        matrix.labels[1] = 0.5;
+
+        let error = ClassicalAdapterRegistry::adapter_for(ClassicalKind::LogisticRegression)
+            .train(&matrix)
+            .expect_err("binary estimator must reject a split payout");
+
+        assert!(
+            error.to_string().contains("split payout"),
+            "typed failure must explain the unsupported label: {error}"
+        );
     }
 }

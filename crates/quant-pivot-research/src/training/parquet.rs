@@ -340,6 +340,7 @@ impl DatasetParquetCodec {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         env,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -350,18 +351,19 @@ mod tests {
         domain::data_plane::{DecisionClock, DecisionSource},
         enums::quant::DatasetPurpose,
         types::{
-            ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest,
-            DecisionPolicySnapshotId, ModelSpecId, SourceSliceManifestRef, TrainingDatasetId,
-            builtin_research_profiles,
+            ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest, ModelSpecId,
+            TrainingDatasetId,
         },
     };
+    use rust_decimal_macros::dec;
 
     use super::DatasetParquetCodec;
     use crate::{
         artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
         training::{
-            DatasetHashContract, TrainingDatasetArtifact, TrainingExample,
-            dataset_source_fingerprint, fixtures::example,
+            DatasetHashContract, LabelName, TrainingDatasetArtifact, TrainingExample,
+            dataset_source_fingerprint,
+            fixtures::{example, source_lineage},
         },
     };
 
@@ -375,6 +377,12 @@ mod tests {
         let feature_hash = hash('1');
         let factor_hash = hash('2');
         let label_hash = hash('3');
+        let horizons_secs = examples
+            .iter()
+            .flat_map(|example| example.labels.iter().map(|label| label.horizon_secs))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let semantic_dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
             DatasetHashContract {
                 model_spec_id: &model_spec_id,
@@ -391,20 +399,12 @@ mod tests {
         DatasetManifest {
             format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             training_dataset_id: TrainingDatasetId::from_v7(),
-            profile_ref: builtin_research_profiles()
-                .expect("built-in profiles")
-                .remove(0)
-                .profile_ref,
-            research_program_hash: hash('4'),
-            source_slice: SourceSliceManifestRef {
-                manifest_uri: ArtifactUri::parse("s3://fixture/source-slice.json").expect("URI"),
-                manifest_hash: hash('5'),
-            },
+            source_lineage: source_lineage(window_start, window_end),
+            cohort_manifest: None,
             model_spec_id,
             model_spec_definition_hash: hash('6'),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             window_start,
             window_end,
             purpose: DatasetPurpose::Training,
@@ -412,7 +412,7 @@ mod tests {
                 .first()
                 .map_or(0, |example| example.decision_boundary.knowledge_lag_secs()),
             sample_interval_secs: 60,
-            horizons_secs: vec![60],
+            horizons_secs,
             feature_schema_hash: hash('1'),
             factor_schema_hash: hash('2'),
             label_schema_hash: hash('3'),
@@ -433,6 +433,33 @@ mod tests {
         assert_eq!(
             decoded, expected,
             "roundtrip must preserve examples exactly"
+        );
+    }
+
+    #[test]
+    fn parquet_keeps_payout_ratios() {
+        let mut examples = vec![
+            example("payout-zero", 0),
+            example("payout-half", 0),
+            example("payout-one", 1),
+        ];
+        for (example, payout_ratio) in examples.iter_mut().zip([dec!(0), dec!(0.5), dec!(1)]) {
+            example.labels[0].label_name = LabelName::from_static("token_payout_ratio");
+            example.labels[0].horizon_secs = 0;
+            example.labels[0].value = payout_ratio;
+            example.labels[0].matured_at = example.decision_at();
+        }
+
+        let bytes = DatasetParquetCodec::encode(&examples, &manifest(&examples)).expect("encode");
+        let decoded = DatasetParquetCodec::decode(&bytes).expect("decode");
+        let decoded_ratios = decoded
+            .iter()
+            .map(|example| example.labels[0].value)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            decoded_ratios,
+            BTreeSet::from([dec!(0), dec!(0.5), dec!(1)])
         );
     }
 

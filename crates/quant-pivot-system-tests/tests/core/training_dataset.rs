@@ -34,10 +34,10 @@ use quant_pivot_models::{
             UpsertMarket, book::BookLevel, registry::TokenInfo,
         },
         quant::{
-            CompleteTrainingDatasetBuild, CryptoSubject, GroundingProof, JobProgressSink,
-            LinkageOutcome, MarketLinkageDerivation, MarketSubject, NewMarketLinkage,
-            NewModelVersion, NewTrainingDatasetPlan, NoopProgressSink, PriceComparator,
-            ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
+            CryptoSubject, GroundingProof, JobProgressSink, LinkageOutcome,
+            MarketLinkageDerivation, MarketSubject, NewMarketLinkage, NewModelVersion,
+            NoopProgressSink, PriceComparator, ResolutionOracle, ResolvedBinding,
+            ResolvedSourceBinding,
         },
     },
     entities::{
@@ -68,11 +68,10 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, BinanceSymbol, CatalogEventChangeId, CatalogEventObjectId,
         CatalogMarketChangeId, CatalogMarketObjectId, CatalogSyncBatchId, ContentHash, CryptoAsset,
-        CryptoQuote, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage, DatasetManifest,
-        DecisionPolicySnapshotId, DomainInstrumentKey, DomainSourceId, EventId, EvmBlockHash,
-        EvmTransactionHash, MarketId, ModelInputContract, ModelSpecId, ModelTrainingContract,
-        ModelVersionId, PayoutRatio, Price, Probability, ResolverVersion, SchemaVersion, Shares,
-        TokenId, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSource,
+        CryptoQuote, DatasetCoverage, DecisionPolicySnapshotId, DomainInstrumentKey,
+        DomainSourceId, EventId, EvmBlockHash, EvmTransactionHash, MarketId, ModelInputContract,
+        ModelSpecId, ModelTrainingContract, ModelVersionId, PayoutRatio, Price, Probability,
+        ResolverVersion, SchemaVersion, Shares, TokenId, TrainingDatasetId, TrainingSampleSource,
         TrainingSampleSources, Usd, default_sample_sources, model_metrics::ModelVersionMetrics,
         model_training::ModelTrainingObjective, stable_name::FeatureName,
     },
@@ -95,18 +94,20 @@ use quant_pivot_research::{
     },
     training::{
         DatasetPlan, DatasetPlanRequest, LabelName, TrainingDatasetArtifact,
-        TrainingDatasetBuilder, TrainingDatasetPlanner, dataset_manifest_hash,
+        TrainingDatasetBuilder, TrainingDatasetPlanner,
     },
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
         catalog_fixtures::{make_event, make_market},
-        execution_pg_seed,
-        execution_pg_seed::{content_hash as fixture_hash, fixture_profile_ref},
+        execution_pg_seed::fixture_profile_ref,
         model_spec_fixtures,
         policy_fixtures::bootstrap_default_policy_bundle,
         report_pipeline_harness::EmptyLinkageRepo,
+        research_fixtures::{
+            DatasetLedgerFixture, DatasetLedgerSeed, DatasetSourceSeed, seed_dataset_source,
+        },
     },
 };
 use rust_decimal::Decimal;
@@ -120,7 +121,7 @@ const MARKET_ID: &str = "0xdatasete2e";
 const YES_TOKEN: &str = "101";
 const NO_TOKEN: &str = "202";
 
-const SETTLEMENT_LABEL: LabelName = LabelName::from_static("settlement_outcome");
+const TOKEN_PAYOUT_LABEL: LabelName = LabelName::from_static("token_payout_ratio");
 
 fn resolution_row(
     payout_ratios: [PayoutRatio; 2],
@@ -170,52 +171,180 @@ const fn sample_as_of(window_start: DateTime<Utc>) -> DateTime<Utc> {
     window_start
 }
 
-#[derive(Clone, Copy)]
-struct LedgerManifestInput<'a> {
-    training_dataset_id: &'a TrainingDatasetId,
-    model_spec_id: &'a ModelSpecId,
-    model_spec_definition_hash: &'a ContentHash,
-    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
+struct DatasetRequestSeed {
+    model_spec_id: ModelSpecId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
-    hash: &'a ContentHash,
+    knowledge_lag_secs: u64,
+    sample_sources: Vec<TrainingSampleSource>,
+    purpose: DatasetPurpose,
+}
+
+impl DatasetRequestSeed {
+    fn training(
+        model_spec_id: ModelSpecId,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            model_spec_id,
+            decision_policy_snapshot_id,
+            window_start,
+            window_end,
+            knowledge_lag_secs: 10,
+            sample_sources: default_sample_sources(),
+            purpose: DatasetPurpose::Training,
+        }
+    }
+
+    #[must_use]
+    const fn with_knowledge_lag(mut self, knowledge_lag_secs: u64) -> Self {
+        self.knowledge_lag_secs = knowledge_lag_secs;
+        self
+    }
+
+    #[must_use]
+    fn with_sources(mut self, sample_sources: Vec<TrainingSampleSource>) -> Self {
+        self.sample_sources = sample_sources;
+        self
+    }
+
+    #[must_use]
+    const fn with_purpose(mut self, purpose: DatasetPurpose) -> Self {
+        self.purpose = purpose;
+        self
+    }
+
+    async fn build(self, db: &DatabaseConnection) -> DatasetPlanRequest {
+        let scope = format!(
+            "training-dataset:{}:{}:{}:{}",
+            self.model_spec_id,
+            self.decision_policy_snapshot_id,
+            self.window_start.timestamp_micros(),
+            self.window_end.timestamp_micros()
+        );
+        let source_lineage = seed_dataset_source(
+            db,
+            DatasetSourceSeed {
+                scope,
+                profile_ref: fixture_profile_ref(),
+                decision_policy_snapshot_id: self.decision_policy_snapshot_id,
+                window_start: self.window_start,
+                window_end: self.window_end,
+                pit_cutoff: self.window_end + ChronoDuration::seconds(60),
+            },
+        )
+        .await
+        .expect("dataset source lineage");
+        DatasetPlanRequest {
+            model_spec_id: self.model_spec_id,
+            source_lineage,
+            cohort_manifest: None,
+            window_start: self.window_start,
+            window_end: self.window_end,
+            sample_interval_secs: 60,
+            horizons_secs: vec![60],
+            knowledge_lag_secs: self.knowledge_lag_secs,
+            feature_schema_version: SchemaVersion::FIRST,
+            sample_sources: self.sample_sources,
+            training_dataset_id: None,
+            purpose: self.purpose,
+        }
+    }
+}
+
+struct ReadyDatasetSeed {
+    model_spec_id: ModelSpecId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    hash: ContentHash,
     sample_count: u64,
 }
 
-fn ledger_manifest(input: LedgerManifestInput<'_>) -> DatasetManifest {
-    let LedgerManifestInput {
-        training_dataset_id,
-        model_spec_id,
-        model_spec_definition_hash,
-        decision_policy_snapshot_id,
-        window_start,
-        window_end,
-        hash,
-        sample_count,
-    } = input;
-    DatasetManifest {
-        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
-        training_dataset_id: *training_dataset_id,
-        profile_ref: fixture_profile_ref(),
-        research_program_hash: fixture_hash('4'),
-        source_slice: execution_pg_seed::source_slice_ref('5'),
-        model_spec_id: *model_spec_id,
-        model_spec_definition_hash: *model_spec_definition_hash,
-        trade_policy_artifact_id: None,
-        trade_policy_hash: None,
-        decision_policy_snapshot_id: *decision_policy_snapshot_id,
-        window_start,
-        window_end,
-        purpose: DatasetPurpose::Training,
-        knowledge_lag_secs: 10,
-        sample_interval_secs: 3_600,
-        horizons_secs: vec![3_600],
-        feature_schema_hash: *hash,
-        factor_schema_hash: *hash,
-        label_schema_hash: *hash,
-        semantic_dataset_hash: *hash,
-        source_fingerprint: *hash,
-        sample_count,
+impl ReadyDatasetSeed {
+    async fn persist(self, db: &DatabaseConnection) -> TrainingDatasetId {
+        let Self {
+            model_spec_id,
+            decision_policy_snapshot_id,
+            window_start,
+            window_end,
+            hash,
+            sample_count,
+        } = self;
+        let training_dataset_id = TrainingDatasetId::from_v7();
+        let source_lineage = seed_dataset_source(
+            db,
+            DatasetSourceSeed {
+                scope: format!("ready-training-dataset-{training_dataset_id}"),
+                profile_ref: fixture_profile_ref(),
+                decision_policy_snapshot_id,
+                window_start,
+                window_end,
+                pit_cutoff: window_end + ChronoDuration::seconds(60),
+            },
+        )
+        .await
+        .expect("ready dataset source lineage");
+        let fixture = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
+            training_dataset_id,
+            model_spec_id,
+            model_spec_definition_hash: model_spec_definition_hash(db, &model_spec_id).await,
+            source_lineage,
+            cohort_manifest: None,
+            window_start,
+            window_end,
+            purpose: DatasetPurpose::Training,
+            knowledge_lag_secs: 10,
+            sample_interval_secs: 3_600,
+            horizons_secs: vec![3_600],
+            feature_schema_version: Some(SchemaVersion::FIRST),
+            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
+            feature_schema_hash: hash,
+            factor_schema_hash: hash,
+            label_schema_hash: hash,
+            semantic_dataset_hash: hash,
+            source_fingerprint: hash,
+            sample_count,
+        })
+        .expect("ready dataset ledger");
+        let coverage = DatasetCoverage {
+            planned_samples: sample_count,
+            built_examples: sample_count,
+            markets: 1,
+            labels_available: sample_count,
+            ..DatasetCoverage::default()
+        };
+        let repository = PgTrainingDatasetRepository::new(db.clone());
+        repository
+            .create_plan(fixture.plan.clone())
+            .await
+            .expect("ready dataset plan");
+        repository
+            .start_build(&training_dataset_id)
+            .await
+            .expect("start ready dataset");
+        repository
+            .complete_build(
+                &training_dataset_id,
+                fixture
+                    .completion(
+                        TrainingDatasetStatus::Ready,
+                        hash,
+                        ArtifactUri::parse(format!(
+                            "s3://fixture/training-datasets/{training_dataset_id}.parquet"
+                        ))
+                        .expect("ready dataset artifact URI"),
+                        coverage,
+                        None,
+                    )
+                    .expect("ready dataset completion"),
+            )
+            .await
+            .expect("complete ready dataset");
+        training_dataset_id
     }
 }
 
@@ -1061,32 +1190,22 @@ fn temp_artifact_store() -> Arc<dyn ArtifactStore> {
 }
 
 async fn plan_request(
+    db: &DatabaseConnection,
     service: &TrainingDatasetService,
     model_spec_id: ModelSpecId,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
 ) -> DatasetPlan {
-    service
-        .plan(DatasetPlanRequest {
-            model_spec_id,
-            profile_ref: fixture_profile_ref(),
-            research_program_hash: fixture_hash('4'),
-            source_slice: execution_pg_seed::source_slice_ref('5'),
-            decision_policy_snapshot_id,
-            window_start,
-            window_end,
-            pit_cutoff: window_end + ChronoDuration::seconds(60),
-            sample_interval_secs: 60,
-            horizons_secs: vec![60],
-            knowledge_lag_secs: 10,
-            feature_schema_version: SchemaVersion::FIRST,
-            sample_sources: default_sample_sources(),
-            training_dataset_id: None,
-            purpose: DatasetPurpose::Training,
-        })
-        .await
-        .expect("plan")
+    let request = DatasetRequestSeed::training(
+        model_spec_id,
+        decision_policy_snapshot_id,
+        window_start,
+        window_end,
+    )
+    .build(db)
+    .await;
+    service.plan(request).await.expect("plan")
 }
 
 fn assert_no_feature_leakage(artifact: &TrainingDatasetArtifact, knowledge_lag_secs: u64) {
@@ -1145,7 +1264,7 @@ pub async fn historical_pit_no_build() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(!artifact.examples.is_empty(), "expected built examples");
     assert_no_feature_leakage(&artifact, 10);
@@ -1174,64 +1293,18 @@ pub async fn calibration_dataset_rejects_overlap() {
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
     let model_spec_id = seed_model_spec(&db).await;
-    let model_spec_definition_hash = model_spec_definition_hash(&db, &model_spec_id).await;
 
     let hash = ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("hash");
-    let dataset_id = TrainingDatasetId::from_v7();
-    let manifest = ledger_manifest(LedgerManifestInput {
-        training_dataset_id: &dataset_id,
-        model_spec_id: &model_spec_id,
-        model_spec_definition_hash: &model_spec_definition_hash,
-        decision_policy_snapshot_id: &rc_id,
+    let _training_dataset_id = ReadyDatasetSeed {
+        model_spec_id,
+        decision_policy_snapshot_id: rc_id,
         window_start,
         window_end,
-        hash: &hash,
+        hash,
         sample_count: 10,
-    });
-    let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
-    let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
-    dataset_repo
-        .create_plan(NewTrainingDatasetPlan {
-            training_dataset_id: dataset_id,
-            model_spec_id,
-            model_spec_definition_hash,
-            window_start,
-            window_end,
-            purpose: DatasetPurpose::Training,
-            knowledge_lag_secs: 10,
-            sample_interval_secs: 3600,
-            horizons_secs: TrainingHorizonsSecs(vec![3600]),
-            feature_schema_version: Some(SchemaVersion::FIRST),
-            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            decision_policy_snapshot_id: rc_id,
-        })
-        .await
-        .expect("seed existing training dataset plan");
-    dataset_repo
-        .start_build(&dataset_id)
-        .await
-        .expect("start existing training dataset");
-    dataset_repo
-        .complete_build(
-            &dataset_id,
-            CompleteTrainingDatasetBuild {
-                status: TrainingDatasetStatus::Ready,
-                feature_schema_hash: hash,
-                factor_schema_hash: hash,
-                label_schema_hash: hash,
-                dataset_hash: hash,
-                manifest_hash,
-                manifest_json: manifest,
-                artifact_bytes_hash: hash,
-                parquet_uri: ArtifactUri::parse("file:///tmp/existing-training.parquet")
-                    .expect("uri"),
-                sample_count: 10,
-                coverage_json: DatasetCoverage::default(),
-                failure_detail: None,
-            },
-        )
-        .await
-        .expect("seed existing Ready training dataset");
+    }
+    .persist(&db)
+    .await;
 
     let as_of_ms = sample_as_of(window_start).timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
@@ -1242,24 +1315,13 @@ pub async fn calibration_dataset_rejects_overlap() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
+    let calibration_request =
+        DatasetRequestSeed::training(model_spec_id, rc_id, window_start, window_end)
+            .with_purpose(DatasetPurpose::Calibration)
+            .build(&db)
+            .await;
     let calibration_plan = svc
-        .plan(DatasetPlanRequest {
-            model_spec_id,
-            profile_ref: fixture_profile_ref(),
-            research_program_hash: fixture_hash('4'),
-            source_slice: execution_pg_seed::source_slice_ref('5'),
-            decision_policy_snapshot_id: rc_id,
-            window_start,
-            window_end,
-            pit_cutoff: window_end + ChronoDuration::seconds(60),
-            sample_interval_secs: 60,
-            horizons_secs: vec![60],
-            knowledge_lag_secs: 10,
-            feature_schema_version: SchemaVersion::FIRST,
-            sample_sources: default_sample_sources(),
-            training_dataset_id: None,
-            purpose: DatasetPurpose::Calibration,
-        })
+        .plan(calibration_request)
         .await
         .expect("plan calibration dataset");
     let err = svc
@@ -1292,7 +1354,7 @@ pub async fn build_before_no_row() {
         Arc::new(ControllableFactRead::new(scenario)),
     );
 
-    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
     let dataset_id = plan.training_dataset_id;
 
     // A cancel observed at the first cross-section boundary unwinds the build
@@ -1348,7 +1410,7 @@ pub async fn pit_selection_excludes_market() {
         },
     );
 
-    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(
         artifact.coverage.pit_selection_candidates > 0,
@@ -1403,7 +1465,7 @@ pub async fn pit_excludes_requires_feature() {
         },
     );
 
-    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(
         artifact.coverage.pit_selection_candidates > 0,
@@ -1552,26 +1614,11 @@ async fn build_crypto_pit_linkage() -> TrainingDatasetArtifact {
         },
     );
 
-    let plan = svc
-        .plan(DatasetPlanRequest {
-            model_spec_id,
-            profile_ref: fixture_profile_ref(),
-            research_program_hash: fixture_hash('4'),
-            source_slice: execution_pg_seed::source_slice_ref('5'),
-            decision_policy_snapshot_id: rc_id,
-            window_start,
-            window_end,
-            pit_cutoff: window_end + ChronoDuration::seconds(60),
-            sample_interval_secs: 60,
-            horizons_secs: vec![60],
-            knowledge_lag_secs: domain_config.crypto.availability_lag_secs,
-            feature_schema_version: SchemaVersion::FIRST,
-            sample_sources: default_sample_sources(),
-            training_dataset_id: None,
-            purpose: DatasetPurpose::Training,
-        })
-        .await
-        .expect("plan");
+    let request = DatasetRequestSeed::training(model_spec_id, rc_id, window_start, window_end)
+        .with_knowledge_lag(domain_config.crypto.availability_lag_secs)
+        .build(&db)
+        .await;
+    let plan = svc.plan(request).await.expect("plan");
     svc.build(plan).await.expect("build")
 }
 
@@ -1635,23 +1682,10 @@ pub async fn plan_estimates_keep_rate() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let request = DatasetPlanRequest {
-        model_spec_id,
-        profile_ref: fixture_profile_ref(),
-        research_program_hash: fixture_hash('4'),
-        source_slice: execution_pg_seed::source_slice_ref('5'),
-        decision_policy_snapshot_id: rc_id,
-        window_start,
-        window_end,
-        pit_cutoff: window_end + ChronoDuration::seconds(60),
-        sample_interval_secs: 60,
-        horizons_secs: vec![60],
-        knowledge_lag_secs: 10,
-        feature_schema_version: SchemaVersion::FIRST,
-        sample_sources: vec![TrainingSampleSource::HistoricalPit],
-        training_dataset_id: None,
-        purpose: DatasetPurpose::Training,
-    };
+    let request = DatasetRequestSeed::training(model_spec_id, rc_id, window_start, window_end)
+        .with_sources(vec![TrainingSampleSource::HistoricalPit])
+        .build(&db)
+        .await;
     // 3 as_of slices × the single eligible fixture market.
     let counts = svc.count_plan(&request, 3, 50).await.expect("count plan");
     assert!(counts.spine_upper_bound > 0, "expected a non-empty spine");
@@ -1685,7 +1719,7 @@ pub async fn dataset_builder_rejects_features() {
         Arc::clone(&store),
         Arc::clone(&fact_read) as Arc<dyn QuantFactReadRepository>,
     );
-    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
     let dataset_id = plan.training_dataset_id;
 
     let leaky = LeakyPitEngine {
@@ -1740,7 +1774,7 @@ pub async fn settlement_not_before_resolution() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(artifact.coverage.labels_not_mature > 0);
     for example in &artifact.examples {
@@ -1748,7 +1782,7 @@ pub async fn settlement_not_before_resolution() {
             !example
                 .labels
                 .iter()
-                .any(|label| label.label_name == SETTLEMENT_LABEL),
+                .any(|label| label.label_name == TOKEN_PAYOUT_LABEL),
             "settlement label must not appear before resolution"
         );
     }
@@ -1785,12 +1819,12 @@ pub async fn settlement_label_after_resolution() {
         Arc::new(ControllableFactRead::new(scenario)),
     );
 
-    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(
         artifact.examples.iter().any(|example| {
             example.labels.iter().any(|label| {
-                label.label_name == SETTLEMENT_LABEL && label.value == Decimal::new(5, 1)
+                label.label_name == TOKEN_PAYOUT_LABEL && label.value == Decimal::new(5, 1)
             })
         }),
         "expected exact split-payout label after resolution is visible in forward window"
@@ -1814,8 +1848,8 @@ pub async fn plan_build_reuses_id() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let plan_a = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
-    let plan_b = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan_a = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan_b = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
     assert_ne!(
         plan_a.training_dataset_id, plan_b.training_dataset_id,
         "each plan call mints a fresh id"
@@ -1860,7 +1894,7 @@ pub async fn build_status_no_mature() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let mut plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let mut plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
     plan.request.horizons_secs = vec![86_400];
     let artifact = svc.build(plan).await.expect("build");
     assert!(artifact.coverage.built_examples > 0);
@@ -1891,7 +1925,7 @@ pub async fn build_failed_zero_examples() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let mut plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let mut plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
     plan.samples.clear();
     let artifact = svc.build(plan).await.expect("build");
     assert_eq!(artifact.coverage.built_examples, 0);
@@ -1930,7 +1964,7 @@ pub async fn build_book_decode_failures() {
         Arc::new(ControllableFactRead::new(scenario)),
     );
 
-    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(
         artifact.coverage.book_decode_failures > 0,
@@ -1977,14 +2011,14 @@ pub async fn settlement_label_without_resolution() {
         Arc::new(ControllableFactRead::new(scenario)),
     );
 
-    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(
         artifact.examples.iter().any(|example| {
             example
                 .labels
                 .iter()
-                .any(|label| label.label_name == SETTLEMENT_LABEL)
+                .any(|label| label.label_name == TOKEN_PAYOUT_LABEL)
         }),
         "settlement must not depend on microstructure extending past resolution"
     );
@@ -1995,64 +2029,18 @@ pub async fn model_version_training_typed() {
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let model_spec_id = seed_model_spec(&db).await;
-    let model_spec_definition_hash = model_spec_definition_hash(&db, &model_spec_id).await;
-    let dataset_id = TrainingDatasetId::from_v7();
     let (window_start, window_end) = dataset_window();
     let hash = ContentHash::parse(&format!("blake3:{}", "b".repeat(64))).expect("hash");
-    let manifest = ledger_manifest(LedgerManifestInput {
-        training_dataset_id: &dataset_id,
-        model_spec_id: &model_spec_id,
-        model_spec_definition_hash: &model_spec_definition_hash,
-        decision_policy_snapshot_id: &rc_id,
+    let dataset_id = ReadyDatasetSeed {
+        model_spec_id,
+        decision_policy_snapshot_id: rc_id,
         window_start,
         window_end,
-        hash: &hash,
+        hash,
         sample_count: 10,
-    });
-    let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
-
-    let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
-    dataset_repo
-        .create_plan(NewTrainingDatasetPlan {
-            training_dataset_id: dataset_id,
-            model_spec_id,
-            model_spec_definition_hash,
-            window_start,
-            window_end,
-            purpose: DatasetPurpose::Training,
-            knowledge_lag_secs: 10,
-            sample_interval_secs: 3600,
-            horizons_secs: TrainingHorizonsSecs(vec![3600]),
-            feature_schema_version: Some(SchemaVersion::FIRST),
-            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-            decision_policy_snapshot_id: rc_id,
-        })
-        .await
-        .expect("create dataset plan");
-    dataset_repo
-        .start_build(&dataset_id)
-        .await
-        .expect("start dataset build");
-    dataset_repo
-        .complete_build(
-            &dataset_id,
-            CompleteTrainingDatasetBuild {
-                status: TrainingDatasetStatus::Ready,
-                feature_schema_hash: hash,
-                factor_schema_hash: hash,
-                label_schema_hash: hash,
-                dataset_hash: hash,
-                manifest_hash,
-                manifest_json: manifest,
-                artifact_bytes_hash: hash,
-                parquet_uri: ArtifactUri::parse("file:///tmp/dataset.parquet").expect("uri"),
-                sample_count: 10,
-                coverage_json: DatasetCoverage::default(),
-                failure_detail: None,
-            },
-        )
-        .await
-        .expect("complete dataset");
+    }
+    .persist(&db)
+    .await;
 
     let version_id = ModelVersionId::from_v7();
     PgModelRegistryRepository::new(db.clone())
@@ -2103,25 +2091,15 @@ pub async fn plan_count_respects_sources() {
         Arc::new(ControllableFactRead::new(scenario)),
     );
 
-    let default_plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let default_plan =
+        plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let historical_request =
+        DatasetRequestSeed::training(model_spec_id, rc_id, window_start, window_end)
+            .with_sources(vec![TrainingSampleSource::HistoricalPit])
+            .build(&db)
+            .await;
     let historical_only_plan = svc
-        .plan(DatasetPlanRequest {
-            model_spec_id,
-            profile_ref: fixture_profile_ref(),
-            research_program_hash: fixture_hash('4'),
-            source_slice: execution_pg_seed::source_slice_ref('5'),
-            decision_policy_snapshot_id: rc_id,
-            window_start,
-            window_end,
-            pit_cutoff: window_end + ChronoDuration::seconds(60),
-            sample_interval_secs: 60,
-            horizons_secs: vec![60],
-            knowledge_lag_secs: 10,
-            feature_schema_version: SchemaVersion::FIRST,
-            sample_sources: vec![TrainingSampleSource::HistoricalPit],
-            training_dataset_id: None,
-            purpose: DatasetPurpose::Training,
-        })
+        .plan(historical_request)
         .await
         .expect("historical-only plan");
 

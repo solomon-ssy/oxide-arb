@@ -15,7 +15,6 @@ use quant_pivot_models::{
         },
     },
     entities::{
-        quant_backtest_report::Entity as QuantBacktestReportEntity,
         quant_calibration_artifact::Entity as QuantCalibrationArtifactEntity,
         quant_feature_parity_run::Entity as QuantFeatureParityRunEntity,
         quant_feature_parity_subject::{
@@ -163,14 +162,6 @@ impl PgModelRegistryRepository {
         db: &impl ConnectionTrait,
         version: &NewModelVersion,
     ) -> Result<(), StorageError> {
-        version
-            .derivation
-            .validate()
-            .map_err(|error| StorageError::InvariantViolation {
-                entity: Some(QUANT_MODEL_VERSION),
-                detail: error.to_string(),
-            })?;
-
         let Some(parent_id) = version.derivation.parent_model_version_id() else {
             return Ok(());
         };
@@ -213,27 +204,6 @@ impl PgModelRegistryRepository {
 
         match &version.derivation {
             ModelVersionDerivation::Training => {}
-            ModelVersionDerivation::ScoreMultiplierCalibration {
-                source_backtest_report_id,
-                ..
-            } => {
-                let source = QuantBacktestReportEntity::find_by_id(*source_backtest_report_id)
-                    .one(db)
-                    .await
-                    .map_err(StorageError::from)?
-                    .ok_or_else(|| {
-                        StorageError::not_found("quant_backtest_report", source_backtest_report_id)
-                    })?;
-                if source.model_version_id != *parent_id {
-                    return Err(StorageError::InvariantViolation {
-                        entity: Some(QUANT_MODEL_VERSION),
-                        detail: format!(
-                            "source backtest report {source_backtest_report_id} belongs to model version {}, not parent {parent_id}",
-                            source.model_version_id
-                        ),
-                    });
-                }
-            }
             ModelVersionDerivation::ReturnCalibration {
                 calibration_artifact_id,
                 ..

@@ -117,6 +117,12 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
+        name: "trg_quant_backtest_report_append_only",
+        table: "quant_backtest_report",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
         name: "trg_quant_calibration_artifact_publication_append_only",
         table: "quant_calibration_artifact_publication",
         events: TriggerEvents::DeleteOrUpdate,
@@ -321,6 +327,12 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
+        name: "trg_quant_source_slice_lifecycle_guard",
+        table: "quant_source_slice",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::GuardSourceSlice,
+    },
+    TriggerSpec {
         name: "trg_quant_trade_policy_artifact_updated_at",
         table: "quant_trade_policy_artifact",
         events: TriggerEvents::Update,
@@ -349,6 +361,12 @@ const TRIGGERS: &[TriggerSpec] = &[
         table: "quant_trade_tape_block_cursor",
         events: TriggerEvents::Update,
         program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_training_dataset_lifecycle_guard",
+        table: "quant_training_dataset",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::GuardTrainingDataset,
     },
     TriggerSpec {
         name: "trg_quant_weather_daily_temperature_projection_updated_at",

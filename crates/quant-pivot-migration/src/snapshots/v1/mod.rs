@@ -235,6 +235,7 @@ pub const ENUMS: &[&str] = &[
     "qp_factor_family",
     "qp_factor_indeterminate_reason",
     "qp_factor_value_state",
+    "qp_feedback_cohort",
     "qp_feature_parity_latch_state",
     "qp_feature_parity_run_kind",
     "qp_feature_parity_run_status",

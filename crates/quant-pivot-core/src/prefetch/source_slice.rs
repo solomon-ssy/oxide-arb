@@ -29,10 +29,10 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::DomainConfig,
     types::{
-        ArtifactUri, ClobMarketInfoVersion, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
-        IcaoStation, ResearchProfileArtifact, ResearchProfileDataSource,
-        SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SourceSliceCatalogProof, SourceSliceId,
-        SourceSliceInvalidSession, SourceSliceManifest, SourceSliceManifestRef,
+        ArtifactUri, CapabilityRegistryHashes, ClobMarketInfoVersion, ContentHash,
+        DATASET_ARTIFACT_FORMAT_VERSION, IcaoStation, ResearchProfileArtifact,
+        ResearchProfileDataSource, SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SourceSliceCatalogProof,
+        SourceSliceId, SourceSliceInvalidSession, SourceSliceManifest, SourceSliceManifestRef,
         SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoffs,
         SourceSliceSessionInvalidationReason,
     },
@@ -72,6 +72,7 @@ pub struct SourceSliceMaterializer {
 /// Fully verified immutable inputs. Consumers receive owned in-memory facts and
 /// cannot reach a live repository while replaying rows.
 pub struct FrozenSourceSlice {
+    pub manifest: SourceSliceManifest,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub pit_cutoff: DateTime<Utc>,
@@ -89,6 +90,25 @@ struct SourceSliceInputs {
     sessions: Vec<BookStreamSessionRow>,
     gap_records: Vec<SourceSliceRecord>,
     invalid_sessions: Vec<SourceSliceInvalidSession>,
+}
+
+impl SourceSliceInputs {
+    fn capability_hashes(&self) -> QuantResult<CapabilityRegistryHashes> {
+        let hashes = self
+            .prefetched
+            .linkages
+            .values()
+            .flatten()
+            .filter_map(|linkage| linkage.capability_registry_hash)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        CapabilityRegistryHashes::try_new(hashes)
+            .map_err(|error| ResearchError::DatasetBuild {
+                detail: error.to_string(),
+            })
+            .map_err(Into::into)
+    }
 }
 
 /// Strict reader for the current Parquet envelope and immutable object bindings.
@@ -138,7 +158,7 @@ impl SourceSliceReader {
             )
             .into());
         }
-        let manifest = source_slice.manifest_json.as_ref().ok_or_else(|| {
+        let manifest = source_slice.manifest.as_ref().ok_or_else(|| {
             StorageError::invariant_violation(
                 Some("quant_source_slice"),
                 "Ready Source Slice has no manifest JSON",
@@ -371,6 +391,7 @@ fn decode_frozen_source_slice(
         .into());
     }
     Ok(FrozenSourceSlice {
+        manifest: manifest.clone(),
         window_start: manifest.window_start,
         window_end: manifest.window_end,
         pit_cutoff: manifest.pit_cutoff,
@@ -792,6 +813,7 @@ impl SourceSliceMaterializer {
             decision_policy_snapshot_id: identity.decision_policy_snapshot_id,
             runtime_config_hash: identity.runtime_config_hash,
             dataset_format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+            capability_registry_hashes: inputs.capability_hashes()?,
             pit_cutoffs: SourceSlicePitCutoffs {
                 catalog_available_at: identity.pit_cutoff,
                 clob_market_info_available_at: identity.pit_cutoff,

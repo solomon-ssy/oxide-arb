@@ -22,7 +22,7 @@ use quant_pivot_models::{
         common::MarketCategory,
         model::{ClassicalKind, ModelFamily},
         quant::{
-            ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus,
+            DatasetPurpose, ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus,
             TrainingDatasetStatus,
         },
     },
@@ -79,7 +79,7 @@ use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace},
     model::{ClassicalAdapterRegistry, ClassicalOutputSemantics, artifact::ClassicalModelArtifact},
     training::{
-        RETURN_TO_HORIZON, SETTLEMENT_OUTCOME, TrainingMatrix, build_borrowed_matrix,
+        RETURN_TO_HORIZON, TOKEN_PAYOUT_RATIO, TrainingMatrix, build_borrowed_matrix,
         matrix_spec_from_contract,
     },
 };
@@ -349,6 +349,15 @@ impl ModelTrainerService {
             }
             .into());
         }
+        if dataset.purpose != DatasetPurpose::Training {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "model training requires purpose=training, got {}",
+                    dataset.purpose.as_str()
+                ),
+            }
+            .into());
+        }
         Ok(dataset)
     }
 
@@ -376,17 +385,19 @@ impl ModelTrainerService {
         cancel: &CancellationToken,
     ) -> QuantResult<ModelVersionInfo> {
         let materialization = require_dataset_materialization(dataset)?;
-        let manifest =
-            dataset
-                .manifest_json
-                .as_ref()
-                .ok_or_else(|| ResearchError::DatasetBuild {
-                    detail: "v1 dataset is missing its immutable manifest".to_owned(),
-                })?;
+        let manifest = dataset
+            .manifest
+            .as_ref()
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "v2 dataset is missing its immutable manifest".to_owned(),
+            })?;
         let header = ModelArtifactHeader {
             model_version_id: *model_version_id,
             model_spec_definition_hash: manifest.model_spec_definition_hash,
-            profile_ref: manifest.profile_ref.clone(),
+            profile_ref: manifest
+                .source_lineage
+                .research_profile_artifact_id
+                .profile_ref(),
             model_family: input.model_family,
             feature_schema_hash: *materialization.feature_schema_hash,
             factor_schema_hash: *materialization.factor_schema_hash,
@@ -434,7 +445,10 @@ impl ModelTrainerService {
                 version,
                 artifact_hash,
                 category_scope,
-                profile_ref: manifest.profile_ref.clone(),
+                profile_ref: manifest
+                    .source_lineage
+                    .research_profile_artifact_id
+                    .profile_ref(),
                 training_dataset_id: Some(input.training_dataset_id),
                 trade_policy_artifact_id,
                 trade_policy_hash,
@@ -886,12 +900,12 @@ pub(crate) fn classical_output_semantics(
         .into());
     }
     match kind {
-        ClassicalKind::LogisticRegression if label.name == SETTLEMENT_OUTCOME => {
-            Ok(ClassicalOutputSemantics::SettlementProbability)
+        ClassicalKind::LogisticRegression if label.name == TOKEN_PAYOUT_RATIO => {
+            Ok(ClassicalOutputSemantics::FullPayoutProbability)
         }
         ClassicalKind::LogisticRegression => Err(ResearchError::DatasetBuild {
             detail: format!(
-                "logistic classical model requires `{SETTLEMENT_OUTCOME}` target, got `{}`",
+                "logistic classical model requires `{TOKEN_PAYOUT_RATIO}` target, got `{}`",
                 label.name
             ),
         }

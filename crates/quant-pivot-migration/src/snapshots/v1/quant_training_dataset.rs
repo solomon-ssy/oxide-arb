@@ -2,7 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{QpDatasetPurpose, QpTrainingDatasetStatus};
+use super::sea_orm_active_enums::{QpDatasetPurpose, QpFeedbackCohort, QpTrainingDatasetStatus};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -12,6 +12,15 @@ pub struct Model {
     pub training_dataset_id: Uuid,
     pub model_spec_id: Uuid,
     pub model_spec_definition_hash: String,
+    #[sea_orm(column_type = "Text")]
+    pub research_profile_artifact_id: String,
+    pub source_slice_id: Uuid,
+    pub pit_cutoff: DateTimeWithTimeZone,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub source_lineage: Json,
+    pub feedback_cohort: Option<QpFeedbackCohort>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub cohort_manifest: Option<Json>,
     pub window_start: DateTimeWithTimeZone,
     pub window_end: DateTimeWithTimeZone,
     pub status: QpTrainingDatasetStatus,
@@ -27,7 +36,7 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub manifest_hash: Option<String>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
-    pub manifest_json: Option<Json>,
+    pub manifest: Option<Json>,
     #[sea_orm(column_type = "Text", nullable)]
     pub artifact_bytes_hash: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
@@ -41,7 +50,7 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub sample_sources: Option<Json>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
-    pub coverage_json: Option<Json>,
+    pub coverage: Option<Json>,
     pub decision_policy_snapshot_id: Uuid,
     pub failure_detail: Option<String>,
     pub completed_at: Option<DateTimeWithTimeZone>,

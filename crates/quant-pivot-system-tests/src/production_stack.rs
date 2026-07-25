@@ -5,7 +5,8 @@ use std::{
     fs::File,
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
+    sync::Arc,
     time::Duration,
 };
 
@@ -27,6 +28,7 @@ use quant_pivot_repository::postgres::{
     PgExecutionSubmissionRepository, PgModelRegistryRepository, PgPolicyRepository,
     policy_bootstrap::ensure_default_policy_bundle,
 };
+use quant_pivot_research::artifact::{ArtifactStore, LocalArtifactStore};
 use reqwest::Client;
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
@@ -34,9 +36,10 @@ use sea_orm::{
 };
 use serde::Deserialize;
 use tokio::{
+    net::TcpStream,
     process::{Child, Command as TokioCommand},
     signal::{unix, unix::SignalKind},
-    time::Instant,
+    time::{Instant, sleep, timeout},
 };
 use toml::{Table, Value};
 use uuid::Uuid;
@@ -49,8 +52,9 @@ use crate::{
     stack::SystemStack,
     support::execution_pg_seed::{
         ReportSeedConfig, enable_test_admission, fill_entry_lot, seed_approved_intent,
-        seed_pending_intent, seed_report_fixture, seed_report_on_infra, seed_shared_demo_infra,
+        seed_demo_with_store, seed_pending_intent, seed_report_fixture, seed_report_on_infra,
     },
+    support::research_browser_seed::seed_browser_research,
 };
 
 const PRIVATE_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -63,6 +67,7 @@ const EVIDENCE_SIGNING_KEY: &str =
     "0808080808080808080808080808080808080808080808080808080808080808";
 const STARTUP_TIMEOUT: Duration = Duration::from_mins(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const SIGNAL_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(1);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 const DISABLED_DOMAIN_SOURCES: &[&str] = &[
@@ -97,9 +102,23 @@ struct Workspace {
 pub struct ProductionStack {
     child: Child,
     base_url: String,
+    listen_port: u16,
     run_dir: PathBuf,
     _upstream: MockServer,
     infrastructure: SystemStack,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShutdownOrigin {
+    Harness,
+    ProcessTreeSignal,
+}
+
+#[derive(Debug)]
+enum SignalObservation {
+    ChildExited(ExitStatus),
+    IngressClosed,
+    Unobserved,
 }
 
 pub async fn serve(listen_port: u16, browser_fixture: bool, retain_artifacts: bool) -> Result<()> {
@@ -126,7 +145,7 @@ pub async fn serve(listen_port: u16, browser_fixture: bool, retain_artifacts: bo
         }
     }
 
-    Box::pin(running.stop(!retain_artifacts)).await
+    Box::pin(running.stop_after_signal(!retain_artifacts)).await
 }
 
 pub async fn start_production_stack() -> Result<ProductionStack> {
@@ -168,50 +187,18 @@ impl ProductionStack {
         self.run_dir.join("backend.log")
     }
 
-    pub async fn stop(mut self, remove_artifacts: bool) -> Result<()> {
-        let shutdown_result: Result<()> = async {
-            if self
-                .child
-                .try_wait()
-                .context("inspect production binary")?
-                .is_none()
-            {
-                let process_id = self
-                    .child
-                    .id()
-                    .context("production binary has no process id")?;
-                let terminate = Command::new("kill")
-                    .args(["-TERM", &process_id.to_string()])
-                    .status()
-                    .context("send SIGTERM to production binary")?;
-                if !terminate.success() {
-                    bail!(
-                        "could not signal production binary {process_id}; logs={}",
-                        self.log_path().display(),
-                    );
-                }
-                if let Ok(status) = tokio::time::timeout(SHUTDOWN_TIMEOUT, self.child.wait()).await {
-                    let status = status.context("wait for graceful production shutdown")?;
-                    if !status.success() {
-                        bail!(
-                            "production binary shutdown failed with {status}; logs={}",
-                            self.log_path().display(),
-                        );
-                    }
-                } else {
-                    self.child
-                        .start_kill()
-                        .context("force-stop unresponsive production binary")?;
-                    let _ = self.child.wait().await;
-                    bail!(
-                        "production binary exceeded the {SHUTDOWN_TIMEOUT:?} shutdown budget; logs={}",
-                        self.log_path().display(),
-                    );
-                }
-            }
-            Ok(())
-        }
-        .await;
+    pub async fn stop(self, remove_artifacts: bool) -> Result<()> {
+        self.shutdown(remove_artifacts, ShutdownOrigin::Harness)
+            .await
+    }
+
+    async fn stop_after_signal(self, remove_artifacts: bool) -> Result<()> {
+        self.shutdown(remove_artifacts, ShutdownOrigin::ProcessTreeSignal)
+            .await
+    }
+
+    async fn shutdown(mut self, remove_artifacts: bool, origin: ShutdownOrigin) -> Result<()> {
+        let shutdown_result = self.shutdown_binary(origin).await;
         let artifact_result = if remove_artifacts && shutdown_result.is_ok() {
             fs::remove_dir_all(&self.run_dir)
                 .with_context(|| format!("remove successful run {}", self.run_dir.display()))
@@ -225,6 +212,91 @@ impl ProductionStack {
         shutdown_result?;
         artifact_result?;
         infrastructure_result
+    }
+
+    async fn shutdown_binary(&mut self, origin: ShutdownOrigin) -> Result<()> {
+        if let Some(status) = self.child.try_wait().context("inspect production binary")? {
+            return self.verify_exit(status);
+        }
+
+        if origin == ShutdownOrigin::ProcessTreeSignal {
+            match self.observe_signal().await? {
+                SignalObservation::ChildExited(status) => return self.verify_exit(status),
+                SignalObservation::IngressClosed => return self.wait_for_exit().await,
+                SignalObservation::Unobserved => {}
+            }
+        }
+
+        self.signal_binary()?;
+        self.wait_for_exit().await
+    }
+
+    async fn observe_signal(&mut self) -> Result<SignalObservation> {
+        let deadline = Instant::now() + SIGNAL_PROPAGATION_TIMEOUT;
+        let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, self.listen_port);
+        loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .context("inspect externally signalled production binary")?
+            {
+                return Ok(SignalObservation::ChildExited(status));
+            }
+            if matches!(
+                timeout(POLL_INTERVAL, TcpStream::connect(address)).await,
+                Ok(Err(_))
+            ) {
+                return Ok(SignalObservation::IngressClosed);
+            }
+            if Instant::now() >= deadline {
+                return Ok(SignalObservation::Unobserved);
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    fn signal_binary(&self) -> Result<()> {
+        let process_id = self
+            .child
+            .id()
+            .context("production binary has no process id")?;
+        let terminate = Command::new("kill")
+            .args(["-TERM", &process_id.to_string()])
+            .status()
+            .context("send SIGTERM to production binary")?;
+        if !terminate.success() {
+            bail!(
+                "could not signal production binary {process_id}; logs={}",
+                self.log_path().display(),
+            );
+        }
+        Ok(())
+    }
+
+    async fn wait_for_exit(&mut self) -> Result<()> {
+        if let Ok(status) = timeout(SHUTDOWN_TIMEOUT, self.child.wait()).await {
+            let status = status.context("wait for graceful production shutdown")?;
+            self.verify_exit(status)
+        } else {
+            self.child
+                .start_kill()
+                .context("force-stop unresponsive production binary")?;
+            let _ = self.child.wait().await;
+            bail!(
+                "production binary exceeded the {SHUTDOWN_TIMEOUT:?} shutdown budget; logs={}",
+                self.log_path().display(),
+            );
+        }
+    }
+
+    fn verify_exit(&self, status: ExitStatus) -> Result<()> {
+        if !status.success() {
+            bail!(
+                "production binary shutdown failed with {status}; logs={}",
+                self.log_path().display(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -248,21 +320,31 @@ async fn start_at(
     )
     .await
     .context("bootstrap canonical fresh-boot policy bundle")?;
-    let browser_report_id = if browser_fixture {
-        Some(
-            Box::pin(seed_browser_fixture(infrastructure.postgres.connection()))
-                .await
-                .context("seed browser production fixture")?,
-        )
-    } else {
-        None
-    };
     let run_dir = workspace
         .target_directory
         .join("production-stack")
         .join(Uuid::now_v7().to_string());
     fs::create_dir_all(&run_dir)
         .with_context(|| format!("create production-stack run {}", run_dir.display()))?;
+    let artifact_store: Arc<dyn ArtifactStore> =
+        Arc::new(LocalArtifactStore::new(run_dir.join("artifacts")));
+    let browser_report_id = if browser_fixture {
+        Some(
+            Box::pin(seed_browser_fixture(
+                infrastructure.postgres.connection(),
+                &artifact_store,
+            ))
+            .await
+            .with_context(|| {
+                format!(
+                    "seed browser production fixture; retained artifacts={}",
+                    run_dir.display()
+                )
+            })?,
+        )
+    } else {
+        None
+    };
 
     if let Err(error) = render_config(
         &workspace.root,
@@ -293,8 +375,6 @@ async fn start_at(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
     let mut child = command
         .spawn()
         .with_context(|| format!("spawn production binary {}", workspace.binary.display()))?;
@@ -319,14 +399,23 @@ async fn start_at(
     Ok(ProductionStack {
         child,
         base_url,
+        listen_port,
         run_dir,
         _upstream: upstream,
         infrastructure,
     })
 }
 
-async fn seed_browser_fixture(db: &DatabaseConnection) -> Result<RecommendationReportId> {
-    let infra = seed_shared_demo_infra(db).await;
+async fn seed_browser_fixture(
+    db: &DatabaseConnection,
+    artifact_store: &Arc<dyn ArtifactStore>,
+) -> Result<RecommendationReportId> {
+    let infra = seed_demo_with_store(db, artifact_store).await;
+    let research = seed_browser_research(db, artifact_store, &infra).await?;
+    println!(
+        "browser research fixture: model_version_id={} evaluation_dataset_id={} backtest_report_id={}",
+        research.model_version_id, research.evaluation_dataset_id, research.backtest_report_id,
+    );
     enable_test_admission(db, "browser-e2e-fixture").await;
     let settlement_report = seed_report_on_infra(
         db,
