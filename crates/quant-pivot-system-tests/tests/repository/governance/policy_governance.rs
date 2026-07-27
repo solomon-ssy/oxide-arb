@@ -4,9 +4,9 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::governance::{
-        ConfigActivityInfo, DecisionPolicySnapshotInfo, NewDecisionPolicySnapshot,
-        NewPolicyActivation, NewPolicyRevision, PolicyActivationCommit, PolicyActivationInfo,
-        PolicyActivationOutcome, RecordPolicyApproval,
+        ConfigActivityInfo, NewDecisionPolicySnapshot, NewPolicyActivation, NewPolicyRevision,
+        PolicyActivationCommit, PolicyActivationInfo, PolicyActivationOutcome,
+        RecordPolicyApproval,
     },
     entities::{
         policy_activation, policy_activation_audit, policy_activation_audit::Entity,
@@ -36,7 +36,7 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait};
 async fn assert_boot_state(
     repo: &PgPolicyRepository,
     active: &[PolicyActivationInfo],
-    current: &DecisionPolicySnapshotInfo,
+    current: &ActivePolicyBundle,
 ) {
     assert_eq!(active.len(), ConfigResourceKind::ALL.len());
     assert!(ConfigResourceKind::ALL.iter().all(|kind| {
@@ -58,7 +58,7 @@ async fn assert_boot_state(
         .await
         .expect("load Config resource inventory in one statement");
     assert_eq!(inventory.resources.len(), ConfigResourceKind::ALL.len());
-    assert_eq!(inventory.bundle_generation, current.bundle_generation);
+    assert_eq!(inventory.bundle_generation, current.generation);
     assert_eq!(
         inventory.active_snapshot_id.as_ref(),
         Some(&current.decision_policy_snapshot_id)
@@ -209,13 +209,13 @@ pub async fn active_resources_loaded_use() {
         .await
         .expect("load current activations");
     let current = repo
-        .load_current()
+        .load_current_bundle()
         .await
         .expect("load current policy bundle")
         .expect("boot bundle exists");
     assert_boot_state(&repo, &active, &current).await;
     let kind = ConfigResourceKind::RecommendationPolicy;
-    let base_generation = current.bundle_generation;
+    let base_generation = current.generation;
     let base_revision_vector = current.snapshot.revisions.clone();
     let mut candidate = current.snapshot;
     candidate.recommendation.data_quality.max_book_age_ms += 1;
@@ -288,9 +288,9 @@ pub async fn active_resources_loaded_use() {
         Some(&1)
     );
 
-    let snapshot_id = DecisionPolicySnapshotId::from_v7();
     let next_generation = base_generation.checked_next().expect("next generation");
-    let new_snapshot = persisted_snapshot(next_generation, snapshot_id, &candidate);
+    let new_snapshot = persisted_snapshot(&candidate);
+    let snapshot_id = new_snapshot.decision_policy_snapshot_id;
     let first_activation = activation(ActivationFixture {
         bundle_generation: next_generation,
         expected_bundle_generation: base_generation,
@@ -495,7 +495,7 @@ pub async fn rollback_generation_matches_history() {
     )
     .await;
     assert_eq!(rollback.snapshot.snapshot_hash, base.snapshot_hash);
-    assert_ne!(
+    assert_eq!(
         rollback.snapshot.decision_policy_snapshot_id,
         base.decision_policy_snapshot_id
     );
@@ -511,7 +511,7 @@ pub async fn rollback_generation_matches_history() {
             .checked_next()
             .expect("rollback generation")
     );
-    assert_ne!(
+    assert_eq!(
         rollback_commit.bundle.decision_policy_snapshot_id,
         base.decision_policy_snapshot_id
     );
@@ -522,15 +522,26 @@ pub async fn rollback_generation_matches_history() {
         .into_iter()
         .filter(|snapshot| snapshot.snapshot_hash == base.snapshot_hash)
         .collect::<Vec<_>>();
-    assert_eq!(matching_history.len(), 2);
-    assert_ne!(
+    assert_eq!(matching_history.len(), 1);
+    assert_eq!(
         matching_history[0].decision_policy_snapshot_id,
-        matching_history[1].decision_policy_snapshot_id
+        base.decision_policy_snapshot_id
     );
-    assert_ne!(
-        matching_history[0].bundle_generation,
-        matching_history[1].bundle_generation
+    let matching_activations = repo
+        .list_activations(Some(kind), 10)
+        .await
+        .expect("list activation lineage")
+        .into_iter()
+        .filter(|activation| {
+            activation.decision_policy_snapshot_id == base.decision_policy_snapshot_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(matching_activations.len(), 2);
+    assert_eq!(
+        matching_activations[0].bundle_generation,
+        rollback_commit.bundle.generation
     );
+    assert_eq!(matching_activations[1].bundle_generation, base.generation);
 }
 
 pub async fn concurrent_rebase_preserves_updates() {
@@ -781,8 +792,8 @@ async fn prepare_candidate(
     .await
     .expect("approve concurrent candidate revision");
     let next_generation = base.generation.checked_next().expect("next generation");
-    let snapshot_id = DecisionPolicySnapshotId::from_v7();
-    let snapshot = persisted_snapshot(next_generation, snapshot_id, &candidate);
+    let snapshot = persisted_snapshot(&candidate);
+    let snapshot_id = snapshot.decision_policy_snapshot_id;
     let activation = activation(ActivationFixture {
         bundle_generation: next_generation,
         expected_bundle_generation: base.generation,
@@ -808,19 +819,16 @@ async fn prepare_candidate(
     }
 }
 
-fn persisted_snapshot(
-    bundle_generation: PolicyBundleGeneration,
-    snapshot_id: DecisionPolicySnapshotId,
-    snapshot: &DecisionPolicySnapshot,
-) -> NewDecisionPolicySnapshot {
+fn persisted_snapshot(snapshot: &DecisionPolicySnapshot) -> NewDecisionPolicySnapshot {
     let snapshot_document = snapshot
         .persistence_document()
         .expect("build policy persistence document");
+    let snapshot_hash = CanonicalDigest::content_hash_json(&snapshot_document)
+        .expect("hash policy persistence document");
+    let snapshot_id = DecisionPolicySnapshotId::from_content_hash(&snapshot_hash);
     NewDecisionPolicySnapshot {
-        bundle_generation,
         decision_policy_snapshot_id: snapshot_id,
-        snapshot_hash: CanonicalDigest::content_hash_json(&snapshot_document)
-            .expect("hash policy persistence document"),
+        snapshot_hash,
         recommendation_policy_revision_id: required_revision(
             snapshot,
             ConfigResourceKind::RecommendationPolicy,

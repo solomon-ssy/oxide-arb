@@ -3,23 +3,20 @@
 //! [`FactorRegistry::build`] selects the generic factors whose family is enabled
 //! by `factors.enabled_factor_families`, resolving each factor's input feature
 //! names against the active feature config. [`crate::factors::FactorEngine`]
-//! binds these specs to the feature-contract hash and derives an immutable,
-//! content-addressed revision identity.
+//! seals these specs with the feature contract into one immutable,
+//! content-addressed serving plane.
 
 use std::{collections::HashSet, sync::Arc};
 
 use quant_pivot_models::{
-    enums::factor::FactorFamily,
+    enums::{common::MarketCategory, factor::FactorFamily},
     runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig},
 };
 
 use crate::{
     factors::{
-        computer::FactorComputer,
-        domain::DomainFactorRegistry,
-        generic::generic_factors,
-        structural::structural_factors,
-        value::{FactorDefinitionDocument, FactorSet},
+        computer::FactorComputer, domain::DomainFactorRegistry, generic::generic_factors,
+        structural::structural_factors, value::FactorDefinitionDocument,
     },
     model::FavoriteLongshotBiasTable,
 };
@@ -36,8 +33,8 @@ impl FactorRegistry {
     /// factors of every vertical enabled in `domain.enabled_by_family`.
     ///
     /// `bias_table` binds the favorite-longshot factor; `None` keeps it inert
-    /// (fail-closed). The table is runtime data — it does not affect
-    /// `factor_schema_hash`.
+    /// (fail-closed). The table is runtime data and its immutable artifact
+    /// commitment is owned by the model-serving contract, not the factor plane.
     ///
     /// Domain factors are **never** selected through `enabled_factor_families`
     /// (config validation rejects them there): they join the batch column set
@@ -53,12 +50,46 @@ impl FactorRegistry {
     ) -> Self {
         let enabled: HashSet<FactorFamily> =
             factors.enabled_factor_families.iter().copied().collect();
-        let selected = generic_factors(features)
+        let mut selected: Vec<_> = generic_factors(features)
             .into_iter()
             .chain(structural_factors(factors, features, bias_table))
             .filter(|(spec, _)| enabled.contains(&spec.family))
             .chain(DomainFactorRegistry::build(domain).all())
             .collect();
+        selected.sort_unstable_by(|left, right| left.0.name.cmp(&right.0.name));
+        Self { factors: selected }
+    }
+
+    /// Build the exact factor registry for one governed model scope.
+    ///
+    /// Generic and structural factors remain available to every model. Domain
+    /// factors are admitted only for the profile's exact category; a pooled or
+    /// non-domain profile therefore cannot accidentally commit revisions from
+    /// an unrelated vertical.
+    #[must_use]
+    pub fn for_model_scope(
+        factors: &FactorsConfig,
+        features: &FeaturesConfig,
+        domain: &DomainConfig,
+        category_scope: Option<MarketCategory>,
+        bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
+    ) -> Self {
+        let enabled: HashSet<FactorFamily> =
+            factors.enabled_factor_families.iter().copied().collect();
+        let mut selected: Vec<_> = generic_factors(features)
+            .into_iter()
+            .chain(structural_factors(factors, features, bias_table))
+            .filter(|(spec, _)| enabled.contains(&spec.family))
+            .collect();
+        if let Some(category) = category_scope {
+            selected.extend(
+                DomainFactorRegistry::build(domain)
+                    .for_category(category)
+                    .into_iter()
+                    .map(|(_, spec, computer)| (spec.clone(), Arc::clone(computer))),
+            );
+        }
+        selected.sort_unstable_by(|left, right| left.0.name.cmp(&right.0.name));
         Self { factors: selected }
     }
 
@@ -66,14 +97,6 @@ impl FactorRegistry {
     #[must_use]
     pub fn factors(&self) -> &[(FactorDefinitionDocument, Arc<dyn FactorComputer>)] {
         &self.factors
-    }
-
-    /// The governed factor set (specs only), for `factor_schema_hash` binding.
-    #[must_use]
-    pub fn factor_set(&self) -> FactorSet {
-        FactorSet {
-            definitions: self.factors.iter().map(|(spec, _)| spec.clone()).collect(),
-        }
     }
 
     /// The number of enabled factors.

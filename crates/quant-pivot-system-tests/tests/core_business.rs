@@ -32,27 +32,75 @@ mod training_dataset;
 mod weather_linkage;
 
 use quant_pivot_system_tests::postgres;
+
 macro_rules! scenario {
     ($module:ident::$function:ident) => {{
         let name = concat!(stringify!($module), "::", stringify!($function));
         eprintln!("core business scenario started: {name}");
-        Box::pin($module::$function()).await;
+        postgres::run_suite_task(Box::pin($module::$function()))
+            .await
+            .unwrap_or_else(|error| panic!("core business scenario failed: {name}: {error:#}"));
         eprintln!("core business scenario passed: {name}");
     }};
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn trainer_factor_contracts() {
+    Box::pin(postgres::with_postgres_suite(
+        model_training_backtest::trainer_freezes_factor_contracts(),
+    ))
+    .await
+    .expect("start trainer factor-contract PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backtest_exact_preimages() {
+    Box::pin(postgres::with_postgres_suite(
+        model_training_backtest::train_backtest_evaluation_e2e(),
+    ))
+    .await
+    .expect("start backtest exact-preimage PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn online_model_runtime() {
+    Box::pin(postgres::with_postgres_suite(
+        model_runtime::online_loop_selection_candidates(),
+    ))
+    .await
+    .expect("start online model-runtime PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn report_pipeline_recommendations() {
+    Box::pin(postgres::with_postgres_suite(
+        report_pipeline::ad_hoc_publishes_recommendations(),
+    ))
+    .await
+    .expect("start report-pipeline PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn report_route_stays_pinned() {
+    Box::pin(postgres::with_postgres_suite(
+        report_pipeline::pinned_route_ignores_registry(),
+    ))
+    .await
+    .expect("start pinned report-route PostgreSQL suite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn core_business_scenarios_server() {
     Box::pin(postgres::with_postgres_suite(async {
         scenario!(catalog_bootstrap::model_spec_service_spec);
-        scenario!(catalog_bootstrap::factor_register_publish_catalog);
+        scenario!(catalog_bootstrap::factor_training_registration_catalog);
 
         scenario!(equity_snapshot::account_no_history_drawdown);
         scenario!(equity_snapshot::resolve_drawdown_concurrent_history);
         scenario!(equity_snapshot::equity_snapshot_real_pnl);
 
         scenario!(factor_pipeline::create_definition_values_run);
-        scenario!(factor_pipeline::unpublished_factor_definitions_pipeline);
+        scenario!(factor_pipeline::unregistered_factor_definitions_pipeline);
         scenario!(factor_pipeline::factor_event_writer_batches);
 
         scenario!(feature_pipeline::insufficient_vectors_audited_input);
@@ -76,21 +124,21 @@ async fn core_business_scenarios_server() {
         scenario!(model_governance::uncalibrated_return_cannot_publish);
         scenario!(model_governance::bind_calibration_creates_model);
         scenario!(model_governance::publish_rescans_not_findings);
-        scenario!(model_governance::sell_publish_requires_set);
-        scenario!(model_governance::sell_publish_succeeds_set);
+        scenario!(model_governance::sell_publish_requires_oof);
+        scenario!(model_governance::sell_cpcv_requires_oof);
 
         scenario!(model_runtime::online_loop_selection_candidates);
-        scenario!(model_runtime::inference_failure_keeps_active);
-        scenario!(model_runtime::hot_changes_not_artifact);
-        scenario!(model_runtime::inference_rejects_retired_model);
+        scenario!(model_runtime::generation_rejects_bad_shadow);
+        scenario!(model_runtime::cached_planes_stay_stable);
+        scenario!(model_runtime::generation_rejects_retired_model);
         scenario!(model_runtime::model_run_create_fail);
 
-        scenario!(model_training_backtest::train_backtest_evaluation_e2e);
         scenario!(model_training_backtest::train_cpcv_persists_decomposition);
 
         scenario!(participant_concentration::whale_trade_tape_monitor);
 
         scenario!(report_pipeline::ad_hoc_publishes_recommendations);
+        scenario!(report_pipeline::pinned_route_ignores_registry);
         scenario!(report_pipeline::ad_hoc_idempotent_key);
         scenario!(report_pipeline::empty_selection_publishes_report);
         scenario!(report_pipeline::missing_non_empty_report);

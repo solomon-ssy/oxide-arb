@@ -42,6 +42,7 @@ pub mod quant_crypto_price_projection;
 pub mod quant_domain_event_outbox;
 pub mod quant_domain_source_cursor;
 pub mod quant_domain_source_expectation;
+pub mod quant_drift_report;
 pub mod quant_entry_condition_artifact;
 pub mod quant_entry_condition_audit;
 #[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
@@ -59,6 +60,9 @@ pub mod quant_feature_parity_run;
 pub mod quant_feature_parity_state;
 pub mod quant_feature_parity_subject;
 pub mod quant_feature_vector;
+pub mod quant_feedback_cycle;
+pub mod quant_feedback_evaluation_use;
+pub mod quant_feedback_stage_event;
 pub mod quant_market_linkage;
 #[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]
 pub mod quant_market_linkage_source;

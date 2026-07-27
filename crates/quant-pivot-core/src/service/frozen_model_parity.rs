@@ -1,7 +1,7 @@
 //! Full frozen dataset/model parity verification and publication evidence.
 //!
 //! Unlike runtime replay, this verifier needs no prior live report. It reloads
-//! the immutable Parquet v2 and model artifact from their content addresses,
+//! the immutable Parquet v3 and model artifact from their content addresses,
 //! recomputes the model-input transform that can be derived from the frozen
 //! rows, and persists a subject-bound `Full` parity run. This is the safe
 //! bootstrap path for a newly trained model while the global parity latch is
@@ -32,6 +32,7 @@ use quant_pivot_models::{
     types::{
         ContentHash, DiagnosticCode, FeatureParityDetail, FeatureParityDetailSource,
         FeatureParityEventId, FeatureParityRunId, ModelInputContract, RoleCode,
+        model_serving::ModelServingContract,
     },
 };
 use quant_pivot_repository::traits::{
@@ -39,12 +40,14 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    factors::FrozenReferenceQuantiles,
     hashing::ResearchHasher,
     model::{
-        ClassicalModelArtifact, ClassicalOutputSemantics, LabelSelector, ModelArtifact,
-        SellScorerArtifact, WeightedFactorModelArtifact, fit_frozen_reference_quantiles,
-        load_hash_verified_artifact, model_input_contract_hash, weighted_training_input_hash,
+        CancellationProbe, ClassicalOutputSemantics, LabelSelector, ModelArtifact,
+        SellScorerTrainer, TrainSellScorerRequest,
+        artifact::{
+            ClassicalModelPayload, ModelPayload, SellScorerPayload, WeightedFactorModelPayload,
+        },
+        fit_frozen_reference_quantiles, model_input_contract_hash, weighted_training_input_hash,
     },
     training::{LabelName, RETURN_TO_HORIZON, TOKEN_PAYOUT_RATIO, TrainingExample},
 };
@@ -338,30 +341,30 @@ impl FrozenModelParityService {
             }
             .into());
         }
-        let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
+        let artifact =
+            ModelArtifact::load_verified(self.deps.artifact_store.as_ref(), version).await?;
         let header = artifact.header();
-        let manifest = dataset
-            .manifest
+        let persisted_contract = header.serving_contract();
+        let bindings = persisted_contract.bindings();
+        let bound_bias_hash = bindings
+            .factors
+            .bias_table
             .as_ref()
-            .ok_or_else(|| ResearchError::Determinism {
-                detail: format!(
-                    "dataset {} is missing its immutable manifest",
-                    dataset.training_dataset_id
-                ),
-            })?;
-        let model_spec_definition_hash = &spec.definition_hash;
-        if header.model_version_id != version.model_version_id
-            || &manifest.model_spec_definition_hash != model_spec_definition_hash
-            || &header.model_spec_definition_hash != model_spec_definition_hash
-            || header.model_family != spec.model_family
-            || version.model_family != spec.model_family
-            || header.feature_schema_hash != *materialization.feature_schema_hash
-            || (!header.model_family.is_classical()
-                && header.factor_schema_hash != *materialization.factor_schema_hash)
+            .map(|binding| binding.content_hash);
+        if &bindings.dataset.manifest != materialization.manifest
+            || bindings.dataset.manifest_hash != *materialization.manifest_hash
+            || bindings.dataset.artifact_bytes_hash != *materialization.artifact_bytes_hash
+            || bindings.schemas.feature_schema_hash != *materialization.feature_schema_hash
+            || bindings.schemas.label_schema_hash != *materialization.label_schema_hash
+            || &bindings.factors.plane != materialization.factor_serving_plane
+            || bound_bias_hash != materialization.coverage.bias_table_hash
+            || bindings.transform.training_dataset_hash != *materialization.dataset_hash
+            || bindings.model.model_spec_definition_hash != spec.definition_hash
+            || bindings.model.model_family != spec.model_family
         {
             return Err(ResearchError::Determinism {
                 detail: format!(
-                    "model artifact {} header/family/schema bindings disagree with frozen dataset {}",
+                    "model artifact {} serving contract disagrees with frozen dataset/spec {}",
                     version.model_version_id, dataset.training_dataset_id
                 ),
             }
@@ -372,38 +375,32 @@ impl FrozenModelParityService {
             name: LabelName::new(spec.training_contract.target_label_name.clone()),
             horizon_secs: spec.training_contract.target_label_horizon_secs,
         };
-        let (transform_hash, training_input_hash) = match &artifact {
-            ModelArtifact::WeightedFactor(weighted) => verify_weighted_artifact(
+        let (transform_hash, training_input_hash) = match artifact.payload() {
+            ModelPayload::WeightedFactor(weighted) => verify_weighted_payload(
                 &examples,
                 &label,
                 weighted,
-                materialization.dataset_hash,
                 &spec.input_contract,
+                persisted_contract,
             )?,
-            ModelArtifact::Classical(classical) => {
-                verify_classical_artifact_binding(
-                    classical,
-                    materialization.dataset_hash,
-                    materialization.label_schema_hash,
-                    spec,
-                )?;
+            ModelPayload::Classical(classical) => {
+                verify_classical_binding(classical, spec, persisted_contract)?;
                 #[cfg(feature = "ml-classical")]
                 {
-                    let transform_hash = self.verify_classical(&examples, spec, classical).await?;
-                    (transform_hash, classical.training_input_hash)
+                    self.verify_classical(&examples, spec, &artifact, classical, persisted_contract)
+                        .await?
                 }
                 #[cfg(not(feature = "ml-classical"))]
                 {
                     return Err(classical_runtime_unavailable(classical));
                 }
             }
-            ModelArtifact::SellScorer(sell_artifact) => verify_sell_scorer_artifact(
+            ModelPayload::SellScorer(sell_payload) => verify_sell_payload(
                 &examples,
                 &label,
-                sell_artifact,
-                materialization.dataset_hash,
-                materialization.label_schema_hash,
+                sell_payload,
                 &spec.input_contract,
+                persisted_contract,
             )?,
         };
         let evidence_request = FrozenEvidenceRequest {
@@ -429,10 +426,12 @@ impl FrozenModelParityService {
         &self,
         examples: &[TrainingExample],
         spec: &ModelSpecInfo,
-        artifact: &ClassicalModelArtifact,
-    ) -> QuantResult<ContentHash> {
+        artifact: &ModelArtifact,
+        payload: &ClassicalModelPayload,
+        contract: &ModelServingContract,
+    ) -> QuantResult<(ContentHash, ContentHash)> {
         let matrix_spec = FeatureMatrixSpec {
-            columns: artifact
+            columns: payload
                 .input_transform
                 .inputs
                 .iter()
@@ -449,9 +448,11 @@ impl FrozenModelParityService {
         let matrix = build_training_matrix(examples, &matrix_spec)?;
         let (refitted, standardized) = FittedInputTransform::fit(&matrix)?;
         let refitted_hash = refitted.transform_hash()?;
-        if refitted != artifact.input_transform
-            || refitted_hash != artifact.input_transform_hash
-            || training_input_hash(&standardized, &matrix.labels)? != artifact.training_input_hash
+        let refitted_input_hash = training_input_hash(&standardized, &matrix.labels)?;
+        let transform = &contract.bindings().transform;
+        if refitted != payload.input_transform
+            || refitted_hash != transform.input_transform_hash
+            || refitted_input_hash != transform.training_input_hash
         {
             return Err(ResearchError::Determinism {
                 detail:
@@ -463,10 +464,10 @@ impl FrozenModelParityService {
         let estimator_bytes = self
             .deps
             .artifact_store
-            .get(&artifact.serialized_model_uri)
+            .get(&payload.serialized_model_uri)
             .await?;
         ClassicalRuntime::load(artifact.clone(), &estimator_bytes)?;
-        Ok(refitted_hash)
+        Ok((refitted_hash, refitted_input_hash))
     }
 
     async fn fail_integrity(
@@ -509,72 +510,79 @@ impl FrozenModelParityService {
     }
 }
 
-fn verify_weighted_artifact(
+fn verify_weighted_payload(
     examples: &[TrainingExample],
     label: &LabelSelector,
-    artifact: &WeightedFactorModelArtifact,
-    dataset_hash: &ContentHash,
+    payload: &WeightedFactorModelPayload,
     spec_contract: &ModelInputContract,
+    contract: &ModelServingContract,
 ) -> QuantResult<(ContentHash, ContentHash)> {
-    verify_input_contract_binding(
+    let bindings = contract.bindings();
+    verify_input_binding(
         "weighted",
-        &artifact.input_contract,
-        &artifact.input_contract_hash,
+        &payload.input_contract,
+        bindings.transform.input_contract_hash,
         spec_contract,
     )?;
-    if artifact.training_dataset_hash != *dataset_hash {
-        return Err(ResearchError::Determinism {
-            detail: "weighted artifact semantic dataset hash differs from its registry-bound frozen dataset"
-                .to_owned(),
-        }
-        .into());
-    }
-    let factors = artifact
-        .weights
+    let reference_factors = bindings
+        .factors
+        .plane
+        .definitions()
         .iter()
-        .map(|weight| weight.factor.clone())
+        .filter(|revision| revision.definition().normalization.is_cross_sectional())
+        .map(|revision| revision.factor_name().clone())
         .collect::<Vec<_>>();
     let refitted = fit_frozen_reference_quantiles(
         examples,
         label,
-        &factors,
-        Some(&artifact.factor_cross_section),
+        &reference_factors,
+        Some(&payload.factor_cross_section),
     )?;
-    if refitted != artifact.frozen_reference_quantiles {
+    if refitted != payload.frozen_reference_quantiles {
         return Err(ResearchError::Determinism {
             detail: "weighted artifact frozen reference CDF differs from its exact training rows"
                 .to_owned(),
         }
         .into());
     }
+    let factors = bindings
+        .factors
+        .plane
+        .definitions()
+        .iter()
+        .filter(|revision| !revision.definition().is_diagnostic())
+        .map(|revision| revision.factor_name().clone())
+        .collect::<Vec<_>>();
     let training_input_hash = weighted_training_input_hash(
         examples,
         label,
         &factors,
         &refitted,
-        Some(&artifact.factor_cross_section),
+        Some(&payload.factor_cross_section),
     )?;
-    if training_input_hash != artifact.training_input_hash {
+    let transform_hash = payload.input_transform_hash()?;
+    if training_input_hash != bindings.transform.training_input_hash
+        || transform_hash != bindings.transform.input_transform_hash
+    {
         return Err(ResearchError::Determinism {
-            detail:
-                "weighted artifact training-input commitment differs from the exact frozen rows"
-                    .to_owned(),
+            detail: "weighted artifact transform/training-input commitment differs from the exact frozen rows"
+                .to_owned(),
         }
         .into());
     }
-    Ok((artifact.input_transform_hash()?, training_input_hash))
+    Ok((transform_hash, training_input_hash))
 }
 
-fn verify_classical_artifact_binding(
-    artifact: &ClassicalModelArtifact,
-    dataset_hash: &ContentHash,
-    label_schema_hash: &ContentHash,
+fn verify_classical_binding(
+    payload: &ClassicalModelPayload,
     spec: &ModelSpecInfo,
+    contract: &ModelServingContract,
 ) -> QuantResult<()> {
-    verify_input_contract_binding(
+    let bindings = contract.bindings();
+    verify_input_binding(
         "classical",
-        &artifact.input_contract,
-        &artifact.input_contract_hash,
+        &payload.input_contract,
+        bindings.transform.input_contract_hash,
         &spec.input_contract,
     )?;
     let prediction_horizon_secs = u64::try_from(spec.prediction_horizon_secs).map_err(|error| {
@@ -582,21 +590,21 @@ fn verify_classical_artifact_binding(
             detail: format!("model spec prediction horizon is invalid: {error}"),
         }
     })?;
-    if artifact.prediction_horizon_secs != prediction_horizon_secs {
+    if bindings.model.prediction_horizon_secs != prediction_horizon_secs {
         return Err(ResearchError::Determinism {
             detail: format!(
-                "classical artifact horizon {}s differs from model spec {}s",
-                artifact.prediction_horizon_secs, prediction_horizon_secs
+                "classical serving horizon {}s differs from model spec {}s",
+                bindings.model.prediction_horizon_secs, prediction_horizon_secs
             ),
         }
         .into());
     }
     let target = spec.training_contract.target_label_name.as_str();
-    let target_semantics = if artifact.kind == ClassicalKind::LogisticRegression
+    let target_semantics = if payload.kind == ClassicalKind::LogisticRegression
         && target == TOKEN_PAYOUT_RATIO.as_str()
     {
         ClassicalOutputSemantics::FullPayoutProbability
-    } else if !matches!(artifact.kind, ClassicalKind::LogisticRegression)
+    } else if !matches!(payload.kind, ClassicalKind::LogisticRegression)
         && target == RETURN_TO_HORIZON.as_str()
         && spec.training_contract.target_label_horizon_secs == prediction_horizon_secs
     {
@@ -605,94 +613,68 @@ fn verify_classical_artifact_binding(
         return Err(ResearchError::Determinism {
             detail: format!(
                 "classical kind {} has unsupported frozen target `{target}` at {}s",
-                artifact.kind, spec.training_contract.target_label_horizon_secs
+                payload.kind, spec.training_contract.target_label_horizon_secs
             ),
         }
         .into());
     };
-    if artifact.output_semantics != target_semantics {
+    if payload.output_semantics != target_semantics {
         return Err(ResearchError::Determinism {
             detail: "classical artifact output semantics differ from its frozen training target"
                 .to_owned(),
         }
         .into());
     }
-    if artifact.training_dataset_hash != *dataset_hash {
-        return Err(ResearchError::Determinism {
-            detail: "classical artifact semantic dataset hash differs from its registry-bound frozen dataset"
-                .to_owned(),
-        }
-        .into());
-    }
-    if artifact.label_schema_hash != *label_schema_hash {
-        return Err(ResearchError::Determinism {
-            detail:
-                "classical artifact label schema differs from its registry-bound frozen dataset"
-                    .to_owned(),
-        }
-        .into());
-    }
     Ok(())
 }
 
-fn verify_sell_scorer_artifact(
+fn verify_sell_payload(
     examples: &[TrainingExample],
     label: &LabelSelector,
-    artifact: &SellScorerArtifact,
-    dataset_hash: &ContentHash,
-    label_schema_hash: &ContentHash,
+    payload: &SellScorerPayload,
     spec_contract: &ModelInputContract,
+    contract: &ModelServingContract,
 ) -> QuantResult<(ContentHash, ContentHash)> {
-    verify_input_contract_binding(
+    let bindings = contract.bindings();
+    verify_input_binding(
         "sell scorer",
-        &artifact.input_contract,
-        &artifact.input_contract_hash,
+        &payload.input_contract,
+        bindings.transform.input_contract_hash,
         spec_contract,
     )?;
-    if artifact.training_dataset_hash != *dataset_hash {
+    let output = SellScorerTrainer::new().train_sell_scorer(&TrainSellScorerRequest {
+        cancellation: CancellationProbe::default(),
+        examples: Arc::<[TrainingExample]>::from(examples.to_vec()),
+        label: label.clone(),
+        factor_plane: bindings.factors.plane.clone(),
+        factor_head: payload.factor_head.clone(),
+        estimator: payload.estimator.clone(),
+        output_spec: payload.output_spec.clone(),
+        input_contract: payload.input_contract.clone(),
+        factor_cross_section: payload.factor_cross_section.clone(),
+    })?;
+    if &output.payload != payload
+        || output.training_input_hash != bindings.transform.training_input_hash
+        || output.input_contract_hash != bindings.transform.input_contract_hash
+        || output.input_transform_hash != bindings.transform.input_transform_hash
+    {
         return Err(ResearchError::Determinism {
-            detail:
-                "sell scorer semantic dataset hash differs from its registry-bound frozen dataset"
-                    .to_owned(),
-        }
-        .into());
-    }
-    if artifact.label_schema_hash != *label_schema_hash {
-        return Err(ResearchError::Determinism {
-            detail: "sell scorer label schema differs from its frozen dataset".to_owned(),
-        }
-        .into());
-    }
-    let factors = artifact
-        .weights
-        .iter()
-        .map(|weight| weight.factor.clone())
-        .collect::<Vec<_>>();
-    let training_input_hash = weighted_training_input_hash(
-        examples,
-        label,
-        &factors,
-        &FrozenReferenceQuantiles::empty(),
-        None,
-    )?;
-    if training_input_hash != artifact.training_input_hash {
-        return Err(ResearchError::Determinism {
-            detail: "sell scorer training-input commitment differs from the exact frozen rows"
+            detail: "sell scorer payload/transform/training-input commitment differs from the exact frozen rows"
                 .to_owned(),
         }
         .into());
     }
-    Ok((artifact.input_transform_hash()?, training_input_hash))
+    Ok((output.input_transform_hash, output.training_input_hash))
 }
 
-fn verify_input_contract_binding(
+fn verify_input_binding(
     artifact_kind: &str,
     artifact_contract: &ModelInputContract,
-    artifact_contract_hash: &ContentHash,
+    bound_contract_hash: ContentHash,
     spec_contract: &ModelInputContract,
 ) -> QuantResult<()> {
     let spec_contract_hash = model_input_contract_hash(spec_contract)?;
-    if artifact_contract != spec_contract || artifact_contract_hash != &spec_contract_hash {
+    if artifact_contract != spec_contract || bound_contract_hash != spec_contract_hash {
         return Err(ResearchError::Determinism {
             detail: format!(
                 "{artifact_kind} artifact input contract differs from its owning model spec"
@@ -704,9 +686,9 @@ fn verify_input_contract_binding(
 }
 
 #[cfg(not(feature = "ml-classical"))]
-fn classical_runtime_unavailable(artifact: &ClassicalModelArtifact) -> QuantError {
+fn classical_runtime_unavailable(payload: &ClassicalModelPayload) -> QuantError {
     ResearchError::RuntimeUnavailable {
-        family: artifact.kind.to_string(),
+        family: payload.kind.to_string(),
         detail: "classical frozen parity requires the ml-classical build".to_owned(),
     }
     .into()
@@ -837,6 +819,14 @@ pub(crate) fn validate_passed_parity(
     version: &ModelVersionInfo,
     dataset: &TrainingDatasetInfo,
 ) -> QuantResult<()> {
+    version
+        .verified_serving_contract()
+        .map_err(|error| ResearchError::Determinism {
+            detail: format!(
+                "model {} persisted serving contract is invalid: {error}",
+                version.model_version_id
+            ),
+        })?;
     let valid = run.kind == FeatureParityRunKind::Full
         && run.status == FeatureParityRunStatus::Passed
         && run.model_version_id.as_ref() == Some(&version.model_version_id)
@@ -849,7 +839,7 @@ pub(crate) fn validate_passed_parity(
         && run.matched_count == run.total_count
         && run.mismatched_count == 0
         && run.pending_materialization_count == 0
-        && run.feature_contract_hash.as_ref() == dataset.feature_schema_hash.as_ref()
+        && run.feature_contract_hash == Some(dataset.feature_schema_hash)
         && run.transform_hash.is_some()
         && run
             .finished_at
@@ -878,20 +868,29 @@ mod tests {
         },
         enums::{
             common::MarketCategory,
-            model::ModelFamily,
+            model::{ClassicalKind, ModelFamily},
             quant::{
                 DataQualityStatus, DatasetPurpose, FeatureParityRunKind, FeatureParityRunStatus,
-                PublicationStatus, TrainingDatasetStatus,
+                ModelSerializationFormat, PublicationStatus, TrainingDatasetStatus,
             },
         },
+        runtime_config::ImmutableProfileArtifacts,
         types::{
-            CapabilityRegistryHashes, ContentHash, DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
-            DatasetSourceLineage, DecisionPolicySnapshotId, EventId, FeatureParityDetail,
-            FeatureParityDetailSource, FeatureParityRunId, MarketId, ModelInputContract,
-            ModelInputSpec, ModelSpecId, ModelVersionId, ReaderContractVersion,
-            ResearchProfileArtifactId, RoleCode, SchemaContractVersion, SchemaVersion,
-            SourceSliceId, TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
-            TrainingSampleSource, model_metrics::ModelVersionMetrics,
+            CapabilityRegistryHashes, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
+            DATASET_SOURCE_LINEAGE_FORMAT_VERSION, DatasetManifest, DatasetSourceLineage,
+            DecisionPolicySnapshotId, EventId, FeatureParityDetail, FeatureParityDetailSource,
+            FeatureParityRunId, MarketId, ModelInputContract, ModelInputSpec, ModelSpecId,
+            ModelVersionId, ReaderContractVersion, ResearchProfileArtifactId, ResearchProfileRef,
+            RoleCode, SchemaContractVersion, SchemaVersion, SourceSliceId, TokenId,
+            TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource,
+            factor::FactorServingPlane,
+            model_metrics::ModelVersionMetrics,
+            model_serving::{
+                ModelServingBindings, ModelServingContract, ModelServingDatasetBinding,
+                ModelServingEstimatorBinding, ModelServingFactorBinding, ModelServingModelBinding,
+                ModelServingPolicySnapshotBinding, ModelServingSchemaBinding,
+                ModelServingTransformBinding,
+            },
             model_training::ModelTrainingObjective,
         },
     };
@@ -902,7 +901,7 @@ mod tests {
 
     use super::{
         FrozenEvidenceRequest, frozen_model_evidence_rows, validate_passed_parity,
-        verify_input_contract_binding,
+        verify_input_binding,
     };
     use crate::test_fixtures::{
         execution_pg_seed::{fixture_profile_ref, source_slice_ref},
@@ -914,126 +913,275 @@ mod tests {
             .expect("valid test hash")
     }
 
+    struct FrozenParitySubject {
+        now: DateTime<Utc>,
+        model_version_id: ModelVersionId,
+        model_spec_id: ModelSpecId,
+        training_dataset_id: TrainingDatasetId,
+        feature_hash: ContentHash,
+        factor_serving_plane: FactorServingPlane,
+        profile_ref: ResearchProfileRef,
+        policy_hash: ContentHash,
+        source_lineage: DatasetSourceLineage,
+        model_spec_definition_hash: ContentHash,
+    }
+
+    impl FrozenParitySubject {
+        fn new() -> Self {
+            let now = Utc::now();
+            let profile_ref = fixture_profile_ref();
+            let policy_hash = hash('1');
+            let decision_policy_snapshot_id =
+                DecisionPolicySnapshotId::from_content_hash(&policy_hash);
+            let source_lineage =
+                Self::source_lineage(now, &profile_ref, policy_hash, decision_policy_snapshot_id);
+            let (_, model_spec_definition_hash) =
+                model_spec_lineage_fixture("frozen-parity-test-spec");
+            Self {
+                now,
+                model_version_id: ModelVersionId::from_v7(),
+                model_spec_id: ModelSpecId::from_v7(),
+                training_dataset_id: TrainingDatasetId::from_v7(),
+                feature_hash: hash('a'),
+                factor_serving_plane: FactorServingPlane::try_empty()
+                    .expect("canonical factor-free plane"),
+                profile_ref,
+                policy_hash,
+                source_lineage,
+                model_spec_definition_hash,
+            }
+        }
+
+        fn source_lineage(
+            now: DateTime<Utc>,
+            profile_ref: &ResearchProfileRef,
+            policy_hash: ContentHash,
+            decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        ) -> DatasetSourceLineage {
+            DatasetSourceLineage {
+                format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+                source_slice_id: SourceSliceId::from_v7(),
+                source_slice_identity_hash: hash('c'),
+                research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(
+                    profile_ref,
+                ),
+                research_program_hash: hash('e'),
+                source_slice: source_slice_ref('f'),
+                source_window_start: now - Duration::hours(3),
+                source_window_end: now,
+                pit_cutoff: now,
+                decision_policy_snapshot_id,
+                runtime_config_hash: policy_hash,
+                reader_contract_version: ReaderContractVersion::v1(),
+                schema_contract_version: SchemaContractVersion::v1(),
+                source_schema_hash: hash('2'),
+                capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![hash('3')])
+                    .expect("canonical capabilities"),
+            }
+        }
+
+        fn manifest(&self) -> DatasetManifest {
+            DatasetManifest {
+                format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+                training_dataset_id: self.training_dataset_id,
+                source_lineage: self.source_lineage.clone(),
+                cohort_manifest: None,
+                model_spec_id: self.model_spec_id,
+                model_family: ModelFamily::ClassicalRandomForest,
+                model_spec_definition_hash: self.model_spec_definition_hash,
+                trade_policy_artifact_id: None,
+                trade_policy_hash: None,
+                window_start: self.now - Duration::hours(2),
+                window_end: self.now - Duration::hours(1),
+                purpose: DatasetPurpose::Training,
+                knowledge_lag_secs: 0,
+                sample_interval_secs: 60,
+                horizons_secs: vec![900],
+                feature_schema_version: SchemaVersion::FIRST,
+                feature_schema_hash: self.feature_hash,
+                factor_serving_plane: self.factor_serving_plane.clone(),
+                label_schema_hash: hash('5'),
+                semantic_dataset_hash: hash('4'),
+                source_fingerprint: hash('6'),
+                sample_count: 1,
+            }
+        }
+
+        fn serving_contract(&self, manifest: DatasetManifest) -> ModelServingContract {
+            let input_contract = ModelInputContract {
+                inputs: vec![ModelInputSpec::required("book.mid")],
+            };
+            let manifest_hash = manifest.content_hash().expect("manifest hash");
+            ModelServingContract::try_seal(ModelServingBindings {
+                policy_snapshot: ModelServingPolicySnapshotBinding {
+                    decision_policy_snapshot_id: self.source_lineage.decision_policy_snapshot_id,
+                    snapshot_hash: self.policy_hash,
+                    profile_artifacts: ImmutableProfileArtifacts::default()
+                        .references()
+                        .expect("profile references"),
+                },
+                required_domain_families: Vec::new(),
+                capability_registry_hashes: self.source_lineage.capability_registry_hashes.clone(),
+                factors: ModelServingFactorBinding {
+                    plane: self.factor_serving_plane.clone(),
+                    bias_table: None,
+                },
+                schemas: ModelServingSchemaBinding {
+                    feature_schema_hash: self.feature_hash,
+                    label_schema_hash: hash('5'),
+                },
+                transform: ModelServingTransformBinding {
+                    input_contract_hash: model_input_contract_hash(&input_contract)
+                        .expect("input contract hash"),
+                    input_transform_hash: hash('7'),
+                    training_input_hash: hash('8'),
+                    training_dataset_hash: hash('4'),
+                },
+                model: ModelServingModelBinding {
+                    model_version_id: self.model_version_id,
+                    model_spec_id: self.model_spec_id,
+                    model_spec_definition_hash: self.model_spec_definition_hash,
+                    model_family: ModelFamily::ClassicalRandomForest,
+                    category_scope: None,
+                    profile_ref: self.profile_ref.clone(),
+                    prediction_horizon_secs: 900,
+                    estimator: ModelServingEstimatorBinding::Classical {
+                        kind: ClassicalKind::RandomForest,
+                        model_payload_hash: hash('9'),
+                        serialized_model_hash: hash('a'),
+                        serialization_format: ModelSerializationFormat::Bincode,
+                    },
+                    calibration: None,
+                },
+                trade_policy: None,
+                dataset: ModelServingDatasetBinding {
+                    manifest,
+                    manifest_hash,
+                    artifact_bytes_hash: hash('b'),
+                },
+            })
+            .expect("serving contract")
+        }
+
+        fn version(&self, serving_contract: ModelServingContract) -> ModelVersionInfo {
+            let (model_spec_thesis, _) = model_spec_lineage_fixture("frozen-parity-test-spec");
+            ModelVersionInfo {
+                model_version_id: self.model_version_id,
+                model_spec_id: self.model_spec_id,
+                model_spec_name: "frozen-parity-test-spec".to_owned(),
+                model_family: ModelFamily::ClassicalRandomForest,
+                model_spec_thesis,
+                model_spec_definition_hash: self.model_spec_definition_hash,
+                model_spec_prediction_horizon_secs: 900,
+                version: 1,
+                artifact_hash: hash('b'),
+                serving_contract_hash: serving_contract.contract_hash(),
+                serving_contract,
+                category_scope: None,
+                profile_ref: self.profile_ref.clone(),
+                training_dataset_id: Some(self.training_dataset_id),
+                trade_policy_artifact_id: None,
+                trade_policy_hash: None,
+                publish_path_set_id: None,
+                derivation_kind: ModelVersionInfo::training_derivation_kind(),
+                parent_model_version_id: None,
+                calibration_artifact_id: None,
+                derivation_evidence_hash: None,
+                metrics: ModelVersionMetrics::not_measured("test fixture"),
+                training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+                quality_gate_report: None,
+                publication_status: PublicationStatus::Candidate,
+                published_at: None,
+                retired_at: None,
+                created_at: self.now,
+            }
+        }
+
+        fn dataset(&self) -> TrainingDatasetInfo {
+            TrainingDatasetInfo {
+                training_dataset_id: self.training_dataset_id,
+                model_spec_id: self.model_spec_id,
+                model_family: ModelFamily::ClassicalRandomForest,
+                model_spec_definition_hash: self.model_spec_definition_hash,
+                factor_schema_hash: self.factor_serving_plane.factor_schema_hash(),
+                factor_serving_plane: self.factor_serving_plane.clone(),
+                research_profile_artifact_id: self
+                    .source_lineage
+                    .research_profile_artifact_id
+                    .clone(),
+                source_slice_id: self.source_lineage.source_slice_id,
+                pit_cutoff: self.source_lineage.pit_cutoff,
+                source_lineage: self.source_lineage.clone(),
+                feedback_cohort: None,
+                cohort_manifest: None,
+                window_start: self.now - Duration::hours(2),
+                window_end: self.now - Duration::hours(1),
+                status: TrainingDatasetStatus::Ready,
+                purpose: DatasetPurpose::Training,
+                feature_schema_hash: self.feature_hash,
+                label_schema_hash: None,
+                dataset_hash: None,
+                manifest_hash: None,
+                manifest: None,
+                artifact_bytes_hash: None,
+                parquet_uri: None,
+                sample_count: None,
+                knowledge_lag_secs: 0,
+                sample_interval_secs: 60,
+                horizons_secs: TrainingHorizonsSecs(Vec::new()),
+                feature_schema_version: SchemaVersion::FIRST,
+                sample_sources: None,
+                coverage: None,
+                decision_policy_snapshot_id: self.source_lineage.decision_policy_snapshot_id,
+                failure_detail: None,
+                completed_at: Some(self.now),
+                created_at: self.now - Duration::hours(3),
+            }
+        }
+
+        fn run(&self, dataset: &TrainingDatasetInfo) -> FeatureParityRunInfo {
+            FeatureParityRunInfo {
+                run_id: FeatureParityRunId::from_v7(),
+                kind: FeatureParityRunKind::Full,
+                status: FeatureParityRunStatus::Passed,
+                window_start: dataset.window_start,
+                window_end: dataset.window_end,
+                report_id: None,
+                model_version_id: Some(self.model_version_id),
+                training_dataset_id: Some(self.training_dataset_id),
+                triggered_by: "test".to_owned(),
+                requested_by: None,
+                acting_role: RoleCode::new("system"),
+                reason: "test".to_owned(),
+                total_count: 4,
+                compared_count: 4,
+                matched_count: 4,
+                mismatched_count: 0,
+                pending_materialization_count: 0,
+                feature_contract_hash: Some(self.feature_hash),
+                transform_hash: Some(hash('c')),
+                failure_code: None,
+                failure_detail: None,
+                started_at: Some(self.now),
+                pending_since: None,
+                containment_completed_at: None,
+                finished_at: Some(self.now + Duration::seconds(1)),
+                created_at: self.now,
+                updated_at: self.now,
+            }
+        }
+
+        fn build(self) -> (ModelVersionInfo, TrainingDatasetInfo, FeatureParityRunInfo) {
+            let serving_contract = self.serving_contract(self.manifest());
+            let version = self.version(serving_contract);
+            let dataset = self.dataset();
+            let run = self.run(&dataset);
+            (version, dataset, run)
+        }
+    }
+
     fn subject() -> (ModelVersionInfo, TrainingDatasetInfo, FeatureParityRunInfo) {
-        let now = Utc::now();
-        let model_version_id = ModelVersionId::from_v7();
-        let model_spec_id = ModelSpecId::from_v7();
-        let training_dataset_id = TrainingDatasetId::from_v7();
-        let feature_hash = hash('a');
-        let profile_ref = fixture_profile_ref();
-        let source_slice_id = SourceSliceId::from_v7();
-        let decision_policy_snapshot_id = DecisionPolicySnapshotId::from_v7();
-        let source_lineage = DatasetSourceLineage {
-            format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
-            source_slice_id,
-            source_slice_identity_hash: hash('c'),
-            research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile_ref),
-            research_program_hash: hash('e'),
-            source_slice: source_slice_ref('f'),
-            source_window_start: now - Duration::hours(3),
-            source_window_end: now,
-            pit_cutoff: now,
-            decision_policy_snapshot_id,
-            runtime_config_hash: hash('1'),
-            reader_contract_version: ReaderContractVersion::v1(),
-            schema_contract_version: SchemaContractVersion::v1(),
-            source_schema_hash: hash('2'),
-            capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![hash('3')])
-                .expect("canonical capabilities"),
-        };
-        let (model_spec_thesis, model_spec_definition_hash) =
-            model_spec_lineage_fixture("frozen-parity-test-spec");
-        let version = ModelVersionInfo {
-            model_version_id,
-            model_spec_id,
-            model_spec_name: "frozen-parity-test-spec".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            model_spec_thesis,
-            model_spec_definition_hash,
-            version: 1,
-            artifact_hash: hash('b'),
-            category_scope: None,
-            profile_ref,
-            training_dataset_id: Some(training_dataset_id),
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
-            publish_path_set_id: None,
-            derivation_kind: ModelVersionInfo::training_derivation_kind(),
-            parent_model_version_id: None,
-            calibration_artifact_id: None,
-            derivation_evidence_hash: None,
-            metrics: ModelVersionMetrics::not_measured("test fixture"),
-            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Candidate,
-            published_at: None,
-            retired_at: None,
-            created_at: now,
-        };
-        let dataset = TrainingDatasetInfo {
-            training_dataset_id,
-            model_spec_id,
-            model_spec_definition_hash: hash('d'),
-            research_profile_artifact_id: source_lineage.research_profile_artifact_id.clone(),
-            source_slice_id,
-            pit_cutoff: source_lineage.pit_cutoff,
-            source_lineage,
-            feedback_cohort: None,
-            cohort_manifest: None,
-            window_start: now - Duration::hours(2),
-            window_end: now - Duration::hours(1),
-            status: TrainingDatasetStatus::Ready,
-            purpose: DatasetPurpose::Training,
-            feature_schema_hash: Some(feature_hash),
-            factor_schema_hash: None,
-            label_schema_hash: None,
-            dataset_hash: None,
-            manifest_hash: None,
-            manifest: None,
-            artifact_bytes_hash: None,
-            parquet_uri: None,
-            sample_count: None,
-            knowledge_lag_secs: 0,
-            sample_interval_secs: 60,
-            horizons_secs: TrainingHorizonsSecs(Vec::new()),
-            feature_schema_version: None,
-            sample_sources: None,
-            coverage: None,
-            decision_policy_snapshot_id,
-            failure_detail: None,
-            completed_at: Some(now),
-            created_at: now - Duration::hours(3),
-        };
-        let run = FeatureParityRunInfo {
-            run_id: FeatureParityRunId::from_v7(),
-            kind: FeatureParityRunKind::Full,
-            status: FeatureParityRunStatus::Passed,
-            window_start: dataset.window_start,
-            window_end: dataset.window_end,
-            report_id: None,
-            model_version_id: Some(model_version_id),
-            training_dataset_id: Some(training_dataset_id),
-            triggered_by: "test".to_owned(),
-            requested_by: None,
-            acting_role: RoleCode::new("system"),
-            reason: "test".to_owned(),
-            total_count: 4,
-            compared_count: 4,
-            matched_count: 4,
-            mismatched_count: 0,
-            pending_materialization_count: 0,
-            feature_contract_hash: Some(feature_hash),
-            transform_hash: Some(hash('c')),
-            failure_code: None,
-            failure_detail: None,
-            started_at: Some(now),
-            pending_since: None,
-            containment_completed_at: None,
-            finished_at: Some(now + Duration::seconds(1)),
-            created_at: now,
-            updated_at: now,
-        };
-        (version, dataset, run)
+        FrozenParitySubject::new().build()
     }
 
     fn training_example(decision_at: DateTime<Utc>) -> TrainingExample {
@@ -1086,12 +1234,16 @@ mod tests {
 
     #[test]
     fn swapped_subject_incomplete_rejected() {
-        let (version, dataset, mut run) = subject();
+        let (mut version, dataset, mut run) = subject();
         run.model_version_id = Some(ModelVersionId::from_v7());
         assert!(validate_passed_parity(&run, &version, &dataset).is_err());
 
         run.model_version_id = Some(version.model_version_id);
         run.transform_hash = None;
+        assert!(validate_passed_parity(&run, &version, &dataset).is_err());
+
+        run.transform_hash = Some(hash('c'));
+        version.serving_contract_hash = hash('d');
         assert!(validate_passed_parity(&run, &version, &dataset).is_err());
     }
 
@@ -1104,24 +1256,19 @@ mod tests {
             ],
         };
         let spec_hash = model_input_contract_hash(&spec).expect("spec hash");
-        verify_input_contract_binding("classical", &spec, &spec_hash, &spec)
-            .expect("exact contract");
+        verify_input_binding("classical", &spec, spec_hash, &spec).expect("exact contract");
 
         let swapped = ModelInputContract {
             inputs: vec![spec.inputs[1].clone(), spec.inputs[0].clone()],
         };
         let swapped_hash = model_input_contract_hash(&swapped).expect("swapped hash");
-        assert!(
-            verify_input_contract_binding("classical", &swapped, &swapped_hash, &spec).is_err()
-        );
-        assert!(verify_input_contract_binding("weighted", &swapped, &swapped_hash, &spec).is_err());
+        assert!(verify_input_binding("classical", &swapped, swapped_hash, &spec).is_err());
+        assert!(verify_input_binding("weighted", &swapped, swapped_hash, &spec).is_err());
 
         let malformed = ModelInputContract {
             inputs: vec![spec.inputs[0].clone(), spec.inputs[0].clone()],
         };
-        assert!(
-            verify_input_contract_binding("sell scorer", &malformed, &spec_hash, &spec).is_err()
-        );
+        assert!(verify_input_binding("sell scorer", &malformed, spec_hash, &spec).is_err());
     }
 
     #[test]
@@ -1131,10 +1278,7 @@ mod tests {
             training_example(dataset.window_start + Duration::minutes(10)),
             training_example(dataset.window_start + Duration::minutes(20)),
         ];
-        let feature_contract_hash = dataset
-            .feature_schema_hash
-            .as_ref()
-            .expect("feature contract hash");
+        let feature_contract_hash = &dataset.feature_schema_hash;
         let dataset_hash = hash('d');
         let training_input_hash = hash('e');
         let transform_hash = hash('f');

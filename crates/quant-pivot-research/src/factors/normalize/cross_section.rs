@@ -16,7 +16,10 @@ use rust_decimal::Decimal;
 
 use crate::factors::normalize::{
     outcome::{NormalizationClampAudit, NormalizedFactor, RawFactorColumn},
-    stats::{NORM_SCALE, NormalizationStats, mean, population_std, quantile_value},
+    stats::{
+        NORM_SCALE, NormalizationStats, interpolated_percentile, mean, population_std,
+        quantile_value,
+    },
 };
 
 /// Fits a normalization distribution and applies it pointwise.
@@ -196,8 +199,6 @@ impl CrossSectionalNormalizer for RankNormalizer {
                 return indeterminate_present(column, FactorIndeterminateReason::ZeroVariance);
             }
         };
-        let span = Decimal::from(sorted.len() - 1);
-        let two = Decimal::from(2);
         column
             .values
             .iter()
@@ -205,27 +206,16 @@ impl CrossSectionalNormalizer for RankNormalizer {
                 let Some(raw) = *value else {
                     return NormalizedFactor::MissingInput;
                 };
-                let first = sorted.iter().position(|entry| *entry == raw);
-                let last = sorted.iter().rposition(|entry| *entry == raw);
-                match (first, last) {
-                    (Some(first), Some(last)) => {
-                        let average = Decimal::from(first + last) / two;
-                        let score = (average / span).round_dp(NORM_SCALE);
-                        NormalizedFactor::Scored {
-                            score: unit_probability(score),
-                            source,
-                            clamp: None,
-                        }
-                    }
-                    // A present-but-unseen value only happens on the historical
-                    // path (today's value absent from the historical distribution);
-                    // rank it by interpolation against the sorted history.
-                    _ => NormalizedFactor::Scored {
-                        score: unit_probability(interpolated_rank(sorted, raw, span)),
+                interpolated_percentile(sorted, raw).map_or(
+                    NormalizedFactor::Indeterminate {
+                        reason: FactorIndeterminateReason::ZeroVariance,
+                    },
+                    |score| NormalizedFactor::Scored {
+                        score: unit_probability(score),
                         source,
                         clamp: None,
                     },
-                }
+                )
             })
             .collect()
     }
@@ -365,15 +355,6 @@ pub(in crate::factors) fn indeterminate_present(
         .collect()
 }
 
-/// Interpolated rank of `raw` against a sorted ascending distribution (used only
-/// on the historical path, where today's value may not appear in history).
-fn interpolated_rank(sorted: &[Decimal], raw: Decimal, span: Decimal) -> Decimal {
-    let below = sorted.iter().filter(|entry| **entry < raw).count();
-    (Decimal::from(below) / span)
-        .round_dp(NORM_SCALE)
-        .clamp(Decimal::ZERO, Decimal::ONE)
-}
-
 /// Clamp into `[0, 1]` and build a [`Probability`] at the normalization scale.
 fn unit_probability(value: Decimal) -> Probability {
     Probability::new(
@@ -418,23 +399,21 @@ mod tests {
 
     #[test]
     fn winsorize_caps_configured_percentile() {
-        // With a 20% winsorize the far outlier (1000) is capped to the top
-        // non-outlier level (4) before standardizing, so it scores identically to
-        // that legitimate maximum and records a winsorize clamp — the raw tail
-        // never dominates the cross-section.
+        // Type-7 interpolation places p80 at 203.2 between 4 and 1000. The raw
+        // outlier is capped to that exact deterministic bound and records the
+        // clamp; the semantic contract must never claim nearest-rank behavior.
         let normalizer = WinsorizedZScoreNormalizer {
             winsor_p: Decimal::new(2, 1),
             clamp_sigma: Decimal::from(3),
         };
         let raw = column(&[Some(1), Some(2), Some(3), Some(4), Some(1_000)]);
         let stats = normalizer.fit(&raw).expect("fit normalization");
-        assert!(matches!(stats, NormalizationStats::WinsorizedZScore { .. }));
+        let NormalizationStats::WinsorizedZScore { upper, .. } = &stats else {
+            panic!("expected winsorized statistics");
+        };
+        assert_eq!(*upper, Decimal::new(2_032, 1));
         let out = normalizer.apply(&raw, &stats, NormalizationSource::CrossSection);
-        assert_eq!(
-            out[4].score(),
-            out[3].score(),
-            "the winsorized outlier scores the same as the capped maximum"
-        );
+        assert!(out[4].score() > out[3].score());
         assert!(out[4].score() <= Decimal::ONE);
         match &out[4] {
             NormalizedFactor::Scored { clamp, .. } => {

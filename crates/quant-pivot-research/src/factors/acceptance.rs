@@ -12,14 +12,15 @@ use quant_pivot_models::{
     enums::{
         common::MarketCategory,
         factor::{FactorFamily, FactorIndeterminateReason, NormalizationSource},
-        quant::DataQualityStatus,
+        quant::{DataQualityStatus, FactorDirection},
     },
     runtime_config::{
         DecimalValue, DomainConfig, FactorsConfig, FeaturesConfig, MissingFactorPolicy,
         SmallCrossSectionPolicy,
     },
     types::{
-        CalibrationArtifactId, MarketId, Price, Probability, SchemaVersion, TokenId, Usd,
+        CalibrationArtifactId, FactorDefinitionId, MarketId, Price, Probability, SchemaVersion,
+        TokenId, Usd,
         calibration::{CategoryBiasCurve, PriceBiasBin, TtrBucketCurve},
     },
 };
@@ -261,6 +262,56 @@ fn zero_variance_yields_indeterminate() {
     );
 }
 
+#[test]
+fn equal_strength_alpha_indeterminate() {
+    // Outcome alpha normalizes absolute strength while preserving sign as a
+    // separate direction. Equal-magnitude opposing signals therefore have no
+    // strength dispersion and must fail closed instead of fabricating scores.
+    let config = factors_config(
+        &[FactorFamily::Microstructure],
+        MissingFactorPolicy::ZeroWeight,
+        "0.10",
+    );
+    let features = FeaturesConfig::default();
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
+    let as_of = Utc::now();
+    let vectors = [
+        make_vector(
+            "0xpositive",
+            &[("book.depth_imbalance", dec(Decimal::new(6, 1)))],
+            DataQualityStatus::Fresh,
+            0,
+            as_of,
+        ),
+        make_vector(
+            "0xnegative",
+            &[("book.depth_imbalance", dec(Decimal::new(-6, 1)))],
+            DataQualityStatus::Fresh,
+            0,
+            as_of,
+        ),
+    ];
+    let outcomes = engine
+        .compute_all_batch(&vectors, &config)
+        .expect("compute");
+    let positive = scored(&outcomes[0], "book_imbalance");
+    let negative = scored(&outcomes[1], "book_imbalance");
+
+    assert_eq!(positive.value.direction, FactorDirection::Positive);
+    assert_eq!(negative.value.direction, FactorDirection::Negative);
+    for factor in [positive, negative] {
+        assert!(
+            matches!(
+                factor.value.normalization,
+                NormalizedFactor::Indeterminate {
+                    reason: FactorIndeterminateReason::ZeroVariance
+                }
+            ),
+            "equal alpha strengths must produce a degenerate cross-section"
+        );
+    }
+}
+
 // ── Cross-sectional gating / determinism ──────────────────────────────────────
 
 #[test]
@@ -444,10 +495,10 @@ fn factor_missing_reject_policy() {
     );
 }
 
-// ── Schema hash ───────────────────────────────────────────────────────────────
+// ── Serving plane ─────────────────────────────────────────────────────────────
 
 #[test]
-fn factor_set_changes_hash() {
+fn factor_plane_changes_hash() {
     let features = FeaturesConfig::default();
     let one = FactorEngine::new(
         &factors_config(
@@ -470,14 +521,14 @@ fn factor_set_changes_hash() {
         None,
     );
     assert_ne!(
-        one.factor_schema_hash().expect("hash"),
-        two.factor_schema_hash().expect("hash"),
+        one.serving_plane().expect("plane").factor_schema_hash(),
+        two.serving_plane().expect("plane").factor_schema_hash(),
         "changing the enabled factor set must change the schema hash"
     );
 }
 
 #[test]
-fn factor_schema_hash_set() {
+fn factor_plane_order_stable() {
     let features = FeaturesConfig::default();
     let forward = FactorEngine::new(
         &factors_config(
@@ -500,9 +551,56 @@ fn factor_schema_hash_set() {
         None,
     );
     assert_eq!(
-        forward.factor_schema_hash().expect("hash"),
-        reversed.factor_schema_hash().expect("hash"),
+        forward
+            .serving_plane()
+            .expect("forward plane")
+            .factor_schema_hash(),
+        reversed
+            .serving_plane()
+            .expect("reversed plane")
+            .factor_schema_hash(),
     );
+}
+
+#[test]
+fn factor_plane_routes_domain() {
+    let features = FeaturesConfig::default();
+    let factors = FactorsConfig::default();
+    let domain = DomainConfig::default();
+    let pooled = FactorEngine::for_model_scope(&factors, &features, &domain, None, None);
+    let crypto = FactorEngine::for_model_scope(
+        &factors,
+        &features,
+        &domain,
+        Some(MarketCategory::Crypto),
+        None,
+    );
+    let weather = FactorEngine::for_model_scope(
+        &factors,
+        &features,
+        &domain,
+        Some(MarketCategory::Weather),
+        None,
+    );
+
+    let families = |engine: &FactorEngine| {
+        engine
+            .serving_plane()
+            .expect("scoped factor plane")
+            .definitions()
+            .iter()
+            .map(|revision| revision.definition().family)
+            .collect::<Vec<_>>()
+    };
+    let pooled_families = families(&pooled);
+    let crypto_families = families(&crypto);
+    let weather_families = families(&weather);
+    assert!(!pooled_families.contains(&FactorFamily::DomainCrypto));
+    assert!(!pooled_families.contains(&FactorFamily::DomainWeather));
+    assert!(crypto_families.contains(&FactorFamily::DomainCrypto));
+    assert!(!crypto_families.contains(&FactorFamily::DomainWeather));
+    assert!(!weather_families.contains(&FactorFamily::DomainCrypto));
+    assert!(weather_families.contains(&FactorFamily::DomainWeather));
 }
 
 // ── Generic factors: basic compute ────────────────────────────────────────────
@@ -965,6 +1063,8 @@ fn reversal_after_shock_reversion() {
         .find(|(spec, _)| spec.name == STRUCT_REVERSAL_AFTER_SHOCK)
         .expect("reversal_after_shock registered")
         .1;
+    let mean_definition_id = FactorDefinitionId::from_v7();
+    let reversal_definition_id = FactorDefinitionId::from_v7();
 
     let as_of = Utc::now();
     // Heterogeneous panel: monotonic price_reversal vs zig-zag short_return with
@@ -987,11 +1087,11 @@ fn reversal_after_shock_reversion() {
             as_of,
         );
         let mean_value = mean_rev
-            .compute_raw(&vector)
+            .compute_raw(mean_definition_id, &vector)
             .expect("mean_reversion compute")
             .raw_value;
         let reversal_value = reversal
-            .compute_raw(&vector)
+            .compute_raw(reversal_definition_id, &vector)
             .expect("reversal compute")
             .raw_value;
         rows.push(vec![mean_value, reversal_value]);
@@ -1090,13 +1190,14 @@ fn favorite_uses_not_constant() {
         as_of,
     );
 
+    let definition_id = FactorDefinitionId::from_v7();
     let low = favorite
-        .compute_raw(&low_vector)
+        .compute_raw(definition_id, &low_vector)
         .expect("low compute")
         .raw_value
         .expect("low bucket bias");
     let high = favorite
-        .compute_raw(&high_vector)
+        .compute_raw(definition_id, &high_vector)
         .expect("high compute")
         .raw_value
         .expect("high bucket bias");

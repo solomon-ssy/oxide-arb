@@ -949,7 +949,7 @@ mod tests {
             },
             runtime_config::{ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActorKind},
         },
-        runtime_config::PolicyValidationEvidence,
+        runtime_config::{ActivePolicyBundle, PolicyValidationEvidence},
         types::{
             ModelVersionId, PolicyApprovalId, PolicyBundleGeneration, PolicyRevisionId,
             RecommendationReportId, ReportRunId, ReportTriggerKey, TrainingDatasetId,
@@ -1275,6 +1275,15 @@ mod tests {
             Err(unexpected("activate_resource"))
         }
 
+        async fn load_current_bundle(&self) -> Result<Option<ActivePolicyBundle>, StorageError> {
+            Ok(Some(ActivePolicyBundle::from_parts(
+                PolicyBundleGeneration::FIRST,
+                self.current.decision_policy_snapshot_id,
+                self.current.snapshot_hash,
+                self.current.snapshot.clone(),
+            )))
+        }
+
         async fn load_current_activation(
             &self,
             _kind: Option<ConfigResourceKind>,
@@ -1333,11 +1342,15 @@ mod tests {
 
     fn runtime_repo(now: DateTime<Utc>) -> FixedRuntimeConfigRepository {
         let config = DecisionPolicySnapshot::default();
+        let snapshot_hash = config
+            .persistence_hash()
+            .expect("hash fixed runtime config fixture");
         FixedRuntimeConfigRepository {
             current: DecisionPolicySnapshotInfo {
-                bundle_generation: PolicyBundleGeneration::FIRST,
-                decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-                snapshot_hash: hash(),
+                decision_policy_snapshot_id: DecisionPolicySnapshotId::from_content_hash(
+                    &snapshot_hash,
+                ),
+                snapshot_hash,
                 snapshot: config,
                 recommendation_policy_revision_id: PolicyRevisionId::from_v7(),
                 execution_risk_policy_revision_id: PolicyRevisionId::from_v7(),

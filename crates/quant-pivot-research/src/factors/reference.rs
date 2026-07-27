@@ -5,23 +5,34 @@
 //! serving. It is deliberately independent of online factor history: an online
 //! write can never change the transform a published model applies.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::types::Probability;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::{factors::FactorName, precision::RESEARCH_DECIMAL_SCALE};
+use crate::{
+    factors::{FactorName, normalize::interpolated_percentile},
+    precision::RESEARCH_DECIMAL_SCALE,
+};
 
 /// One factor's empirical training-reference CDF.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "FrozenReferenceCdfDocument")]
 pub struct FrozenReferenceCdf {
     /// Governed factor name this reference transforms.
-    pub factor: FactorName,
+    factor: FactorName,
     /// Every observed raw training value, sorted ascending. Duplicates are
     /// retained because they are probability mass in the empirical CDF.
-    pub sorted_values: Vec<Decimal>,
+    sorted_values: Vec<Decimal>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrozenReferenceCdfDocument {
+    factor: FactorName,
+    sorted_values: Vec<Decimal>,
 }
 
 impl FrozenReferenceCdf {
@@ -74,35 +85,46 @@ impl FrozenReferenceCdf {
         Ok(())
     }
 
-    /// Map a raw value onto the empirical CDF using an average rank for ties and
-    /// deterministic interpolation for unseen values.
+    /// Number of observations retained by the frozen reference.
     #[must_use]
-    pub fn percentile(&self, raw: Decimal) -> Probability {
-        let values = &self.sorted_values;
-        let span = Decimal::from(values.len() - 1);
-        let insertion = values.partition_point(|value| *value < raw);
-        let upper = values.partition_point(|value| *value <= raw);
-        let rank = if insertion < upper {
-            Decimal::from(insertion + upper - 1) / Decimal::from(2_u8)
-        } else {
-            Decimal::from(insertion.min(values.len() - 1))
+    pub const fn sample_count(&self) -> usize {
+        self.sorted_values.len()
+    }
+
+    /// Map a raw value onto the piecewise-linear reference CDF using average
+    /// ranks for ties and exact `Decimal` interpolation for unseen values.
+    pub fn percentile(&self, raw: Decimal) -> QuantResult<Probability> {
+        Ok(Probability::new(
+            interpolated_percentile(&self.sorted_values, raw)?.round_dp(RESEARCH_DECIMAL_SCALE),
+        ))
+    }
+}
+
+impl TryFrom<FrozenReferenceCdfDocument> for FrozenReferenceCdf {
+    type Error = QuantError;
+
+    fn try_from(document: FrozenReferenceCdfDocument) -> Result<Self, Self::Error> {
+        let reference = Self {
+            factor: document.factor,
+            sorted_values: document.sorted_values,
         };
-        let percentile = if raw < values[0] {
-            Decimal::ZERO
-        } else if raw > values[values.len() - 1] {
-            Decimal::ONE
-        } else {
-            rank / span
-        };
-        Probability::new(percentile.round_dp(RESEARCH_DECIMAL_SCALE))
+        reference.validate()?;
+        Ok(reference)
     }
 }
 
 /// Frozen per-factor CDFs carried by one weighted-model artifact.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "FrozenReferenceQuantilesDocument")]
 pub struct FrozenReferenceQuantiles {
     /// Stable factor-name-ordered CDFs.
-    pub references: Vec<FrozenReferenceCdf>,
+    references: Vec<FrozenReferenceCdf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrozenReferenceQuantilesDocument {
+    references: Vec<FrozenReferenceCdf>,
 }
 
 impl FrozenReferenceQuantiles {
@@ -133,18 +155,19 @@ impl FrozenReferenceQuantiles {
     ///
     /// Returns an invalid-artifact error for malformed artifact content.
     pub fn validate(&self) -> QuantResult<()> {
-        let mut names = BTreeSet::new();
+        if self
+            .references
+            .windows(2)
+            .any(|pair| pair[0].factor >= pair[1].factor)
+        {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "frozen reference CDFs must be unique and ordered by factor name"
+                    .to_owned(),
+            }
+            .into());
+        }
         for reference in &self.references {
             reference.validate()?;
-            if !names.insert(reference.factor.clone()) {
-                return Err(ResearchError::InvalidModelArtifact {
-                    detail: format!(
-                        "duplicate frozen reference CDF `{}` in weighted artifact",
-                        reference.factor
-                    ),
-                }
-                .into());
-            }
         }
         Ok(())
     }
@@ -175,6 +198,18 @@ impl FrozenReferenceQuantiles {
     }
 }
 
+impl TryFrom<FrozenReferenceQuantilesDocument> for FrozenReferenceQuantiles {
+    type Error = QuantError;
+
+    fn try_from(document: FrozenReferenceQuantilesDocument) -> Result<Self, Self::Error> {
+        let references = Self {
+            references: document.references,
+        };
+        references.validate()?;
+        Ok(references)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rust_decimal_macros::dec;
@@ -194,10 +229,25 @@ mod tests {
             reference.sorted_values,
             vec![dec!(1), dec!(2), dec!(2), dec!(3)]
         );
-        assert_eq!(reference.percentile(dec!(0)).inner(), dec!(0));
-        assert_eq!(reference.percentile(dec!(2)).inner(), dec!(0.5));
-        assert_eq!(reference.percentile(dec!(2.5)).inner(), dec!(1));
-        assert_eq!(reference.percentile(dec!(4)).inner(), dec!(1));
+        assert_eq!(
+            reference.percentile(dec!(0)).expect("below").inner(),
+            dec!(0)
+        );
+        assert_eq!(
+            reference.percentile(dec!(2)).expect("tie").inner(),
+            dec!(0.5)
+        );
+        assert_eq!(
+            reference
+                .percentile(dec!(2.5))
+                .expect("interpolated")
+                .inner(),
+            dec!(0.75)
+        );
+        assert_eq!(
+            reference.percentile(dec!(4)).expect("above").inner(),
+            dec!(1)
+        );
     }
 
     #[test]

@@ -29,7 +29,7 @@ use quant_pivot_models::{
             ModelComparisonReportInfo, ModelSpecInfo, ModelVersionInfo, TrainingDatasetInfo,
         },
     },
-    enums::{common::MarketCategory, quant::PublicationStatus},
+    enums::common::MarketCategory,
     types::{FactorDefinitionId, MarketId, Probability, stable_name::FactorName},
 };
 use quant_pivot_repository::traits::{
@@ -43,7 +43,7 @@ use rust_decimal::Decimal;
 
 use crate::app::bundles::ResearchBundle;
 
-/// Ceiling on how many published factor definitions the collinearity analysis
+/// Ceiling on how many immutable factor definitions the collinearity analysis
 /// pulls in one page (the generic factor set is a dozen; this is generous).
 const COLLINEARITY_DEFINITION_LIMIT: u64 = 500;
 
@@ -209,13 +209,12 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
         source: FactorCollinearitySource,
         neutralize_by_category: bool,
     ) -> QuantResult<FactorCollinearityView> {
-        // The published factor definitions define the columns of the panel.
+        // The immutable factor-definition catalog defines the panel columns.
         let definitions = self
             .factors
             .page_definitions(FactorDefinitionListQuery {
                 factor_family: None,
                 scope: None,
-                status: Some(PublicationStatus::Published),
                 page: PageRequest {
                     page: 1,
                     size: COLLINEARITY_DEFINITION_LIMIT,

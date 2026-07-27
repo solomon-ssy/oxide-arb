@@ -3,22 +3,23 @@
 //! This module validates only the current quant-pivot document. Unknown and
 //! superseded configuration paths are rejected by the typed schema.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use linkme::distributed_slice;
 use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
 use rust_decimal::Decimal;
 
 use super::{
-    DecimalValue, DecisionPolicySnapshot, OutcomeReconciliationPolicy, PolicyValidationConfig,
-    ResearchValidationConfig, ResearchValidationTrialsConfig, SizingModelConfig,
+    BuyModelRoute, DecimalValue, DecisionPolicySnapshot, OutcomeReconciliationPolicy,
+    PolicyValidationConfig, ResearchValidationConfig, ResearchValidationTrialsConfig,
+    SizingModelConfig,
     sections::{FeaturesConfig, KellySafetyConfig, MAX_REPORT_TOP_N},
     validate_schedule_cadence,
 };
 use crate::{
-    enums::factor::FactorNormalization,
+    enums::{common::MarketCategory, factor::FactorNormalization},
     runtime_config::{FeatureFamily, PerFactorNormalization},
-    types::CalibrationArtifactId,
+    types::{CalibrationArtifactId, stable_name::FactorName},
 };
 
 /// Extension hook for feature-config validation that requires research-plane schema knowledge.
@@ -398,25 +399,122 @@ fn validate_factors(config: &DecisionPolicySnapshot, report: &mut ConfigValidati
             });
         }
     }
-    for name in config
-        .profile_artifacts
-        .scoring
-        .definition
-        .factor_weights
-        .weights
-        .keys()
-    {
-        if name.trim().is_empty() {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field: "factors.factor_weights",
-                detail: "factor names must not be empty".to_owned(),
-            });
-        }
-    }
+    validate_factor_head(config, report);
+    validate_sell_scorer(config, report);
     validate_factor_normalization(config, report);
     validate_factor_cross_section(config, report);
     validate_factor_orthogonalize(config, report);
     validate_factor_structural(config, report);
+}
+
+fn validate_factor_head(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
+    let head = &config.profile_artifacts.scoring.definition.factor_head;
+    validate_weight_simplex(
+        "factors.factor_head.alpha_seed_weights",
+        &head.alpha_seed_weights,
+        report,
+    );
+    validate_weight_simplex(
+        "factors.factor_head.context_coverage_weights",
+        &head.context_coverage_weights,
+        report,
+    );
+    for (name, strength) in &head.context_penalty_strengths {
+        validate_factor_name(
+            "factors.factor_head.context_penalty_strengths",
+            name,
+            report,
+        );
+        unit_ratio(
+            "factors.factor_head.context_penalty_strengths",
+            strength,
+            report,
+        );
+    }
+    unit_ratio(
+        "factors.factor_head.default_context_penalty_strength",
+        &head.default_context_penalty_strength,
+        report,
+    );
+    if !(Decimal::ZERO..Decimal::ONE).contains(&head.alpha_deadband.value) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.factor_head.alpha_deadband",
+            detail: format!("`{}` must be within [0, 1)", head.alpha_deadband.value),
+        });
+    }
+}
+
+fn validate_sell_scorer(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
+    let scorer = &config.profile_artifacts.scoring.definition.sell_scorer;
+    let weights = [
+        &scorer.market_head_weight,
+        &scorer.position_take_profit_weight,
+        &scorer.position_stop_loss_weight,
+        &scorer.position_time_in_trade_weight,
+        &scorer.position_peak_drawdown_weight,
+    ];
+    for weight in weights {
+        non_negative_decimal("factors.sell_scorer.estimator_weights", weight, report);
+    }
+    let sum = weights.iter().map(|weight| weight.value).sum::<Decimal>();
+    if (sum - Decimal::ONE).abs() > Decimal::new(1, 12) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.sell_scorer.estimator_weights",
+            detail: format!("weights must sum to one; got {sum}"),
+        });
+    }
+    positive_decimal(
+        "factors.sell_scorer.max_exit_alpha_bps",
+        &scorer.max_exit_alpha_bps,
+        report,
+    );
+    positive_decimal(
+        "factors.sell_scorer.p_exit_gain",
+        &scorer.p_exit_gain,
+        report,
+    );
+    if !(Decimal::ZERO..Decimal::ONE).contains(&scorer.exit_deadband.value) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.sell_scorer.exit_deadband",
+            detail: format!("`{}` must be within [0, 1)", scorer.exit_deadband.value),
+        });
+    }
+    half_open_unit(
+        "factors.sell_scorer.default_sell_pct",
+        &scorer.default_sell_pct,
+        report,
+    );
+}
+
+fn validate_weight_simplex(
+    field: &'static str,
+    weights: &BTreeMap<String, DecimalValue>,
+    report: &mut ConfigValidationReport,
+) {
+    if weights.is_empty() {
+        return;
+    }
+    let mut sum = Decimal::ZERO;
+    for (name, weight) in weights {
+        validate_factor_name(field, name, report);
+        non_negative_decimal(field, weight, report);
+        sum += weight.value;
+    }
+    if (sum - Decimal::ONE).abs() > Decimal::new(1, 12) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("weights must sum to one; got {sum}"),
+        });
+    }
+}
+
+fn validate_factor_name(field: &'static str, name: &str, report: &mut ConfigValidationReport) {
+    if !FactorName::new(name).is_canonical() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("factor name `{name}` must be a canonical lowercase ASCII stable name"),
+        });
+    }
 }
 
 /// Validate the structural factor plane. Every knob a structural
@@ -661,6 +759,50 @@ fn validate_factor_orthogonalize(
 }
 
 fn validate_model(config: &DecisionPolicySnapshot, report: &mut ConfigValidationReport) {
+    let selection = &config.recommendation.selection;
+    let route = BuyModelRoute::try_from(selection);
+    if let Err(error) = &route {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "selection.enabled_categories",
+            detail: error.to_string(),
+        });
+    }
+    if config
+        .model_routing
+        .model
+        .category_model_pointers
+        .keys()
+        .any(|category| !matches!(category, MarketCategory::Crypto | MarketCategory::Weather))
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "model.category_model_pointers",
+            detail: "only Crypto and Weather own category-specific Buy model routes; every \
+                     other category belongs to the explicit pooled route"
+                .to_owned(),
+        });
+    }
+    if !selection.enabled_categories.is_empty()
+        && let Ok(route) = route
+        && config.model_routing.model.active_pointer(route).is_err()
+    {
+        let (field, detail) = match route {
+            BuyModelRoute::Pooled => (
+                "model.active_model_version_id",
+                "an explicit pooled report requires the pooled active model pointer".to_owned(),
+            ),
+            BuyModelRoute::Crypto => (
+                "model.category_model_pointers",
+                "enabled vertical Crypto requires its exact category model pointer".to_owned(),
+            ),
+            BuyModelRoute::Weather => (
+                "model.category_model_pointers",
+                "enabled vertical Weather requires its exact category model pointer".to_owned(),
+            ),
+        };
+        report
+            .errors
+            .push(ConfigValidationError::InvalidValue { field, detail });
+    }
     unit_ratio(
         "model.min_model_confidence",
         &config.model_routing.model.min_model_confidence,
@@ -1442,20 +1584,180 @@ fn non_empty_numbers(field: &'static str, values: &[u64], report: &mut ConfigVal
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigValidationError, DecisionPolicySnapshot};
+    use std::collections::BTreeMap;
+
+    use super::{BuyModelRoute, ConfigValidationError, DecisionPolicySnapshot};
     use crate::{
-        enums::factor::FactorFamily,
+        enums::{common::MarketCategory, factor::FactorFamily},
         runtime_config::{
             DecimalValue, FeatureFamily, MAX_REPORT_TOP_N, OutcomeReconciliationPolicy,
             POLICY_RESOURCE_SCHEMA_VERSION, ReportScheduleConfig, ScheduleCadence,
+            wire::ModelVersionRef,
         },
-        types::CalibrationArtifactId,
+        types::{CalibrationArtifactId, ModelVersionId},
     };
 
     #[test]
     fn default_runtime_config_valid() {
         let report = DecisionPolicySnapshot::default().validate_runtime_config();
         assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn model_routes_fail_closed() {
+        let generic = ModelVersionRef::new(ModelVersionId::from_v7());
+        let weather = ModelVersionRef::new(ModelVersionId::from_v7());
+        assert!(BuyModelRoute::try_from(Some(MarketCategory::Sports)).is_err());
+
+        let mut missing = DecisionPolicySnapshot::default();
+        missing.recommendation.selection.enabled_categories = vec![MarketCategory::Weather];
+        missing.model_routing.model.active_model_version_id = Some(generic.clone());
+        assert!(
+            missing
+                .validate_runtime_config()
+                .errors
+                .iter()
+                .any(|error| {
+                    matches!(
+                        error,
+                        ConfigValidationError::InvalidValue {
+                            field: "model.category_model_pointers",
+                            ..
+                        }
+                    )
+                })
+        );
+
+        let mut mixed = DecisionPolicySnapshot::default();
+        mixed.recommendation.selection.enabled_categories =
+            vec![MarketCategory::Weather, MarketCategory::Sports];
+        mixed.model_routing.model.active_model_version_id = Some(generic.clone());
+        mixed.model_routing.model.category_model_pointers =
+            BTreeMap::from([(MarketCategory::Weather, weather.clone())]);
+        assert!(mixed.validate_runtime_config().errors.iter().any(|error| {
+            matches!(
+                error,
+                ConfigValidationError::InvalidValue {
+                    field: "selection.enabled_categories",
+                    ..
+                }
+            )
+        }));
+
+        let mut invalid_key = DecisionPolicySnapshot::default();
+        invalid_key.recommendation.selection.enabled_categories = vec![MarketCategory::Sports];
+        invalid_key.model_routing.model.active_model_version_id = Some(generic.clone());
+        invalid_key.model_routing.model.category_model_pointers =
+            BTreeMap::from([(MarketCategory::Sports, weather.clone())]);
+        assert!(
+            invalid_key
+                .validate_runtime_config()
+                .errors
+                .iter()
+                .any(|error| {
+                    matches!(
+                        error,
+                        ConfigValidationError::InvalidValue {
+                            field: "model.category_model_pointers",
+                            ..
+                        }
+                    )
+                })
+        );
+
+        let mut pooled = DecisionPolicySnapshot::default();
+        pooled.recommendation.selection.enabled_categories = vec![MarketCategory::Sports];
+        pooled.model_routing.model.active_model_version_id = Some(generic);
+        assert!(!pooled.validate_runtime_config().has_errors());
+
+        let mut exact_vertical = DecisionPolicySnapshot::default();
+        exact_vertical.recommendation.selection.enabled_categories = vec![MarketCategory::Weather];
+        exact_vertical.model_routing.model.category_model_pointers =
+            BTreeMap::from([(MarketCategory::Weather, weather)]);
+        assert!(!exact_vertical.validate_runtime_config().has_errors());
+    }
+
+    #[test]
+    fn factor_head_seed_validates() {
+        let mut config = DecisionPolicySnapshot::default();
+        let head = &mut config.profile_artifacts.scoring.definition.factor_head;
+        head.alpha_seed_weights.insert(
+            "valid.alpha".to_owned(),
+            DecimalValue::new(rust_decimal_macros::dec!(0.75)),
+        );
+        head.alpha_seed_weights.insert(
+            "Invalid Alpha".to_owned(),
+            DecimalValue::new(rust_decimal_macros::dec!(-0.25)),
+        );
+        head.context_penalty_strengths.insert(
+            "valid.context".to_owned(),
+            DecimalValue::new(rust_decimal_macros::dec!(1.01)),
+        );
+        head.alpha_deadband = DecimalValue::new(rust_decimal_macros::dec!(1));
+
+        let report = config.validate_runtime_config();
+        for field in [
+            "factors.factor_head.alpha_seed_weights",
+            "factors.factor_head.context_penalty_strengths",
+            "factors.factor_head.alpha_deadband",
+        ] {
+            assert!(report.errors.iter().any(|error| matches!(
+                error,
+                ConfigValidationError::InvalidValue {
+                    field: actual,
+                    ..
+                } if *actual == field
+            )));
+        }
+    }
+
+    #[test]
+    fn sell_scorer_validates() {
+        let mut config = DecisionPolicySnapshot::default();
+        let scorer = &mut config.profile_artifacts.scoring.definition.sell_scorer;
+        scorer.market_head_weight = DecimalValue::new(rust_decimal_macros::dec!(-0.1));
+        scorer.max_exit_alpha_bps = DecimalValue::new(rust_decimal_macros::dec!(0));
+        scorer.p_exit_gain = DecimalValue::new(rust_decimal_macros::dec!(0));
+        scorer.exit_deadband = DecimalValue::new(rust_decimal_macros::dec!(1));
+        scorer.default_sell_pct = DecimalValue::new(rust_decimal_macros::dec!(0));
+
+        let report = config.validate_runtime_config();
+        for field in [
+            "factors.sell_scorer.estimator_weights",
+            "factors.sell_scorer.max_exit_alpha_bps",
+            "factors.sell_scorer.p_exit_gain",
+            "factors.sell_scorer.exit_deadband",
+            "factors.sell_scorer.default_sell_pct",
+        ] {
+            assert!(report.errors.iter().any(|error| matches!(
+                error,
+                ConfigValidationError::InvalidValue {
+                    field: actual,
+                    ..
+                } if *actual == field
+            )));
+        }
+    }
+
+    #[test]
+    fn head_rejects_unknown_fields() {
+        let mut value = serde_json::to_value(DecisionPolicySnapshot::default())
+            .expect("serialize policy snapshot");
+        value["profile_artifacts"]["scoring"]["definition"]["factor_head"]["future_knob"] =
+            serde_json::json!("0.1");
+        assert!(serde_json::from_value::<DecisionPolicySnapshot>(value).is_err());
+    }
+
+    #[test]
+    fn old_factor_weights_rejected() {
+        let mut value = serde_json::to_value(DecisionPolicySnapshot::default())
+            .expect("serialize policy snapshot");
+        let factors = &mut value["profile_artifacts"]["scoring"]["definition"];
+        factors
+            .as_object_mut()
+            .expect("factors object")
+            .insert("factor_weights".to_owned(), serde_json::json!({}));
+        assert!(serde_json::from_value::<DecisionPolicySnapshot>(value).is_err());
     }
 
     #[test]

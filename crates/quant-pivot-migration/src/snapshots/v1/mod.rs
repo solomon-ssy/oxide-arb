@@ -31,6 +31,7 @@ pub mod quant_crypto_price_projection;
 pub mod quant_domain_event_outbox;
 pub mod quant_domain_source_cursor;
 pub mod quant_domain_source_expectation;
+pub mod quant_drift_report;
 pub mod quant_entry_condition_artifact;
 pub mod quant_entry_condition_audit;
 pub mod quant_entry_condition_evaluation_outbox;
@@ -47,6 +48,9 @@ pub mod quant_feature_parity_run;
 pub mod quant_feature_parity_state;
 pub mod quant_feature_parity_subject;
 pub mod quant_feature_vector;
+pub mod quant_feedback_cycle;
+pub mod quant_feedback_evaluation_use;
+pub mod quant_feedback_stage_event;
 pub mod quant_market_linkage;
 pub mod quant_market_linkage_source;
 pub mod quant_market_selection;
@@ -133,6 +137,7 @@ pub const TABLES: &[&str] = &[
     "quant_domain_event_outbox",
     "quant_domain_source_cursor",
     "quant_domain_source_expectation",
+    "quant_drift_report",
     "quant_entry_condition_artifact",
     "quant_entry_condition_audit",
     "quant_entry_condition_evaluation_outbox",
@@ -144,6 +149,9 @@ pub const TABLES: &[&str] = &[
     "quant_execution_transaction_ref",
     "quant_factor_definition",
     "quant_factor_value",
+    "quant_feedback_cycle",
+    "quant_feedback_evaluation_use",
+    "quant_feedback_stage_event",
     "quant_feature_parity_candidate",
     "quant_feature_parity_run",
     "quant_feature_parity_state",
@@ -236,6 +244,15 @@ pub const ENUMS: &[&str] = &[
     "qp_factor_indeterminate_reason",
     "qp_factor_value_state",
     "qp_feedback_cohort",
+    "qp_feedback_cycle_status",
+    "qp_feedback_decision",
+    "qp_feedback_drift_assessment",
+    "qp_feedback_drift_kind",
+    "qp_feedback_drift_metric",
+    "qp_feedback_evaluation_purpose",
+    "qp_feedback_stage",
+    "qp_feedback_stage_event_kind",
+    "qp_feedback_trigger_family",
     "qp_feature_parity_latch_state",
     "qp_feature_parity_run_kind",
     "qp_feature_parity_run_status",
@@ -355,6 +372,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_domain_event_outbox.rs"),
     include_bytes!("quant_domain_source_cursor.rs"),
     include_bytes!("quant_domain_source_expectation.rs"),
+    include_bytes!("quant_drift_report.rs"),
     include_bytes!("quant_entry_condition_artifact.rs"),
     include_bytes!("quant_entry_condition_audit.rs"),
     include_bytes!("quant_entry_condition_evaluation_outbox.rs"),
@@ -366,6 +384,9 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_execution_transaction_ref.rs"),
     include_bytes!("quant_factor_definition.rs"),
     include_bytes!("quant_factor_value.rs"),
+    include_bytes!("quant_feedback_cycle.rs"),
+    include_bytes!("quant_feedback_evaluation_use.rs"),
+    include_bytes!("quant_feedback_stage_event.rs"),
     include_bytes!("quant_feature_parity_candidate.rs"),
     include_bytes!("quant_feature_parity_run.rs"),
     include_bytes!("quant_feature_parity_state.rs"),

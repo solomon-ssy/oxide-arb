@@ -14,7 +14,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    enums::quant::{ModelSerializationFormat, OutcomeSide},
+    enums::{
+        model::ModelFamily,
+        quant::{ModelSerializationFormat, OutcomeSide},
+    },
     hashing::CanonicalDigest,
     types::{
         ContentHash, ModelRunId, ModelVersionId, Price, Probability, SignalCandidateId, TokenId,
@@ -28,12 +31,15 @@ use crate::{
     features::{FeatureCell, FeatureCellState, FeatureName},
     model::{
         CLASSICAL_CRATE_NAME,
-        artifact::{ClassicalModelArtifact, ClassicalOutputSemantics},
+        artifact::{
+            ClassicalModelPayload, ClassicalOutputSemantics, ModelArtifact, ModelArtifactHeader,
+            ModelPayload,
+        },
         classical::{CLASSICAL_CRATE_VERSION, SmartcoreModel},
         runtime::{
-            InferenceMatrix, InferenceMatrixRow, MarketInferenceContext, ModelFamily,
-            ModelInputAuditRow, ModelInputAuditState, ModelRuntimeInput, ModelRuntimeMetrics,
-            ModelRuntimeOutput, QuantModelRuntime,
+            InferenceMatrix, InferenceMatrixRow, MarketInferenceContext, ModelInputAuditRow,
+            ModelInputAuditState, ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput,
+            QuantModelRuntime,
         },
         signal::{ModelExplanation, SignalCandidate, SignalWarning},
     },
@@ -45,7 +51,8 @@ const MAX_LONG_DOWNSIDE_BPS: i64 = 10_000;
 
 /// A loaded classical model runtime.
 pub struct ClassicalRuntime {
-    artifact: ClassicalModelArtifact,
+    header: ModelArtifactHeader,
+    payload: ClassicalModelPayload,
     model: SmartcoreModel,
 }
 
@@ -78,43 +85,51 @@ impl ClassicalRuntime {
     ///
     /// Returns [`ResearchError::RuntimeUnavailable`] on a crate-version mismatch
     /// and [`ResearchError::Serialization`] on a decode failure.
-    pub fn load(artifact: ClassicalModelArtifact, model_bytes: &[u8]) -> QuantResult<Self> {
-        artifact.validate()?;
-        if artifact.crate_name != CLASSICAL_CRATE_NAME {
+    pub fn load(artifact: ModelArtifact, model_bytes: &[u8]) -> QuantResult<Self> {
+        let (header, payload) = artifact.into_parts()?;
+        let ModelPayload::Classical(payload) = payload else {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "classical runtime requires a classical model payload".to_owned(),
+            }
+            .into());
+        };
+        let payload = *payload;
+        payload.validate()?;
+        if payload.crate_name != CLASSICAL_CRATE_NAME {
             return Err(ResearchError::RuntimeUnavailable {
-                family: artifact.kind.to_string(),
+                family: payload.kind.to_string(),
                 detail: format!(
                     "classical crate name mismatch: artifact `{}`, runtime `{}`",
-                    artifact.crate_name, CLASSICAL_CRATE_NAME
+                    payload.crate_name, CLASSICAL_CRATE_NAME
                 ),
             }
             .into());
         }
-        if artifact.crate_version != CLASSICAL_CRATE_VERSION {
+        if payload.crate_version != CLASSICAL_CRATE_VERSION {
             return Err(ResearchError::RuntimeUnavailable {
-                family: artifact.kind.to_string(),
+                family: payload.kind.to_string(),
                 detail: format!(
                     "classical crate version mismatch: artifact `{}`, runtime `{}`",
-                    artifact.crate_version, CLASSICAL_CRATE_VERSION
+                    payload.crate_version, CLASSICAL_CRATE_VERSION
                 ),
             }
             .into());
         }
-        if artifact.serialization_format != ModelSerializationFormat::Bincode {
+        if payload.serialization_format != ModelSerializationFormat::Bincode {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: format!(
                     "classical runtime expects bincode bytes, got {:?}",
-                    artifact.serialization_format
+                    payload.serialization_format
                 ),
             }
             .into());
         }
         let actual_hash = CanonicalDigest::content_hash_bytes(model_bytes);
-        if actual_hash != artifact.serialized_model_hash {
+        if actual_hash != payload.serialized_model_hash {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: format!(
                     "classical estimator bytes hash mismatch: expected {}, got {}",
-                    artifact.serialized_model_hash, actual_hash
+                    payload.serialized_model_hash, actual_hash
                 ),
             }
             .into());
@@ -123,17 +138,21 @@ impl ClassicalRuntime {
             bincode::deserialize(model_bytes).map_err(|error| ResearchError::Serialization {
                 detail: format!("bincode deserialize classical model: {error}"),
             })?;
-        if !model.matches_kind(artifact.kind) {
+        if !model.matches_kind(payload.kind) {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: format!(
                     "serialized estimator variant does not match artifact kind {}",
-                    artifact.kind
+                    payload.kind
                 ),
             }
             .into());
         }
-        model.validate_width(artifact.input_transform.encoded_columns.len())?;
-        Ok(Self { artifact, model })
+        model.validate_width(payload.input_transform.encoded_columns.len())?;
+        Ok(Self {
+            header,
+            payload,
+            model,
+        })
     }
 
     /// Apply the exact frozen training transform to one inference row.
@@ -152,18 +171,18 @@ impl ClassicalRuntime {
             }
             .into());
         }
-        if self.artifact.input_transform.inputs.len() != names.len() {
+        if self.payload.input_transform.inputs.len() != names.len() {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: format!(
                     "classical transform raw input width {} does not match artifact name width {}",
-                    self.artifact.input_transform.inputs.len(),
+                    self.payload.input_transform.inputs.len(),
                     names.len()
                 ),
             }
             .into());
         }
         let cells = self
-            .artifact
+            .payload
             .input_transform
             .inputs
             .iter()
@@ -182,7 +201,7 @@ impl ClassicalRuntime {
                 model_input_cell(Some(cell), name, input.value_kind)
             })
             .collect::<QuantResult<Vec<_>>>()?;
-        let encoded_values = self.artifact.input_transform.apply_cells(&cells)?;
+        let encoded_values = self.payload.input_transform.apply_cells(&cells)?;
         let input_audit = self.project_input_audit(row, names, &encoded_values)?;
         Ok(TransformedInferenceRow {
             encoded_values,
@@ -196,20 +215,21 @@ impl ClassicalRuntime {
         names: &[FeatureName],
         encoded_values: &[f64],
     ) -> QuantResult<Vec<ModelInputAuditRow>> {
-        if encoded_values.len() != self.artifact.input_transform.encoded_columns.len() {
+        if encoded_values.len() != self.payload.input_transform.encoded_columns.len() {
             return Err(ResearchError::Inference {
                 detail: format!(
                     "classical audit width mismatch: transform emitted {}, contract declares {}",
                     encoded_values.len(),
-                    self.artifact.input_transform.encoded_columns.len()
+                    self.payload.input_transform.encoded_columns.len()
                 ),
             }
             .into());
         }
-        let input_contract_hash = self.artifact.input_contract_hash;
-        let transform_hash = self.artifact.input_transform_hash;
-        let training_input_hash = self.artifact.training_input_hash;
-        self.artifact
+        let transform = &self.header.serving_contract().bindings().transform;
+        let input_contract_hash = transform.input_contract_hash;
+        let transform_hash = transform.input_transform_hash;
+        let training_input_hash = transform.training_input_hash;
+        self.payload
             .input_transform
             .encoded_columns
             .iter()
@@ -244,8 +264,8 @@ impl ClassicalRuntime {
                         })?;
                 let (raw_state, raw_value) = classical_raw_evidence(cell)?;
                 Ok(ModelInputAuditRow {
-                    model_version_id: self.artifact.header.model_version_id,
-                    model_family: self.artifact.header.model_family,
+                    model_version_id: self.header.model_version_id(),
+                    model_family: self.header.model_family(),
                     market_id: row.market_id.clone(),
                     raw_input_name: column.source_feature.to_string(),
                     raw_state,
@@ -277,7 +297,7 @@ impl ClassicalRuntime {
         let Some(scores) = self.candidate_scores(&projection, context)? else {
             return Ok(None);
         };
-        let semantics = match self.artifact.output_semantics {
+        let semantics = match self.payload.output_semantics {
             ClassicalOutputSemantics::ForwardReturnBps => "forward_return_bps",
             ClassicalOutputSemantics::FullPayoutProbability => "full_payout_probability",
         };
@@ -323,20 +343,20 @@ impl ClassicalRuntime {
         context: &MarketInferenceContext,
     ) -> QuantResult<Option<ClassicalCandidateScores>> {
         let data_quality_score = clamp_unit(
-            self.artifact
+            self.payload
                 .multipliers
                 .data_quality
                 .multiplier_for(context.data_quality),
         );
         let liquidity_score = clamp_unit(
-            self.artifact
+            self.payload
                 .multipliers
                 .liquidity
                 .multiplier_for(context.liquidity_usd.map(Usd::inner)),
         );
-        let horizon_multiplier = self.artifact.multipliers.horizon.multiplier_for(
+        let horizon_multiplier = self.payload.multipliers.horizon.multiplier_for(
             context.time_to_resolution_secs,
-            self.artifact.prediction_horizon_secs,
+            self.header.prediction_horizon_secs(),
         );
         let edge_strength = bounded_edge_strength(projection.expected_return_bps)?;
         let composite_score = clamp_unit(checked_product(
@@ -356,7 +376,7 @@ impl ClassicalRuntime {
                     checked_mul(
                         "classical substitution confidence",
                         acc,
-                        self.artifact
+                        self.payload
                             .substitution_confidence_rules
                             .multiplier_for(*reason),
                     )
@@ -366,11 +386,10 @@ impl ClassicalRuntime {
             data_quality_score.inner(),
             substitution_penalty,
         )?);
-        let suggested_horizon_secs = context
-            .time_to_resolution_secs
-            .map_or(self.artifact.prediction_horizon_secs, |remaining| {
-                remaining.min(self.artifact.prediction_horizon_secs)
-            });
+        let suggested_horizon_secs = context.time_to_resolution_secs.map_or_else(
+            || self.header.prediction_horizon_secs(),
+            |remaining| remaining.min(self.header.prediction_horizon_secs()),
+        );
         Ok(
             (suggested_horizon_secs > 0).then_some(ClassicalCandidateScores {
                 composite_score,
@@ -387,7 +406,7 @@ impl ClassicalRuntime {
         raw_prediction: Decimal,
         row: &InferenceMatrixRow,
     ) -> QuantResult<Option<ClassicalEconomicProjection>> {
-        match self.artifact.output_semantics {
+        match self.payload.output_semantics {
             ClassicalOutputSemantics::ForwardReturnBps => {
                 project_forward_return(raw_prediction, row)
             }
@@ -420,23 +439,23 @@ impl MarketInferenceContext {
 #[async_trait]
 impl QuantModelRuntime for ClassicalRuntime {
     fn model_version_id(&self) -> ModelVersionId {
-        self.artifact.header.model_version_id
+        self.header.model_version_id()
     }
 
     fn model_family(&self) -> ModelFamily {
-        ModelFamily::from_classical(self.artifact.kind)
+        ModelFamily::from_classical(self.payload.kind)
     }
 
     fn feature_schema_hash(&self) -> ContentHash {
-        self.artifact.header.feature_schema_hash
+        self.header.feature_schema_hash()
     }
 
     fn required_features(&self) -> Vec<FeatureName> {
-        self.artifact.required_features()
+        self.payload.required_features()
     }
 
     fn input_features(&self) -> Vec<FeatureName> {
-        self.artifact.input_features()
+        self.payload.input_features()
     }
 
     async fn infer_batch(&self, input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
@@ -459,7 +478,7 @@ impl QuantModelRuntime for ClassicalRuntime {
             });
         }
 
-        let expected_names = self.artifact.input_features();
+        let expected_names = self.payload.input_features();
         if matrix.feature_names != expected_names {
             return Err(ResearchError::Inference {
                 detail: "classical raw input contract/order does not match its artifact".to_owned(),
@@ -828,10 +847,13 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use ndarray::Array1;
     use quant_pivot_models::{
-        enums::quant::{DataQualityStatus, OutcomeSide},
+        enums::{
+            model::{ClassicalKind, ModelFamily},
+            quant::{DataQualityStatus, OutcomeSide},
+        },
         types::{
-            ArtifactUri, MarketId, ModelArtifactId, ModelInputRequiredness, ModelInputSpec,
-            ModelRunId, ModelVersionId, Price, TokenId, builtin_research_profiles,
+            ArtifactUri, MarketId, ModelInputRequiredness, ModelInputSpec, ModelRunId, Price,
+            TokenId, factor::FactorServingPlane,
         },
     };
     use rust_decimal::Decimal;
@@ -845,7 +867,7 @@ mod tests {
         model::{
             ModelInputAuditState, SignalWarning,
             artifact::{
-                ClassicalModelArtifact, ClassicalOutputSemantics, ModelArtifactHeader,
+                ClassicalModelPayload, ClassicalOutputSemantics, ModelArtifact, ModelPayload,
                 ScoreMultiplierSpec, SubstitutionConfidenceRules, model_input_contract_hash,
             },
             classical::{
@@ -853,11 +875,11 @@ mod tests {
                 ClassicalTrainOutput,
             },
             runtime::{
-                ClassicalKind, InferenceMatrix, InferenceMatrixRow, MarketInferenceContext,
-                ModelFamily, ModelRuntimeInput, QuantModelRuntime,
+                InferenceMatrix, InferenceMatrixRow, MarketInferenceContext, ModelRuntimeInput,
+                QuantModelRuntime,
             },
         },
-        test_support::content_hash as hash,
+        test_support::{seal_model_payload, seal_model_training_payload},
         training::{FeatureColumnSpec, ModelInputCell, RawInputMatrix, TrainingMatrix},
     };
 
@@ -915,41 +937,38 @@ mod tests {
     }
 
     impl ClassicalTrainOutput {
-        fn artifact(&self) -> ClassicalModelArtifact {
-            ClassicalModelArtifact {
-                header: ModelArtifactHeader {
-                    model_version_id: ModelVersionId::from_v7(),
-                    model_spec_definition_hash: hash("spec"),
-                    profile_ref: builtin_research_profiles()
-                        .expect("built-in profiles")
-                        .remove(0)
-                        .profile_ref,
-                    model_family: ModelFamily::from_classical(ClassicalKind::RandomForest),
-                    feature_schema_hash: hash("feat"),
-                    factor_schema_hash: hash("fac"),
-                    trade_policy_artifact_id: None,
-                    trade_policy_hash: None,
-                },
-                artifact_id: ModelArtifactId::from_v7(),
+        fn payload(&self) -> ClassicalModelPayload {
+            ClassicalModelPayload {
                 kind: self.kind,
                 crate_name: self.crate_name.clone(),
                 crate_version: self.crate_version.clone(),
-                label_schema_hash: hash("lab"),
-                training_dataset_hash: hash("ds"),
-                prediction_horizon_secs: 3_600,
-                output_semantics: ClassicalOutputSemantics::ForwardReturnBps,
+                output_semantics: if self.kind == ClassicalKind::LogisticRegression {
+                    ClassicalOutputSemantics::FullPayoutProbability
+                } else {
+                    ClassicalOutputSemantics::ForwardReturnBps
+                },
                 multipliers: ScoreMultiplierSpec::conservative(),
                 substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
                 input_contract: self.input_contract.clone(),
-                input_contract_hash: self.input_contract_hash,
-                input_transform_hash: self.input_transform_hash,
-                training_input_hash: self.training_input_hash,
                 serialized_model_uri: ArtifactUri::parse("file:///tmp/model.bin").expect("uri"),
                 serialized_model_hash: self.model_bytes_hash,
                 serialization_format: self.serialization_format,
                 input_transform: self.input_transform.clone(),
                 metrics: self.metrics.clone(),
             }
+        }
+
+        fn artifact(&self) -> ModelArtifact {
+            let payload = self.payload();
+            let family = ModelFamily::from_classical(payload.kind);
+            let plane = FactorServingPlane::try_empty().expect("empty classical factor plane");
+            seal_model_training_payload(
+                ModelPayload::Classical(Box::new(payload)),
+                plane,
+                family,
+                self.training_input_hash,
+                3_600,
+            )
         }
     }
 
@@ -1098,9 +1117,13 @@ mod tests {
         assert_eq!(output.crate_version, CLASSICAL_CRATE_VERSION);
 
         // A version mismatch is rejected.
-        let mut tampered = output.artifact();
+        let mut tampered = output.payload();
         tampered.crate_version = "9.9".to_owned();
-        let err = ClassicalRuntime::load(tampered, &output.model_bytes);
+        let family = ModelFamily::from_classical(tampered.kind);
+        let plane = FactorServingPlane::try_empty().expect("empty classical factor plane");
+        let artifact =
+            seal_model_payload(ModelPayload::Classical(Box::new(tampered)), plane, family);
+        let err = ClassicalRuntime::load(artifact, &output.model_bytes);
         assert!(err.is_err(), "crate version mismatch must be rejected");
     }
 
@@ -1121,43 +1144,34 @@ mod tests {
             model_input_contract_hash(&output.input_contract).expect("typed contract hash")
         );
 
-        let mut stale_hash = output.artifact();
-        stale_hash.input_contract.inputs[0].requiredness = ModelInputRequiredness::Optional;
+        let mut stale_contract = output.payload();
+        stale_contract.input_contract.inputs[0].requiredness = ModelInputRequiredness::Optional;
         assert!(
-            ClassicalRuntime::load(stale_hash, &output.model_bytes).is_err(),
-            "requiredness drift without a new canonical hash must fail closed"
+            stale_contract.validate().is_err(),
+            "requiredness drift from the fitted transform must fail closed"
         );
 
-        let mut swapped = output.artifact();
+        let mut swapped = output.payload();
         swapped.input_contract.inputs.swap(0, 1);
-        swapped.input_contract_hash =
-            model_input_contract_hash(&swapped.input_contract).expect("swapped contract hash");
         assert!(
-            ClassicalRuntime::load(swapped, &output.model_bytes).is_err(),
-            "an internally hashed contract still cannot diverge from the fitted transform"
+            swapped.validate().is_err(),
+            "an internally valid contract cannot diverge from the fitted transform"
         );
 
-        let mut malformed = output.artifact();
+        let mut malformed = output.payload();
         malformed
             .input_contract
             .inputs
             .push(malformed.input_contract.inputs[0].clone());
         assert!(
-            ClassicalRuntime::load(malformed, &output.model_bytes).is_err(),
+            malformed.validate().is_err(),
             "duplicate raw inputs must fail closed"
         );
 
-        let mut zero_horizon = output.artifact();
-        zero_horizon.prediction_horizon_secs = 0;
-        assert!(
-            ClassicalRuntime::load(zero_horizon, &output.model_bytes).is_err(),
-            "zero classical horizon must fail closed"
-        );
-
-        let mut wrong_semantics = output.artifact();
+        let mut wrong_semantics = output.payload();
         wrong_semantics.output_semantics = ClassicalOutputSemantics::FullPayoutProbability;
         assert!(
-            ClassicalRuntime::load(wrong_semantics, &output.model_bytes).is_err(),
+            wrong_semantics.validate().is_err(),
             "regressor artifact cannot masquerade as a full-payout probability"
         );
     }

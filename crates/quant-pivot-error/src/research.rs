@@ -16,7 +16,7 @@ use crate::{QuantError, storage::StorageError};
 /// Covers artifact IO, schema/hash mismatches, and determinism violations.
 /// Money-adjacent invariants (hash mismatch, schema mismatch) are dedicated
 /// variants so callers can reject loads rather than silently degrade.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ResearchError {
     /// A valid research operation cannot run because required serving evidence
     /// does not exist yet.
@@ -27,6 +27,15 @@ pub enum ResearchError {
         /// Operator-facing explanation.
         detail: String,
     },
+
+    /// Sell-side CPCV cannot start until training produces leakage-safe
+    /// out-of-fold estimator predictions and a genuine Sell trial
+    /// specification.
+    #[error(
+        "Sell CPCV requires a leakage-safe fitted estimator, OOF prediction lineage, and a \
+         genuine Sell trial specification; the governed payload is OofPredictionsRequired"
+    )]
+    SellOofEstimatorRequired,
 
     /// An artifact-store IO operation failed.
     #[error("artifact store IO failed for `{uri}`: {detail}")]
@@ -125,6 +134,29 @@ pub enum ResearchError {
         detail: String,
     },
 
+    /// A cold serving-contract load failed before a complete runtime/plane
+    /// could be published to the process registry.
+    #[error("model serving contract `{contract_hash}` failed during {stage}: {detail}")]
+    ModelServingLoad {
+        /// Exact validated contract identity used as the registry key.
+        contract_hash: String,
+        /// Stable cold-load stage.
+        stage: &'static str,
+        /// Underlying typed failure rendered for operator diagnosis.
+        detail: String,
+    },
+
+    /// The bounded registry rejected a cache-miss caller before it could queue.
+    #[error("model serving registry pending-load capacity {limit} is exhausted")]
+    ModelServingCapacity {
+        /// Maximum admitted cache-miss callers.
+        limit: usize,
+    },
+
+    /// The registry is shutting down and accepts no new or in-flight loads.
+    #[error("model serving registry is shutting down")]
+    ModelServingShutdown,
+
     /// A historical point-in-time resolution failed (e.g. an undecodable book
     /// snapshot payload, or an inconsistent historical fact).
     #[error("point-in-time resolution failed: {detail}")]
@@ -217,6 +249,18 @@ pub enum ResearchError {
     Cancelled {
         /// Context describing where the cancellation was observed.
         detail: String,
+    },
+
+    /// A training operation failed and its already-created durable model run
+    /// could not be moved to a terminal state.
+    #[error(
+        "model-run terminal finalization failed after `{primary}`; finalizer error: {finalizer}"
+    )]
+    ModelRunFinalization {
+        /// The training or cancellation failure that required finalization.
+        primary: String,
+        /// The persistence failure that prevented terminalization.
+        finalizer: String,
     },
 }
 

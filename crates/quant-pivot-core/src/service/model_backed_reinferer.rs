@@ -9,7 +9,10 @@ use std::{slice, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{
+    QuantError, QuantResult,
+    storage::{StorageError, entity::QUANT_FACTOR},
+};
 use quant_pivot_models::{
     domain::{
         data_plane::{DecisionBoundary, DecisionClock, DecisionSource},
@@ -35,35 +38,32 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     factors::{
-        FactorEligibility, FactorEngine, FactorValue, MarketFactorOutcome, NormalizedFactor,
-        ScoredFactor,
+        FactorEligibility, FactorValue, MarketFactorOutcome, NormalizedFactor, ScoredFactor,
     },
     features::{
-        ConfiguredFeatureBuilder, FeatureSchema, FeatureSourceWindows, FeatureVector,
-        MarketWindowSnapshot, TradeTapeWindowSnapshot,
+        ConfiguredFeatureBuilder, FeatureSourceWindows, FeatureVector, MarketWindowSnapshot,
+        TradeTapeWindowSnapshot,
     },
-    hashing::ResearchHasher,
-    model::{
-        ActiveSchemaBinding, ModelRuntimeFactoryBuilder, ModelRuntimeOutput, QuantModelRuntime,
-        SignalCandidate, WeightOverlay,
-    },
+    model::{ModelRuntimeOutput, QuantModelRuntime, SignalCandidate},
     pit::{PointInTimeSnapshotSource, ResolvedMarketSnapshot},
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
 use rust_decimal::Decimal;
 
 use crate::{
-    governance::{WeightOverlayApplicator, quality_gate_load::quality_gate_passed_ok},
+    governance::quality_gate_load::quality_gate_passed_ok,
     prefetch::feature_window::FeatureWindowProvider,
     projection::inference_batch::build_runtime_input,
-    service::signal_reinference::{ExitSignalReinferer, FreshSignal},
+    service::{
+        model_serving_preimage::ModelServingPreimageService,
+        signal_reinference::{ExitSignalReinferer, FreshSignal},
+    },
 };
 
 /// Dependencies for [`ModelBackedExitSignalReinferer`].
 pub struct ModelBackedExitSignalReinfererDeps {
     pub model_registry: Arc<dyn ModelRegistryRepository>,
-    pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
-    pub weight_overlay: Arc<WeightOverlayApplicator>,
+    pub serving_preimages: Arc<ModelServingPreimageService>,
     pub config_versions: Arc<dyn PolicyRepository>,
     /// Source of the recommendation's exact governed factor-definition set.
     pub recommendations: Arc<dyn RecommendationRepository>,
@@ -116,23 +116,24 @@ impl ModelBackedExitSignalReinferer {
     async fn load_runtime(
         &self,
         version: &ModelVersionInfo,
-        config: &DecisionPolicySnapshot,
-    ) -> QuantResult<Option<Box<dyn QuantModelRuntime>>> {
-        let binding = schema_binding(
-            &config.profile_artifacts.features.definition,
-            &config.profile_artifacts.scoring.definition,
-            &config.profile_artifacts.domain.definition,
-            None,
-        )?;
-        let factory = self.deps.factory_builder.build(binding);
-        let overlay = resolve_overlay(&self.deps.weight_overlay, version);
-        match factory.load(version, overlay).await {
-            Ok(runtime) => Ok(Some(runtime)),
+    ) -> QuantResult<Option<Arc<dyn QuantModelRuntime>>> {
+        match self.deps.serving_preimages.load(version).await {
+            Ok(source) => match source.buy_runtime() {
+                Ok(runtime) => Ok(Some(runtime)),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        model_version_id = %version.model_version_id,
+                        "exit signal re-inference: model runtime build failed"
+                    );
+                    Ok(None)
+                }
+            },
             Err(error) => {
                 tracing::warn!(
                     %error,
                     model_version_id = %version.model_version_id,
-                    "exit signal re-inference: model runtime load failed"
+                    "exit signal re-inference: model preimage load failed"
                 );
                 Ok(None)
             }
@@ -161,7 +162,7 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
         let Some(version) = self.load_model_version(&intent.model_version_id).await? else {
             return Ok(None);
         };
-        let Some(runtime) = self.load_runtime(&version, &config).await? else {
+        let Some(runtime) = self.load_runtime(&version).await? else {
             return Ok(None);
         };
 
@@ -310,7 +311,7 @@ pub(crate) async fn fresh_exit_outcome(
         return Ok(None);
     }
     let Some(bundle) = factors
-        .latest_snapshot_bundle(definition_ids, &market_id, &intent.model_version_id)
+        .latest_snapshot_bundle(definition_ids, &market_id, &intent.model_version_id, as_of)
         .await
         .map_err(QuantError::from)?
     else {
@@ -322,14 +323,14 @@ pub(crate) async fn fresh_exit_outcome(
         return Ok(None);
     };
     if bundle.observed_at > as_of || bundle.available_at > as_of {
-        tracing::warn!(
-            %market_id,
-            observed_at = %bundle.observed_at,
-            available_at = %bundle.available_at,
-            %as_of,
-            "exit signal re-inference: factor snapshot violates PIT boundary"
-        );
-        return Ok(None);
+        return Err(StorageError::invariant_violation(
+            Some(QUANT_FACTOR),
+            format!(
+                "factor snapshot {} exceeded exit re-inference cutoff {as_of}",
+                bundle.snapshot_hash
+            ),
+        )
+        .into());
     }
     let max_age = ChronoDuration::seconds(i64::try_from(max_age_secs).map_err(|error| {
         QuantError::config(format!(
@@ -481,43 +482,13 @@ async fn resolve_frozen_config(
     Ok(Some(info.snapshot))
 }
 
-/// Build the [`ActiveSchemaBinding`] from a config snapshot.
-pub(crate) fn schema_binding(
-    features: &FeaturesConfig,
-    factors: &FactorsConfig,
-    domain: &DomainConfig,
-    bias_table_hash: Option<ContentHash>,
-) -> QuantResult<ActiveSchemaBinding> {
-    Ok(ActiveSchemaBinding {
-        feature_schema_hash: ResearchHasher::feature_schema(&FeatureSchema::build(features)?)?,
-        factor_schema_hash: FactorEngine::new(factors, features, domain, None)
-            .factor_schema_hash()?,
-        bias_table_hash,
-    })
-}
-
 /// Load-time policy for a model version on the exit path (shared by
 /// thesis-invalidation re-inference and the opportunistic Sell scorer).
 pub(crate) fn exit_model_load_ok(version: &ModelVersionInfo) -> Result<(), String> {
     match version.publication_status {
         PublicationStatus::Published | PublicationStatus::Retired => Ok(()),
         PublicationStatus::Candidate | PublicationStatus::Shadow => quality_gate_passed_ok(version),
-        PublicationStatus::Draft | PublicationStatus::Rejected => Err(format!(
-            "model {} publication status {} cannot score exit signal",
-            version.model_version_id,
-            version.publication_status.as_str()
-        )),
     }
-}
-
-fn resolve_overlay(
-    applicator: &WeightOverlayApplicator,
-    version: &ModelVersionInfo,
-) -> Option<WeightOverlay> {
-    if version.publication_status == PublicationStatus::Published {
-        return None;
-    }
-    applicator.overlay_for(&version.model_version_id)
 }
 
 /// Project a position lot into a [`SelectedMarket`] for feature / model scoring.

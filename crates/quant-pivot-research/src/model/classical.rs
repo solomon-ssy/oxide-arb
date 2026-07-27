@@ -18,7 +18,7 @@
 use ndarray::Array1;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    enums::quant::ModelSerializationFormat,
+    enums::{model::ClassicalKind, quant::ModelSerializationFormat},
     hashing::CanonicalDigest,
     types::{ContentHash, ModelInputContract, ModelInputRequiredness, ModelInputSpec},
 };
@@ -48,7 +48,6 @@ use crate::{
             ClassicalModelMetrics, FeatureImportance, FittedInputTransform,
             model_input_contract_hash,
         },
-        runtime::ClassicalKind,
         trainer::{CancellationProbe, ValidationReport, ValidationSpec},
     },
     precision::RESEARCH_DECIMAL_SCALE,
@@ -152,7 +151,7 @@ impl ClassicalParams {
 }
 
 /// The output of a classical training run: the serialized estimator + the
-/// metadata the core needs to assemble a `ClassicalModelArtifact`.
+/// metadata the core needs to assemble a sealed `ClassicalModelPayload`.
 #[derive(Debug, Clone)]
 pub struct ClassicalTrainOutput {
     /// The fitted classical kind.
@@ -869,16 +868,14 @@ fn count_f64(n: usize) -> QuantResult<f64> {
 mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use ndarray::Array1;
+    use quant_pivot_models::enums::model::ClassicalKind;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     use super::{ClassicalAdapterRegistry, ClassicalParams, SmartcoreModel, rolling_validation};
     use crate::{
         features::{FeatureName, FeatureUnit, FeatureValueKind},
-        model::{
-            runtime::ClassicalKind,
-            trainer::{CancellationProbe, ValidationSpec},
-        },
+        model::trainer::{CancellationProbe, ValidationSpec},
         training::{
             DenseInputMatrix, FeatureColumnSpec, ModelInputCell, RawInputMatrix, TrainingMatrix,
         },

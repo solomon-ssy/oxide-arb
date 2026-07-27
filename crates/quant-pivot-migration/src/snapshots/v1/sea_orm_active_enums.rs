@@ -1053,8 +1053,6 @@ pub enum QpPositionLedgerState {
     enum_name = "qp_publication_status"
 )]
 pub enum QpPublicationStatus {
-    #[sea_orm(string_value = "draft")]
-    Draft,
     #[sea_orm(string_value = "candidate")]
     Candidate,
     #[sea_orm(string_value = "shadow")]
@@ -1063,8 +1061,6 @@ pub enum QpPublicationStatus {
     Published,
     #[sea_orm(string_value = "retired")]
     Retired,
-    #[sea_orm(string_value = "rejected")]
-    Rejected,
 }
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(
@@ -1891,4 +1887,157 @@ pub enum QpWeatherTemperatureStatistic {
     Maximum,
     #[sea_orm(string_value = "minimum")]
     Minimum,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_feedback_cycle_status"
+)]
+pub enum QpFeedbackCycleStatus {
+    #[sea_orm(string_value = "queued")]
+    Queued,
+    #[sea_orm(string_value = "running")]
+    Running,
+    #[sea_orm(string_value = "succeeded")]
+    Succeeded,
+    #[sea_orm(string_value = "failed")]
+    Failed,
+    #[sea_orm(string_value = "cancelled")]
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_feedback_decision")]
+pub enum QpFeedbackDecision {
+    #[sea_orm(string_value = "no_action")]
+    NoAction,
+    #[sea_orm(string_value = "challenger_rejected")]
+    ChallengerRejected,
+    #[sea_orm(string_value = "candidate_ready")]
+    CandidateReady,
+    #[sea_orm(string_value = "promoted")]
+    Promoted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_feedback_trigger_family"
+)]
+pub enum QpFeedbackTriggerFamily {
+    #[sea_orm(string_value = "scheduled")]
+    Scheduled,
+    #[sea_orm(string_value = "manual")]
+    Manual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "Enum", db_type = "Enum", enum_name = "qp_feedback_stage")]
+pub enum QpFeedbackStage {
+    #[sea_orm(string_value = "trigger")]
+    Trigger,
+    #[sea_orm(string_value = "coverage")]
+    Coverage,
+    #[sea_orm(string_value = "drift")]
+    Drift,
+    #[sea_orm(string_value = "dataset_seal")]
+    DatasetSeal,
+    #[sea_orm(string_value = "training")]
+    Training,
+    #[sea_orm(string_value = "calibration")]
+    Calibration,
+    #[sea_orm(string_value = "cpcv")]
+    Cpcv,
+    #[sea_orm(string_value = "comparison")]
+    Comparison,
+    #[sea_orm(string_value = "shadow_replay")]
+    ShadowReplay,
+    #[sea_orm(string_value = "decision")]
+    Decision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_feedback_stage_event_kind"
+)]
+pub enum QpFeedbackStageEventKind {
+    #[sea_orm(string_value = "triggered")]
+    Triggered,
+    #[sea_orm(string_value = "job_linked")]
+    JobLinked,
+    #[sea_orm(string_value = "started")]
+    Started,
+    #[sea_orm(string_value = "succeeded")]
+    Succeeded,
+    #[sea_orm(string_value = "failed")]
+    Failed,
+    #[sea_orm(string_value = "cancellation_requested")]
+    CancellationRequested,
+    #[sea_orm(string_value = "cancelled")]
+    Cancelled,
+    #[sea_orm(string_value = "lease_recovered")]
+    LeaseRecovered,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_feedback_drift_kind"
+)]
+pub enum QpFeedbackDriftKind {
+    #[sea_orm(string_value = "data")]
+    Data,
+    #[sea_orm(string_value = "concept")]
+    Concept,
+    #[sea_orm(string_value = "label")]
+    Label,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_feedback_drift_metric"
+)]
+pub enum QpFeedbackDriftMetric {
+    #[sea_orm(string_value = "population_stability_index")]
+    PopulationStabilityIndex,
+    #[sea_orm(string_value = "kolmogorov_smirnov_p_value")]
+    KolmogorovSmirnovPValue,
+    #[sea_orm(string_value = "rank_ic_drop")]
+    RankIcDrop,
+    #[sea_orm(string_value = "jensen_shannon_divergence")]
+    JensenShannonDivergence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_feedback_drift_assessment"
+)]
+pub enum QpFeedbackDriftAssessment {
+    #[sea_orm(string_value = "within_threshold")]
+    WithinThreshold,
+    #[sea_orm(string_value = "threshold_exceeded")]
+    ThresholdExceeded,
+    #[sea_orm(string_value = "insufficient_evidence")]
+    InsufficientEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(
+    rs_type = "Enum",
+    db_type = "Enum",
+    enum_name = "qp_feedback_evaluation_purpose"
+)]
+pub enum QpFeedbackEvaluationPurpose {
+    #[sea_orm(string_value = "promotion_comparison")]
+    PromotionComparison,
 }

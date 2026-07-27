@@ -1,13 +1,20 @@
 //! Postgres-backed unified calibration-artifact ledger repository. Artifact
 //! identity is append-only; `active` is the sole mutable column.
 
-use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::{StorageError, entity::QUANT_CALIBRATION_ARTIFACT};
+use chrono::{DateTime, Duration, Utc};
+use quant_pivot_error::storage::{
+    StorageError,
+    entity::{QUANT_CALIBRATION_ARTIFACT, QUANT_MODEL_RUN},
+};
 use quant_pivot_models::{
     domain::{
         api::CalibrationArtifactListQuery,
         pagination::{PageWindow, Paginated},
-        quant::{CalibrationArtifactInfo, CalibrationArtifactPayload, NewCalibrationArtifact},
+        quant::{
+            CalibrationArtifactInfo, CalibrationArtifactPayload, ModelRunInfo,
+            ModelScoreCalibrationCommit, ModelScoreCalibrationCommitOutcome,
+            NewCalibrationArtifact,
+        },
     },
     entities::{
         quant_calibration_artifact::{Column, Entity},
@@ -15,21 +22,30 @@ use quant_pivot_models::{
             ActiveModel, Column as QuantCalibrationArtifactPublicationColumn,
             Entity as QuantCalibrationArtifactPublicationEntity,
         },
+        quant_model_run::{
+            ActiveModel as ModelRunActiveModel, Entity as ModelRunEntity, Model as ModelRunModel,
+        },
     },
-    enums::quant::CalibrationKind,
+    enums::quant::{CalibrationKind, DatasetPurpose, ModelRunKind, ModelRunStatus},
     hashing::CanonicalDigest,
     types::{
         CalibrationArtifactId, CalibrationArtifactPublicationId, ContentHash,
-        calibration::PublishedWeatherStationLeadBias,
+        calibration::{ModelScoreCalibrationPayload, PublishedWeatherStationLeadBias},
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, TransactionTrait, sea_query::Expr,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
+    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    TryInsertResult,
+    sea_query::{Expr, OnConflict},
 };
 
 use crate::{
-    postgres::{error, query::paginate_mapped},
+    postgres::{
+        error, primitives,
+        quant::integrity::{load_dataset, load_model_lineage, verify_replay_dataset},
+        query::paginate_mapped,
+    },
     traits::CalibrationArtifactRepository,
 };
 
@@ -41,6 +57,217 @@ pub struct PgCalibrationArtifactRepository {
 impl PgCalibrationArtifactRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
+    }
+
+    async fn validate_model_score_lineage<C>(
+        &self,
+        db: &C,
+        payload: &ModelScoreCalibrationPayload,
+        fit_window_start: DateTime<Utc>,
+        fit_window_end: DateTime<Utc>,
+        sample_count: i64,
+    ) -> Result<ContentHash, StorageError>
+    where
+        C: ConnectionTrait,
+    {
+        let fit = &payload.fit_contract;
+        let model = load_model_lineage(db, fit.model.model_version_id).await?;
+        let bindings = model.version.serving_contract.bindings();
+        let training = model.training_materialization()?;
+        if fit.model.artifact_hash != model.version.artifact_hash
+            || fit.model.serving_contract_hash != model.version.serving_contract.contract_hash()
+            || fit.model.model_spec_id != model.spec.model_spec_id
+            || fit.model.model_spec_definition_hash != model.spec.definition_hash
+            || fit.model.model_family != model.spec.model_family
+            || fit.model.profile_ref != bindings.model.profile_ref
+            || fit.model.category_scope != bindings.model.category_scope
+            || fit.model.prediction_horizon_secs != bindings.model.prediction_horizon_secs
+            || fit.model.training_dataset_id != model.training_dataset.training_dataset_id
+            || fit.model.training_dataset_hash != *training.dataset_hash
+        {
+            return Err(invariant(
+                "model-score fit contract differs from the exact source model",
+            ));
+        }
+        if fit.policy_snapshot.decision_policy_snapshot_id
+            != model.policy.decision_policy_snapshot_id
+            || fit.policy_snapshot.snapshot_hash != model.policy.snapshot_hash
+            || fit.policy_snapshot.decision_policy_snapshot_id
+                != bindings.policy_snapshot.decision_policy_snapshot_id
+            || fit.policy_snapshot.snapshot_hash != bindings.policy_snapshot.snapshot_hash
+        {
+            return Err(invariant(
+                "model-score fit contract differs from the exact policy snapshot",
+            ));
+        }
+
+        let dataset = load_dataset(db, fit.calibration_dataset.calibration_dataset_id).await?;
+        let calibration =
+            verify_replay_dataset(db, &dataset, DatasetPurpose::Calibration, &model).await?;
+        let dataset_binding = &fit.calibration_dataset;
+        if dataset_binding.dataset_hash != *calibration.dataset_hash
+            || dataset_binding.manifest_hash != *calibration.manifest_hash
+            || dataset_binding.artifact_bytes_hash != *calibration.artifact_bytes_hash
+            || dataset_binding.source_slice_manifest_hash
+                != calibration
+                    .manifest
+                    .source_lineage
+                    .source_slice
+                    .manifest_hash
+            || dataset_binding.feature_schema_hash != *calibration.feature_schema_hash
+            || dataset_binding.factor_schema_hash != calibration.factor_schema_hash()
+            || dataset_binding.label_schema_hash != *calibration.label_schema_hash
+            || fit_window_start != dataset.window_start
+            || fit_window_end != dataset.window_end
+            || calibration.manifest.source_lineage.research_program_hash
+                != training.manifest.source_lineage.research_program_hash
+        {
+            return Err(invariant(
+                "model-score fit contract differs from the exact Calibration Dataset",
+            ));
+        }
+        let artifact_samples = u64::try_from(sample_count)
+            .map_err(|error| invariant(format!("invalid artifact sample_count: {error}")))?;
+        let dataset_samples = u64::try_from(calibration.sample_count)
+            .map_err(|error| invariant(format!("invalid Dataset sample_count: {error}")))?;
+        if artifact_samples > dataset_samples {
+            return Err(invariant(
+                "model-score artifact uses more samples than its Calibration Dataset",
+            ));
+        }
+        let embargo_secs = i64::try_from(
+            model
+                .policy
+                .snapshot
+                .model_routing
+                .model
+                .calibration
+                .embargo_secs,
+        )
+        .map_err(|error| invariant(format!("invalid calibration embargo: {error}")))?;
+        let required_start = model
+            .training_dataset
+            .window_end
+            .checked_add_signed(Duration::seconds(embargo_secs))
+            .ok_or_else(|| invariant("calibration embargo timestamp overflow"))?;
+        if dataset.training_dataset_id == model.training_dataset.training_dataset_id
+            || dataset.window_start < required_start
+        {
+            return Err(invariant(
+                "Calibration Dataset is not independent and embargoed after Training",
+            ));
+        }
+        Ok(*calibration.dataset_hash)
+    }
+
+    async fn verify_existing_model_score<C>(
+        &self,
+        db: &C,
+        stored: &CalibrationArtifactInfo,
+        requested: &NewCalibrationArtifact,
+    ) -> Result<(), StorageError>
+    where
+        C: ConnectionTrait,
+    {
+        let payload = stored.verify_model_score().map_err(invariant)?;
+        if stored.kind != requested.kind
+            || stored.content_hash != requested.content_hash
+            || stored.fit_window_start != requested.fit_window_start
+            || stored.fit_window_end != requested.fit_window_end
+            || stored.calibration_split_hash != requested.calibration_split_hash
+            || stored.sample_count != requested.sample_count
+            || stored.payload != requested.payload
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_CALIBRATION_ARTIFACT,
+                Some(&requested.content_hash),
+                "content-addressed calibration collision is not an exact immutable replay",
+            ));
+        }
+        Box::pin(self.validate_model_score_lineage(
+            db,
+            payload,
+            stored.fit_window_start,
+            stored.fit_window_end,
+            stored.sample_count,
+        ))
+        .await
+        .map(drop)
+    }
+
+    fn validate_run(
+        run: &ModelRunModel,
+        commit: &ModelScoreCalibrationCommit,
+        payload: &ModelScoreCalibrationPayload,
+        dataset_hash: ContentHash,
+    ) -> Result<bool, StorageError> {
+        let exact_subject = run.run_kind == ModelRunKind::Calibration
+            && run.model_version_id == Some(payload.fit_contract.model.model_version_id)
+            && run.decision_policy_snapshot_id
+                == payload
+                    .fit_contract
+                    .policy_snapshot
+                    .decision_policy_snapshot_id
+            && run.market_selection_id.is_none()
+            && run.window_start == commit.artifact.fit_window_start
+            && run.window_end == commit.artifact.fit_window_end
+            && run.input_hash == dataset_hash;
+        if !exact_subject {
+            return Err(StorageError::state_conflict(
+                QUANT_MODEL_RUN,
+                Some(&commit.model_run_id),
+                "Calibration run differs from the canonical artifact subject",
+            ));
+        }
+        match run.status {
+            ModelRunStatus::Running
+                if run.output_hash.is_none()
+                    && run.error_code.is_none()
+                    && run.error_message.is_none()
+                    && run.finished_at.is_none() =>
+            {
+                Ok(false)
+            }
+            ModelRunStatus::Succeeded
+                if run.output_hash == Some(commit.artifact.content_hash)
+                    && run.error_code.is_none()
+                    && run.error_message.is_none()
+                    && run.finished_at.is_some()
+                    && run
+                        .finished_at
+                        .is_some_and(|finished_at| finished_at >= run.started_at) =>
+            {
+                Ok(true)
+            }
+            _ => Err(StorageError::state_conflict(
+                QUANT_MODEL_RUN,
+                Some(&commit.model_run_id),
+                "Calibration run is neither Running nor an exact Succeeded replay",
+            )),
+        }
+    }
+
+    async fn load_by_content_hash<C>(
+        db: &C,
+        content_hash: ContentHash,
+    ) -> Result<CalibrationArtifactInfo, StorageError>
+    where
+        C: ConnectionTrait,
+    {
+        Entity::find()
+            .filter(Column::ContentHash.eq(content_hash))
+            .lock_shared()
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .map(Into::into)
+            .ok_or_else(|| {
+                StorageError::state_conflict(
+                    QUANT_CALIBRATION_ARTIFACT,
+                    Some(&content_hash),
+                    "calibration insert conflicted without an observable canonical artifact",
+                )
+            })
     }
 }
 
@@ -55,6 +282,11 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
                 "calibration relational kind and payload discriminator differ",
             ));
         }
+        if artifact.kind == CalibrationKind::ModelScore {
+            return Err(invariant(
+                "model_score artifacts must use commit_model_score so artifact append and run success are atomic",
+            ));
+        }
         if artifact.kind == CalibrationKind::WeatherStationLeadBias {
             validate_weather_artifact(&artifact)?;
         }
@@ -66,6 +298,90 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
                 error::map_unique(err, QUANT_CALIBRATION_ARTIFACT, &content_hash.to_string())
             })
             .map(Into::into)
+    }
+
+    async fn commit_model_score(
+        &self,
+        commit: ModelScoreCalibrationCommit,
+    ) -> Result<ModelScoreCalibrationCommitOutcome, StorageError> {
+        let payload = commit.artifact.verify_model_score().map_err(invariant)?;
+        let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        let run = ModelRunEntity::find_by_id(commit.model_run_id)
+            .lock_exclusive()
+            .one(&transaction)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_MODEL_RUN, commit.model_run_id))?;
+        let dataset_hash = Box::pin(self.validate_model_score_lineage(
+            &transaction,
+            payload,
+            commit.artifact.fit_window_start,
+            commit.artifact.fit_window_end,
+            commit.artifact.sample_count,
+        ))
+        .await?;
+        let already_succeeded = Self::validate_run(&run, &commit, payload, dataset_hash)?;
+        if already_succeeded {
+            let stored =
+                Self::load_by_content_hash(&transaction, commit.artifact.content_hash).await?;
+            Box::pin(self.verify_existing_model_score(&transaction, &stored, &commit.artifact))
+                .await?;
+            let model_run = ModelRunInfo::from(run);
+            transaction.commit().await.map_err(StorageError::from)?;
+            return Ok(ModelScoreCalibrationCommitOutcome::ExistingExact {
+                artifact: stored,
+                model_run,
+            });
+        }
+
+        let insert = Entity::insert(commit.artifact.clone().into_active_model())
+            .on_conflict(OnConflict::new().do_nothing().to_owned())
+            .try_insert()
+            .exec_without_returning(&transaction)
+            .await
+            .map_err(StorageError::from)?;
+        let inserted = match insert {
+            TryInsertResult::Inserted(1) => true,
+            TryInsertResult::Inserted(0) | TryInsertResult::Conflicted => false,
+            TryInsertResult::Inserted(rows) => {
+                return Err(invariant(format!(
+                    "single model-score commit affected {rows} rows; expected zero or one"
+                )));
+            }
+            TryInsertResult::Empty => {
+                return Err(invariant(
+                    "model-score commit unexpectedly produced an empty insert",
+                ));
+            }
+        };
+        let stored = Self::load_by_content_hash(&transaction, commit.artifact.content_hash).await?;
+        Box::pin(self.verify_existing_model_score(&transaction, &stored, &commit.artifact)).await?;
+
+        let finished_at = primitives::statement_timestamp(&transaction).await?;
+        let mut terminal: ModelRunActiveModel = run.into_active_model();
+        terminal.status = ActiveValue::Set(ModelRunStatus::Succeeded);
+        terminal.output_hash = ActiveValue::Set(Some(stored.content_hash));
+        terminal.error_code = ActiveValue::Set(None);
+        terminal.error_message = ActiveValue::Set(None);
+        terminal.finished_at = ActiveValue::Set(Some(finished_at));
+        let model_run = ModelRunInfo::from(
+            terminal
+                .update(&transaction)
+                .await
+                .map_err(StorageError::from)?,
+        );
+        transaction.commit().await.map_err(StorageError::from)?;
+        if inserted {
+            Ok(ModelScoreCalibrationCommitOutcome::Inserted {
+                artifact: stored,
+                model_run,
+            })
+        } else {
+            Ok(ModelScoreCalibrationCommitOutcome::ExistingExact {
+                artifact: stored,
+                model_run,
+            })
+        }
     }
 
     async fn find_by_id(
@@ -159,6 +475,7 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
     ) -> Result<CalibrationArtifactInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let Some(row) = Entity::find_by_id(*artifact_id)
+            .lock_exclusive()
             .one(&txn)
             .await
             .map_err(StorageError::from)?
@@ -168,6 +485,18 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
                 artifact_id,
             ));
         };
+        if row.kind == CalibrationKind::ModelScore {
+            let info = CalibrationArtifactInfo::from(row.clone());
+            let payload = info.verify_model_score().map_err(invariant)?;
+            Box::pin(self.validate_model_score_lineage(
+                &txn,
+                payload,
+                info.fit_window_start,
+                info.fit_window_end,
+                info.sample_count,
+            ))
+            .await?;
+        }
         // `market_price_bias` has exactly one global governance pointer
         // (runtime-config `bias_table_ref`), so activating one deactivates
         // every other bias table in the same transaction — the ledger must

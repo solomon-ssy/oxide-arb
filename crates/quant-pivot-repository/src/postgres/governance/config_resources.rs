@@ -64,7 +64,6 @@ enum InventoryColumn {
     GuardGeneration,
     GuardSnapshotId,
     GuardSnapshotHash,
-    SnapshotGeneration,
     SnapshotId,
     SnapshotHash,
     ActiveRevisionId,
@@ -79,7 +78,6 @@ struct InventoryRow {
     guard_generation: PolicyBundleGeneration,
     guard_snapshot_id: Option<DecisionPolicySnapshotId>,
     guard_snapshot_hash: Option<ContentHash>,
-    snapshot_generation: Option<PolicyBundleGeneration>,
     snapshot_id: Option<DecisionPolicySnapshotId>,
     snapshot_hash: Option<ContentHash>,
     active_revision_id: Option<PolicyRevisionId>,
@@ -242,13 +240,6 @@ fn inventory_query() -> SelectStatement {
         .expr_as(
             Expr::col((
                 DecisionPolicySnapshotEntity,
-                DecisionPolicySnapshotColumn::BundleGeneration,
-            )),
-            InventoryColumn::SnapshotGeneration,
-        )
-        .expr_as(
-            Expr::col((
-                DecisionPolicySnapshotEntity,
                 DecisionPolicySnapshotColumn::DecisionPolicySnapshotId,
             )),
             InventoryColumn::SnapshotId,
@@ -335,21 +326,18 @@ impl InventoryRow {
         match (
             &self.guard_snapshot_id,
             &self.guard_snapshot_hash,
-            self.snapshot_generation,
             &self.snapshot_id,
             &self.snapshot_hash,
         ) {
-            (None, None, None, None, None) => Ok((self.guard_generation, None, None)),
-            (Some(guard_id), Some(guard_hash), Some(snapshot_generation), Some(id), Some(hash))
-                if guard_id == id
-                    && guard_hash == hash
-                    && self.guard_generation == snapshot_generation =>
+            (None, None, None, None) => Ok((self.guard_generation, None, None)),
+            (Some(guard_id), Some(guard_hash), Some(id), Some(hash))
+                if guard_id == id && guard_hash == hash =>
             {
                 Ok((self.guard_generation, Some(*guard_id), Some(*guard_hash)))
             }
             _ => Err(StorageError::invariant_violation(
                 Some("policy_activation_guard"),
-                "guard generation/id/hash does not match its current decision snapshot",
+                "guard id/hash does not match its current decision snapshot",
             )),
         }
     }

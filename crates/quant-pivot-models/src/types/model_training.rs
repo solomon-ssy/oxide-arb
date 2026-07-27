@@ -10,7 +10,18 @@ use crate::{
 };
 
 /// System-owned schema version for [`ModelTrainingObjective`].
-pub const MODEL_TRAINING_OBJECTIVE_FORMAT_VERSION: u16 = 1;
+pub const MODEL_TRAINING_OBJECTIVE_FORMAT_VERSION: u16 = 2;
+
+/// Honest fit state for the governed Hold-vs-Exit estimator.
+///
+/// Payload preparation may freeze and validate the governed estimator without
+/// claiming a same-data refit. Fitting requires leakage-safe typed out-of-fold
+/// predictions and therefore remains a separate phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernedSellFitStatus {
+    OofPredictionsRequired,
+}
 
 /// Full governed learning-to-rank objective snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,7 +54,7 @@ impl Default for TrainingObjectiveSpec {
 
 /// Closed set of training strategies that can produce a model version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum ModelTrainingObjectiveDefinition {
     /// Governed cross-sectional learning-to-rank optimization.
     LearningToRank { spec: TrainingObjectiveSpec },
@@ -52,6 +63,8 @@ pub enum ModelTrainingObjectiveDefinition {
         model_kind: ClassicalKind,
         validation_metric: ClassicalValidationMetric,
     },
+    /// Governed Sell payload preparation with no leakage-prone same-data refit.
+    GovernedSellEstimator { fit_status: GovernedSellFitStatus },
     /// A governed model artifact authored outside the trainer pipeline.
     HandAuthored { rationale: String },
 }
@@ -92,6 +105,14 @@ impl ModelTrainingObjective {
     }
 
     #[must_use]
+    pub const fn governed_sell(fit_status: GovernedSellFitStatus) -> Self {
+        Self {
+            format_version: MODEL_TRAINING_OBJECTIVE_FORMAT_VERSION,
+            definition: ModelTrainingObjectiveDefinition::GovernedSellEstimator { fit_status },
+        }
+    }
+
+    #[must_use]
     pub fn hand_authored(rationale: impl Into<String>) -> Self {
         Self {
             format_version: MODEL_TRAINING_OBJECTIVE_FORMAT_VERSION,
@@ -106,13 +127,13 @@ impl ModelTrainingObjective {
 mod tests {
     use serde_json::json;
 
-    use super::{ModelTrainingObjective, TrainingObjectiveSpec};
+    use super::{GovernedSellFitStatus, ModelTrainingObjective, TrainingObjectiveSpec};
 
     #[test]
     fn objective_tagged_rejects_drift() {
         let objective = ModelTrainingObjective::learning_to_rank(TrainingObjectiveSpec::default());
         let value = serde_json::to_value(objective).expect("serialize objective");
-        assert_eq!(value["format_version"], json!(1));
+        assert_eq!(value["format_version"], json!(2));
         assert_eq!(value["definition"]["kind"], json!("learning_to_rank"));
 
         let mut unknown = value.clone();
@@ -122,5 +143,14 @@ mod tests {
         let mut invalid_kind = value;
         invalid_kind["definition"]["kind"] = json!("future_algorithm");
         assert!(serde_json::from_value::<ModelTrainingObjective>(invalid_kind).is_err());
+
+        let sell =
+            ModelTrainingObjective::governed_sell(GovernedSellFitStatus::OofPredictionsRequired);
+        let sell_value = serde_json::to_value(sell).expect("serialize sell objective");
+        assert_eq!(sell_value["format_version"], json!(2));
+        assert_eq!(
+            sell_value["definition"]["kind"],
+            json!("governed_sell_estimator")
+        );
     }
 }

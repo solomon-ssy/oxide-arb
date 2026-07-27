@@ -12,10 +12,7 @@ use std::collections::HashSet;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::QuantFeatureEventRow,
-    domain::{
-        data_plane::{DecisionBoundary, DecisionSource},
-        quant::FeatureVectorInfo,
-    },
+    domain::{data_plane::DecisionBoundary, quant::FeatureVectorInfo},
     enums::{
         clickhouse::{ChFeatureCellState, ChFeatureSourceKind, ChFeatureValueKind},
         feature::EvidenceSourceKind,
@@ -395,7 +392,7 @@ fn validate_cell(
                 boundary.decision_at()
             )));
         }
-        let source_cutoff = decision_source(expected_source).map_or_else(
+        let source_cutoff = expected_source.decision_source().map_or_else(
             || boundary.knowledge_cutoff(),
             |source| boundary.cutoff_for(source),
         );
@@ -432,18 +429,6 @@ fn validate_cell(
         )));
     }
     Ok(())
-}
-
-const fn decision_source(evidence_source: EvidenceSourceKind) -> Option<DecisionSource> {
-    match evidence_source {
-        EvidenceSourceKind::Book => Some(DecisionSource::Book),
-        EvidenceSourceKind::GammaMetadata => Some(DecisionSource::Catalog),
-        EvidenceSourceKind::ClickHouseFact => Some(DecisionSource::Microstructure),
-        EvidenceSourceKind::TradeTape => Some(DecisionSource::TradeTape),
-        EvidenceSourceKind::DomainExternal => Some(DecisionSource::DomainCrypto),
-        EvidenceSourceKind::Linkage => Some(DecisionSource::Linkage),
-        EvidenceSourceKind::Derived => None,
-    }
 }
 
 fn raw_value_text(value: &FeatureValue) -> String {

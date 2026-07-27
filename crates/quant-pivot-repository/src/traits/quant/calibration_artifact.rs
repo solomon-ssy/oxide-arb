@@ -6,7 +6,10 @@ use quant_pivot_models::{
     domain::{
         api::CalibrationArtifactListQuery,
         pagination::Paginated,
-        quant::{CalibrationArtifactInfo, NewCalibrationArtifact},
+        quant::{
+            CalibrationArtifactInfo, ModelScoreCalibrationCommit,
+            ModelScoreCalibrationCommitOutcome, NewCalibrationArtifact,
+        },
     },
     types::{CalibrationArtifactId, ContentHash, calibration::PublishedWeatherStationLeadBias},
 };
@@ -20,6 +23,15 @@ pub trait CalibrationArtifactRepository: Send + Sync {
         &self,
         artifact: NewCalibrationArtifact,
     ) -> Result<CalibrationArtifactInfo, StorageError>;
+
+    /// Atomically append one canonical `model_score` artifact and transition
+    /// its locked `Running` Calibration run to `Succeeded` with the artifact
+    /// hash. Exact retries return `ExistingExact`; every other collision fails
+    /// closed and rolls back.
+    async fn commit_model_score(
+        &self,
+        commit: ModelScoreCalibrationCommit,
+    ) -> Result<ModelScoreCalibrationCommitOutcome, StorageError>;
 
     /// Look up a calibration artifact by id.
     async fn find_by_id(

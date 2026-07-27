@@ -10,8 +10,8 @@ use quant_pivot_models::{
     },
     enums::common::MarketCategory,
     types::{
-        BacktestPathSetId, FeatureParityRunId, FeatureParityStateId, ModelSpecId, ModelVersionId,
-        RoleCode, model_quality::QualityGateReport,
+        BacktestPathSetId, FeatureParityRunId, FeatureParityStateId, ModelRunId, ModelSpecId,
+        ModelVersionId, RoleCode, model_quality::QualityGateReport,
     },
 };
 
@@ -59,13 +59,28 @@ pub trait ModelRegistryRepository: Send + Sync {
         version: NewModelVersion,
     ) -> Result<ModelVersionInfo, StorageError>;
 
+    /// Atomically insert a root training candidate and finalize its already
+    /// running, unbound training run as succeeded.
+    ///
+    /// Version allocation remains authoritative under the owning model-spec
+    /// lock. The run receives the inserted version id and uses the immutable
+    /// artifact hash as its output hash in the same database transaction. The
+    /// version must bind the exact Ready/Training dataset captured by the run.
+    /// An exact retry of an already committed run/version pair returns the
+    /// stored version; any payload or terminal-state drift fails closed.
+    async fn commit_training_model_version(
+        &self,
+        model_run_id: &ModelRunId,
+        version: NewModelVersion,
+    ) -> Result<ModelVersionInfo, StorageError>;
+
     /// The next monotonic version number for a spec (`existing + 1`), honoring
     /// the `(model_spec_id, version)` uniqueness invariant the trainer relies on.
     async fn next_version_for_spec(&self, model_spec_id: &ModelSpecId)
     -> Result<i32, StorageError>;
 
-    /// Look up a model version by id (used by the runtime factory to resolve the
-    /// active / shadow artifact for a round).
+    /// Look up a model version by id for deep preimage verification and atomic
+    /// serving-generation resolution.
     async fn find_model_version(
         &self,
         model_version_id: &ModelVersionId,
@@ -85,9 +100,8 @@ pub trait ModelRegistryRepository: Send + Sync {
     ) -> Result<Paginated<ModelVersionInfo>, StorageError>;
 
     /// Return the complete published picker catalog using one typed joined
-    /// query. Category filtering includes generic artifacts (`NULL`) because
-    /// they remain valid fallbacks; category-pointer UI applies exact-scope
-    /// filtering before allowing a governed selection.
+    /// query. A supplied category is an exact route filter; pooled (`NULL`)
+    /// artifacts are never returned as vertical fallbacks.
     async fn list_published_catalog(
         &self,
         side: ModelPickerSide,

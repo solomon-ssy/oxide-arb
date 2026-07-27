@@ -8,6 +8,7 @@ use std::{
 };
 
 use chrono::{DateTime, TimeZone, Utc};
+use quant_pivot_error::hashing::CanonicalDigestError;
 use rust_decimal::Decimal;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use sea_orm::{
@@ -29,6 +30,16 @@ pub const WEATHER_FORECAST_24H_PROFILE_ID: &str = "weather_forecast_24h";
 pub const POOLED_1H_HORIZON_SECS: u64 = 3_600;
 pub const CRYPTO_PRICE_15M_HORIZON_SECS: u64 = 900;
 pub const WEATHER_FORECAST_24H_HORIZON_SECS: u64 = 86_400;
+const SECONDS_PER_DAY: u64 = 86_400;
+// A feedback schedule beyond one year is operationally indistinguishable from
+// disabling it and cannot be represented honestly as an active cadence.
+const MAX_FEEDBACK_EVALUATION_WINDOW_DAYS: u32 = 365;
+const MAX_FEEDBACK_DURATION_SECS: u64 = 365 * SECONDS_PER_DAY;
+// PostgreSQL cohort and scheduler counters use signed BIGINT.
+const MAX_FEEDBACK_OBSERVATION_COUNT: u64 = 9_223_372_036_854_775_807;
+/// Breaking hash-schema version for [`ResearchFeedbackPolicy`].
+pub const RESEARCH_FEEDBACK_POLICY_HASH_VERSION: u32 = 1;
+const RESEARCH_FEEDBACK_POLICY_HASH_DOMAIN: &str = "quant-pivot/research-feedback-policy";
 
 /// Stable immutable profile identity carried by every downstream artifact.
 #[derive(
@@ -239,6 +250,22 @@ impl ResearchProfileRef {
     pub fn artifact_id(&self) -> ResearchProfileArtifactId {
         ResearchProfileArtifactId::from_profile_ref(self)
     }
+
+    /// Validate that the reference has the exact canonical artifact-id form.
+    pub fn validate(&self) -> Result<(), ResearchProfileArtifactIdParseError> {
+        let canonical = self
+            .artifact_id()
+            .to_string()
+            .parse::<ResearchProfileArtifactId>()?
+            .profile_ref();
+        if canonical == *self {
+            Ok(())
+        } else {
+            Err(ResearchProfileArtifactIdParseError {
+                detail: "research profile reference is not canonical".to_owned(),
+            })
+        }
+    }
 }
 
 /// Information set under which policy decisions are evaluated.
@@ -307,7 +334,16 @@ pub enum ResearchProfileDataSource {
 #[serde(deny_unknown_fields)]
 pub struct ResearchFeedbackPolicy {
     pub evaluation_window_days: u32,
+    /// How often the coordinator may evaluate whether a new feedback cycle is
+    /// warranted. This schedules evaluation only; it grants no promotion
+    /// authority.
+    pub feedback_cadence_secs: u64,
     pub minimum_mature_labels: u64,
+    /// Incremental labels matured after the champion/cycle cutoff. This is
+    /// distinct from the total mature-label floor above.
+    pub minimum_new_mature_labels: u64,
+    /// Minimum interval between successful retraining starts for this profile.
+    pub retraining_cooldown_secs: u64,
     pub minimum_coverage: Decimal,
     pub data_drift_psi_threshold: Decimal,
     pub data_drift_ks_p_value: Decimal,
@@ -316,17 +352,137 @@ pub struct ResearchFeedbackPolicy {
     pub minimum_effect_bps: Bps,
     pub effect_confidence: Decimal,
     pub shadow_minimum_observations: u64,
-    pub auto_publish_eligible: bool,
+}
+
+/// Stable validation failures for immutable feedback scheduling and gates.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResearchFeedbackPolicyError {
+    #[error("feedback policy duration `{field}` must be positive")]
+    ZeroDuration { field: &'static str },
+    #[error(
+        "feedback policy duration `{field}` is {actual}, exceeding the maximum {maximum} seconds"
+    )]
+    DurationExceeds {
+        field: &'static str,
+        actual: u64,
+        maximum: u64,
+    },
+    #[error(
+        "feedback policy `evaluation_window_days` is {actual}, exceeding the maximum {maximum} days"
+    )]
+    EvaluationWindowExceeds { actual: u32, maximum: u32 },
+    #[error("feedback policy `evaluation_window_days` cannot be represented in seconds")]
+    EvaluationWindowOverflow,
+    #[error(
+        "feedback policy `feedback_cadence_secs` ({cadence_secs}) exceeds its evaluation window ({evaluation_window_secs} seconds)"
+    )]
+    CadenceExceedsWindow {
+        cadence_secs: u64,
+        evaluation_window_secs: u64,
+    },
+    #[error(
+        "feedback policy `retraining_cooldown_secs` ({cooldown_secs}) cannot be shorter than `feedback_cadence_secs` ({cadence_secs})"
+    )]
+    CooldownShorterThanCadence {
+        cadence_secs: u64,
+        cooldown_secs: u64,
+    },
+    #[error("feedback policy count `{field}` must be positive")]
+    ZeroCount { field: &'static str },
+    #[error(
+        "feedback policy count `{field}` is {actual}, exceeding the durable count maximum {maximum}"
+    )]
+    CountExceeds {
+        field: &'static str,
+        actual: u64,
+        maximum: u64,
+    },
+    #[error(
+        "feedback policy `minimum_new_mature_labels` ({minimum_new}) cannot exceed `minimum_mature_labels` ({minimum_total})"
+    )]
+    NewLabelsExceedTotal {
+        minimum_new: u64,
+        minimum_total: u64,
+    },
+    #[error("feedback policy `{field}` must be within (0, 1]")]
+    UnitInterval { field: &'static str },
+    #[error("feedback policy `data_drift_psi_threshold` must be positive")]
+    NonPositivePsi,
+    #[error("feedback policy `minimum_effect_bps` must be positive")]
+    NonPositiveEffect,
+    #[error(transparent)]
+    Hash(#[from] CanonicalDigestError),
 }
 
 impl ResearchFeedbackPolicy {
-    fn validate(&self) -> Result<(), String> {
-        if self.evaluation_window_days == 0
-            || self.minimum_mature_labels == 0
-            || self.shadow_minimum_observations == 0
-            || self.minimum_effect_bps.inner() <= Decimal::ZERO
-        {
-            return Err("feedback policy counts/windows/effect must be positive".to_owned());
+    /// Validate scheduling bounds, incremental-label semantics, and statistical
+    /// thresholds without relying on any runtime defaults.
+    pub fn validate(&self) -> Result<(), ResearchFeedbackPolicyError> {
+        if self.evaluation_window_days == 0 {
+            return Err(ResearchFeedbackPolicyError::ZeroDuration {
+                field: "evaluation_window_days",
+            });
+        }
+        if self.evaluation_window_days > MAX_FEEDBACK_EVALUATION_WINDOW_DAYS {
+            return Err(ResearchFeedbackPolicyError::EvaluationWindowExceeds {
+                actual: self.evaluation_window_days,
+                maximum: MAX_FEEDBACK_EVALUATION_WINDOW_DAYS,
+            });
+        }
+        let evaluation_window_secs = u64::from(self.evaluation_window_days)
+            .checked_mul(SECONDS_PER_DAY)
+            .ok_or(ResearchFeedbackPolicyError::EvaluationWindowOverflow)?;
+        for (field, value) in [
+            ("feedback_cadence_secs", self.feedback_cadence_secs),
+            ("retraining_cooldown_secs", self.retraining_cooldown_secs),
+        ] {
+            if value == 0 {
+                return Err(ResearchFeedbackPolicyError::ZeroDuration { field });
+            }
+            if value > MAX_FEEDBACK_DURATION_SECS {
+                return Err(ResearchFeedbackPolicyError::DurationExceeds {
+                    field,
+                    actual: value,
+                    maximum: MAX_FEEDBACK_DURATION_SECS,
+                });
+            }
+        }
+        if self.feedback_cadence_secs > evaluation_window_secs {
+            return Err(ResearchFeedbackPolicyError::CadenceExceedsWindow {
+                cadence_secs: self.feedback_cadence_secs,
+                evaluation_window_secs,
+            });
+        }
+        if self.retraining_cooldown_secs < self.feedback_cadence_secs {
+            return Err(ResearchFeedbackPolicyError::CooldownShorterThanCadence {
+                cadence_secs: self.feedback_cadence_secs,
+                cooldown_secs: self.retraining_cooldown_secs,
+            });
+        }
+        for (field, value) in [
+            ("minimum_mature_labels", self.minimum_mature_labels),
+            ("minimum_new_mature_labels", self.minimum_new_mature_labels),
+            (
+                "shadow_minimum_observations",
+                self.shadow_minimum_observations,
+            ),
+        ] {
+            if value == 0 {
+                return Err(ResearchFeedbackPolicyError::ZeroCount { field });
+            }
+            if value > MAX_FEEDBACK_OBSERVATION_COUNT {
+                return Err(ResearchFeedbackPolicyError::CountExceeds {
+                    field,
+                    actual: value,
+                    maximum: MAX_FEEDBACK_OBSERVATION_COUNT,
+                });
+            }
+        }
+        if self.minimum_new_mature_labels > self.minimum_mature_labels {
+            return Err(ResearchFeedbackPolicyError::NewLabelsExceedTotal {
+                minimum_new: self.minimum_new_mature_labels,
+                minimum_total: self.minimum_mature_labels,
+            });
         }
         for (name, value) in [
             ("minimum_coverage", self.minimum_coverage),
@@ -336,13 +492,27 @@ impl ResearchFeedbackPolicy {
             ("effect_confidence", self.effect_confidence),
         ] {
             if value <= Decimal::ZERO || value > Decimal::ONE {
-                return Err(format!("feedback policy {name} must be within (0, 1]"));
+                return Err(ResearchFeedbackPolicyError::UnitInterval { field: name });
             }
         }
         if self.data_drift_psi_threshold <= Decimal::ZERO {
-            return Err("feedback policy PSI threshold must be positive".to_owned());
+            return Err(ResearchFeedbackPolicyError::NonPositivePsi);
+        }
+        if self.minimum_effect_bps.inner() <= Decimal::ZERO {
+            return Err(ResearchFeedbackPolicyError::NonPositiveEffect);
         }
         Ok(())
+    }
+
+    /// Domain-separated commitment frozen into each feedback-cycle identity.
+    pub fn content_hash(&self) -> Result<ContentHash, ResearchFeedbackPolicyError> {
+        self.validate()?;
+        CanonicalDigest::content_hash_typed(
+            RESEARCH_FEEDBACK_POLICY_HASH_DOMAIN,
+            RESEARCH_FEEDBACK_POLICY_HASH_VERSION,
+            self,
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -425,7 +595,9 @@ impl ResearchProfileSpec {
             );
         }
         self.quality_gate.validate()?;
-        self.feedback_policy.validate()
+        self.feedback_policy
+            .validate()
+            .map_err(|error| error.to_string())
     }
 
     #[must_use]
@@ -442,8 +614,6 @@ impl ResearchProfileSpec {
     /// Complete raw-history runway required to reproduce one fit, rounded up
     /// to natural days for retention planning.
     pub fn required_days(&self) -> Result<u32, String> {
-        const SECONDS_PER_DAY: u64 = 86_400;
-
         let ceil_days = |seconds: u64| {
             seconds
                 .checked_add(SECONDS_PER_DAY - 1)
@@ -512,13 +682,13 @@ impl ResearchProfileArtifact {
 /// Return the complete closed registry for Runtime v1.
 pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, String> {
     let published_at = Utc
-        .with_ymd_and_hms(2026, 7, 14, 0, 0, 0)
+        .with_ymd_and_hms(2026, 7, 25, 0, 0, 0)
         .single()
         .ok_or_else(|| "research profile publication timestamp is invalid".to_owned())?;
     let cash_budget = vec![Usd::new(Decimal::new(25, 0))];
     let pooled = ResearchProfileArtifact::try_new(
         POOLED_1H_CONTROL_PROFILE_ID,
-        2,
+        3,
         ResearchProfileSpec {
             information_regime: ResearchInformationRegime::PooledBinaryMarket,
             policy_fitter: None,
@@ -541,13 +711,13 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
             allowed_cash_budget_tiers: cash_budget.clone(),
             activation_eligibility: ResearchEvaluationTrack::ResearchOnly,
             quality_gate: TradePolicyQualityGate::production(),
-            feedback_policy: production_feedback_policy(false),
+            feedback_policy: production_feedback_policy(SECONDS_PER_DAY, 50, 7 * SECONDS_PER_DAY),
         },
         published_at,
     )?;
     let crypto = ResearchProfileArtifact::try_new(
         CRYPTO_PRICE_15M_PROFILE_ID,
-        1,
+        2,
         ResearchProfileSpec {
             information_regime: ResearchInformationRegime::CryptoPrice,
             policy_fitter: None,
@@ -573,13 +743,13 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
             allowed_cash_budget_tiers: cash_budget.clone(),
             activation_eligibility: ResearchEvaluationTrack::ResearchOnly,
             quality_gate: TradePolicyQualityGate::production(),
-            feedback_policy: production_feedback_policy(true),
+            feedback_policy: production_feedback_policy(6 * 3_600, 50, 3 * SECONDS_PER_DAY),
         },
         published_at,
     )?;
     let weather = ResearchProfileArtifact::try_new(
         WEATHER_FORECAST_24H_PROFILE_ID,
-        2,
+        3,
         ResearchProfileSpec {
             information_regime: ResearchInformationRegime::WeatherForecast,
             policy_fitter: Some(ResearchPolicyFitter::WeatherForecast),
@@ -606,7 +776,7 @@ pub fn builtin_research_profiles() -> Result<Vec<ResearchProfileArtifact>, Strin
             allowed_cash_budget_tiers: cash_budget,
             activation_eligibility: ResearchEvaluationTrack::SemiAutoCandidate,
             quality_gate: TradePolicyQualityGate::production(),
-            feedback_policy: production_feedback_policy(true),
+            feedback_policy: production_feedback_policy(SECONDS_PER_DAY, 50, 14 * SECONDS_PER_DAY),
         },
         published_at,
     )?;
@@ -644,10 +814,17 @@ impl ResearchProfileRef {
     }
 }
 
-fn production_feedback_policy(auto_publish_eligible: bool) -> ResearchFeedbackPolicy {
+fn production_feedback_policy(
+    feedback_cadence_secs: u64,
+    minimum_new_mature_labels: u64,
+    retraining_cooldown_secs: u64,
+) -> ResearchFeedbackPolicy {
     ResearchFeedbackPolicy {
         evaluation_window_days: 30,
+        feedback_cadence_secs,
         minimum_mature_labels: 500,
+        minimum_new_mature_labels,
+        retraining_cooldown_secs,
         minimum_coverage: Decimal::new(95, 2),
         data_drift_psi_threshold: Decimal::new(2, 1),
         data_drift_ks_p_value: Decimal::new(5, 2),
@@ -656,26 +833,106 @@ fn production_feedback_policy(auto_publish_eligible: bool) -> ResearchFeedbackPo
         minimum_effect_bps: Bps::new(Decimal::from(25)),
         effect_confidence: Decimal::new(95, 2),
         shadow_minimum_observations: 1_000,
-        auto_publish_eligible,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, from_value, to_value};
+
     use super::{
-        Bps, ResearchEvaluationTrack, WEATHER_FORECAST_24H_HORIZON_SECS, builtin_research_profiles,
-        minimum_raw_retention_days,
+        Bps, CRYPTO_PRICE_15M_PROFILE_ID, MAX_FEEDBACK_DURATION_SECS,
+        MAX_FEEDBACK_EVALUATION_WINDOW_DAYS, MAX_FEEDBACK_OBSERVATION_COUNT,
+        POOLED_1H_CONTROL_PROFILE_ID, RESEARCH_FEEDBACK_POLICY_HASH_VERSION,
+        ResearchEvaluationTrack, ResearchFeedbackPolicy, ResearchFeedbackPolicyError,
+        ResearchProfileArtifact, SECONDS_PER_DAY, WEATHER_FORECAST_24H_HORIZON_SECS,
+        WEATHER_FORECAST_24H_PROFILE_ID, builtin_research_profiles, minimum_raw_retention_days,
     };
+    use crate::hashing::CanonicalDigest;
+
+    type PolicyMutation = fn(&mut ResearchFeedbackPolicy);
+
+    impl ResearchFeedbackPolicy {
+        fn fixture() -> Self {
+            builtin_research_profiles()
+                .expect("profiles")
+                .into_iter()
+                .next()
+                .expect("pooled profile")
+                .spec
+                .feedback_policy
+        }
+    }
 
     #[test]
-    fn builtins_hash_stable_candidate() {
+    fn builtins_are_content_addressed() {
         let profiles = builtin_research_profiles().expect("profiles");
         assert_eq!(profiles.len(), 3);
+        let pooled = profiles
+            .iter()
+            .find(|profile| profile.profile_ref.id.as_str() == POOLED_1H_CONTROL_PROFILE_ID)
+            .expect("pooled profile");
+        let crypto = profiles
+            .iter()
+            .find(|profile| profile.profile_ref.id.as_str() == CRYPTO_PRICE_15M_PROFILE_ID)
+            .expect("crypto profile");
         let weather = profiles
             .iter()
-            .find(|profile| profile.spec.target_horizon_secs == WEATHER_FORECAST_24H_HORIZON_SECS)
+            .find(|profile| profile.profile_ref.id.as_str() == WEATHER_FORECAST_24H_PROFILE_ID)
             .expect("weather profile");
+        assert_eq!(pooled.profile_ref.version, 3);
+        assert_eq!(crypto.profile_ref.version, 2);
+        assert_eq!(weather.profile_ref.version, 3);
+        assert_eq!(
+            pooled.profile_ref.content_hash.to_string(),
+            "blake3:84c34e2ad55d79bb67db2804a4371b105cc430890282381c1e9f25f623aad564"
+        );
+        assert_eq!(
+            crypto.profile_ref.content_hash.to_string(),
+            "blake3:592fcda74a28166d5ebcc5ae9e2267648d975b04aebfc7b74cb5a66dbda1351a"
+        );
+        assert_eq!(
+            weather.profile_ref.content_hash.to_string(),
+            "blake3:baf12884866475dd0e422f2adb8cf6c03563e601930fd098cc5d0b0a15be244c"
+        );
+        assert_eq!(pooled.spec.feedback_policy.feedback_cadence_secs, 86_400);
+        assert_eq!(
+            pooled.spec.feedback_policy.retraining_cooldown_secs,
+            604_800
+        );
+        assert_eq!(crypto.spec.feedback_policy.feedback_cadence_secs, 21_600);
+        assert_eq!(
+            crypto.spec.feedback_policy.retraining_cooldown_secs,
+            259_200
+        );
+        assert_eq!(weather.spec.feedback_policy.feedback_cadence_secs, 86_400);
+        assert_eq!(
+            weather.spec.feedback_policy.retraining_cooldown_secs,
+            1_209_600
+        );
+        for profile in &profiles {
+            assert_eq!(profile.spec.feedback_policy.minimum_new_mature_labels, 50);
+            profile.spec.validate().expect("valid built-in profile");
+            assert_eq!(
+                CanonicalDigest::content_hash_json(&profile.spec).expect("profile hash"),
+                profile.profile_ref.content_hash
+            );
+            let restored = from_value::<ResearchProfileArtifact>(
+                to_value(profile).expect("serialize built-in profile"),
+            )
+            .expect("deserialize built-in profile");
+            assert_eq!(&restored, profile);
+            restored.spec.validate().expect("valid restored profile");
+
+            let mut legacy_ref = profile.profile_ref.clone();
+            legacy_ref.version = legacy_ref.version.checked_sub(1).expect("bumped version");
+            assert!(legacy_ref.resolve_builtin_research_profile().is_err());
+        }
         assert_eq!(weather.spec.fit_span_days, 90);
+        assert_eq!(
+            weather.spec.target_horizon_secs,
+            WEATHER_FORECAST_24H_HORIZON_SECS
+        );
         assert_eq!(weather.spec.allowed_cash_budget_tiers.len(), 1);
         assert_eq!(
             weather.spec.quality_gate.min_lower_confidence_utility_bps,
@@ -694,16 +951,298 @@ mod tests {
                 .profile_ref,
             weather.profile_ref
         );
-        let control = profiles
-            .iter()
-            .find(|profile| profile.profile_ref != weather.profile_ref)
-            .expect("control profile");
         assert!(
-            !control
+            !pooled
                 .spec
                 .permits(ResearchEvaluationTrack::SemiAutoCandidate)
         );
         assert_eq!(weather.spec.required_days().expect("required days"), 100);
         assert_eq!(minimum_raw_retention_days().expect("retention"), 200);
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected() {
+        let mut value =
+            to_value(ResearchFeedbackPolicy::fixture()).expect("serialize feedback policy");
+        let removed_permission = ["auto", "publish", "eligible"].join("_");
+        value
+            .as_object_mut()
+            .expect("policy object")
+            .insert(removed_permission, Value::Bool(true));
+        assert!(from_value::<ResearchFeedbackPolicy>(value).is_err());
+
+        let mut unknown =
+            to_value(ResearchFeedbackPolicy::fixture()).expect("serialize feedback policy");
+        unknown
+            .as_object_mut()
+            .expect("policy object")
+            .insert("unknown_schedule_knob".to_owned(), Value::from(1));
+        assert!(from_value::<ResearchFeedbackPolicy>(unknown).is_err());
+    }
+
+    #[test]
+    fn zero_values_are_rejected() {
+        let mut policy = ResearchFeedbackPolicy::fixture();
+        policy.evaluation_window_days = 0;
+        assert_eq!(
+            policy.validate(),
+            Err(ResearchFeedbackPolicyError::ZeroDuration {
+                field: "evaluation_window_days"
+            })
+        );
+
+        let mut policy = ResearchFeedbackPolicy::fixture();
+        policy.feedback_cadence_secs = 0;
+        assert_eq!(
+            policy.validate(),
+            Err(ResearchFeedbackPolicyError::ZeroDuration {
+                field: "feedback_cadence_secs"
+            })
+        );
+
+        let mut policy = ResearchFeedbackPolicy::fixture();
+        policy.retraining_cooldown_secs = 0;
+        assert_eq!(
+            policy.validate(),
+            Err(ResearchFeedbackPolicyError::ZeroDuration {
+                field: "retraining_cooldown_secs"
+            })
+        );
+
+        let zero_counts: [(&str, PolicyMutation); 3] = [
+            (
+                "minimum_mature_labels",
+                |policy: &mut ResearchFeedbackPolicy| policy.minimum_mature_labels = 0,
+            ),
+            (
+                "minimum_new_mature_labels",
+                |policy: &mut ResearchFeedbackPolicy| {
+                    policy.minimum_new_mature_labels = 0;
+                },
+            ),
+            (
+                "shadow_minimum_observations",
+                |policy: &mut ResearchFeedbackPolicy| {
+                    policy.shadow_minimum_observations = 0;
+                },
+            ),
+        ];
+        for (field, mutate) in zero_counts {
+            let mut policy = ResearchFeedbackPolicy::fixture();
+            mutate(&mut policy);
+            assert_eq!(
+                policy.validate(),
+                Err(ResearchFeedbackPolicyError::ZeroCount { field })
+            );
+        }
+    }
+
+    #[test]
+    fn bounds_are_enforced() {
+        let mut policy = ResearchFeedbackPolicy::fixture();
+        policy.evaluation_window_days = MAX_FEEDBACK_EVALUATION_WINDOW_DAYS;
+        policy.feedback_cadence_secs = MAX_FEEDBACK_DURATION_SECS;
+        policy.retraining_cooldown_secs = MAX_FEEDBACK_DURATION_SECS;
+        policy.minimum_mature_labels = MAX_FEEDBACK_OBSERVATION_COUNT;
+        policy.minimum_new_mature_labels = MAX_FEEDBACK_OBSERVATION_COUNT;
+        policy.shadow_minimum_observations = MAX_FEEDBACK_OBSERVATION_COUNT;
+        policy.validate().expect("inclusive boundaries");
+
+        let mut policy = ResearchFeedbackPolicy::fixture();
+        policy.evaluation_window_days = MAX_FEEDBACK_EVALUATION_WINDOW_DAYS + 1;
+        assert_eq!(
+            policy.validate(),
+            Err(ResearchFeedbackPolicyError::EvaluationWindowExceeds {
+                actual: MAX_FEEDBACK_EVALUATION_WINDOW_DAYS + 1,
+                maximum: MAX_FEEDBACK_EVALUATION_WINDOW_DAYS,
+            })
+        );
+
+        let excessive_durations: [(&str, PolicyMutation); 2] = [
+            (
+                "feedback_cadence_secs",
+                |policy: &mut ResearchFeedbackPolicy| {
+                    policy.feedback_cadence_secs = MAX_FEEDBACK_DURATION_SECS + 1;
+                },
+            ),
+            (
+                "retraining_cooldown_secs",
+                |policy: &mut ResearchFeedbackPolicy| {
+                    policy.retraining_cooldown_secs = MAX_FEEDBACK_DURATION_SECS + 1;
+                },
+            ),
+        ];
+        for (field, mutate) in excessive_durations {
+            let mut policy = ResearchFeedbackPolicy::fixture();
+            mutate(&mut policy);
+            assert_eq!(
+                policy.validate(),
+                Err(ResearchFeedbackPolicyError::DurationExceeds {
+                    field,
+                    actual: MAX_FEEDBACK_DURATION_SECS + 1,
+                    maximum: MAX_FEEDBACK_DURATION_SECS,
+                })
+            );
+        }
+
+        let excessive_counts: [(&str, PolicyMutation); 3] = [
+            (
+                "minimum_mature_labels",
+                |policy: &mut ResearchFeedbackPolicy| {
+                    policy.minimum_mature_labels = MAX_FEEDBACK_OBSERVATION_COUNT + 1;
+                },
+            ),
+            (
+                "minimum_new_mature_labels",
+                |policy: &mut ResearchFeedbackPolicy| {
+                    policy.minimum_mature_labels = MAX_FEEDBACK_OBSERVATION_COUNT;
+                    policy.minimum_new_mature_labels = MAX_FEEDBACK_OBSERVATION_COUNT + 1;
+                },
+            ),
+            (
+                "shadow_minimum_observations",
+                |policy: &mut ResearchFeedbackPolicy| {
+                    policy.shadow_minimum_observations = MAX_FEEDBACK_OBSERVATION_COUNT + 1;
+                },
+            ),
+        ];
+        for (field, mutate) in excessive_counts {
+            let mut policy = ResearchFeedbackPolicy::fixture();
+            mutate(&mut policy);
+            assert_eq!(
+                policy.validate(),
+                Err(ResearchFeedbackPolicyError::CountExceeds {
+                    field,
+                    actual: MAX_FEEDBACK_OBSERVATION_COUNT + 1,
+                    maximum: MAX_FEEDBACK_OBSERVATION_COUNT,
+                })
+            );
+        }
+
+        let mut policy = ResearchFeedbackPolicy::fixture();
+        policy.feedback_cadence_secs = u64::MAX;
+        assert!(matches!(
+            policy.validate(),
+            Err(ResearchFeedbackPolicyError::DurationExceeds {
+                field: "feedback_cadence_secs",
+                actual: u64::MAX,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn cross_field_invariants_hold() {
+        let mut policy = ResearchFeedbackPolicy::fixture();
+        policy.minimum_new_mature_labels = policy.minimum_mature_labels + 1;
+        assert_eq!(
+            policy.validate(),
+            Err(ResearchFeedbackPolicyError::NewLabelsExceedTotal {
+                minimum_new: 501,
+                minimum_total: 500,
+            })
+        );
+
+        let mut policy = ResearchFeedbackPolicy::fixture();
+        policy.feedback_cadence_secs = 2 * SECONDS_PER_DAY;
+        policy.retraining_cooldown_secs = SECONDS_PER_DAY;
+        assert_eq!(
+            policy.validate(),
+            Err(ResearchFeedbackPolicyError::CooldownShorterThanCadence {
+                cadence_secs: 2 * SECONDS_PER_DAY,
+                cooldown_secs: SECONDS_PER_DAY,
+            })
+        );
+
+        let mut policy = ResearchFeedbackPolicy::fixture();
+        policy.evaluation_window_days = 1;
+        policy.feedback_cadence_secs = SECONDS_PER_DAY + 1;
+        policy.retraining_cooldown_secs = SECONDS_PER_DAY + 1;
+        assert_eq!(
+            policy.validate(),
+            Err(ResearchFeedbackPolicyError::CadenceExceedsWindow {
+                cadence_secs: SECONDS_PER_DAY + 1,
+                evaluation_window_secs: SECONDS_PER_DAY,
+            })
+        );
+    }
+
+    #[test]
+    fn schedule_fields_change_hash() {
+        let profile = builtin_research_profiles()
+            .expect("profiles")
+            .into_iter()
+            .next()
+            .expect("pooled profile");
+        let baseline = profile.profile_ref.content_hash;
+
+        let mut cadence = profile.spec.clone();
+        cadence.feedback_policy.feedback_cadence_secs += 1;
+        cadence.validate().expect("cadence variant");
+        assert_ne!(
+            CanonicalDigest::content_hash_json(&cadence).expect("cadence hash"),
+            baseline
+        );
+
+        let mut labels = profile.spec.clone();
+        labels.feedback_policy.minimum_new_mature_labels += 1;
+        labels.validate().expect("label variant");
+        assert_ne!(
+            CanonicalDigest::content_hash_json(&labels).expect("label hash"),
+            baseline
+        );
+
+        let mut cooldown = profile.spec;
+        cooldown.feedback_policy.retraining_cooldown_secs += 1;
+        cooldown.validate().expect("cooldown variant");
+        assert_ne!(
+            CanonicalDigest::content_hash_json(&cooldown).expect("cooldown hash"),
+            baseline
+        );
+    }
+
+    #[test]
+    fn policy_hash_is_deterministic() {
+        assert_eq!(RESEARCH_FEEDBACK_POLICY_HASH_VERSION, 1);
+        let profiles = builtin_research_profiles().expect("profiles");
+        for profile in &profiles {
+            let policy = &profile.spec.feedback_policy;
+            let baseline = policy.content_hash().expect("policy hash");
+            assert_eq!(
+                policy.content_hash().expect("repeated policy hash"),
+                baseline
+            );
+            let expected = match profile.profile_ref.id.as_str() {
+                POOLED_1H_CONTROL_PROFILE_ID => {
+                    "blake3:362524dc4430f41701712d7bff99938f631d942f4f32b962a5ae47ecb6aa4d1b"
+                }
+                CRYPTO_PRICE_15M_PROFILE_ID => {
+                    "blake3:1c71c258792a3148ddd5448d488a508cf71a949f05b4649654cbc3bece5e10be"
+                }
+                WEATHER_FORECAST_24H_PROFILE_ID => {
+                    "blake3:f43676d206d3e6793a6246d77d0c9a12fa8fa50c24f03623d969ac83c901fc8c"
+                }
+                other => panic!("unexpected built-in profile {other}"),
+            };
+            assert_eq!(baseline.to_string(), expected);
+
+            let mut cadence = policy.clone();
+            cadence.feedback_cadence_secs += 1;
+            assert_ne!(
+                cadence.content_hash().expect("cadence policy hash"),
+                baseline
+            );
+
+            let mut labels = policy.clone();
+            labels.minimum_new_mature_labels += 1;
+            assert_ne!(labels.content_hash().expect("label policy hash"), baseline);
+
+            let mut cooldown = policy.clone();
+            cooldown.retraining_cooldown_secs += 1;
+            assert_ne!(
+                cooldown.content_hash().expect("cooldown policy hash"),
+                baseline
+            );
+        }
     }
 }

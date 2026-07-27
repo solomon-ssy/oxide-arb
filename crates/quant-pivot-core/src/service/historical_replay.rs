@@ -1,13 +1,11 @@
 //! Shared point-in-time cross-section materialization.
 //!
-//! This is the **single** feature→factor computation path the offline closure
-//! runs: the training-dataset build, model training rematerialization, and the
-//! backtest replay all call [`materialize_cross_section`], so the factors a
-//! model is trained on are byte-identical to those a backtest scores and to
-//! those the online plane would compute from the same point-in-time facts. Any
-//! divergence here would mean a backtest validates a different model than
-//! production — money-unsafe — so the path is deliberately shared rather than
-//! duplicated.
+//! This is the **single** family-aware feature materialization path the offline
+//! closure runs. Factor-native families execute the governed factor engine;
+//! classical families select [`ReplayFactorMode::FeatureOnly`] and structurally
+//! cannot compute factors. Training, rematerialization, and backtest callers
+//! therefore share the same point-in-time feature path without fabricating a
+//! factor contract for classical estimators.
 //!
 //! The function is pure orchestration over already-prefetched facts (served by
 //! `HistoricalWindow`); it never touches a live `BookStore`.
@@ -19,9 +17,12 @@ use futures_util::future::try_join_all;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::data_plane::DecisionBoundary,
-    enums::quant::DataQualityStatus,
+    enums::{
+        common::MarketCategory,
+        quant::{DataQualityStatus, OutcomeSide},
+    },
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
-    types::{MarketId, Price, Usd},
+    types::{MarketId, OutcomeTokenBinding, Price, TokenId, Usd},
 };
 use quant_pivot_research::{
     domain::{DomainFactWindows, build_domain_slice_inputs},
@@ -51,9 +52,8 @@ pub struct ReplayConfig {
     pub domain: DomainConfig,
     /// Data-quality gates applied during feature build.
     pub data_quality: DataQualityConfig,
-    /// Favorite-longshot bias table pinned by the frozen factor config (content-
-    /// hash verified). `None` keeps `struct.favorite_longshot` inert. Bound here
-    /// so the offline engine scores byte-identically to the online plane.
+    /// Factor-native bias calibration. Classical feature-only replay carries
+    /// `None` and never resolves or consumes this dependency.
     pub bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
 }
 
@@ -67,6 +67,8 @@ pub struct CrossSectionRequest<'a> {
     pub decision_at: DateTime<Utc>,
     /// `(market, token)` samples in this decision-time group.
     pub group: &'a [ReplaySample],
+    /// Exact `ResearchProfile` category. `None` is the explicit pooled plane.
+    pub category_scope: Option<MarketCategory>,
     /// Source visibility delay applied to features.
     pub knowledge_lag: Duration,
     /// Maximum trailing feature lookback.
@@ -87,30 +89,70 @@ pub struct ReplayCrossSection {
     /// remain first-class replay evidence but never enter factors or models.
     pub rejected_vectors: Vec<FeatureVector>,
     /// Full decision captures for every resolved vector, including DQ rejects.
-    pub captures: HashMap<MarketId, MarketDecisionCapture>,
+    pub captures: HashMap<ReplayCaptureKey, MarketDecisionCapture>,
+    /// Validated catalog/feature-token orientations aligned with `vectors`.
+    pub outcome_bindings: Vec<OutcomeTokenBinding>,
     /// Selection snapshots aligned with `vectors`.
     pub markets: Vec<SelectedMarket>,
     /// Entry mids (resolved book mid) aligned with `vectors`.
     pub entry_mids: Vec<Option<Price>>,
-    /// Factor outcomes aligned with `vectors`.
-    pub outcomes: Vec<MarketFactorOutcome>,
+    /// Family-aware factor materialization result.
+    pub factor_output: ReplayFactorOutput,
     /// Vectors dropped for insufficient data quality (coverage accounting).
     pub dropped_insufficient: u64,
+}
+
+/// Exact identity of one replay decision capture.
+///
+/// A market may contribute both YES- and NO-oriented rows at the same decision
+/// time, so `MarketId` alone is not a valid key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReplayCaptureKey {
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+}
+
+impl ReplayCaptureKey {
+    /// Build the capture key for one market/token orientation.
+    #[must_use]
+    pub fn new(market_id: &MarketId, token_id: &TokenId) -> Self {
+        Self {
+            market_id: market_id.clone(),
+            token_id: token_id.clone(),
+        }
+    }
+}
+
+/// Explicit factor execution mode for one replay.
+///
+/// Classical estimators use `FeatureOnly`; the factor engine is structurally
+/// absent rather than constructed and ignored.
+#[derive(Clone, Copy)]
+pub enum ReplayFactorMode<'a> {
+    FactorNative { engine: &'a FactorEngine },
+    FeatureOnly,
+}
+
+/// Family-aware output from one replayed cross-section.
+pub enum ReplayFactorOutput {
+    FactorNative { outcomes: Vec<MarketFactorOutcome> },
+    FeatureOnly,
 }
 
 /// Materialize one `as_of` cross-section from the prefetched window.
 ///
 /// Resolves each sample's PIT feature window, builds feature vectors with the
-/// configured builder, drops insufficient-quality vectors, validates the
-/// cross-section invariants, and computes every enabled factor. Returns `None`
-/// when no sample resolves to a market in the catalog.
+/// configured builder and drops insufficient-quality vectors. Factor-native
+/// mode validates cross-section invariants and computes every frozen factor;
+/// feature-only mode returns no factor output. Returns `None` when no sample
+/// resolves to a market in the catalog.
 ///
 /// # Errors
 ///
 /// Propagates feature-resolution and factor-computation errors.
 pub async fn materialize_cross_section(
     builder: &ConfiguredFeatureBuilder,
-    engine: &FactorEngine,
+    factor_mode: ReplayFactorMode<'_>,
     config: &ReplayConfig,
     request: &CrossSectionRequest<'_>,
 ) -> QuantResult<Option<ReplayCrossSection>> {
@@ -128,6 +170,7 @@ pub async fn materialize_cross_section(
     )?;
     let ReplayInputs {
         selected,
+        outcome_bindings,
         windows,
         trade_windows,
         liquidity_caps,
@@ -191,31 +234,45 @@ pub async fn materialize_cross_section(
 
     let vectors = builder.build_batch(&bundles, &[], &config.features, &config.data_quality)?;
 
-    let partitioned = partition_feature_vectors(vectors, &bundles, &selected)?;
+    let partitioned = partition_feature_vectors(vectors, &bundles, &selected, &outcome_bindings)?;
     if partitioned.kept_vectors.is_empty() {
         return Ok(Some(ReplayCrossSection {
             boundary,
             vectors: Vec::new(),
             rejected_vectors: partitioned.rejected_vectors,
             captures: partitioned.captures,
+            outcome_bindings: Vec::new(),
             markets: Vec::new(),
             entry_mids: Vec::new(),
-            outcomes: Vec::new(),
+            factor_output: match factor_mode {
+                ReplayFactorMode::FactorNative { .. } => ReplayFactorOutput::FactorNative {
+                    outcomes: Vec::new(),
+                },
+                ReplayFactorMode::FeatureOnly => ReplayFactorOutput::FeatureOnly,
+            },
             dropped_insufficient: partitioned.dropped_insufficient,
         }));
     }
 
-    FactorEngine::validate_batch_invariants(&partitioned.kept_vectors)?;
-    let outcomes = engine.compute_all_batch(&partitioned.kept_vectors, &config.factors)?;
+    let factor_output = match factor_mode {
+        ReplayFactorMode::FactorNative { engine } => {
+            FactorEngine::validate_batch_invariants(&partitioned.kept_vectors)?;
+            ReplayFactorOutput::FactorNative {
+                outcomes: engine.compute_all_batch(&partitioned.kept_vectors, &config.factors)?,
+            }
+        }
+        ReplayFactorMode::FeatureOnly => ReplayFactorOutput::FeatureOnly,
+    };
 
     Ok(Some(ReplayCrossSection {
         boundary,
         vectors: partitioned.kept_vectors,
         rejected_vectors: partitioned.rejected_vectors,
         captures: partitioned.captures,
+        outcome_bindings: partitioned.kept_bindings,
         markets: partitioned.kept_markets,
         entry_mids: partitioned.kept_entry_mids,
-        outcomes,
+        factor_output,
         dropped_insufficient: partitioned.dropped_insufficient,
     }))
 }
@@ -223,7 +280,8 @@ pub async fn materialize_cross_section(
 struct PartitionedFeatureVectors {
     kept_vectors: Vec<FeatureVector>,
     rejected_vectors: Vec<FeatureVector>,
-    captures: HashMap<MarketId, MarketDecisionCapture>,
+    captures: HashMap<ReplayCaptureKey, MarketDecisionCapture>,
+    kept_bindings: Vec<OutcomeTokenBinding>,
     kept_markets: Vec<SelectedMarket>,
     kept_entry_mids: Vec<Option<Price>>,
     dropped_insufficient: u64,
@@ -233,27 +291,51 @@ fn partition_feature_vectors(
     vectors: Vec<FeatureVector>,
     bundles: &[ResolvedMarketBundle<'_>],
     selected: &[SelectedMarket],
+    outcome_bindings: &[OutcomeTokenBinding],
 ) -> QuantResult<PartitionedFeatureVectors> {
     let mut output = PartitionedFeatureVectors {
         kept_vectors: Vec::with_capacity(vectors.len()),
         rejected_vectors: Vec::new(),
         captures: HashMap::with_capacity(vectors.len()),
+        kept_bindings: Vec::with_capacity(vectors.len()),
         kept_markets: Vec::with_capacity(vectors.len()),
         kept_entry_mids: Vec::with_capacity(vectors.len()),
         dropped_insufficient: 0,
     };
-    for ((vector, bundle), market) in vectors.into_iter().zip(bundles).zip(selected) {
-        let mut capture = bundle.capture.clone();
-        capture.data_quality = vector.data_quality;
-        if output
-            .captures
-            .insert(vector.market_id.clone(), capture)
-            .is_some()
+    for (((vector, bundle), market), binding) in vectors
+        .into_iter()
+        .zip(bundles)
+        .zip(selected)
+        .zip(outcome_bindings)
+    {
+        if vector.token_id.as_ref() != Some(&market.primary_token_id) {
+            return Err(ResearchError::Determinism {
+                detail: format!(
+                    "replay feature vector token {:?} does not match oriented primary token {} for market {}",
+                    vector.token_id, market.primary_token_id, vector.market_id
+                ),
+            }
+            .into());
+        }
+        if binding.market_id() != &vector.market_id
+            || binding.feature_token_id() != &market.primary_token_id
         {
             return Err(ResearchError::Determinism {
                 detail: format!(
-                    "replay cross-section contains duplicate market {}",
-                    vector.market_id
+                    "replay outcome binding does not match feature vector {}/{}",
+                    vector.market_id, market.primary_token_id
+                ),
+            }
+            .into());
+        }
+        let mut capture = bundle.capture.clone();
+        capture.data_quality = vector.data_quality;
+        let capture_key = ReplayCaptureKey::new(&vector.market_id, &market.primary_token_id);
+        if output.captures.insert(capture_key, capture).is_some() {
+            return Err(ResearchError::Determinism {
+                detail: format!(
+                    "replay cross-section contains duplicate market/token {}/{}",
+                    vector.market_id, market.primary_token_id
                 ),
             }
             .into());
@@ -267,6 +349,7 @@ fn partition_feature_vectors(
             .kept_entry_mids
             .push(bundle.inputs.book.as_ref().and_then(ResolvedBook::mid));
         output.kept_markets.push(market.clone());
+        output.kept_bindings.push(binding.clone());
         output.kept_vectors.push(vector);
     }
     Ok(output)
@@ -274,6 +357,7 @@ fn partition_feature_vectors(
 
 struct ReplayInputs {
     selected: Vec<SelectedMarket>,
+    outcome_bindings: Vec<OutcomeTokenBinding>,
     windows: Vec<MarketWindowSnapshot>,
     trade_windows: Vec<TradeTapeWindowSnapshot>,
     liquidity_caps: Vec<Usd>,
@@ -285,6 +369,7 @@ async fn resolve_replay_inputs(
     boundary: &DecisionBoundary,
 ) -> QuantResult<ReplayInputs> {
     let mut selected = Vec::with_capacity(request.group.len());
+    let mut outcome_bindings = Vec::with_capacity(request.group.len());
     let mut windows = Vec::with_capacity(request.group.len());
     let mut trade_windows = Vec::with_capacity(request.group.len());
     let mut liquidity_caps = Vec::with_capacity(request.group.len());
@@ -296,14 +381,11 @@ async fn resolve_replay_inputs(
         else {
             continue;
         };
-        if sample.token_id != snapshot.market.token_yes {
-            return Err(ResearchError::PitResolution {
-                detail: format!(
-                    "replay schedule token {} does not match catalog YES token {} for market {}",
-                    sample.token_id, snapshot.market.token_yes, sample.market_id
-                ),
-            }
-            .into());
+        if request
+            .category_scope
+            .is_some_and(|category| snapshot.market.primary_category() != category)
+        {
+            continue;
         }
         let liquidity_cap =
             snapshot
@@ -316,7 +398,34 @@ async fn resolve_replay_inputs(
                         boundary.decision_at()
                     ),
                 })?;
-        selected.push(selected_market(snapshot.market.as_ref()));
+        let feature_side = if sample.token_id == snapshot.market.token_yes {
+            OutcomeSide::Yes
+        } else if sample.token_id == snapshot.market.token_no {
+            OutcomeSide::No
+        } else {
+            return Err(ResearchError::PitResolution {
+                detail: format!(
+                    "replay token {} matches neither catalog token {} nor {} for market {}",
+                    sample.token_id,
+                    snapshot.market.token_yes,
+                    snapshot.market.token_no,
+                    sample.market_id
+                ),
+            }
+            .into());
+        };
+        let outcome_binding = OutcomeTokenBinding::try_new(
+            sample.market_id.clone(),
+            snapshot.market.token_yes.clone(),
+            snapshot.market.token_no.clone(),
+            sample.token_id.clone(),
+            feature_side,
+        )
+        .map_err(|error| ResearchError::PitResolution {
+            detail: error.to_string(),
+        })?;
+        selected.push(selected_market(snapshot.market.as_ref(), &sample.token_id)?);
+        outcome_bindings.push(outcome_binding);
         windows.push(feature_window(
             sample.token_id.clone(),
             boundary,
@@ -341,6 +450,7 @@ async fn resolve_replay_inputs(
     }
     Ok(ReplayInputs {
         selected,
+        outcome_bindings,
         windows,
         trade_windows,
         liquidity_caps,

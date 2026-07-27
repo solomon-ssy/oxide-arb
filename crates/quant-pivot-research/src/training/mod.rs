@@ -26,12 +26,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 pub use cohort::ModelLearningCohortCodec;
 pub use labeler::{
-    HOLD_VS_EXIT_ALPHA_BPS, HoldVsExitProceedsLabeler, LIQUIDITY_EXIT_POSSIBLE,
+    HOLD_VS_EXIT_ALPHA_BPS, HoldVsExitProceedsLabeler, LIQUIDITY_EXIT_POSSIBLE, LabelDefinition,
     LiquidityExitLabeler, MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS,
     MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, POLICY_ENTRY_FILL_RATIO,
     POLICY_EXIT_FILL_RATIO, POLICY_NET_POSITIVE, POLICY_NET_RETURN_BPS, RETURN_TO_HORIZON,
-    ReturnToHorizonLabeler, TOKEN_PAYOUT_RATIO, TokenPayoutRatioLabeler, label_names,
-    label_names_for_sources,
+    ReturnToHorizonLabeler, TOKEN_PAYOUT_RATIO, TokenPayoutRatioLabeler, label_definitions,
+    label_names, label_names_for_sources,
 };
 pub use leakage::{
     LeakageFindings, LeakageViolation, assert_no_future_leakage, scan_future_leakage,
@@ -56,13 +56,16 @@ pub(crate) use quant_pivot_models::{
         market::{book::BookLevel, fee::MarketFeeSchedule},
         quant::{ExitTrainingLotRow, LotExitEventRow},
     },
-    enums::{feature::EvidenceSourceKind, quant::DatasetPurpose},
+    enums::{
+        model::ModelFamily,
+        quant::{DatasetPurpose, OutcomeSide},
+    },
     types::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCohortManifest,
         DatasetCoverage, DatasetManifest, DatasetSourceLineage, MarketId, ModelSpecId,
         OrderIntentId, PayoutRatio, PositionId, Price, SchemaVersion, Shares, TokenId,
         TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId,
-        TrainingSampleSource, Usd, default_sample_sources,
+        TrainingSampleSource, TrainingSampleSources, Usd, factor::FactorServingPlane,
     },
 };
 use rust_decimal::Decimal;
@@ -108,8 +111,8 @@ pub struct DatasetPlanRequest {
     /// Feature schema version to materialize against.
     pub feature_schema_version: SchemaVersion,
     /// Which sample sources to materialize.
-    #[serde(default = "default_sample_sources")]
-    pub sample_sources: Vec<TrainingSampleSource>,
+    #[serde(default)]
+    pub sample_sources: TrainingSampleSources,
     /// Pre-assigned dataset id (build path); minted by the planner when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_dataset_id: Option<TrainingDatasetId>,
@@ -153,6 +156,8 @@ pub struct LotSamplePlan {
     pub market_id: MarketId,
     /// Outcome token held.
     pub token_id: TokenId,
+    /// Canonical outcome side of the held token.
+    pub outcome_side: OutcomeSide,
     /// Hold-vs-exit decision time.
     pub decision_at: DateTime<Utc>,
     /// When the lot opened.
@@ -166,6 +171,7 @@ pub struct LotSamplePlan {
 pub struct LotTrainingContext {
     pub order_intent_id: OrderIntentId,
     pub position_id: PositionId,
+    pub outcome_side: OutcomeSide,
     pub remaining_shares: Shares,
     pub avg_price: Price,
     pub peak_mark: Option<Price>,
@@ -200,6 +206,12 @@ pub struct DatasetPlan {
     pub training_dataset_id: TrainingDatasetId,
     /// Immutable definition of the owning model spec resolved before any work.
     pub model_spec_definition_hash: ContentHash,
+    /// Immutable estimator family resolved from the owning model spec.
+    pub model_family: ModelFamily,
+    /// Complete feature-schema hash frozen before materialization.
+    pub feature_schema_hash: ContentHash,
+    /// Complete factor revision plane frozen before any examples are built.
+    pub factor_serving_plane: FactorServingPlane,
     /// Deterministic market-grid sample instants, ordered by `(market_id, as_of)`.
     pub samples: Vec<SamplePlan>,
     /// Lot-timeline hold-vs-exit samples.
@@ -566,11 +578,9 @@ pub struct TrainingDatasetArtifact {
     pub examples: Vec<TrainingExample>,
     /// Feature-schema hash the dataset was built against.
     pub feature_schema_hash: ContentHash,
-    /// Factor-schema hash the dataset was built against.
-    pub factor_schema_hash: ContentHash,
     /// Label-schema hash the dataset was built against.
     pub label_schema_hash: ContentHash,
-    /// Content hash over schema hashes + canonical example content.
+    /// Content hash over the full governed bindings + canonical example content.
     pub dataset_hash: ContentHash,
     /// Frozen manifest embedded in the Parquet artifact.
     pub manifest: DatasetManifest,
@@ -580,6 +590,20 @@ pub struct TrainingDatasetArtifact {
     pub parquet_uri: ArtifactUri,
     /// Coverage accounting.
     pub coverage: DatasetCoverage,
+}
+
+impl TrainingDatasetArtifact {
+    /// Strict scalar projection of the manifest's complete factor plane.
+    #[must_use]
+    pub const fn factor_schema_hash(&self) -> ContentHash {
+        self.manifest.factor_schema_hash()
+    }
+
+    /// Complete immutable factor revision plane bound by this artifact.
+    #[must_use]
+    pub const fn factor_serving_plane(&self) -> &FactorServingPlane {
+        &self.manifest.factor_serving_plane
+    }
 }
 
 /// Canonical content hash persisted alongside the Parquet byte hash.
@@ -593,6 +617,8 @@ pub fn dataset_source_fingerprint(examples: &[TrainingExample]) -> QuantResult<C
     struct RowSources<'a> {
         market_id: &'a MarketId,
         token_id: &'a TokenId,
+        sample_source: TrainingSampleSource,
+        lot_context: Option<&'a LotTrainingContext>,
         boundary: &'a DecisionBoundary,
         refs: Vec<String>,
         decision_capture_hash: Option<ContentHash>,
@@ -613,6 +639,8 @@ pub fn dataset_source_fingerprint(examples: &[TrainingExample]) -> QuantResult<C
         rows.push(RowSources {
             market_id: &example.market_id,
             token_id: &example.token_id,
+            sample_source: example.sample_source,
+            lot_context: example.lot_context.as_ref(),
             boundary: &example.decision_boundary,
             refs,
             decision_capture_hash: example
@@ -626,11 +654,25 @@ pub fn dataset_source_fingerprint(examples: &[TrainingExample]) -> QuantResult<C
         (
             left.market_id.as_str(),
             left.token_id.as_str(),
+            left.lot_context
+                .map(|context| context.order_intent_id.to_string())
+                .unwrap_or_default(),
+            left.lot_context
+                .map(|context| context.position_id.to_string())
+                .unwrap_or_default(),
             left.boundary.decision_at(),
         )
             .cmp(&(
                 right.market_id.as_str(),
                 right.token_id.as_str(),
+                right
+                    .lot_context
+                    .map(|context| context.order_intent_id.to_string())
+                    .unwrap_or_default(),
+                right
+                    .lot_context
+                    .map(|context| context.position_id.to_string())
+                    .unwrap_or_default(),
                 right.boundary.decision_at(),
             ))
     });
@@ -642,15 +684,11 @@ pub fn verify_dataset_manifest(
     manifest: &DatasetManifest,
     examples: &[TrainingExample],
 ) -> QuantResult<()> {
-    if manifest.format_version != DATASET_ARTIFACT_FORMAT_VERSION {
-        return Err(ResearchError::DatasetBuild {
-            detail: format!(
-                "unsupported dataset manifest format {}, expected {}",
-                manifest.format_version, DATASET_ARTIFACT_FORMAT_VERSION
-            ),
-        }
-        .into());
-    }
+    manifest
+        .validate()
+        .map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("invalid dataset manifest contract: {error}"),
+        })?;
     let sample_count =
         u64::try_from(examples.len()).map_err(|error| ResearchError::DatasetBuild {
             detail: format!("dataset row count conversion failed: {error}"),
@@ -666,16 +704,35 @@ pub fn verify_dataset_manifest(
     }
     for example in examples {
         validate_example_boundary(example, manifest)?;
+        example.validate_sample_contract()?;
         (example).validate_example_capture()?;
+        if example.labels.windows(2).any(|pair| {
+            (&pair[0].label_name, pair[0].horizon_secs)
+                >= (&pair[1].label_name, pair[1].horizon_secs)
+        }) {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "dataset example {} labels are not in unique canonical name/horizon order",
+                    example.example_id
+                ),
+            }
+            .into());
+        }
     }
+    validate_factor_rows(
+        manifest.model_family,
+        &manifest.factor_serving_plane,
+        examples,
+    )?;
     let semantic_hash = TrainingDatasetArtifact::compute_dataset_hash(
         DatasetHashContract {
             model_spec_id: &manifest.model_spec_id,
+            model_family: manifest.model_family,
             window_start: manifest.window_start,
             window_end: manifest.window_end,
             purpose: manifest.purpose,
             feature_schema_hash: &manifest.feature_schema_hash,
-            factor_schema_hash: &manifest.factor_schema_hash,
+            factor_serving_plane: &manifest.factor_serving_plane,
             label_schema_hash: &manifest.label_schema_hash,
         },
         examples,
@@ -698,6 +755,48 @@ pub fn verify_dataset_manifest(
             ),
         }
         .into());
+    }
+    Ok(())
+}
+
+fn validate_factor_rows(
+    model_family: ModelFamily,
+    factor_serving_plane: &FactorServingPlane,
+    examples: &[TrainingExample],
+) -> QuantResult<()> {
+    let definitions = factor_serving_plane.definitions();
+    for example in examples {
+        if model_family.is_classical() && !example.factor_values.is_empty() {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "classical dataset example {} contains factor values",
+                    example.example_id
+                ),
+            }
+            .into());
+        }
+        if model_family.is_classical() {
+            continue;
+        }
+        if example.factor_values.len() != definitions.len() {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "dataset example {} is not in exact canonical governed factor-plane order",
+                    example.example_id
+                ),
+            }
+            .into());
+        }
+        for (factor, revision) in example.factor_values.iter().zip(definitions) {
+            factor
+                .validate_against(revision)
+                .map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "dataset example {} carries invalid factor `{}`: {error}",
+                        example.example_id, factor.name
+                    ),
+                })?;
+        }
     }
     Ok(())
 }
@@ -753,7 +852,9 @@ fn validate_example_boundary(
                 .filter_map(|(_, cell)| cell.evidence.as_ref()),
         )
     {
-        let cutoff = decision_source_for_evidence(evidence.source_kind)
+        let cutoff = evidence
+            .source_kind
+            .decision_source()
             .map_or(decision_at, |source| boundary.cutoff_for(source));
         if evidence.effective_at > cutoff {
             return Err(ResearchError::DatasetBuild {
@@ -784,6 +885,48 @@ fn validate_example_boundary(
 }
 
 impl TrainingExample {
+    fn validate_sample_contract(&self) -> QuantResult<()> {
+        let valid = match self.sample_source {
+            TrainingSampleSource::HistoricalPit | TrainingSampleSource::RecommendationFeedback => {
+                self.lot_context.is_none()
+                    && self.position_state.is_none()
+                    && self.book_fidelity.is_none()
+            }
+            TrainingSampleSource::ExitDecision => {
+                let Some(lot) = self.lot_context.as_ref() else {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "exit-decision example {} has no lot context",
+                            self.example_id
+                        ),
+                    }
+                    .into());
+                };
+                self.position_state.is_some()
+                    && self.book_fidelity == Some(BookFidelity::FullL2)
+                    && lot.remaining_shares.is_positive()
+                    && !lot.avg_price.is_zero()
+                    && lot.max_hold_secs > 0
+                    && lot.opened_at <= self.decision_at()
+                    && match lot.outcome_side {
+                        OutcomeSide::Yes | OutcomeSide::No => {
+                            self.selected_market.primary_token_id == self.token_id
+                        }
+                    }
+            }
+        };
+        if !valid {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "example {} violates the exact {:?} sample-source field contract",
+                    self.example_id, self.sample_source
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     fn validate_example_capture(&self) -> QuantResult<()> {
         let capture =
             self.decision_capture
@@ -820,28 +963,17 @@ impl TrainingExample {
     }
 }
 
-const fn decision_source_for_evidence(source: EvidenceSourceKind) -> Option<DecisionSource> {
-    match source {
-        EvidenceSourceKind::Book => Some(DecisionSource::Book),
-        EvidenceSourceKind::GammaMetadata => Some(DecisionSource::Catalog),
-        EvidenceSourceKind::ClickHouseFact => Some(DecisionSource::Microstructure),
-        EvidenceSourceKind::TradeTape => Some(DecisionSource::TradeTape),
-        EvidenceSourceKind::DomainExternal => Some(DecisionSource::DomainCrypto),
-        EvidenceSourceKind::Linkage => Some(DecisionSource::Linkage),
-        EvidenceSourceKind::Derived => None,
-    }
-}
-
 /// Canonical, surrogate-free projection used to compute `dataset_hash`.
 ///
 /// Excludes the dataset id, parquet URI, and per-row surrogate ids so the hash
-/// is a pure function of the schema bindings + the materialized content. Any
+/// is a pure function of the full governed bindings + materialized content. Any
 /// change to a feature value, factor value, or label flips the digest; a rename
 /// of a surrogate id does not.
 #[derive(Serialize)]
 struct DatasetHashInput<'a> {
     format_version: u32,
     model_spec_id: &'a ModelSpecId,
+    model_family: ModelFamily,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
     /// Included so a `Training` dataset never collides with a `Calibration`
@@ -851,7 +983,7 @@ struct DatasetHashInput<'a> {
     /// silently conflated by a shared hash.
     purpose: DatasetPurpose,
     feature_schema_hash: &'a ContentHash,
-    factor_schema_hash: &'a ContentHash,
+    factor_serving_plane: &'a FactorServingPlane,
     label_schema_hash: &'a ContentHash,
     examples: Vec<CanonicalExample<'a>>,
 }
@@ -864,12 +996,12 @@ struct CanonicalExample<'a> {
     selected_market: &'a SelectedMarket,
     decision_boundary: &'a DecisionBoundary,
     sample_source: TrainingSampleSource,
-    order_intent_id: Option<&'a OrderIntentId>,
+    lot_context: Option<&'a LotTrainingContext>,
     feature_vector: &'a FeatureVector,
-    factor_values: &'a [FactorValue],
+    factor_values: Vec<&'a FactorValue>,
     position_state: Option<&'a PositionStateFeatures>,
     book_fidelity: Option<BookFidelity>,
-    labels: &'a [TrainingLabel],
+    labels: Vec<&'a TrainingLabel>,
     decision_capture: Option<&'a DecisionCaptureEvidence>,
 }
 
@@ -883,6 +1015,8 @@ struct CanonicalExample<'a> {
 pub struct DatasetHashContract<'a> {
     /// Owning immutable model specification.
     pub model_spec_id: &'a ModelSpecId,
+    /// Immutable estimator family of the owning model specification.
+    pub model_family: ModelFamily,
     /// Inclusive dataset decision-window start.
     pub window_start: DateTime<Utc>,
     /// Exclusive dataset decision-window end.
@@ -891,14 +1025,14 @@ pub struct DatasetHashContract<'a> {
     pub purpose: DatasetPurpose,
     /// Frozen governed feature-schema hash.
     pub feature_schema_hash: &'a ContentHash,
-    /// Frozen factor-definition/schema hash.
-    pub factor_schema_hash: &'a ContentHash,
+    /// Complete frozen factor-definition plane.
+    pub factor_serving_plane: &'a FactorServingPlane,
     /// Frozen label-schema hash.
     pub label_schema_hash: &'a ContentHash,
 }
 
 impl TrainingDatasetArtifact {
-    /// Compute the content hash over schema bindings + canonical example content.
+    /// Compute the content hash over governed bindings + canonical example content.
     ///
     /// Examples are sorted by `(market_id, token_id, decision_at)` so build order never
     /// perturbs the digest.
@@ -917,7 +1051,7 @@ impl TrainingDatasetArtifact {
                 a.token_id.as_str(),
                 a.lot_context
                     .as_ref()
-                    .map(|ctx| ctx.order_intent_id.to_string())
+                    .map(|ctx| (ctx.order_intent_id.to_string(), ctx.position_id.to_string()))
                     .unwrap_or_default(),
                 a.decision_at(),
             )
@@ -926,36 +1060,53 @@ impl TrainingDatasetArtifact {
                     b.token_id.as_str(),
                     b.lot_context
                         .as_ref()
-                        .map(|ctx| ctx.order_intent_id.to_string())
+                        .map(|ctx| (ctx.order_intent_id.to_string(), ctx.position_id.to_string()))
                         .unwrap_or_default(),
                     b.decision_at(),
                 ))
         });
         let canonical = ordered
             .into_iter()
-            .map(|e| CanonicalExample {
-                market_id: &e.market_id,
-                token_id: &e.token_id,
-                selected_market: &e.selected_market,
-                decision_boundary: &e.decision_boundary,
-                sample_source: e.sample_source,
-                order_intent_id: e.lot_context.as_ref().map(|ctx| &ctx.order_intent_id),
-                feature_vector: &e.feature_vector,
-                factor_values: &e.factor_values,
-                position_state: e.position_state.as_ref(),
-                book_fidelity: e.book_fidelity,
-                labels: &e.labels,
-                decision_capture: e.decision_capture.as_ref(),
+            .map(|e| {
+                let mut factor_values = e.factor_values.iter().collect::<Vec<_>>();
+                factor_values.sort_unstable_by(|left, right| {
+                    left.name.cmp(&right.name).then_with(|| {
+                        left.definition_id
+                            .as_uuid()
+                            .cmp(&right.definition_id.as_uuid())
+                    })
+                });
+                let mut labels = e.labels.iter().collect::<Vec<_>>();
+                labels.sort_unstable_by(|left, right| {
+                    left.label_name
+                        .cmp(&right.label_name)
+                        .then_with(|| left.horizon_secs.cmp(&right.horizon_secs))
+                });
+                CanonicalExample {
+                    market_id: &e.market_id,
+                    token_id: &e.token_id,
+                    selected_market: &e.selected_market,
+                    decision_boundary: &e.decision_boundary,
+                    sample_source: e.sample_source,
+                    lot_context: e.lot_context.as_ref(),
+                    feature_vector: &e.feature_vector,
+                    factor_values,
+                    position_state: e.position_state.as_ref(),
+                    book_fidelity: e.book_fidelity,
+                    labels,
+                    decision_capture: e.decision_capture.as_ref(),
+                }
             })
             .collect();
         ResearchHasher::canonical(&DatasetHashInput {
             format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             model_spec_id: contract.model_spec_id,
+            model_family: contract.model_family,
             window_start: contract.window_start,
             window_end: contract.window_end,
             purpose: contract.purpose,
             feature_schema_hash: contract.feature_schema_hash,
-            factor_schema_hash: contract.factor_schema_hash,
+            factor_serving_plane: contract.factor_serving_plane,
             label_schema_hash: contract.label_schema_hash,
             examples: canonical,
         })
@@ -1229,24 +1380,123 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         domain::data_plane::{DecisionClock, DecisionSource},
-        enums::quant::DatasetPurpose,
+        enums::{
+            factor::{FactorFamily, FactorNormalization},
+            model::ModelFamily,
+            quant::{DatasetPurpose, FactorDirection, OutcomeSide},
+        },
         hashing::CanonicalDigest,
-        types::{ContentHash, ModelSpecId},
+        types::{
+            ContentHash, ModelSpecId, OrderIntentId, PositionId, Price, Probability, SchemaVersion,
+            Shares, TrainingSampleSource,
+            factor::{
+                FactorComputationContract, FactorContextEffect, FactorDefinitionDocument,
+                FactorDefinitionRef, FactorExplanation, FactorOutputSemantics, FactorServingPlane,
+            },
+            stable_name::FactorName,
+        },
     };
     use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
 
     use super::{
-        DatasetHashContract, PolicySimulationLabels, PolicySimulationOutcome,
+        DatasetHashContract, LotTrainingContext, PolicySimulationLabels, PolicySimulationOutcome,
         TrainingDatasetArtifact, TrainingExample, dataset_source_fingerprint, fixtures::example,
-        policy_simulation_labels,
+        policy_simulation_labels, validate_factor_rows,
     };
+    use crate::factors::{FactorValue, NormalizedFactor};
 
-    fn hashes() -> (ContentHash, ContentHash, ContentHash) {
+    fn hashes() -> (ContentHash, ContentHash) {
         (
             CanonicalDigest::content_hash_json("feature").expect("h"),
-            CanonicalDigest::content_hash_json("factor").expect("h"),
             CanonicalDigest::content_hash_json("label").expect("h"),
         )
+    }
+
+    fn factor_plane(feature_hash: ContentHash) -> FactorServingPlane {
+        let revision = FactorDefinitionRef::try_seal(
+            FactorDefinitionDocument {
+                name: FactorName::new("test.alpha"),
+                family: FactorFamily::Liquidity,
+                input_features: Vec::new(),
+                output: FactorOutputSemantics::Context {
+                    effect: FactorContextEffect::HigherIsSupportive,
+                },
+                normalization: FactorNormalization::MinMax,
+                owner: "research-tests".to_owned(),
+                required: false,
+                computation: FactorComputationContract {
+                    semantic_version: 1,
+                    semantic_key: "raw=test-alpha-v1;engine=normalization-v1".to_owned(),
+                },
+            },
+            feature_hash,
+            SchemaVersion::FIRST,
+            SchemaVersion::FIRST,
+        )
+        .expect("sealed factor revision");
+        FactorServingPlane::try_seal(vec![revision]).expect("sealed factor plane")
+    }
+
+    fn factor_value(plane: &FactorServingPlane) -> FactorValue {
+        let revision = &plane.definitions()[0];
+        FactorValue {
+            definition_id: revision.factor_definition_id(),
+            name: revision.factor_name().clone(),
+            family: revision.definition().family,
+            raw_value: None,
+            normalization: NormalizedFactor::MissingInput,
+            direction: FactorDirection::Neutral,
+            confidence: Probability::ZERO,
+            explanation: FactorExplanation {
+                headline: "fixture missing input".to_owned(),
+                drivers: Vec::new(),
+            },
+            input_feature_refs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn factor_rows_exact_plane() {
+        let feature_hash = CanonicalDigest::content_hash_json("feature").expect("feature hash");
+        let plane = factor_plane(feature_hash);
+        let mut exact = example("aaa", 100);
+        exact.factor_values = vec![factor_value(&plane)];
+        assert!(
+            validate_factor_rows(ModelFamily::WeightedFactor, &plane, &[exact.clone()]).is_ok()
+        );
+
+        let mut wrong_name = exact.clone();
+        wrong_name.factor_values[0].name = FactorName::new("test.other");
+        assert!(validate_factor_rows(ModelFamily::WeightedFactor, &plane, &[wrong_name]).is_err());
+
+        let mut duplicate = exact;
+        duplicate
+            .factor_values
+            .push(duplicate.factor_values[0].clone());
+        assert!(validate_factor_rows(ModelFamily::WeightedFactor, &plane, &[duplicate]).is_err());
+
+        assert!(
+            validate_factor_rows(
+                ModelFamily::WeightedFactor,
+                &plane,
+                &[example("missing", 100)]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn classical_rows_factor_free() {
+        let feature_hash = CanonicalDigest::content_hash_json("feature").expect("feature hash");
+        let native_plane = factor_plane(feature_hash);
+        let empty_plane = FactorServingPlane::try_empty().expect("canonical factor-free plane");
+        let mut example = example("aaa", 100);
+        example.factor_values = vec![factor_value(&native_plane)];
+        assert!(
+            validate_factor_rows(ModelFamily::ClassicalRandomForest, &empty_plane, &[example])
+                .is_err()
+        );
     }
 
     #[test]
@@ -1280,16 +1530,19 @@ mod tests {
         examples: &[TrainingExample],
         purpose: DatasetPurpose,
     ) -> ContentHash {
-        let (feature, factor, label) = hashes();
+        let (feature, label) = hashes();
+        let factor_serving_plane =
+            FactorServingPlane::try_empty().expect("canonical factor-free plane");
         let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
         TrainingDatasetArtifact::compute_dataset_hash(
             DatasetHashContract {
                 model_spec_id,
+                model_family: ModelFamily::ClassicalRandomForest,
                 window_start: start,
                 window_end: start,
                 purpose,
                 feature_schema_hash: &feature,
-                factor_schema_hash: &factor,
+                factor_serving_plane: &factor_serving_plane,
                 label_schema_hash: &label,
             },
             examples,
@@ -1312,6 +1565,39 @@ mod tests {
         let base = vec![example("aaa", 100)];
         let changed = vec![example("aaa", 101)];
         assert_ne!(dataset_hash(&spec, &base), dataset_hash(&spec, &changed));
+    }
+
+    #[test]
+    fn dataset_hash_binds_lots() {
+        let spec = ModelSpecId::from_v7();
+        let mut base = example("lot", 100);
+        base.sample_source = TrainingSampleSource::ExitDecision;
+        base.lot_context = Some(LotTrainingContext {
+            order_intent_id: OrderIntentId::from_v7(),
+            position_id: PositionId::from_v7(),
+            outcome_side: OutcomeSide::No,
+            remaining_shares: Shares::new(dec!(100)),
+            avg_price: Price::new(dec!(0.45)),
+            peak_mark: Some(Price::new(dec!(0.62))),
+            opened_at: base.decision_at(),
+            max_hold_secs: 86_400,
+        });
+        let mut changed = base.clone();
+        changed
+            .lot_context
+            .as_mut()
+            .expect("lot context")
+            .remaining_shares = Shares::new(dec!(99));
+
+        assert_ne!(
+            dataset_hash(&spec, std::slice::from_ref(&base)),
+            dataset_hash(&spec, std::slice::from_ref(&changed))
+        );
+        assert_ne!(
+            dataset_source_fingerprint(std::slice::from_ref(&base)).expect("base fingerprint"),
+            dataset_source_fingerprint(std::slice::from_ref(&changed))
+                .expect("changed fingerprint")
+        );
     }
 
     #[test]

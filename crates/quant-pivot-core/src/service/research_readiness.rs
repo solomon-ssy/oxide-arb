@@ -440,82 +440,46 @@ fn evidence_scope_hash(
     .map_err(Into::into)
 }
 
-/// Periodic producer. It measures `ClickHouse` directly, writes content-addressed
-/// evidence, then appends the signed index row.
-pub struct ResearchReadinessEvidenceProducer {
+/// Atomic owner of content-addressed readiness bytes, attestation, and the
+/// append-only `PostgreSQL` index row.
+pub struct ResearchReadinessEvidenceWriter {
     repo: Arc<dyn ResearchReadinessEvidenceRepository>,
     artifacts: Arc<dyn ArtifactStore>,
-    clickhouse: Arc<ClickHousePool>,
-    catalog: Arc<dyn CatalogLedgerRepository>,
-    clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     attestor: Option<EvidenceAttestor>,
     scope: EvidenceScopeIdentity,
-    source_registry: ResearchSourceRegistry,
 }
 
-impl ResearchReadinessEvidenceProducer {
-    pub fn new(
+impl ResearchReadinessEvidenceWriter {
+    #[must_use]
+    pub const fn new(
         repo: Arc<dyn ResearchReadinessEvidenceRepository>,
         artifacts: Arc<dyn ArtifactStore>,
-        clickhouse: Arc<ClickHousePool>,
-        catalog: Arc<dyn CatalogLedgerRepository>,
-        clob_market_info: Arc<dyn ClobMarketInfoRepository>,
         attestor: Option<EvidenceAttestor>,
         scope: EvidenceScopeIdentity,
-    ) -> QuantResult<Self> {
-        let source_registry = research_source_registry().map_err(methodology)?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             repo,
             artifacts,
-            clickhouse,
-            catalog,
-            clob_market_info,
             attestor,
             scope,
-            source_registry,
-        })
+        }
     }
 
-    pub async fn capture(&self, required_days: u32) -> QuantResult<bool> {
-        let Some(attestor) = self.attestor.as_ref() else {
-            tracing::warn!(
-                "research readiness evidence producer disabled: attestation key is not configured"
-            );
-            return Ok(false);
-        };
-        let observed_at = Utc::now();
-        let retention = self.capture_retention(required_days, observed_at).await?;
-        self.persist(
-            ResearchReadinessEvidenceKind::RetentionRunway,
-            ResearchReadinessEvidencePayload::RetentionRunway(retention),
-            observed_at - Duration::days(i64::from(required_days)),
-            observed_at,
-            observed_at,
-            attestor,
-        )
-        .await?;
-        let latency = self.capture_shadow_latency(observed_at).await?;
-        self.persist(
-            ResearchReadinessEvidenceKind::ShadowLatencyProfile,
-            ResearchReadinessEvidencePayload::ShadowLatencyProfile(latency),
-            observed_at - LATENCY_WINDOW,
-            observed_at,
-            observed_at,
-            attestor,
-        )
-        .await?;
-        Ok(true)
-    }
-
-    async fn persist(
+    /// Persist one immutable typed observation and return its exact index row.
+    pub async fn persist(
         &self,
         kind: ResearchReadinessEvidenceKind,
         payload: ResearchReadinessEvidencePayload,
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
         observed_at: DateTime<Utc>,
-        attestor: &EvidenceAttestor,
-    ) -> QuantResult<()> {
+    ) -> QuantResult<ResearchReadinessEvidenceInfo> {
+        let attestor =
+            self.attestor
+                .as_ref()
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: "readiness evidence attestation key is not configured".to_owned(),
+                })?;
         let expires_at = observed_at + EVIDENCE_VALID_FOR;
         let bytes = CanonicalDigest::canonical_json_bytes(&payload).map_err(|error| {
             QuantError::from(ResearchError::Serialization {
@@ -569,8 +533,70 @@ impl ResearchReadinessEvidenceProducer {
                 attestation_key_id: attestor.active_key_id.clone(),
                 attestation_mac,
             })
+            .await
+            .map_err(Into::into)
+    }
+}
+
+/// Periodic producer. It measures `ClickHouse` directly, writes content-addressed
+/// evidence, then appends the signed index row.
+pub struct ResearchReadinessEvidenceProducer {
+    writer: ResearchReadinessEvidenceWriter,
+    clickhouse: Arc<ClickHousePool>,
+    catalog: Arc<dyn CatalogLedgerRepository>,
+    clob_market_info: Arc<dyn ClobMarketInfoRepository>,
+    source_registry: ResearchSourceRegistry,
+}
+
+impl ResearchReadinessEvidenceProducer {
+    pub fn new(
+        repo: Arc<dyn ResearchReadinessEvidenceRepository>,
+        artifacts: Arc<dyn ArtifactStore>,
+        clickhouse: Arc<ClickHousePool>,
+        catalog: Arc<dyn CatalogLedgerRepository>,
+        clob_market_info: Arc<dyn ClobMarketInfoRepository>,
+        attestor: Option<EvidenceAttestor>,
+        scope: EvidenceScopeIdentity,
+    ) -> QuantResult<Self> {
+        let source_registry = research_source_registry().map_err(methodology)?;
+        Ok(Self {
+            writer: ResearchReadinessEvidenceWriter::new(repo, artifacts, attestor, scope),
+            clickhouse,
+            catalog,
+            clob_market_info,
+            source_registry,
+        })
+    }
+
+    pub async fn capture(&self, required_days: u32) -> QuantResult<bool> {
+        if self.writer.attestor.is_none() {
+            tracing::warn!(
+                "research readiness evidence producer disabled: attestation key is not configured"
+            );
+            return Ok(false);
+        }
+        let observed_at = Utc::now();
+        let retention = self.capture_retention(required_days, observed_at).await?;
+        self.writer
+            .persist(
+                ResearchReadinessEvidenceKind::RetentionRunway,
+                ResearchReadinessEvidencePayload::RetentionRunway(retention),
+                observed_at - Duration::days(i64::from(required_days)),
+                observed_at,
+                observed_at,
+            )
             .await?;
-        Ok(())
+        let latency = self.capture_shadow_latency(observed_at).await?;
+        self.writer
+            .persist(
+                ResearchReadinessEvidenceKind::ShadowLatencyProfile,
+                ResearchReadinessEvidencePayload::ShadowLatencyProfile(latency),
+                observed_at - LATENCY_WINDOW,
+                observed_at,
+                observed_at,
+            )
+            .await?;
+        Ok(true)
     }
 
     async fn capture_retention(
@@ -669,6 +695,7 @@ impl ResearchReadinessEvidenceProducer {
             .observe_book_latency(window_start, observed_at)
             .await?;
         let pg = self
+            .writer
             .repo
             .observe_shadow_latency(window_start, observed_at)
             .await?;

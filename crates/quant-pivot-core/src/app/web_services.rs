@@ -22,10 +22,9 @@ use quant_pivot_repository::{
         FeatureParityEventRepository, FeatureRepository, MenuRepository, OperationLogRepository,
         OrderIntentRepository, PolicyRepository, PositionRepository,
         RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-        ReportRunRepository, ResearchReadinessEvidenceRepository, RoleMenuRepository,
-        RolePermissionRepository, RoleRepository, ServingEvidenceRepository, TradePolicyRepository,
-        TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
-        quant::settlement_redeem::SettlementRedeemRepository,
+        ReportRunRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
+        ServingEvidenceRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
+        UserRepository, UserRoleRepository, quant::settlement_redeem::SettlementRedeemRepository,
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
@@ -64,9 +63,7 @@ use crate::{
     service::{
         feature_integrity::{CatalogFeatureIntegrityCoverage, FeatureIntegrityService},
         model_calibration_fit::ModelCalibrationFitService,
-        research_readiness::{
-            EvidenceAttestor, EvidenceScopeIdentity, ResearchReadinessEvidenceService,
-        },
+        research_readiness::ResearchReadinessEvidenceService,
         trade_policy::{TradePolicyService, TradePolicyServiceDeps},
     },
 };
@@ -151,7 +148,7 @@ async fn build_app_state(
     let research_ports = (ctx).build_research_web_ports();
     let trade_policy_dataset_builder =
         Arc::clone(&research_ports.training_datasets) as Arc<dyn TrainingDatasetPort>;
-    let research_readiness = (ctx).build_research_readiness()?;
+    let research_readiness = Arc::clone(&ctx.research.research_readiness);
 
     Ok(AppState {
         deploy: Arc::clone(&ctx.config),
@@ -194,7 +191,6 @@ async fn build_app_state(
         backtests: research_ports.backtests,
         cpcv_backtests: research_ports.cpcv_backtests,
         model_governance: Arc::clone(&ctx.research.model_governance),
-        factor_governance: Arc::clone(&ctx.research.factor_governance),
         model_spec: Arc::clone(&ctx.research.model_spec),
         research_catalog: Arc::new(CoreResearchCatalogPort::from_research(&ctx.research)),
         research_jobs,
@@ -257,23 +253,6 @@ async fn build_app_state(
     })
 }
 
-impl AppContext {
-    fn build_research_readiness(&self) -> QuantResult<Arc<ResearchReadinessEvidenceService>> {
-        let attestor = EvidenceAttestor::from_config(&self.config.research.evidence_attestation)?;
-        let evidence_scope = EvidenceScopeIdentity::from_config(
-            &self.config.db.clickhouse,
-            &self.config.research.artifact_store,
-        )?;
-        Ok(Arc::new(ResearchReadinessEvidenceService::new(
-            Arc::clone(&self.infra.repos.research_readiness)
-                as Arc<dyn ResearchReadinessEvidenceRepository>,
-            Arc::clone(&self.research.artifact_store),
-            attestor,
-            &evidence_scope,
-        )?))
-    }
-}
-
 fn build_trade_policy_port(
     ctx: &AppContext,
     dataset_builder: Arc<dyn TrainingDatasetPort>,
@@ -289,7 +268,7 @@ fn build_trade_policy_port(
         runtime_configs: Arc::clone(&ctx.infra.repos.runtime_config) as Arc<dyn PolicyRepository>,
         source_slices: Arc::clone(&ctx.research.source_slice_repo),
         readiness,
-        model_runtime_factory_builder: Arc::clone(&ctx.research.model_runtime_factory_builder),
+        serving_preimages: Arc::clone(&ctx.research.serving_preimages),
     }))
 }
 
@@ -429,18 +408,14 @@ impl AppContext {
         let backtests = Arc::new(CoreBacktestPort::from_research(
             &self.research,
             Arc::clone(&runtime_config),
-            Arc::clone(&bias_table),
         ));
-        let cpcv_backtests = Arc::new(CoreCpcvBacktestPort::from_research(
-            &self.research,
-            Arc::clone(&runtime_config),
-            Arc::clone(&bias_table),
-        ));
+        let cpcv_backtests = Arc::new(CoreCpcvBacktestPort::from_research(&self.research));
         let model_calibration_fit = Arc::new(ModelCalibrationFitService::new(
             Arc::clone(&backtests),
             Arc::clone(&self.research.model_registry_repo),
             Arc::clone(&self.research.training_dataset_repo),
             Arc::clone(&bias_table),
+            Arc::clone(&self.research.model_run_repo),
             Arc::clone(&runtime_config),
         ));
         ResearchWebPorts {

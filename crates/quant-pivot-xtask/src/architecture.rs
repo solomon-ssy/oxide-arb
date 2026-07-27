@@ -98,6 +98,12 @@ pub fn run() -> Result<()> {
     )?);
     violations.extend(validate_phase_ledger(&metadata.workspace_root)?);
     violations.extend(validate_attribution_removal(&metadata.workspace_root)?);
+    violations.extend(validate_factor_publication_removal(
+        &metadata.workspace_root,
+    )?);
+    violations.extend(validate_serving_dead_semantics(&metadata.workspace_root)?);
+    violations.extend(validate_model_serving_registry(&metadata.workspace_root)?);
+    violations.extend(validate_model_category_routes(&metadata.workspace_root)?);
     if violations.is_empty() {
         println!("architecture check passed");
         return Ok(());
@@ -407,6 +413,1057 @@ fn validate_attribution_removal(workspace_root: &Path) -> Result<Vec<String>> {
     }
 
     Ok(violations)
+}
+
+fn validate_factor_publication_removal(workspace_root: &Path) -> Result<Vec<String>> {
+    const REMOVED_PATHS: &[&str] = &[
+        "crates/quant-pivot-core/src/governance/factor_governance.rs",
+        "crates/quant-pivot-models/src/domain/api/factor_governance.rs",
+        "crates/quant-pivot-models/src/domain/ports/factor_governance.rs",
+        "crates/quant-pivot-web/src/routes/factor_governance.rs",
+    ];
+    const REMOVED_TOKENS: &[&str] = &[
+        "FactorGovernanceDeps",
+        "FactorGovernanceAuditId",
+        "FactorGovernancePort",
+        "FactorGovernanceService",
+        "PublishFactorCommand",
+        "PublishFactorRequest",
+        "PublishFactorsBatchCommand",
+        "PublishFactorsBatchRequest",
+        "RegisterFactorDefinitionsCommand",
+        "RegisterFactorDefinitionsRequest",
+        "RetireFactorCommand",
+        "RetireFactorRequest",
+        "publish_definition(",
+        "publish_definitions(",
+        "retire_definition(",
+        "/research/factors/register",
+        "/research/factors/publish-batch",
+        "/research/factors/{id}/publish",
+        "/research/factors/{id}/retire",
+        "factor.register",
+        "factor.publish",
+        "factor.retire",
+        "factor_definition:create",
+        "factor_definition:publish",
+        "factor_definition:retire",
+        "factor_definition:update",
+        "factor_definition:delete",
+        "trg_quant_factor_definition_status_guard",
+        "guard_factor_definition",
+        "uq_quant_factor_definition_published_name",
+        "idx_quant_factor_definition_family_status",
+    ];
+
+    let mut violations = Vec::new();
+    for relative in REMOVED_PATHS {
+        let path = workspace_root.join(relative);
+        if path.exists() {
+            violations.push(format!(
+                "{} retains a removed factor-publication source path",
+                path.display()
+            ));
+        }
+    }
+
+    let mut source_paths = Vec::new();
+    for relative in [
+        "crates",
+        "schema",
+        "config",
+        "ui/apps/web-antdv-next/src",
+        "ui/packages/types/src",
+    ] {
+        collect_contract_sources(&workspace_root.join(relative), &mut source_paths)?;
+    }
+    source_paths.sort();
+    let gate_source = workspace_root.join("crates/quant-pivot-xtask/src/architecture.rs");
+    for path in source_paths {
+        if path == gate_source {
+            continue;
+        }
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        for token in REMOVED_TOKENS {
+            if source.contains(token) {
+                violations.push(format!(
+                    "{} retains removed factor-publication contract `{token}`",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(violations)
+}
+
+fn validate_serving_dead_semantics(workspace_root: &Path) -> Result<Vec<String>> {
+    const REMOVED_PATHS: &[&str] = &[
+        "crates/quant-pivot-research/src/model/factory.rs",
+        "crates/quant-pivot-research/src/model/routing.rs",
+    ];
+    const REMOVED_TOKENS: &[&str] = &[
+        "FactorBundleId",
+        "FactorValueModel",
+        "ModelRuntimeFactory",
+        "DefaultModelRuntimeFactory",
+        "load_verified_artifact",
+        "model_runtime_factory_builder",
+        "pub fn resolve_model_route(",
+        "pub fn generic_model_version_id(",
+        "pub fn version_id_for_category(",
+        "pub fn replace(&self, config: DecisionPolicySnapshot)",
+    ];
+
+    let mut violations = Vec::new();
+    for relative in REMOVED_PATHS {
+        let path = workspace_root.join(relative);
+        if path.exists() {
+            violations.push(format!(
+                "{} retains a removed serving abstraction path",
+                path.display()
+            ));
+        }
+    }
+
+    let mut source_paths = Vec::new();
+    collect_contract_sources(&workspace_root.join("crates"), &mut source_paths)?;
+    source_paths.sort();
+    let gate_source = workspace_root.join("crates/quant-pivot-xtask/src/architecture.rs");
+    for path in source_paths {
+        if path == gate_source {
+            continue;
+        }
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        for token in REMOVED_TOKENS {
+            if source.contains(token) {
+                violations.push(format!(
+                    "{} retains removed serving/dead contract `{token}`",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    let (artifact_path, artifact) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-research/src/model/artifact.rs",
+    )?;
+    let (preimage_path, preimage) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/service/model_serving_preimage.rs",
+    )?;
+    let (registry_path, registry) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/service/model_serving_registry.rs",
+    )?;
+    for (path, source, needle, expected, invariant) in [
+        (
+            &artifact_path,
+            artifact.as_str(),
+            "pub async fn load_verified(",
+            1,
+            "ModelArtifact must solely own verified artifact loading",
+        ),
+        (
+            &preimage_path,
+            preimage.as_str(),
+            "estimator_bytes: Option<Vec<u8>>",
+            1,
+            "the verified preimage must retain classical estimator bytes",
+        ),
+        (
+            &preimage_path,
+            preimage.as_str(),
+            "calibration: Option<ResolvedCalibration>",
+            1,
+            "the verified preimage must retain the resolved root calibration",
+        ),
+        (
+            &preimage_path,
+            preimage.as_str(),
+            "pub fn buy_runtime(&self)",
+            1,
+            "the verified preimage must solely construct Buy runtimes",
+        ),
+        (
+            &preimage_path,
+            preimage.as_str(),
+            "pub fn sell_runtime(&self)",
+            1,
+            "the verified preimage must solely construct Sell runtimes",
+        ),
+        (
+            &registry_path,
+            registry.as_str(),
+            ".buy_runtime()",
+            1,
+            "the serving registry must build from its verified preimage",
+        ),
+    ] {
+        require_exact_occurrences(&mut violations, path, source, needle, expected, invariant);
+    }
+    Ok(violations)
+}
+
+fn validate_model_serving_registry(workspace_root: &Path) -> Result<Vec<String>> {
+    let (registry_path, registry) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/service/model_serving_registry.rs",
+    )?;
+    let (runner_path, runner) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/service/model_runner.rs",
+    )?;
+    let (factor_path, factor) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/service/factor_pipeline.rs",
+    )?;
+    let (bundle_path, bundle) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/app/bundles/research.rs",
+    )?;
+    let (bootstrap_path, bootstrap) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/app/bootstrap.rs",
+    )?;
+    let mut violations = validate_registry_cache(&registry_path, &registry);
+    violations.extend(validate_registry_consumers(
+        &runner_path,
+        &runner,
+        &factor_path,
+        &factor,
+    ));
+    violations.extend(validate_registry_wiring(
+        &bundle_path,
+        &bundle,
+        &bootstrap_path,
+        &bootstrap,
+    ));
+    Ok(violations)
+}
+
+fn validate_registry_cache(registry_path: &Path, registry: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let production_registry = registry
+        .split_once("#[cfg(test)]")
+        .map_or(registry, |(production, _)| production);
+    for (needle, expected, invariant) in [
+        (
+            "cache: Cache<ContentHash, Arc<LoadedModelServingRuntime>>",
+            1,
+            "the validated serving-contract hash must be the sole runtime cache key",
+        ),
+        (
+            ".max_capacity(config.max_cached_contracts)",
+            1,
+            "the successful runtime cache must have one deploy-time capacity budget",
+        ),
+        (
+            "FactorExecutionPlane::try_new(",
+            1,
+            "the deep preimage loader must construct the factor execution plane",
+        ),
+        (
+            "cache.invalidate_all()",
+            1,
+            "registry shutdown must make every successful entry invisible",
+        ),
+    ] {
+        require_exact_occurrences(
+            &mut violations,
+            registry_path,
+            production_registry,
+            needle,
+            expected,
+            invariant,
+        );
+    }
+    require_exact_occurrences(
+        &mut violations,
+        registry_path,
+        production_registry,
+        "Cache<ModelVersionId",
+        0,
+        "model-version ids and artifact headers must not become parallel cache identities",
+    );
+
+    let load_section = registry
+        .split_once("/// Load one exact contract")
+        .and_then(|(_, tail)| tail.split_once("/// Stop admission").map(|(load, _)| load));
+    let Some(load_section) = load_section else {
+        violations.push(format!(
+            "{} is missing the canonical registry load section",
+            registry_path.display()
+        ));
+        return violations;
+    };
+    for (needle, expected, invariant) in [
+        (
+            "version.verified_serving_contract()",
+            1,
+            "cache lookup must begin with full model-version contract validation",
+        ),
+        (
+            "let key = contract.contract_hash();",
+            1,
+            "only the validated contract identity may key the cache",
+        ),
+        (
+            "self.cache.get(&key).await",
+            2,
+            "cache hits must be checked before and after bounded pending admission",
+        ),
+        (
+            "cached.verify_version(version, contract)?",
+            2,
+            "every successful cache hit must revalidate exact version projections",
+        ),
+        (
+            "try_acquire_owned()",
+            1,
+            "cold misses must fail closed at the bounded pending-call budget",
+        ),
+        (
+            "builders.acquire_owned()",
+            1,
+            "cold initialization must obey the bounded builder budget",
+        ),
+        (
+            "self.cache.try_get_with(key, init)",
+            1,
+            "same-contract misses must share one fallible successful-only initializer",
+        ),
+        (
+            "result.verify_version(version, contract)?",
+            1,
+            "a newly initialized entry must be revalidated before publication",
+        ),
+    ] {
+        require_exact_occurrences(
+            &mut violations,
+            registry_path,
+            load_section,
+            needle,
+            expected,
+            invariant,
+        );
+    }
+    violations
+}
+
+fn validate_registry_consumers(
+    runner_path: &Path,
+    runner: &str,
+    factor_path: &Path,
+    factor: &str,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for token in [
+        "ModelRuntimeFactoryBuilder",
+        "ModelServingPreimageService",
+        "BiasTableApplicator",
+        "FactorExecutionPlane::try_new",
+        "FactorEngine::for_model_scope",
+        "FactorServingPlane",
+    ] {
+        require_exact_occurrences(
+            &mut violations,
+            runner_path,
+            runner,
+            token,
+            0,
+            "online inference must consume the canonical registry rather than rebuild serving state",
+        );
+    }
+
+    let request_section = factor
+        .split_once("pub struct FactorPipelineRequest<'a>")
+        .and_then(|(_, tail)| {
+            tail.split_once("/// A market excluded")
+                .map(|(request, _)| request)
+        });
+    let Some(request_section) = request_section else {
+        violations.push(format!(
+            "{} is missing the canonical factor-pipeline request",
+            factor_path.display()
+        ));
+        return violations;
+    };
+    require_exact_occurrences(
+        &mut violations,
+        factor_path,
+        request_section,
+        "pub factor_execution: &'a FactorExecutionPlane",
+        1,
+        "the online factor pipeline must receive one registry-owned execution plane",
+    );
+    for token in [
+        "pub factors:",
+        "pub features:",
+        "pub domain:",
+        "pub category_scope:",
+        "pub factor_serving_plane:",
+        "pub bias_table:",
+    ] {
+        require_exact_occurrences(
+            &mut violations,
+            factor_path,
+            request_section,
+            token,
+            0,
+            "callers must not reconstruct a factor plane from raw policy or header projections",
+        );
+    }
+    violations
+}
+
+fn validate_registry_wiring(
+    bundle_path: &Path,
+    bundle: &str,
+    bootstrap_path: &Path,
+    bootstrap: &str,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (path, source, needle, expected, invariant) in [
+        (
+            bundle_path,
+            bundle,
+            "pub runtime_registry: Arc<ModelServingRuntimeRegistry>",
+            1,
+            "the research bundle must own one process-wide serving registry",
+        ),
+        (
+            bundle_path,
+            bundle,
+            "ModelServingRuntimeRegistry::new(",
+            1,
+            "production bootstrap must construct the canonical registry exactly once",
+        ),
+        (
+            bootstrap_path,
+            bootstrap,
+            "ctx.research.runtime_registry.shutdown().await",
+            1,
+            "application shutdown must explicitly drain the serving registry",
+        ),
+    ] {
+        require_exact_occurrences(&mut violations, path, source, needle, expected, invariant);
+    }
+
+    violations
+}
+
+fn validate_model_category_routes(workspace_root: &Path) -> Result<Vec<String>> {
+    let (owner_path, owner) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-models/src/runtime_config/mod.rs",
+    )?;
+    let (validation_path, validation) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-models/src/runtime_config/validation.rs",
+    )?;
+    let (runner_path, runner) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/service/model_runner.rs",
+    )?;
+    let (report_path, report) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/report/builder.rs",
+    )?;
+    let (generation_path, generation) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/service/model_serving_generation.rs",
+    )?;
+    let (applicator_path, applicator) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/runtime_config/applicator.rs",
+    )?;
+    let (research_path, research) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/app/bundles/research.rs",
+    )?;
+    let (governance_path, governance) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/app/bundles/governance.rs",
+    )?;
+    let (build_path, build) =
+        read_architecture_source(workspace_root, "crates/quant-pivot-core/src/app/build.rs")?;
+    let (parity_path, parity) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/service/durable_feature_parity.rs",
+    )?;
+    let (policy_path, policy) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/service/trade_policy.rs",
+    )?;
+    let (preflight_path, preflight) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/governance/mode_preflight.rs",
+    )?;
+    let (capability_path, capability) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-core/src/governance/system_capability.rs",
+    )?;
+    let (repository_path, repository) = read_architecture_source(
+        workspace_root,
+        "crates/quant-pivot-repository/src/postgres/quant/model_registry.rs",
+    )?;
+    let production_generation = generation
+        .split_once("#[cfg(test)]")
+        .map_or(generation.as_str(), |(production, _)| production);
+    let mut violations =
+        validate_category_owner(&owner_path, &owner, &validation_path, &validation);
+    violations.extend(validate_category_runtime(
+        &runner_path,
+        &runner,
+        &report_path,
+        &report,
+        &generation_path,
+        production_generation,
+    ));
+    violations.extend(validate_atomic_generation(&AtomicGenerationSources {
+        generation: ArchitectureSource {
+            path: &generation_path,
+            text: production_generation,
+        },
+        applicator: ArchitectureSource {
+            path: &applicator_path,
+            text: &applicator,
+        },
+        research: ArchitectureSource {
+            path: &research_path,
+            text: &research,
+        },
+        governance: ArchitectureSource {
+            path: &governance_path,
+            text: &governance,
+        },
+        build: ArchitectureSource {
+            path: &build_path,
+            text: &build,
+        },
+        parity: ArchitectureSource {
+            path: &parity_path,
+            text: &parity,
+        },
+        runner: ArchitectureSource {
+            path: &runner_path,
+            text: &runner,
+        },
+    }));
+    violations.extend(validate_category_governance(
+        &generation_path,
+        production_generation,
+        &policy_path,
+        &policy,
+    ));
+    violations.extend(validate_category_readiness(
+        &preflight_path,
+        &preflight,
+        &capability_path,
+        &capability,
+    ));
+    violations.extend(validate_category_repository(&repository_path, &repository));
+    Ok(violations)
+}
+
+fn validate_category_owner(
+    owner_path: &Path,
+    owner: &str,
+    validation_path: &Path,
+    validation: &str,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (path, source, needle, expected, invariant) in [
+        (
+            owner_path,
+            owner,
+            "pub enum BuyModelRoute {\n    Pooled,\n    Crypto,\n    Weather,\n}",
+            1,
+            "pooled and vertical Buy routing must have one canonical nominal owner",
+        ),
+        (
+            owner_path,
+            owner,
+            "impl TryFrom<&SelectionConfig> for BuyModelRoute",
+            1,
+            "report scope must resolve through the canonical selection conversion",
+        ),
+        (
+            owner_path,
+            owner,
+            "impl TryFrom<Option<MarketCategory>> for BuyModelRoute",
+            1,
+            "only pooled, Crypto, and Weather profile scopes may form Buy routes",
+        ),
+        (
+            owner_path,
+            owner,
+            "pub fn active_pointer(&self, route: BuyModelRoute)",
+            1,
+            "exact pointer lookup must belong to ModelConfig",
+        ),
+        (
+            validation_path,
+            validation,
+            "let route = BuyModelRoute::try_from(selection);",
+            1,
+            "runtime-config validation must consume the canonical route owner",
+        ),
+    ] {
+        require_exact_occurrences(&mut violations, path, source, needle, expected, invariant);
+    }
+    require_exact_occurrences(
+        &mut violations,
+        owner_path,
+        owner,
+        "pub use BuyModelRoute",
+        0,
+        "the route owner must not be exposed through a compatibility re-export",
+    );
+    require_exact_occurrences(
+        &mut violations,
+        owner_path,
+        owner,
+        "impl From<Option<MarketCategory>> for BuyModelRoute",
+        0,
+        "an infallible category conversion would make invalid vertical routes representable",
+    );
+    require_exact_occurrences(
+        &mut violations,
+        owner_path,
+        owner,
+        "BuyModelRoute::Category",
+        0,
+        "the three-state route type must not regain an open MarketCategory payload",
+    );
+    violations
+}
+
+fn validate_category_runtime(
+    runner_path: &Path,
+    runner: &str,
+    report_path: &Path,
+    report: &str,
+    generation_path: &Path,
+    generation: &str,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (path, source, needle, expected, invariant) in [
+        (
+            runner_path,
+            runner,
+            "let run_version_id = request.serving.active_model_version_id();",
+            1,
+            "model-run persistence must consume the route snapshot pinned before selection",
+        ),
+        (
+            runner_path,
+            runner,
+            ".resolve_route(ModelServingGenerationRequest::from(request.policy))",
+            1,
+            "pre-selection requirements must resolve one exact immutable route generation",
+        ),
+        (
+            runner_path,
+            runner,
+            "ensure_route_membership(request.serving.route(), request.selection)?;",
+            1,
+            "online inference must enforce the pinned route against every selected market",
+        ),
+        (
+            report_path,
+            report,
+            "policy: &version,",
+            1,
+            "the report must resolve serving from the frozen durable policy artifact",
+        ),
+        (
+            report_path,
+            report,
+            "serving: &context.active.serving,",
+            1,
+            "model execution must retain the pre-selection generation across the full report",
+        ),
+        (
+            generation_path,
+            generation,
+            "let route = BuyModelRoute::try_from(runtime.category_scope())",
+            1,
+            "every loaded runtime must derive its exact route from the sealed artifact scope",
+        ),
+    ] {
+        require_exact_occurrences(&mut violations, path, source, needle, expected, invariant);
+    }
+    for token in [
+        "LoadedRoutes",
+        "RoutedFeatureBatch",
+        "ordered_route_groups",
+        "routed_feature_batch",
+        "load_active_routes",
+        "infer_loaded_routes",
+        "unwrap_or(&routes.generic_version_id)",
+        "resolve_active_version",
+        "load_shadow_runtime",
+        "request.model",
+        "request.route",
+    ] {
+        require_exact_occurrences(
+            &mut violations,
+            runner_path,
+            runner,
+            token,
+            0,
+            "online inference must not guess per-market routes or fall back to generic",
+        );
+    }
+    violations
+}
+
+#[derive(Clone, Copy)]
+struct ArchitectureSource<'a> {
+    path: &'a Path,
+    text: &'a str,
+}
+
+struct AtomicGenerationSources<'a> {
+    generation: ArchitectureSource<'a>,
+    applicator: ArchitectureSource<'a>,
+    research: ArchitectureSource<'a>,
+    governance: ArchitectureSource<'a>,
+    build: ArchitectureSource<'a>,
+    parity: ArchitectureSource<'a>,
+    runner: ArchitectureSource<'a>,
+}
+
+fn validate_atomic_generation(sources: &AtomicGenerationSources<'_>) -> Vec<String> {
+    let mut violations = Vec::new();
+    violations.extend(validate_generation_owner(sources.generation));
+    violations.extend(validate_generation_publication(sources));
+    violations.extend(validate_generation_consumers(sources));
+    violations
+}
+
+fn validate_generation_owner(source: ArchitectureSource<'_>) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (needle, expected, invariant) in [
+        (
+            "current: ArcSwap<ModelServingGeneration>",
+            1,
+            "all active/shadow/category routes must have one atomic publication owner",
+        ),
+        (
+            "let loaded = join_all(",
+            1,
+            "all configured serving pointers must prepare concurrently before publication",
+        ),
+        (
+            "let current = self.current.load_full();",
+            1,
+            "a route snapshot crossing await boundaries must own one generation",
+        ),
+        (
+            "DecisionPolicySnapshotId::from_content_hash(&actual_hash)",
+            1,
+            "historical route resolution must bind policy identity to canonical content",
+        ),
+        (
+            "DecisionPolicySnapshotId::from_content_hash(&snapshot_hash)",
+            1,
+            "durable generation publication must bind policy identity to canonical content",
+        ),
+        (
+            "current: ArcSwap::from(Arc::new(generation))",
+            1,
+            "boot must construct ArcSwap only after the complete generation is prepared",
+        ),
+        (
+            "self.current.store(Arc::new(generation));",
+            1,
+            "durable activation must publish the complete generation in one store",
+        ),
+        (
+            "does not match selected report route",
+            1,
+            "the global shadow must be rejected unless it matches the selected route",
+        ),
+    ] {
+        require_exact_occurrences(
+            &mut violations,
+            source.path,
+            source.text,
+            needle,
+            expected,
+            invariant,
+        );
+    }
+    violations
+}
+
+fn validate_generation_publication(sources: &AtomicGenerationSources<'_>) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (source, needle, expected, invariant) in [
+        (
+            sources.applicator,
+            "let serving_generation = generations.prepare(&arc).await?;",
+            1,
+            "serving preparation must finish before the durable publication callback",
+        ),
+        (
+            sources.applicator,
+            "generations.publish_committed(serving_generation, &serving_bundle)?;",
+            1,
+            "a committed policy must publish exactly one prepared serving generation",
+        ),
+        (
+            sources.research,
+            "pub serving_generations: Arc<ModelServingGenerationStore>",
+            1,
+            "the research bundle must own the process-wide generation store",
+        ),
+        (
+            sources.research,
+            "ModelServingGenerationStore::bootstrap(",
+            1,
+            "boot must resolve a complete generation before workers can start",
+        ),
+        (
+            sources.research,
+            ".attach_model_serving(Arc::clone(&serving_generations))?;",
+            1,
+            "the generation subscriber must be attached before reconciliation",
+        ),
+        (
+            sources.governance,
+            "policy_bundle_reconciler: None,",
+            1,
+            "governance assembly must not start reconciliation before late-bound consumers",
+        ),
+        (
+            sources.governance,
+            "pub fn start_policy_reconciler(",
+            1,
+            "reconciliation must have one explicit post-bootstrap start boundary",
+        ),
+        (
+            sources.build,
+            "governance.start_policy_reconciler(",
+            1,
+            "application build must start one reconciler after all subscribers bootstrap",
+        ),
+    ] {
+        require_exact_occurrences(
+            &mut violations,
+            source.path,
+            source.text,
+            needle,
+            expected,
+            invariant,
+        );
+    }
+
+    let research_position = sources.build.text.find("ResearchBundle::assemble(");
+    let reconciler_position = sources
+        .build
+        .text
+        .find("governance.start_policy_reconciler(");
+    if !matches!(
+        (research_position, reconciler_position),
+        (Some(research), Some(reconciler)) if research < reconciler
+    ) {
+        violations.push(format!(
+            "{} must assemble and attach the complete serving generation before starting policy reconciliation",
+            sources.build.path.display()
+        ));
+    }
+    violations
+}
+
+fn validate_generation_consumers(sources: &AtomicGenerationSources<'_>) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (needle, expected, invariant) in [
+        (
+            "pub serving_generations: Arc<ModelServingGenerationStore>",
+            1,
+            "durable parity must share the production generation resolver",
+        ),
+        (
+            ".resolve_route(ModelServingGenerationRequest {",
+            1,
+            "durable parity must resolve the frozen policy's exact route",
+        ),
+        (
+            "let runtime = request.serving.active_runtime().runtime();",
+            1,
+            "durable parity must run the runtime pinned by that exact route snapshot",
+        ),
+    ] {
+        require_exact_occurrences(
+            &mut violations,
+            sources.parity.path,
+            sources.parity.text,
+            needle,
+            expected,
+            invariant,
+        );
+    }
+    for source in [
+        sources.generation,
+        sources.applicator,
+        sources.parity,
+        sources.runner,
+    ] {
+        for token in [
+            "CategoryPointerGuard",
+            "category_pointer_guard",
+            "ArcSwapOption<ModelServingGeneration",
+            "load_shadow_runtime",
+            "resolve_active_version",
+            "markets_by_version",
+            "configured_generic",
+            "runtime_factory",
+        ] {
+            require_exact_occurrences(
+                &mut violations,
+                source.path,
+                source.text,
+                token,
+                0,
+                "atomic serving consumers must not retain partial, fallback, or raw-runtime paths",
+            );
+        }
+    }
+    violations
+}
+
+fn validate_category_governance(
+    generation_path: &Path,
+    generation: &str,
+    policy_path: &Path,
+    policy: &str,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (path, source, needle, expected, invariant) in [
+        (
+            generation_path,
+            generation,
+            "ServingRole::Active(expected) => {",
+            1,
+            "config activation must validate every explicitly configured active route",
+        ),
+        (
+            generation_path,
+            generation,
+            "if route != expected {",
+            1,
+            "config activation must reject a runtime whose sealed scope differs from its route",
+        ),
+        (
+            generation_path,
+            generation,
+            "validate_policy_profiles(snapshot, *route, &active_model.loaded)?;",
+            1,
+            "every configured active route must bind the candidate policy's immutable profiles",
+        ),
+        (
+            generation_path,
+            generation,
+            "validate_policy_profiles(snapshot, *shadow_route, &shadow_model.loaded)?;",
+            1,
+            "the configured shadow must bind the same candidate policy profiles",
+        ),
+        (
+            policy_path,
+            policy,
+            "let route = BuyModelRoute::try_from(profile.spec.category)?;",
+            1,
+            "trade-policy fitting must resolve the route from the governed profile",
+        ),
+    ] {
+        require_exact_occurrences(&mut violations, path, source, needle, expected, invariant);
+    }
+    violations
+}
+
+fn validate_category_readiness(
+    preflight_path: &Path,
+    preflight: &str,
+    capability_path: &Path,
+    capability: &str,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (path, source, needle, expected, invariant) in [
+        (
+            preflight_path,
+            preflight,
+            "BuyModelRoute::try_from(&config.recommendation.selection)",
+            2,
+            "mode preflight must check the exact governed report route",
+        ),
+        (
+            preflight_path,
+            preflight,
+            ".active_pointer(route)",
+            2,
+            "mode preflight must not accept an unrelated active pointer",
+        ),
+        (
+            capability_path,
+            capability,
+            "BuyModelRoute::try_from(&runtime_config.recommendation.selection)",
+            1,
+            "system readiness must resolve the exact governed report route",
+        ),
+        (
+            capability_path,
+            capability,
+            ".active_pointer(route)",
+            1,
+            "system readiness must not infer capability from an unrelated pointer",
+        ),
+    ] {
+        require_exact_occurrences(&mut violations, path, source, needle, expected, invariant);
+    }
+    violations
+}
+
+fn validate_category_repository(repository_path: &Path, repository: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let catalog = repository
+        .split_once("    async fn list_published_catalog(")
+        .and_then(|(_, tail)| {
+            tail.split_once("    async fn list_published_for_spec(")
+                .map(|(catalog, _)| catalog)
+        });
+    let Some(catalog) = catalog else {
+        violations.push(format!(
+            "{} is missing the canonical published-model catalog query",
+            repository_path.display()
+        ));
+        return violations;
+    };
+    require_exact_occurrences(
+        &mut violations,
+        repository_path,
+        catalog,
+        "QuantModelVersionColumn::CategoryScope.eq(category)",
+        1,
+        "a supplied category must be an exact persistence filter",
+    );
+    for token in ["CategoryScope.is_null()", "Condition::any()"] {
+        require_exact_occurrences(
+            &mut violations,
+            repository_path,
+            catalog,
+            token,
+            0,
+            "published vertical catalogs must not include pooled fallback artifacts",
+        );
+    }
+    violations
 }
 
 fn collect_contract_sources(directory: &Path, output: &mut Vec<PathBuf>) -> Result<()> {

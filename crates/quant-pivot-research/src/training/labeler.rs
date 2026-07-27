@@ -7,8 +7,10 @@
 //! pre-fetched into [`LabelBuildInput::forward`]; a labeler never reads a database.
 
 use chrono::{DateTime, Duration, Utc};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{enums::quant::FillRequirement, types::Price};
 use rust_decimal::Decimal;
+use serde::Serialize;
 
 use super::{
     LabelBuildInput, LabelBuildOutput, LabelDelayReason, LabelName, Labeler, MissingLabelReason,
@@ -37,6 +39,71 @@ pub const POLICY_EXIT_FILL_RATIO: LabelName = LabelName::from_static("policy_exi
 /// `hold_vs_exit_alpha_bps`: bps advantage of exiting now (simulated fill @ t)
 /// over holding through the lot's terminal outcome.
 pub const HOLD_VS_EXIT_ALPHA_BPS: LabelName = LabelName::from_static("hold_vs_exit_alpha_bps");
+
+/// Content-addressed executable semantics for one supervised target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LabelDefinition {
+    pub name: LabelName,
+    pub semantic_version: u32,
+    pub semantic_key: &'static str,
+}
+
+/// Resolve an exact label-schema preimage from its governed target names.
+///
+/// Unknown targets are rejected so a name-only column can never enter a
+/// dataset hash without executable label semantics.
+pub fn label_definitions(names: &[LabelName]) -> QuantResult<Vec<LabelDefinition>> {
+    let mut definitions = names
+        .iter()
+        .map(|name| {
+            let (semantic_version, semantic_key) = if *name == RETURN_TO_HORIZON {
+                (1, "mid-return-at-horizon-bps@1")
+            } else if *name == MAX_FAVORABLE_EXCURSION_BPS {
+                (1, "max-executable-bid-high-excursion-bps@1")
+            } else if *name == MAX_ADVERSE_EXCURSION_BPS {
+                (1, "min-executable-bid-low-excursion-bps@1")
+            } else if *name == LIQUIDITY_EXIT_POSSIBLE {
+                (1, "forward-top1-exit-depth-threshold@1")
+            } else if *name == TOKEN_PAYOUT_RATIO {
+                (1, "canonical-token-terminal-payout-ratio@1")
+            } else if *name == POLICY_NET_RETURN_BPS {
+                (1, "atomic-policy-simulation-net-return-bps@1")
+            } else if *name == POLICY_NET_POSITIVE {
+                (1, "atomic-policy-simulation-net-positive@1")
+            } else if *name == POLICY_ENTRY_FILL_RATIO {
+                (1, "atomic-policy-simulation-entry-fill-ratio@1")
+            } else if *name == POLICY_EXIT_FILL_RATIO {
+                (1, "atomic-policy-simulation-exit-fill-ratio@1")
+            } else if *name == HOLD_VS_EXIT_ALPHA_BPS {
+                (
+                    2,
+                    "fak-exit-fill-plus-proportional-terminal-residual-vs-hold-all-bps@2",
+                )
+            } else {
+                return Err(ResearchError::DatasetBuild {
+                    detail: format!("unknown executable label definition `{name}`"),
+                }
+                .into());
+            };
+            Ok(LabelDefinition {
+                name: name.clone(),
+                semantic_version,
+                semantic_key,
+            })
+        })
+        .collect::<QuantResult<Vec<_>>>()?;
+    definitions.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    if definitions
+        .windows(2)
+        .any(|pair| pair[0].name == pair[1].name)
+    {
+        return Err(ResearchError::DatasetBuild {
+            detail: "label schema contains duplicate target names".to_owned(),
+        }
+        .into());
+    }
+    Ok(definitions)
+}
 
 /// All label names this plane produces, in a stable order (for schema hashing).
 #[must_use]
@@ -373,9 +440,22 @@ impl Labeler for HoldVsExitProceedsLabeler {
                 reason: MissingLabelReason::NoForwardData,
             };
         }
+        let total_shares = ctx.remaining_shares.inner();
+        let filled_shares = fill.filled_shares.inner();
+        if filled_shares > total_shares {
+            return LabelBuildOutput::Invalid {
+                detail: format!(
+                    "hold-vs-exit fill {} exceeds remaining shares {}",
+                    fill.filled_shares, ctx.remaining_shares
+                ),
+            };
+        }
         let exit_proceeds = fill.gross_order_amount.inner() - fill.expected_fee.inner();
-        let hold_terminal = hold_terminal_proceeds(&ctx.terminal, input.decision_at).inner();
-        let alpha = (exit_proceeds - hold_terminal) / cost_basis * bps_denominator();
+        let hold_all = hold_terminal_proceeds(&ctx.terminal, input.decision_at).inner();
+        let residual_shares = total_shares - filled_shares;
+        let hold_residual = hold_all * residual_shares / total_shares;
+        let exit_then_hold = exit_proceeds + hold_residual;
+        let alpha = (exit_then_hold - hold_all) / cost_basis * bps_denominator();
         LabelBuildOutput::Available(TrainingLabel {
             label_name: self.label_name(),
             horizon_secs: 0,
@@ -501,6 +581,50 @@ mod tests {
             best_bid_low: Some(price(bid_low)),
             best_bid_close: Some(price(mid)),
             top1_depth_usd: Some(Usd::new(Decimal::from(250))),
+        }
+    }
+
+    fn exit_context(
+        market: &MarketId,
+        remaining: Decimal,
+        terminal_cash: Decimal,
+        bid_price: Decimal,
+        bid_size: Decimal,
+    ) -> ExitDecisionLabelContext {
+        ExitDecisionLabelContext {
+            remaining_shares: Shares::new(remaining),
+            avg_price: Price::new(dec!(0.5)),
+            fee_schedule: Some(MarketFeeSchedule {
+                market_id: market.clone(),
+                market_info_version_id: ClobMarketInfoVersionId::from_v7(),
+                market_info_payload_hash: ContentHash::parse(&format!("blake3:{}", "f".repeat(64)))
+                    .expect("hash"),
+                platform_rate: Decimal::ZERO,
+                exponent: Decimal::ONE,
+                taker_only: true,
+                builder_maker_fee_bps: Bps::ZERO,
+                builder_taker_fee_bps: Bps::ZERO,
+                builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+                effective_at: at(0),
+                available_at: at(0),
+            }),
+            terminal: LotTerminalSnapshot {
+                entry_shares: Shares::new(remaining),
+                opened_at: at(0),
+                closed_at: at(1000),
+                total_net_proceeds: Usd::new(terminal_cash),
+                exit_events: vec![LotExitEvent {
+                    at: at(800),
+                    shares: Shares::new(remaining),
+                    net_proceeds: Usd::new(terminal_cash),
+                }],
+            },
+            decision_book: Some(DecisionBook::L2 {
+                bids: Arc::new([BookLevel::from_decimal_unchecked(
+                    Price::new(bid_price),
+                    Shares::new(bid_size),
+                )]),
+            }),
         }
     }
 
@@ -686,6 +810,46 @@ mod tests {
         input.exit_decision = Some(&ctx);
         let out = HoldVsExitProceedsLabeler.build_label(&input);
         assert!(matches!(out, LabelBuildOutput::Available(l) if l.value > Decimal::ZERO));
+    }
+
+    #[test]
+    fn partial_exit_conserves_shares() {
+        let market = MarketId::new("m");
+        let token = TokenId::new("t");
+        let window = forward(Vec::new(), 0, None);
+        let context = exit_context(&market, dec!(100), dec!(60), dec!(0.80), dec!(10));
+        let mut request = input(&market, &token, None, 0, &window);
+        request.exit_decision = Some(&context);
+
+        let LabelBuildOutput::Available(label) = HoldVsExitProceedsLabeler.build_label(&request)
+        else {
+            panic!("partial executable exit must produce a label");
+        };
+        // Sell 10 for 8 and hold 90 for 54, versus holding all 100 for 60.
+        // The two complete strategies differ by 2 over the full 50 cost basis.
+        assert_eq!(label.value, dec!(400));
+    }
+
+    #[test]
+    fn hold_vs_partial_boundary() {
+        let market = MarketId::new("m");
+        let token = TokenId::new("t");
+        let window = forward(Vec::new(), 0, None);
+        for bid_size in [dec!(10), dec!(100)] {
+            let context = exit_context(&market, dec!(100), dec!(60), dec!(0.60), bid_size);
+            let mut request = input(&market, &token, None, 0, &window);
+            request.exit_decision = Some(&context);
+            let LabelBuildOutput::Available(label) =
+                HoldVsExitProceedsLabeler.build_label(&request)
+            else {
+                panic!("executable exit must produce a label");
+            };
+            assert_eq!(
+                label.value,
+                Decimal::ZERO,
+                "partial and full fills are equivalent when exit and hold per-share cash agree"
+            );
+        }
     }
 
     #[test]

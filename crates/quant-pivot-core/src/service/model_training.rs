@@ -9,35 +9,51 @@
 //! the classical (smartcore) path is linked only under the `ml-classical`
 //! feature and otherwise fails closed with `RuntimeUnavailable`.
 
+#[cfg(not(feature = "ml-classical"))]
+use std::future;
 use std::{collections::BTreeSet, sync::Arc};
 
-use chrono::Utc;
 use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
-use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
-    domain::quant::{
-        JobProgressSink, ModelVersionInfo, NewModelRun, NewModelVersion, TrainingDatasetInfo,
+    domain::{
+        governance::DecisionPolicySnapshotInfo,
+        quant::{
+            FactorRegistrationOutcome, JobProgressSink, ModelSpecInfo, ModelVersionInfo,
+            NewFactorDefinition, NewModelRun, NewModelVersion, TrainingDatasetInfo,
+            TrainingDatasetMaterialization,
+        },
     },
     enums::{
         common::MarketCategory,
+        domain::DomainFamily,
+        factor::FactorFamily,
         model::{ClassicalKind, ModelFamily},
         quant::{
-            DatasetPurpose, ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus,
+            CalibrationKind, DatasetPurpose, ModelRunErrorCode, ModelRunKind, PublicationStatus,
             TrainingDatasetStatus,
         },
     },
-    runtime_config::sections::FactorsConfig,
     types::{
-        DecisionPolicySnapshotId, ModelInputContract, ModelRunId, ModelSpecId, ModelVersionId,
-        ResearchJobProgress, TrainingDatasetId,
+        CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, ModelInputContract,
+        ModelRunId, ModelVersionId, ResearchJobProgress, ResearchProfileArtifact,
+        TrainingDatasetId,
+        factor::{FactorDefinitionRef, FactorServingPlane},
         model_lineage::ModelVersionDerivation,
         model_metrics::{
-            HeldOutMetricKind, LearningToRankInSampleMetrics, ModelArtifactTrainingLineage,
-            ModelValidationMetrics, ModelVersionMetrics, ObjectiveComponentMetrics,
-            RankingDiagnosticsMetrics,
+            GovernedSellEstimatorMetrics, HeldOutMetricKind, LearningToRankInSampleMetrics,
+            ModelArtifactTrainingLineage, ModelValidationMetrics, ModelVersionMetrics,
+            ObjectiveComponentMetrics, RankingDiagnosticsMetrics,
         },
-        model_training::{ModelTrainingObjective, TrainingObjectiveSpec},
-        stable_name::FactorName,
+        model_serving::{
+            ModelServingBindings, ModelServingCalibrationArtifactRef, ModelServingContract,
+            ModelServingDatasetBinding, ModelServingEstimatorBinding, ModelServingEstimatorInput,
+            ModelServingFactorBinding, ModelServingModelBinding, ModelServingPolicySnapshotBinding,
+            ModelServingSchemaBinding, ModelServingTradePolicyBinding,
+            ModelServingTransformBinding,
+        },
+        model_training::ModelTrainingObjective,
+        stable_name::FeatureName,
         training::TrainingSampleSource,
     },
 };
@@ -46,90 +62,56 @@ use quant_pivot_models::{
     enums::quant::ModelSerializationFormat,
     hashing::CanonicalDigest,
     types::{
-        ModelArtifactId,
         model_metrics::{ClassicalInSampleMetrics, ModelFeatureImportance},
         stable_name::ModelMetricName,
     },
 };
 use quant_pivot_repository::traits::{
-    ModelRegistryRepository, ModelRunRepository, TrainingDatasetRepository,
+    CalibrationArtifactRepository, FactorRepository, ModelRegistryRepository, ModelRunRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    factors::{
-        FactorEngine,
-        names::{POSITION_PEAK_DRAWDOWN, POSITION_TIME_IN_TRADE, POSITION_UNREALIZED_PNL},
-    },
-    features::FeatureSchema,
+    factors::{FactorEngine, names::STRUCT_FAVORITE_LONGSHOT},
+    features::{FeatureSchema, SourceRequirement},
     hashing::ResearchHasher,
     model::{
-        CancellationProbe, FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader,
-        ModelTrainer, ReturnModelSpec, ScoreMultiplierSpec, SellScorerOutputSpec,
-        SellScorerTrainer, SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
-        TrainedModelArtifact, TrainingObjectiveReport, ValidationReport, ValidationSpec,
-        WeightedFactorTrainer, infer_training_category_scope,
-        objective::{ObjectiveComponentReport, RankingDiagnostics},
+        CancellationProbe, FavoriteLongshotBiasTable, HorizonMultipliers, LabelSelector,
+        ModelArtifact, ModelTrainer, ReturnModelSpec, SellScorerTrainer,
+        SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
+        TrainingObjectiveReport, ValidationReport, ValidationSpec, WeightedFactorTrainer,
+        artifact::{ModelPayload, SellEstimatorSpec, SellScorerOutputSpec},
+        factor_heads::FactorHeadSpec,
+        model_input_contract_hash,
+        objective::{ObjectiveComponentReport, RankingDiagnostics, runtime_training_objective},
+        sell_scorer::trainer::SellTrainingMetrics,
     },
-    selection::ModelFeatureRequirements,
-    training::TrainingExample,
+    training::{LabelName, TrainingExample, label_names_for_sources},
     validation::PurgeConfig,
 };
 #[cfg(feature = "ml-classical")]
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace},
-    model::{ClassicalAdapterRegistry, ClassicalOutputSemantics, artifact::ClassicalModelArtifact},
+    model::{
+        ClassicalAdapterRegistry, ClassicalOutputSemantics, ScoreMultiplierSpec,
+        artifact::ClassicalModelPayload,
+    },
     training::{
         RETURN_TO_HORIZON, TOKEN_PAYOUT_RATIO, TrainingMatrix, build_borrowed_matrix,
         matrix_spec_from_contract,
     },
 };
-use rust_decimal::Decimal;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use crate::service::{
-    historical_replay::ReplayConfig,
+    model_serving_preimage::ModelServingPreimageService,
+    trade_policy_evidence::TradePolicyEvidenceDurability,
+    trade_policy_preimage::{TradePolicyPreimageTarget, TradePolicyPreimageVerifier},
     training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
 };
 
-/// Derive the candidate factor seed: configured `factor_weights` if present,
-/// else a uniform seed over the (sorted, de-duplicated) factors observed in
-/// `examples`. Shared by [`ModelTrainerService`] and the CPCV/trial-grid
-/// orchestration (`quant-pivot-core::service::cpcv_backtest`) so every
-/// `WeightedFactor` fold — production or validation — starts from the same
-/// governed seed.
-pub(crate) fn weighted_seed_weights(
-    factors: &FactorsConfig,
-    examples: &[TrainingExample],
-) -> Vec<FactorWeight> {
-    let configured: Vec<FactorWeight> = factors
-        .factor_weights
-        .weights
-        .iter()
-        .map(|(name, value)| FactorWeight {
-            factor: FactorName::new(name.clone()),
-            weight: value.value,
-        })
-        .collect();
-    if !configured.is_empty() {
-        return configured;
-    }
-    let mut names: BTreeSet<String> = BTreeSet::new();
-    for example in examples {
-        for factor in &example.factor_values {
-            names.insert(factor.name.to_string());
-        }
-    }
-    let count = names.len().max(1);
-    let weight = Decimal::ONE / Decimal::from(count as u64);
-    names
-        .into_iter()
-        .map(|name| FactorWeight {
-            factor: FactorName::new(name),
-            weight,
-        })
-        .collect()
-}
+const MODEL_RUN_DIAGNOSTIC_MAX_CHARS: usize = 4_096;
 
 /// Fail closed with a terminal [`ResearchError::Cancelled`] when the job was
 /// cooperatively cancelled (operator cancel, lease loss, or graceful shutdown),
@@ -155,48 +137,36 @@ pub struct ModelTrainerServiceDeps {
     pub compute: Arc<ComputeExecutor>,
     /// Frozen training-dataset ledger.
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
+    /// Immutable factor-definition registry.
+    pub factor_repo: Arc<dyn FactorRepository>,
     /// Content-addressed artifact store (model bytes).
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Model registry (spec/version lifecycle).
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     /// Model-run ledger.
     pub model_run_repo: Arc<dyn ModelRunRepository>,
+    /// Immutable calibration-artifact ledger used to reverify bias-table preimages.
+    pub calibration_repo: Arc<dyn CalibrationArtifactRepository>,
+    /// Canonical resolver for executable-label `TradePolicy` dependency graphs.
+    pub trade_policy_preimages: Arc<TradePolicyPreimageVerifier>,
+    /// Shared side-effect-free Dataset/Source Slice serving-preimage verifier.
+    pub serving_preimages: Arc<ModelServingPreimageService>,
 }
 
-/// Frozen config governing training (from the runtime-config version).
+/// Complete persisted policy snapshot governing training.
 pub struct ModelTrainerConfig {
-    /// Factor config (the `factor_weights` training seed).
-    pub factors: FactorsConfig,
-    /// Governed objective snapshot from `research.training`.
-    pub objective: TrainingObjectiveSpec,
-    /// Label-horizon purge/embargo for trainer CV (same knobs as CPCV).
-    pub validation_purge: PurgeConfig,
+    /// The database-authoritative row plus all resolved profile preimages.
+    pub policy_snapshot: DecisionPolicySnapshotInfo,
 }
 
 /// A training request resolved by the admin port.
 pub struct TrainModelInput {
     /// Pre-assigned registry id (async job engine) or minted for direct calls.
     pub model_version_id: ModelVersionId,
-    /// Target model spec.
-    pub model_spec_id: ModelSpecId,
+    /// Complete immutable target model specification.
+    pub model_spec: ModelSpecInfo,
     /// Frozen dataset to train on.
     pub training_dataset_id: TrainingDatasetId,
-    /// Frozen runtime-config version (provenance on the run).
-    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    /// Family to train.
-    pub model_family: ModelFamily,
-    /// Exact ordered raw-input contract frozen by the owning model spec.
-    pub input_contract: ModelInputContract,
-    /// Supervised target label.
-    pub label: LabelSelector,
-    /// Model-intrinsic prediction horizon (seconds), frozen into the artifact.
-    pub prediction_horizon_secs: u64,
-    /// Rolling validation folds.
-    pub validation_folds: u32,
-    /// Categories enabled in the frozen selection policy (for scope inference).
-    pub selection_enabled_categories: Vec<MarketCategory>,
-    /// Explicit category scope override; when `None`, inferred from spec + examples.
-    pub category_scope: Option<MarketCategory>,
 }
 
 /// Successful training outcome — version row plus the materialization run id.
@@ -205,31 +175,160 @@ pub struct TrainModelOutcome {
     pub model_run_id: ModelRunId,
 }
 
+struct VerifiedServingInputs {
+    feature_schema: FeatureSchema,
+    factor_plane: FactorServingPlane,
+    training_dataset_hash: ContentHash,
+    policy_snapshot: ModelServingPolicySnapshotBinding,
+    profile: ResearchProfileArtifact,
+    bias_table: Option<ModelServingCalibrationArtifactRef>,
+    trade_policy: Option<ModelServingTradePolicyBinding>,
+}
+
+struct PendingRankingMetrics {
+    in_sample: TrainingObjectiveReport,
+    validation: ValidationReport,
+}
+
+#[cfg(feature = "ml-classical")]
+struct PendingClassicalMetrics {
+    kind: ClassicalKind,
+    in_sample: ClassicalInSampleMetrics,
+    validation: ModelValidationMetrics,
+    feature_importances: Vec<ModelFeatureImportance>,
+}
+
+enum PendingModelMetrics {
+    LearningToRank(Box<PendingRankingMetrics>),
+    SellGoverned(SellTrainingMetrics),
+    #[cfg(feature = "ml-classical")]
+    Classical(Box<PendingClassicalMetrics>),
+}
+
+struct PreparedModelPayload {
+    payload: ModelPayload,
+    transform: ModelServingTransformBinding,
+    metrics: PendingModelMetrics,
+    objective: ModelTrainingObjective,
+}
+
+struct ModelTrainingCommit<'a> {
+    model_run_id: &'a ModelRunId,
+    model_version_id: &'a ModelVersionId,
+    input: &'a TrainModelInput,
+    dataset: &'a TrainingDatasetInfo,
+    examples: &'a Arc<[TrainingExample]>,
+    serving: &'a VerifiedServingInputs,
+    cancel: &'a CancellationToken,
+}
+
 /// Offline trainer service.
 pub struct ModelTrainerService {
     deps: ModelTrainerServiceDeps,
     config: ModelTrainerConfig,
-    replay: ReplayConfig,
+}
+
+impl TrainModelInput {
+    fn label(&self) -> LabelSelector {
+        LabelSelector {
+            name: LabelName::new(self.model_spec.training_contract.target_label_name.clone()),
+            horizon_secs: self.model_spec.training_contract.target_label_horizon_secs,
+        }
+    }
+
+    fn prediction_horizon(&self) -> QuantResult<u64> {
+        u64::try_from(self.model_spec.prediction_horizon_secs).map_err(|error| {
+            QuantError::from(ResearchError::InvalidModelArtifact {
+                detail: format!("model prediction horizon does not fit u64: {error}"),
+            })
+        })
+    }
+}
+
+impl ModelTrainerConfig {
+    fn verified_policy_binding(&self) -> QuantResult<ModelServingPolicySnapshotBinding> {
+        let info = &self.policy_snapshot;
+        let recomputed_hash = info.snapshot.persistence_hash().map_err(|error| {
+            ResearchError::InvalidModelArtifact {
+                detail: format!("policy snapshot persistence hash failed: {error}"),
+            }
+        })?;
+        if recomputed_hash != info.snapshot_hash
+            || DecisionPolicySnapshotId::from_content_hash(&recomputed_hash)
+                != info.decision_policy_snapshot_id
+        {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "policy snapshot identity mismatch: row id={} hash={}, recomputed id={} hash={recomputed_hash}",
+                    info.decision_policy_snapshot_id,
+                    info.snapshot_hash,
+                    DecisionPolicySnapshotId::from_content_hash(&recomputed_hash),
+                ),
+            }
+            .into());
+        }
+        let revisions = &info.snapshot.revisions;
+        let revisions_match = revisions.recommendation_policy.as_ref()
+            == Some(&info.recommendation_policy_revision_id)
+            && revisions.execution_risk_policy.as_ref()
+                == Some(&info.execution_risk_policy_revision_id)
+            && revisions.model_routing.as_ref() == Some(&info.model_routing_revision_id)
+            && revisions.report_schedule.as_ref() == Some(&info.report_schedule_revision_id)
+            && revisions.operational_control.as_ref()
+                == Some(&info.operational_control_revision_id)
+            && revisions.execution_authorization.as_ref()
+                == Some(&info.execution_authorization_revision_id);
+        if !revisions_match {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "policy snapshot revision projections differ from the persisted row"
+                    .to_owned(),
+            }
+            .into());
+        }
+        let profile_artifacts = info
+            .snapshot
+            .profile_artifacts
+            .references()
+            .map_err(|error| ResearchError::InvalidModelArtifact {
+                detail: format!("policy profile preimage verification failed: {error}"),
+            })?;
+        Ok(ModelServingPolicySnapshotBinding {
+            decision_policy_snapshot_id: info.decision_policy_snapshot_id,
+            snapshot_hash: info.snapshot_hash,
+            profile_artifacts,
+        })
+    }
+
+    fn validation_purge(&self) -> PurgeConfig {
+        let snapshot = &self.policy_snapshot.snapshot;
+        PurgeConfig {
+            embargo_pct: snapshot
+                .profile_artifacts
+                .research_method
+                .research
+                .validation
+                .purge
+                .embargo_pct
+                .value,
+            min_embargo_secs: snapshot
+                .profile_artifacts
+                .features
+                .definition
+                .max_lookback_secs(),
+        }
+    }
 }
 
 impl ModelTrainerService {
     /// Assemble the service from persistence dependencies and frozen trainer config.
     #[must_use]
-    pub const fn new(
-        deps: ModelTrainerServiceDeps,
-        config: ModelTrainerConfig,
-        replay: ReplayConfig,
-    ) -> Self {
-        Self {
-            deps,
-            config,
-            replay,
-        }
+    pub const fn new(deps: ModelTrainerServiceDeps, config: ModelTrainerConfig) -> Self {
+        Self { deps, config }
     }
 
     /// Train a model and register it as a Candidate version.
     ///
-    /// Reports coarse but honest phases (`load → decode → verify → fit`) to
+    /// Reports coarse but honest phases (`load → decode → verify → register → fit`) to
     /// `progress`; the fit itself is a single opaque research-trainer call,
     /// offloaded to the governed offline pool. `cancel` is polled at each stage boundary.
     pub async fn train(
@@ -241,63 +340,285 @@ impl ModelTrainerService {
         ensure_not_cancelled(cancel, "load")?;
         progress.report(ResearchJobProgress::indeterminate("load", 0));
         let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
-        self.validate_dataset_contracts(&dataset)?;
+        let policy_snapshot = self.config.verified_policy_binding()?;
+        let (feature_schema, factor_plane, profile) =
+            self.validate_dataset_contracts(&dataset, &input, &policy_snapshot)?;
+        self.deps
+            .serving_preimages
+            .verify_dataset_objects(&dataset, &profile)
+            .await?;
+        let bias_table = self
+            .load_bias_table(&factor_plane, input.model_spec.model_family)
+            .await?;
+        let trade_policy = Box::pin(self.deps.trade_policy_preimages.verify(
+            &self.deps.serving_preimages,
+            TradePolicyPreimageTarget {
+                dataset: &dataset,
+                model_spec: &input.model_spec,
+                policy_snapshot: &policy_snapshot,
+                profile: &profile,
+            },
+            TradePolicyEvidenceDurability::ContentVerified,
+        ))
+        .await?
+        .map(|verified| verified.binding().clone());
+        let training_dataset_hash = *require_dataset_materialization(&dataset)?.dataset_hash;
+        let serving_inputs = VerifiedServingInputs {
+            feature_schema,
+            factor_plane,
+            training_dataset_hash,
+            policy_snapshot,
+            profile,
+            bias_table,
+            trade_policy,
+        };
         progress.report(ResearchJobProgress::indeterminate("decode", 0));
         let examples: Arc<[TrainingExample]> = self.decode_examples(&dataset).await?.into();
+        Self::validate_example_contracts(&dataset, &input, &examples)?;
+        Self::validate_example_scope(&serving_inputs.profile, &examples)?;
         ensure_not_cancelled(cancel, "verify")?;
         progress.report(ResearchJobProgress::indeterminate(
             "verify",
             examples.len() as u64,
         ));
+        ensure_not_cancelled(cancel, "register")?;
+        progress.report(ResearchJobProgress::indeterminate(
+            "register",
+            serving_inputs.factor_plane.definitions().len() as u64,
+        ));
+        if !input.model_spec.model_family.is_classical() {
+            self.register_factor_plane(&serving_inputs.factor_plane)
+                .await?;
+        }
 
         let model_version_id = input.model_version_id;
         let model_run_id = ModelRunId::from_v7();
-        self.create_run(&model_run_id, &input, &dataset).await?;
+        self.create_run(&model_run_id, &dataset).await?;
 
-        ensure_not_cancelled(cancel, "fit")?;
-        progress.report(ResearchJobProgress::indeterminate(
-            "fit",
-            examples.len() as u64,
-        ));
-        match self
-            .train_and_register(&model_version_id, &input, &dataset, &examples, cancel)
-            .await
-        {
-            Ok(version) => {
-                self.deps
-                    .model_run_repo
-                    .succeed(
-                        &model_run_id,
-                        version.artifact_hash,
-                        Utc::now(),
-                        Some(model_version_id),
-                    )
-                    .await?;
-                Ok(TrainModelOutcome {
-                    version,
-                    model_run_id,
+        let result = async {
+            ensure_not_cancelled(cancel, "fit")?;
+            progress.report(ResearchJobProgress::indeterminate(
+                "fit",
+                examples.len() as u64,
+            ));
+            let version = self
+                .train_and_commit(ModelTrainingCommit {
+                    model_run_id: &model_run_id,
+                    model_version_id: &model_version_id,
+                    input: &input,
+                    dataset: &dataset,
+                    examples: &examples,
+                    serving: &serving_inputs,
+                    cancel,
                 })
-            }
+                .await?;
+            QuantResult::Ok(version)
+        }
+        .await;
+        match result {
+            Ok(version) => Ok(TrainModelOutcome {
+                version,
+                model_run_id,
+            }),
             Err(error) => {
-                let _ = self
-                    .deps
-                    .model_run_repo
-                    .fail(
-                        &model_run_id,
-                        ModelRunErrorCode::TrainingFailed,
-                        error.to_string(),
-                        Utc::now(),
-                    )
-                    .await;
+                self.finalize_run_error(&model_run_id, &error).await?;
                 Err(error)
             }
         }
     }
 
-    fn validate_dataset_contracts(&self, dataset: &TrainingDatasetInfo) -> QuantResult<()> {
+    async fn finalize_run_error(
+        &self,
+        model_run_id: &ModelRunId,
+        error: &QuantError,
+    ) -> QuantResult<()> {
+        let diagnostic = Self::run_diagnostic(error);
+        let finalization = if matches!(error, QuantError::Research(ResearchError::Cancelled { .. }))
+        {
+            self.deps
+                .model_run_repo
+                .cancel(model_run_id, diagnostic)
+                .await
+        } else {
+            self.deps
+                .model_run_repo
+                .fail(model_run_id, ModelRunErrorCode::TrainingFailed, diagnostic)
+                .await
+        };
+        finalization.map(|_| ()).map_err(|finalizer| {
+            ResearchError::ModelRunFinalization {
+                primary: error.to_string(),
+                finalizer: finalizer.to_string(),
+            }
+            .into()
+        })
+    }
+
+    fn run_diagnostic(error: &QuantError) -> String {
+        let detail = error.to_string();
+        let mut chars = detail.chars();
+        let bounded = chars
+            .by_ref()
+            .take(MODEL_RUN_DIAGNOSTIC_MAX_CHARS)
+            .collect::<String>();
+        if chars.next().is_none() {
+            return bounded;
+        }
+        let mut truncated = bounded
+            .chars()
+            .take(MODEL_RUN_DIAGNOSTIC_MAX_CHARS - 1)
+            .collect::<String>();
+        truncated.push('…');
+        truncated
+    }
+
+    fn validate_dataset_lineage<'a>(
+        dataset: &'a TrainingDatasetInfo,
+        input: &TrainModelInput,
+        policy_snapshot: &ModelServingPolicySnapshotBinding,
+    ) -> QuantResult<TrainingDatasetMaterialization<'a>> {
+        let definition = input.model_spec.definition();
+        definition
+            .validate()
+            .map_err(|detail| ResearchError::InvalidModelArtifact {
+                detail: format!("invalid persisted model specification: {detail}"),
+            })?;
+        let definition_hash =
+            definition
+                .content_hash()
+                .map_err(|error| ResearchError::InvalidModelArtifact {
+                    detail: format!("model-spec definition hash failed: {error}"),
+                })?;
+        if definition_hash != input.model_spec.definition_hash {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "model-spec definition mismatch: row {}, recomputed {definition_hash}",
+                    input.model_spec.definition_hash
+                ),
+            }
+            .into());
+        }
+        if dataset.model_spec_id != input.model_spec.model_spec_id {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "frozen dataset model spec mismatch: dataset {}, requested {}",
+                    dataset.model_spec_id, input.model_spec.model_spec_id
+                ),
+            }
+            .into());
+        }
+        if dataset.model_spec_definition_hash != definition_hash {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "frozen dataset model-spec definition mismatch: dataset {}, verified {definition_hash}",
+                    dataset.model_spec_definition_hash
+                ),
+            }
+            .into());
+        }
+        if dataset.decision_policy_snapshot_id != policy_snapshot.decision_policy_snapshot_id {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "frozen dataset policy snapshot mismatch: dataset {}, requested {}",
+                    dataset.decision_policy_snapshot_id,
+                    policy_snapshot.decision_policy_snapshot_id
+                ),
+            }
+            .into());
+        }
+        if dataset.source_lineage.runtime_config_hash != policy_snapshot.snapshot_hash {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "frozen source runtime hash mismatch: dataset {}, policy {}",
+                    dataset.source_lineage.runtime_config_hash, policy_snapshot.snapshot_hash
+                ),
+            }
+            .into());
+        }
+        if dataset.model_family != input.model_spec.model_family {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "frozen dataset model family mismatch: dataset {}, requested {}",
+                    dataset.model_family.as_str(),
+                    input.model_spec.model_family.as_str()
+                ),
+            }
+            .into());
+        }
         let materialization = require_dataset_materialization(dataset)?;
-        let feature_schema = FeatureSchema::build(&self.replay.features)?;
+        materialization
+            .manifest
+            .validate()
+            .map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("invalid frozen Dataset v3 manifest: {error}"),
+            })?;
+        if materialization.manifest.model_family != input.model_spec.model_family {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "frozen manifest model family mismatch: manifest {}, requested {}",
+                    materialization.manifest.model_family.as_str(),
+                    input.model_spec.model_family.as_str()
+                ),
+            }
+            .into());
+        }
+        if materialization.manifest.model_spec_definition_hash != definition_hash
+            || materialization.manifest.model_spec_id != input.model_spec.model_spec_id
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: "frozen Dataset v3 manifest differs from the verified model specification"
+                    .to_owned(),
+            }
+            .into());
+        }
+        if materialization.manifest.trade_policy_artifact_id
+            != input.model_spec.training_contract.trade_policy_artifact_id
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail:
+                    "frozen Dataset v3 trade-policy binding differs from the model training contract"
+                        .to_owned(),
+            }
+            .into());
+        }
+        let target_horizon = input.model_spec.training_contract.target_label_horizon_secs;
+        if target_horizon > 0
+            && !materialization
+                .manifest
+                .horizons_secs
+                .contains(&target_horizon)
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!("frozen Dataset v3 omitted target label horizon {target_horizon}s"),
+            }
+            .into());
+        }
+        Ok(materialization)
+    }
+
+    fn validate_dataset_contracts(
+        &self,
+        dataset: &TrainingDatasetInfo,
+        input: &TrainModelInput,
+        policy_snapshot: &ModelServingPolicySnapshotBinding,
+    ) -> QuantResult<(FeatureSchema, FactorServingPlane, ResearchProfileArtifact)> {
+        let materialization = Self::validate_dataset_lineage(dataset, input, policy_snapshot)?;
+        let runtime = &self.config.policy_snapshot.snapshot;
+        let feature_schema = FeatureSchema::build(&runtime.profile_artifacts.features.definition)?;
         let feature_schema_hash = ResearchHasher::feature_schema(&feature_schema)?;
+        if feature_schema.version() != dataset.feature_schema_version
+            || feature_schema.version() != input.model_spec.feature_schema_version
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "feature schema version mismatch: dataset {}, model spec {}, runtime {}",
+                    dataset.feature_schema_version,
+                    input.model_spec.feature_schema_version,
+                    feature_schema.version()
+                ),
+            }
+            .into());
+        }
         if &feature_schema_hash != materialization.feature_schema_hash {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
@@ -307,18 +628,206 @@ impl ModelTrainerService {
             }
             .into());
         }
-        let factor_schema_hash = FactorEngine::new(
-            &self.replay.factors,
-            &self.replay.features,
-            &self.replay.domain,
-            None,
-        )
-        .factor_schema_hash()?;
-        if &factor_schema_hash != materialization.factor_schema_hash {
+        let profile_ref = materialization
+            .manifest
+            .source_lineage
+            .research_profile_artifact_id
+            .profile_ref();
+        let profile = profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(|detail| ResearchError::DatasetBuild {
+                detail: format!("research profile preimage verification failed: {detail}"),
+            })?;
+        if dataset.research_profile_artifact_id != profile.profile_ref.artifact_id()
+            || dataset.source_lineage.research_profile_artifact_id
+                != profile.profile_ref.artifact_id()
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: "dataset research-profile projections differ from the verified builtin"
+                    .to_owned(),
+            }
+            .into());
+        }
+        let prediction_horizon_secs = input.prediction_horizon()?;
+        if prediction_horizon_secs != profile.spec.target_horizon_secs {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
-                    "frozen dataset factor contract mismatch: dataset {}, runtime {}",
-                    materialization.factor_schema_hash, factor_schema_hash
+                    "model prediction horizon {prediction_horizon_secs}s differs from ResearchProfile {}@{} target {}s",
+                    profile.profile_ref.id,
+                    profile.profile_ref.version,
+                    profile.spec.target_horizon_secs,
+                ),
+            }
+            .into());
+        }
+        let expected_plane = if input.model_spec.model_family.is_classical() {
+            FactorServingPlane::try_empty().map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("build factor-free classical serving plane: {error}"),
+            })?
+        } else {
+            FactorEngine::for_model_scope(
+                &runtime.profile_artifacts.scoring.definition,
+                &runtime.profile_artifacts.features.definition,
+                &runtime.profile_artifacts.domain.definition,
+                profile.spec.category,
+                None,
+            )
+            .serving_plane()?
+            .clone()
+        };
+        if &expected_plane != materialization.factor_serving_plane {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "frozen dataset factor plane mismatch: dataset {} ({} revisions), runtime {} ({} revisions)",
+                    materialization.factor_serving_plane.factor_schema_hash(),
+                    materialization.factor_serving_plane.definitions().len(),
+                    expected_plane.factor_schema_hash(),
+                    expected_plane.definitions().len()
+                ),
+            }
+            .into());
+        }
+        Self::validate_category_plane(
+            input.model_spec.model_family,
+            profile.spec.category,
+            &expected_plane,
+        )?;
+        model_input_contract_hash(&input.model_spec.input_contract)?;
+        Self::required_domain_families(
+            &feature_schema,
+            &expected_plane,
+            &input.model_spec.input_contract,
+            profile.spec.category,
+        )?;
+        Ok((feature_schema, expected_plane, profile))
+    }
+
+    fn validate_category_plane(
+        model_family: ModelFamily,
+        category_scope: Option<MarketCategory>,
+        plane: &FactorServingPlane,
+    ) -> QuantResult<()> {
+        if model_family.is_classical() {
+            return Ok(());
+        }
+        let required_family = match category_scope {
+            Some(MarketCategory::Crypto) => Some(FactorFamily::DomainCrypto),
+            Some(MarketCategory::Weather) => Some(FactorFamily::DomainWeather),
+            _ => None,
+        };
+        if required_family.is_some_and(|family| {
+            !plane
+                .definitions()
+                .iter()
+                .any(|revision| revision.definition().family == family)
+        }) {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "{category_scope:?} ResearchProfile requires an enabled matching domain factor plane"
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    async fn load_bias_table(
+        &self,
+        plane: &FactorServingPlane,
+        model_family: ModelFamily,
+    ) -> QuantResult<Option<ModelServingCalibrationArtifactRef>> {
+        if model_family.is_classical() {
+            return Ok(None);
+        }
+        let reference = self
+            .config
+            .policy_snapshot
+            .snapshot
+            .profile_artifacts
+            .scoring
+            .definition
+            .structural
+            .favorite_longshot
+            .bias_table_ref
+            .as_deref();
+        let Some(reference) = reference else {
+            return Ok(None);
+        };
+        let artifact_id = reference
+            .parse::<CalibrationArtifactId>()
+            .map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("bias-table reference `{reference}` is invalid: {error}"),
+            })?;
+        let info = self
+            .deps
+            .calibration_repo
+            .find_by_id(&artifact_id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "calibration_artifact",
+                id: artifact_id.to_string(),
+            })?;
+        let table = FavoriteLongshotBiasTable::from_persisted(&info)?;
+        if table.table_id != artifact_id
+            || table.content_hash != info.content_hash
+            || !plane
+                .definitions()
+                .iter()
+                .any(|definition| definition.factor_name() == &STRUCT_FAVORITE_LONGSHOT)
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: "verified bias-table preimage is incompatible with the frozen factor plane"
+                    .to_owned(),
+            }
+            .into());
+        }
+        Ok(Some(ModelServingCalibrationArtifactRef {
+            artifact_id,
+            kind: CalibrationKind::MarketPriceBias,
+            content_hash: info.content_hash,
+        }))
+    }
+
+    async fn register_factor_plane(&self, plane: &FactorServingPlane) -> QuantResult<()> {
+        let registrations = plane
+            .definitions()
+            .iter()
+            .cloned()
+            .map(NewFactorDefinition::from)
+            .collect();
+        let outcomes = self
+            .deps
+            .factor_repo
+            .register_definitions(registrations)
+            .await?;
+        let mut registered = Vec::with_capacity(outcomes.len());
+        for outcome in &outcomes {
+            let definition = match outcome {
+                FactorRegistrationOutcome::Inserted(definition)
+                | FactorRegistrationOutcome::AlreadyPresent(definition) => definition,
+            };
+            registered.push(FactorDefinitionRef::try_from(definition).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!(
+                        "persisted factor revision `{}` failed reconstruction: {error}",
+                        definition.name
+                    ),
+                }
+            })?);
+        }
+        let registered_plane = FactorServingPlane::try_seal(registered).map_err(|error| {
+            ResearchError::DatasetBuild {
+                detail: format!("seal registered factor serving plane: {error}"),
+            }
+        })?;
+        if &registered_plane != plane {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "registered factor plane mismatch: frozen {} ({} revisions), persisted {} ({} revisions)",
+                    plane.factor_schema_hash(),
+                    plane.definitions().len(),
+                    registered_plane.factor_schema_hash(),
+                    registered_plane.definitions().len()
                 ),
             }
             .into());
@@ -375,55 +884,243 @@ impl ModelTrainerService {
         verify_frozen_dataset_artifact(dataset, &bytes)
     }
 
-    /// Train + register, dispatching on family.
-    async fn train_and_register(
-        &self,
-        model_version_id: &ModelVersionId,
-        input: &TrainModelInput,
+    fn validate_example_contracts(
         dataset: &TrainingDatasetInfo,
-        examples: &Arc<[TrainingExample]>,
-        cancel: &CancellationToken,
-    ) -> QuantResult<ModelVersionInfo> {
-        let materialization = require_dataset_materialization(dataset)?;
-        let manifest = dataset
-            .manifest
-            .as_ref()
-            .ok_or_else(|| ResearchError::DatasetBuild {
-                detail: "v2 dataset is missing its immutable manifest".to_owned(),
-            })?;
-        let header = ModelArtifactHeader {
-            model_version_id: *model_version_id,
-            model_spec_definition_hash: manifest.model_spec_definition_hash,
-            profile_ref: manifest
-                .source_lineage
-                .research_profile_artifact_id
-                .profile_ref(),
-            model_family: input.model_family,
-            feature_schema_hash: *materialization.feature_schema_hash,
-            factor_schema_hash: *materialization.factor_schema_hash,
-            trade_policy_artifact_id: manifest.trade_policy_artifact_id,
-            trade_policy_hash: manifest.trade_policy_hash,
-        };
+        input: &TrainModelInput,
+        examples: &[TrainingExample],
+    ) -> QuantResult<()> {
+        let sample_sources =
+            dataset
+                .sample_sources
+                .as_ref()
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "training Dataset {} has no frozen sample-source contract",
+                        dataset.training_dataset_id
+                    ),
+                })?;
+        let manifest = require_dataset_materialization(dataset)?.manifest;
+        let label_names = label_names_for_sources(
+            sample_sources.as_slice(),
+            manifest.trade_policy_artifact_id.is_some(),
+        );
+        let label_schema_hash = ResearchHasher::label_schema(&label_names)?;
+        if label_schema_hash != manifest.label_schema_hash {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "training Dataset {} label schema differs from its sample-source/trade-policy contract",
+                    dataset.training_dataset_id
+                ),
+            }
+            .into());
+        }
 
-        let (artifact, metrics, training_objective) = if input.model_family.is_exit_scorer() {
-            self.train_sell_scorer(header, input, dataset, examples, cancel)
+        let target = input.label();
+        if !label_names.contains(&target.name) {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "ModelSpec target {} is absent from Dataset {} canonical label schema",
+                    target.name, dataset.training_dataset_id
+                ),
+            }
+            .into());
+        }
+        let mut target_rows = 0_usize;
+        for example in examples {
+            let mut labels = BTreeSet::new();
+            for label in &example.labels {
+                if !label_names.contains(&label.label_name) {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "Dataset example {} contains undeclared label {}",
+                            example.example_id, label.label_name
+                        ),
+                    }
+                    .into());
+                }
+                if !labels.insert((label.label_name.clone(), label.horizon_secs)) {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "Dataset example {} duplicates label {}@{}s",
+                            example.example_id, label.label_name, label.horizon_secs
+                        ),
+                    }
+                    .into());
+                }
+                if (&label.label_name, label.horizon_secs) == (&target.name, target.horizon_secs) {
+                    target_rows = target_rows.saturating_add(1);
+                }
+            }
+        }
+        if target_rows == 0 {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "Dataset {} has no rows for ModelSpec target {}@{}s",
+                    dataset.training_dataset_id, target.name, target.horizon_secs
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn validate_example_scope(
+        profile: &ResearchProfileArtifact,
+        examples: &[TrainingExample],
+    ) -> QuantResult<()> {
+        let Some(category) = profile.spec.category else {
+            return Ok(());
+        };
+        if let Some(example) = examples
+            .iter()
+            .find(|example| example.selected_market.category != category)
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "ResearchProfile {}@{} is scoped to {category}, but dataset example {} belongs to {}",
+                    profile.profile_ref.id,
+                    profile.profile_ref.version,
+                    example.example_id,
+                    example.selected_market.category,
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn required_domain_families(
+        schema: &FeatureSchema,
+        plane: &FactorServingPlane,
+        input_contract: &ModelInputContract,
+        category_scope: Option<MarketCategory>,
+    ) -> QuantResult<Vec<DomainFamily>> {
+        let mut required = BTreeSet::new();
+        match category_scope {
+            Some(MarketCategory::Crypto) => {
+                required.insert(DomainFamily::Crypto);
+            }
+            Some(MarketCategory::Weather) => {
+                required.insert(DomainFamily::Weather);
+            }
+            _ => {}
+        }
+        for factor in plane.definitions() {
+            match factor.definition().family {
+                FactorFamily::DomainCrypto => {
+                    required.insert(DomainFamily::Crypto);
+                }
+                FactorFamily::DomainWeather => {
+                    required.insert(DomainFamily::Weather);
+                }
+                _ => {}
+            }
+        }
+        for input in &input_contract.inputs {
+            let feature_name = FeatureName::new(input.feature_name.clone());
+            let feature = schema.by_name(&feature_name).ok_or_else(|| {
+                ResearchError::DatasetBuild {
+                    detail: format!(
+                        "model input `{feature_name}` is absent from the verified feature schema"
+                    ),
+                }
+            })?;
+            match feature.source_requirement {
+                SourceRequirement::DomainCryptoObservationWindow => {
+                    required.insert(DomainFamily::Crypto);
+                }
+                SourceRequirement::DomainWeatherObservationWindow => {
+                    required.insert(DomainFamily::Weather);
+                }
+                _ => {}
+            }
+        }
+        Ok(required.into_iter().collect())
+    }
+
+    /// Train + register, dispatching on family.
+    async fn train_and_commit(
+        &self,
+        commit: ModelTrainingCommit<'_>,
+    ) -> QuantResult<ModelVersionInfo> {
+        let ModelTrainingCommit {
+            model_run_id,
+            model_version_id,
+            input,
+            dataset,
+            examples,
+            serving,
+            cancel,
+        } = commit;
+        let materialization = require_dataset_materialization(dataset)?;
+        let category_scope = serving.profile.spec.category;
+        let prepared = if input.model_spec.model_family.is_exit_scorer() {
+            self.train_sell_scorer(input, examples, serving, cancel)
                 .await?
         } else {
-            match input.model_family.classical_kind() {
+            match input.model_spec.model_family.classical_kind() {
                 None => {
-                    self.train_weighted(header, input, dataset, examples, cancel)
+                    self.train_weighted(input, examples, serving, cancel)
                         .await?
                 }
                 Some(kind) => {
-                    self.train_classical(header, input, dataset, examples, kind, cancel)
+                    self.train_classical(input, examples, serving, kind, cancel)
                         .await?
                 }
             }
         };
-
-        let category_scope = artifact.category_scope();
-        let trade_policy_artifact_id = artifact.header().trade_policy_artifact_id;
-        let trade_policy_hash = artifact.header().trade_policy_hash;
+        let required_domain_families = Self::required_domain_families(
+            &serving.feature_schema,
+            &serving.factor_plane,
+            &input.model_spec.input_contract,
+            serving.profile.spec.category,
+        )?;
+        let estimator = prepared
+            .payload
+            .serving_estimator_binding(&serving.factor_plane)?;
+        let prediction_horizon_secs = input.prediction_horizon()?;
+        let contract = ModelServingContract::try_seal(ModelServingBindings {
+            policy_snapshot: serving.policy_snapshot.clone(),
+            required_domain_families,
+            capability_registry_hashes: dataset.source_lineage.capability_registry_hashes.clone(),
+            factors: ModelServingFactorBinding {
+                plane: serving.factor_plane.clone(),
+                bias_table: serving.bias_table.clone(),
+            },
+            schemas: ModelServingSchemaBinding {
+                feature_schema_hash: *materialization.feature_schema_hash,
+                label_schema_hash: *materialization.label_schema_hash,
+            },
+            transform: prepared.transform,
+            model: ModelServingModelBinding {
+                model_version_id: *model_version_id,
+                model_spec_id: input.model_spec.model_spec_id,
+                model_spec_definition_hash: input.model_spec.definition_hash,
+                model_family: input.model_spec.model_family,
+                category_scope,
+                profile_ref: serving.profile.profile_ref.clone(),
+                prediction_horizon_secs,
+                estimator,
+                calibration: None,
+            },
+            trade_policy: serving.trade_policy.clone(),
+            dataset: ModelServingDatasetBinding {
+                manifest: materialization.manifest.clone(),
+                manifest_hash: *materialization.manifest_hash,
+                artifact_bytes_hash: *materialization.artifact_bytes_hash,
+            },
+        })
+        .map_err(|error| ResearchError::InvalidModelArtifact {
+            detail: format!("seal complete model-serving contract: {error}"),
+        })?;
+        let artifact = ModelArtifact::try_seal(contract, prepared.payload)?;
+        let metrics = prepared.metrics.finalize(&artifact)?;
+        let serving_contract = artifact.header().serving_contract().clone();
+        let bindings = serving_contract.bindings();
+        let trade_policy = bindings
+            .trade_policy
+            .as_ref()
+            .map(|binding| (binding.artifact_id, binding.content_hash));
         let artifact_hash = artifact.content_hash()?;
         let key = ModelArtifact::artifact_key(&artifact_hash)?;
         self.deps
@@ -434,33 +1131,35 @@ impl ModelTrainerService {
         let version = self
             .deps
             .model_registry_repo
-            .next_version_for_spec(&input.model_spec_id)
+            .next_version_for_spec(&input.model_spec.model_spec_id)
             .await?;
+        ensure_not_cancelled(cancel, "commit")?;
         let registered = self
             .deps
             .model_registry_repo
-            .create_model_version(NewModelVersion {
-                model_version_id: *model_version_id,
-                model_spec_id: input.model_spec_id,
-                version,
-                artifact_hash,
-                category_scope,
-                profile_ref: manifest
-                    .source_lineage
-                    .research_profile_artifact_id
-                    .profile_ref(),
-                training_dataset_id: Some(input.training_dataset_id),
-                trade_policy_artifact_id,
-                trade_policy_hash,
-                publish_path_set_id: None,
-                derivation: ModelVersionDerivation::Training,
-                metrics,
-                training_objective,
-                quality_gate_report: None,
-                publication_status: PublicationStatus::Candidate,
-                published_at: None,
-                retired_at: None,
-            })
+            .commit_training_model_version(
+                model_run_id,
+                NewModelVersion {
+                    model_version_id: *model_version_id,
+                    model_spec_id: input.model_spec.model_spec_id,
+                    version,
+                    artifact_hash,
+                    serving_contract,
+                    category_scope,
+                    profile_ref: serving.profile.profile_ref.clone(),
+                    training_dataset_id: Some(input.training_dataset_id),
+                    trade_policy_artifact_id: trade_policy.map(|binding| binding.0),
+                    trade_policy_hash: trade_policy.map(|binding| binding.1),
+                    publish_path_set_id: None,
+                    derivation: ModelVersionDerivation::Training,
+                    metrics,
+                    training_objective: prepared.objective,
+                    quality_gate_report: None,
+                    publication_status: PublicationStatus::Candidate,
+                    published_at: None,
+                    retired_at: None,
+                },
+            )
             .await?;
         Ok(registered)
     }
@@ -468,46 +1167,51 @@ impl ModelTrainerService {
     /// Weighted-factor training path (always linked).
     async fn train_weighted(
         &self,
-        header: ModelArtifactHeader,
         input: &TrainModelInput,
-        dataset: &TrainingDatasetInfo,
         examples: &Arc<[TrainingExample]>,
+        serving: &VerifiedServingInputs,
         cancel: &CancellationToken,
-    ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
-        let materialization = require_dataset_materialization(dataset)?;
-        let requirements = ModelFeatureRequirements::from_input_contract(&input.input_contract);
-        let category_scope = input.category_scope.or_else(|| {
-            infer_training_category_scope(
-                examples,
-                &requirements,
-                &input.selection_enabled_categories,
-            )
-        });
-        let seed_weights = weighted_seed_weights(&self.config.factors, examples);
+    ) -> QuantResult<PreparedModelPayload> {
+        let factors = &self
+            .config
+            .policy_snapshot
+            .snapshot
+            .profile_artifacts
+            .scoring
+            .definition;
+        let seed_head = FactorHeadSpec::from_config(&serving.factor_plane, &factors.factor_head)?;
+        let objective = runtime_training_objective(
+            &self
+                .config
+                .policy_snapshot
+                .snapshot
+                .profile_artifacts
+                .research_method
+                .research
+                .training,
+        )?;
+        let validation_purge = self.config.validation_purge();
         let request = TrainModelRequest {
             cancellation: cancellation_probe(cancel),
             examples: Arc::clone(examples),
-            training_dataset_hash: *materialization.dataset_hash,
-            label: input.label.clone(),
-            seed_weights,
-            objective: self.config.objective.clone(),
+            label: input.label(),
+            factor_plane: serving.factor_plane.clone(),
+            seed_head,
+            objective: objective.clone(),
             validation: ValidationSpec {
-                folds: input.validation_folds.max(2),
-                embargo_pct: self.config.validation_purge.embargo_pct,
-                min_embargo_secs: self.config.validation_purge.min_embargo_secs,
+                folds: input.model_spec.training_contract.validation_folds,
+                embargo_pct: validation_purge.embargo_pct,
+                min_embargo_secs: validation_purge.min_embargo_secs,
             },
-            header,
-            prediction_horizon_secs: input.prediction_horizon_secs,
-            multipliers: ScoreMultiplierSpec::conservative(),
+            horizon_multipliers: HorizonMultipliers::conservative(),
             substitution_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
-            input_contract: input.input_contract.clone(),
-            factor_cross_section: self.config.factors.cross_section.clone(),
-            category_scope,
+            input_contract: input.model_spec.input_contract.clone(),
+            factor_cross_section: factors.cross_section.clone(),
         };
         let runtime = Handle::current();
         let cancellation = cancel.clone();
-        let trained: TrainedModelArtifact = self
+        let trained = self
             .deps
             .compute
             .run_offline_cancellable(OfflineMemory::try_gib(8)?, cancel, move || {
@@ -517,27 +1221,30 @@ impl ModelTrainerService {
                 Ok(trained)
             })
             .await?;
-        let objective = ModelTrainingObjective::learning_to_rank(self.config.objective.clone());
-        let metrics = learning_to_rank_metrics(
-            &trained.in_sample_metrics,
-            &trained.validation_metrics,
-            &trained.artifact,
-        )?;
-        Ok((trained.artifact, metrics, objective))
+        Ok(PreparedModelPayload {
+            payload: ModelPayload::WeightedFactor(Box::new(trained.payload)),
+            transform: ModelServingTransformBinding {
+                input_contract_hash: trained.input_contract_hash,
+                input_transform_hash: trained.input_transform_hash,
+                training_input_hash: trained.training_input_hash,
+                training_dataset_hash: serving.training_dataset_hash,
+            },
+            metrics: PendingModelMetrics::LearningToRank(Box::new(PendingRankingMetrics {
+                in_sample: trained.in_sample_metrics,
+                validation: trained.validation_metrics,
+            })),
+            objective: ModelTrainingObjective::learning_to_rank(objective),
+        })
     }
 
-    /// Sell-side hold-vs-exit training path. Seeds over the market
-    /// factors plus the position-state pseudo-factors and fits the shared LTR
-    /// simplex against the `hold_vs_exit_alpha_bps` label.
+    /// Validate and freeze a governed Sell estimator without same-data refit.
     async fn train_sell_scorer(
         &self,
-        header: ModelArtifactHeader,
         input: &TrainModelInput,
-        dataset: &TrainingDatasetInfo,
         examples: &Arc<[TrainingExample]>,
+        serving: &VerifiedServingInputs,
         cancel: &CancellationToken,
-    ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
-        let materialization = require_dataset_materialization(dataset)?;
+    ) -> QuantResult<PreparedModelPayload> {
         if !examples
             .iter()
             .all(|example| example.sample_source == TrainingSampleSource::ExitDecision)
@@ -547,24 +1254,24 @@ impl ModelTrainerService {
             }
             .into());
         }
-        let seed_weights = Self::seed_weights(examples);
+        let factors = &self
+            .config
+            .policy_snapshot
+            .snapshot
+            .profile_artifacts
+            .scoring
+            .definition;
+        let factor_head = FactorHeadSpec::from_config(&serving.factor_plane, &factors.factor_head)?;
         let request = TrainSellScorerRequest {
             cancellation: cancellation_probe(cancel),
             examples: Arc::clone(examples),
-            label: input.label.clone(),
-            seed_weights,
-            objective: self.config.objective.clone(),
-            validation: ValidationSpec {
-                folds: input.validation_folds.max(2),
-                embargo_pct: self.config.validation_purge.embargo_pct,
-                min_embargo_secs: self.config.validation_purge.min_embargo_secs,
-            },
-            header,
-            prediction_horizon_secs: input.prediction_horizon_secs,
-            output_spec: SellScorerOutputSpec::conservative(),
-            label_schema_hash: *materialization.label_schema_hash,
-            training_dataset_hash: *materialization.dataset_hash,
-            input_contract: input.input_contract.clone(),
+            label: input.label(),
+            factor_plane: serving.factor_plane.clone(),
+            factor_head,
+            estimator: SellEstimatorSpec::try_from(&factors.sell_scorer)?,
+            output_spec: SellScorerOutputSpec::try_from(&factors.sell_scorer)?,
+            input_contract: input.model_spec.input_contract.clone(),
+            factor_cross_section: factors.cross_section.clone(),
         };
         let cancellation = cancel.clone();
         let trained = self
@@ -577,41 +1284,18 @@ impl ModelTrainerService {
                 Ok(trained)
             })
             .await?;
-        let objective = ModelTrainingObjective::learning_to_rank(self.config.objective.clone());
-        let metrics = learning_to_rank_metrics(
-            &trained.in_sample_metrics,
-            &trained.validation_metrics,
-            &trained.artifact,
-        )?;
-        Ok((trained.artifact, metrics, objective))
-    }
-
-    /// Seed the Sell scorer over the observed market factors plus the three
-    /// position-state pseudo-factors (uniform), so the trainer can weigh the
-    /// lot's own state alongside market factors.
-    fn seed_weights(examples: &[TrainingExample]) -> Vec<FactorWeight> {
-        let mut names: BTreeSet<String> = BTreeSet::new();
-        for example in examples {
-            for factor in &example.factor_values {
-                names.insert(factor.name.to_string());
-            }
-        }
-        for pseudo in [
-            POSITION_UNREALIZED_PNL,
-            POSITION_TIME_IN_TRADE,
-            POSITION_PEAK_DRAWDOWN,
-        ] {
-            names.insert(pseudo.to_string());
-        }
-        let count = names.len().max(1);
-        let weight = Decimal::ONE / Decimal::from(count as u64);
-        names
-            .into_iter()
-            .map(|name| FactorWeight {
-                factor: FactorName::new(name),
-                weight,
-            })
-            .collect()
+        let fit_status = trained.metrics.fit_status;
+        Ok(PreparedModelPayload {
+            payload: ModelPayload::SellScorer(Box::new(trained.payload)),
+            transform: ModelServingTransformBinding {
+                input_contract_hash: trained.input_contract_hash,
+                input_transform_hash: trained.input_transform_hash,
+                training_input_hash: trained.training_input_hash,
+                training_dataset_hash: serving.training_dataset_hash,
+            },
+            metrics: PendingModelMetrics::SellGoverned(trained.metrics),
+            objective: ModelTrainingObjective::governed_sell(fit_status),
+        })
     }
 
     /// Create the `Training` run record (status `Running`).
@@ -623,7 +1307,6 @@ impl ModelTrainerService {
     async fn create_run(
         &self,
         model_run_id: &ModelRunId,
-        input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
     ) -> QuantResult<()> {
         let materialization = require_dataset_materialization(dataset)?;
@@ -633,17 +1316,11 @@ impl ModelTrainerService {
                 model_run_id: *model_run_id,
                 run_kind: ModelRunKind::Training,
                 model_version_id: None,
-                decision_policy_snapshot_id: input.decision_policy_snapshot_id,
+                decision_policy_snapshot_id: dataset.decision_policy_snapshot_id,
                 market_selection_id: None,
                 window_start: dataset.window_start,
                 window_end: dataset.window_end,
-                status: ModelRunStatus::Running,
                 input_hash: *materialization.dataset_hash,
-                output_hash: None,
-                error_code: None,
-                error_message: None,
-                started_at: Utc::now(),
-                finished_at: None,
             })
             .await?;
         Ok(())
@@ -705,49 +1382,73 @@ fn validation_metrics(
 fn artifact_training_lineage(
     artifact: &ModelArtifact,
 ) -> QuantResult<ModelArtifactTrainingLineage> {
-    match artifact {
-        ModelArtifact::WeightedFactor(weighted) => Ok(ModelArtifactTrainingLineage::FactorNative {
-            training_dataset_hash: weighted.training_dataset_hash,
-            training_input_hash: weighted.training_input_hash,
-            input_contract_hash: weighted.input_contract_hash,
-            input_transform_hash: weighted.input_transform_hash()?,
-            factor_inputs: weighted
-                .weights
-                .iter()
-                .map(|weight| weight.factor.clone())
-                .collect(),
-        }),
-        ModelArtifact::Classical(classical) => {
-            Ok(ModelArtifactTrainingLineage::FittedFeatureMatrix {
-                model_kind: classical.kind,
-                training_dataset_hash: classical.training_dataset_hash,
-                training_input_hash: classical.training_input_hash,
-                input_contract_hash: classical.input_contract_hash,
-                input_transform_hash: classical.input_transform_hash,
-                serialized_model_hash: classical.serialized_model_hash,
-                serialization_format: classical.serialization_format,
+    artifact.validate()?;
+    let bindings = artifact.header().serving_contract().bindings();
+    let transform = &bindings.transform;
+    match (&bindings.model.estimator, artifact.payload()) {
+        (
+            ModelServingEstimatorBinding::FactorNative { ordered_inputs, .. },
+            ModelPayload::WeightedFactor(_) | ModelPayload::SellScorer(_),
+        ) => {
+            let mut factor_inputs = Vec::new();
+            for estimator_input in ordered_inputs {
+                let ModelServingEstimatorInput::GovernedFactor {
+                    factor_definition_id,
+                } = estimator_input
+                else {
+                    continue;
+                };
+                let factor = bindings
+                    .factors
+                    .plane
+                    .definitions()
+                    .iter()
+                    .find(|factor| factor.factor_definition_id() == *factor_definition_id)
+                    .ok_or_else(|| ResearchError::InvalidModelArtifact {
+                        detail: format!(
+                            "serving lineage references unknown factor definition {factor_definition_id}"
+                        ),
+                    })?;
+                factor_inputs.push(factor.factor_name().clone());
+            }
+            Ok(ModelArtifactTrainingLineage::FactorNative {
+                training_dataset_hash: transform.training_dataset_hash,
+                training_input_hash: transform.training_input_hash,
+                input_contract_hash: transform.input_contract_hash,
+                input_transform_hash: transform.input_transform_hash,
+                factor_inputs,
             })
         }
-        ModelArtifact::SellScorer(sell) => Ok(ModelArtifactTrainingLineage::FactorNative {
-            training_dataset_hash: sell.training_dataset_hash,
-            training_input_hash: sell.training_input_hash,
-            input_contract_hash: sell.input_contract_hash,
-            input_transform_hash: sell.input_transform_hash()?,
-            factor_inputs: sell
-                .weights
-                .iter()
-                .map(|weight| weight.factor.clone())
-                .collect(),
+        (
+            ModelServingEstimatorBinding::Classical {
+                kind,
+                serialized_model_hash,
+                serialization_format,
+                ..
+            },
+            ModelPayload::Classical(_),
+        ) => Ok(ModelArtifactTrainingLineage::FittedFeatureMatrix {
+            model_kind: *kind,
+            training_dataset_hash: transform.training_dataset_hash,
+            training_input_hash: transform.training_input_hash,
+            input_contract_hash: transform.input_contract_hash,
+            input_transform_hash: transform.input_transform_hash,
+            serialized_model_hash: *serialized_model_hash,
+            serialization_format: *serialization_format,
         }),
+        _ => Err(ResearchError::InvalidModelArtifact {
+            detail: "serving estimator and header-free model payload families diverge".to_owned(),
+        }
+        .into()),
     }
 }
 
 fn learning_to_rank_metrics(
     in_sample: &TrainingObjectiveReport,
     validation: &ValidationReport,
-    artifact: &ModelArtifact,
-) -> QuantResult<ModelVersionMetrics> {
-    Ok(ModelVersionMetrics::learning_to_rank(
+    artifact_lineage: ModelArtifactTrainingLineage,
+) -> ModelVersionMetrics {
+    ModelVersionMetrics::learning_to_rank(
         LearningToRankInSampleMetrics {
             objective_value: in_sample.objective_value,
             components: objective_component_metrics(&in_sample.components),
@@ -761,8 +1462,37 @@ fn learning_to_rank_metrics(
             validation,
             HeldOutMetricKind::NegativeTotalLearningToRankLoss,
         ),
-        artifact_training_lineage(artifact)?,
-    ))
+        artifact_lineage,
+    )
+}
+
+impl PendingModelMetrics {
+    fn finalize(self, artifact: &ModelArtifact) -> QuantResult<ModelVersionMetrics> {
+        let artifact_lineage = artifact_training_lineage(artifact)?;
+        match self {
+            Self::LearningToRank(metrics) => Ok(learning_to_rank_metrics(
+                &metrics.in_sample,
+                &metrics.validation,
+                artifact_lineage,
+            )),
+            Self::SellGoverned(metrics) => Ok(ModelVersionMetrics::governed_sell(
+                GovernedSellEstimatorMetrics {
+                    resolved_label_rows: metrics.resolved_label_rows,
+                    position_state_rows: metrics.position_state_rows,
+                    fit_status: metrics.fit_status,
+                },
+                artifact_lineage,
+            )),
+            #[cfg(feature = "ml-classical")]
+            Self::Classical(metrics) => Ok(ModelVersionMetrics::classical_pointwise(
+                metrics.kind,
+                metrics.in_sample,
+                metrics.validation,
+                metrics.feature_importances,
+                artifact_lineage,
+            )),
+        }
+    }
 }
 
 /// Classical training path — only linked under `ml-classical`.
@@ -770,36 +1500,23 @@ fn learning_to_rank_metrics(
 impl ModelTrainerService {
     async fn train_classical(
         &self,
-        header: ModelArtifactHeader,
         input: &TrainModelInput,
-        dataset: &TrainingDatasetInfo,
         examples: &Arc<[TrainingExample]>,
+        serving: &VerifiedServingInputs,
         kind: ClassicalKind,
         cancel: &CancellationToken,
-    ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
-        let materialization = require_dataset_materialization(dataset)?;
+    ) -> QuantResult<PreparedModelPayload> {
+        let label = input.label();
         let output_semantics =
-            classical_output_semantics(kind, &input.label, input.prediction_horizon_secs)?;
-        let schema = FeatureSchema::build(&self.replay.features)?;
-        let schema_hash = ResearchHasher::feature_schema(&schema)?;
-        if &schema_hash != materialization.feature_schema_hash {
-            return Err(ResearchError::DatasetBuild {
-                detail: format!(
-                    "classical frozen dataset feature schema mismatch: dataset {}, runtime {}",
-                    materialization.feature_schema_hash, schema_hash
-                ),
-            }
-            .into());
-        }
-        let folds = input.validation_folds.max(2);
+            classical_output_semantics(kind, &label, input.prediction_horizon()?)?;
         let validation = ValidationSpec {
-            folds,
-            embargo_pct: self.config.validation_purge.embargo_pct,
-            min_embargo_secs: self.config.validation_purge.min_embargo_secs,
+            folds: input.model_spec.training_contract.validation_folds,
+            embargo_pct: self.config.validation_purge().embargo_pct,
+            min_embargo_secs: self.config.validation_purge().min_embargo_secs,
         };
         let examples = Arc::clone(examples);
-        let label = input.label.clone();
-        let input_contract = input.input_contract.clone();
+        let schema = serving.feature_schema.clone();
+        let input_contract = input.model_spec.input_contract.clone();
         let cancellation = cancel.clone();
         let (output, validation) = self
             .deps
@@ -818,7 +1535,7 @@ impl ModelTrainerService {
                 Ok((output, validation))
             })
             .await?;
-        if output.input_contract != input.input_contract {
+        if output.input_contract != input.model_spec.input_contract {
             return Err(ResearchError::Determinism {
                 detail: "classical trainer input contract differs from its owning model spec"
                     .to_owned(),
@@ -854,36 +1571,35 @@ impl ModelTrainerService {
                 importance: importance.importance,
             })
             .collect();
-        let artifact = ModelArtifact::Classical(Box::new(ClassicalModelArtifact {
-            header,
-            artifact_id: ModelArtifactId::from_v7(),
-            kind,
-            crate_name: output.crate_name.clone(),
-            crate_version: output.crate_version.clone(),
-            label_schema_hash: *materialization.label_schema_hash,
-            training_dataset_hash: *materialization.dataset_hash,
-            prediction_horizon_secs: input.prediction_horizon_secs,
-            output_semantics,
-            multipliers: ScoreMultiplierSpec::conservative(),
-            substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-            input_contract: output.input_contract,
-            input_contract_hash: output.input_contract_hash,
-            input_transform_hash: output.input_transform_hash,
-            training_input_hash: output.training_input_hash,
-            serialized_model_uri,
-            serialized_model_hash: output.model_bytes_hash,
-            serialization_format: ModelSerializationFormat::Bincode,
-            input_transform: output.input_transform,
-            metrics: output.metrics,
-        }));
-        let metrics = ModelVersionMetrics::classical_pointwise(
-            kind,
-            in_sample_metrics,
-            validation_metrics,
-            feature_importances,
-            artifact_training_lineage(&artifact)?,
-        );
-        Ok((artifact, metrics, objective))
+        Ok(PreparedModelPayload {
+            payload: ModelPayload::Classical(Box::new(ClassicalModelPayload {
+                kind,
+                crate_name: output.crate_name,
+                crate_version: output.crate_version,
+                output_semantics,
+                multipliers: ScoreMultiplierSpec::conservative(),
+                substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+                input_contract: output.input_contract,
+                serialized_model_uri,
+                serialized_model_hash: output.model_bytes_hash,
+                serialization_format: ModelSerializationFormat::Bincode,
+                input_transform: output.input_transform,
+                metrics: output.metrics,
+            })),
+            transform: ModelServingTransformBinding {
+                input_contract_hash: output.input_contract_hash,
+                input_transform_hash: output.input_transform_hash,
+                training_input_hash: output.training_input_hash,
+                training_dataset_hash: serving.training_dataset_hash,
+            },
+            metrics: PendingModelMetrics::Classical(Box::new(PendingClassicalMetrics {
+                kind,
+                in_sample: in_sample_metrics,
+                validation: validation_metrics,
+                feature_importances,
+            })),
+            objective,
+        })
     }
 }
 
@@ -968,20 +1684,76 @@ pub(crate) fn build_classical_matrix<'a>(
 /// Classical training is not linked in this build.
 #[cfg(not(feature = "ml-classical"))]
 impl ModelTrainerService {
-    #[allow(clippy::unused_async)]
     async fn train_classical(
         &self,
-        _header: ModelArtifactHeader,
         _input: &TrainModelInput,
-        _dataset: &TrainingDatasetInfo,
         _examples: &Arc<[TrainingExample]>,
+        _serving: &VerifiedServingInputs,
         kind: ClassicalKind,
         _cancel: &CancellationToken,
-    ) -> QuantResult<(ModelArtifact, ModelVersionMetrics, ModelTrainingObjective)> {
-        Err(ResearchError::RuntimeUnavailable {
+    ) -> QuantResult<PreparedModelPayload> {
+        future::ready(Err(ResearchError::RuntimeUnavailable {
             family: kind.to_string(),
             detail: "classical training requires the `ml-classical` build".to_owned(),
         }
-        .into())
+        .into()))
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_error::{QuantError, research::ResearchError};
+    use quant_pivot_models::{
+        enums::{common::MarketCategory, domain::DomainFamily},
+        runtime_config::FeaturesConfig,
+        types::{ModelInputContract, ModelInputSpec, factor::FactorServingPlane},
+    };
+    use quant_pivot_research::features::{
+        FeatureSchema,
+        names::{
+            book::MID, domain_crypto::DISTANCE_TO_STRIKE, domain_weather::ENSEMBLE_BIN_PROBABILITY,
+        },
+    };
+
+    use super::{MODEL_RUN_DIAGNOSTIC_MAX_CHARS, ModelTrainerService};
+
+    #[test]
+    fn run_diagnostic_is_bounded() {
+        let error = QuantError::from(ResearchError::DatasetBuild {
+            detail: "界".repeat(MODEL_RUN_DIAGNOSTIC_MAX_CHARS + 64),
+        });
+        let diagnostic = ModelTrainerService::run_diagnostic(&error);
+        assert_eq!(diagnostic.chars().count(), MODEL_RUN_DIAGNOSTIC_MAX_CHARS);
+        assert!(diagnostic.ends_with('…'));
+        assert!(error.to_string().chars().count() > diagnostic.chars().count());
+    }
+
+    #[test]
+    fn domain_union_tracks_contract() -> Result<(), QuantError> {
+        let schema = FeatureSchema::build(&FeaturesConfig::default())?;
+        let plane =
+            FactorServingPlane::try_empty().map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("empty factor plane failed: {error}"),
+            })?;
+        let input_contract = ModelInputContract {
+            inputs: vec![
+                ModelInputSpec::required(DISTANCE_TO_STRIKE.to_string()),
+                ModelInputSpec::required(ENSEMBLE_BIN_PROBABILITY.to_string()),
+            ],
+        };
+
+        let actual =
+            ModelTrainerService::required_domain_families(&schema, &plane, &input_contract, None)?;
+
+        assert_eq!(actual, vec![DomainFamily::Crypto, DomainFamily::Weather]);
+        let weather = ModelTrainerService::required_domain_families(
+            &schema,
+            &plane,
+            &ModelInputContract::single_required(MID.to_string()),
+            Some(MarketCategory::Weather),
+        )?;
+        assert_eq!(weather, vec![DomainFamily::Weather]);
+        Ok(())
     }
 }

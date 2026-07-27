@@ -26,15 +26,19 @@ use crate::{
     factors::{
         computer::FactorComputer,
         generic::{data_quality_confidence, extract_decimal},
-        identity::provisional_factor_definition_id,
         names::{
             STRUCT_BOOK_CHURN_INTENSITY, STRUCT_FAVORITE_LONGSHOT, STRUCT_NEGRISK_CONVERT_EDGE,
             STRUCT_NEGRISK_LEG_SUM_DRIFT, STRUCT_PARTICIPANT_CONCENTRATION,
             STRUCT_RESOLUTION_PROXIMITY_REGIME, STRUCT_REVERSAL_AFTER_SHOCK,
         },
+        semantics::{
+            FAVORITE_LONGSHOT, FEATURE_SCALAR_IDENTITY,
+            NEGRISK_CONVERT_EDGE as NEGRISK_CONVERT_EDGE_SEMANTICS, NEGRISK_LEG_SUM_DRIFT,
+            PARTICIPANT_CONCENTRATION, RESOLUTION_PROXIMITY, REVERSAL_AFTER_SHOCK, contract,
+        },
         value::{
-            FactorDefinitionDocument, FactorDriver, FactorName, FactorOutputKind, RawFactor,
-            RawFactorEligibility,
+            FactorAlphaOrientation, FactorContextEffect, FactorDefinitionDocument, FactorDriver,
+            FactorName, FactorOutputSemantics, RawFactor, RawFactorEligibility,
         },
     },
     features::{
@@ -78,44 +82,44 @@ pub fn structural_factors(
 
     vec![
         computer(ReversalAfterShockFactor {
-            definition_id: provisional_factor_definition_id(STRUCT_REVERSAL_AFTER_SHOCK.as_str()),
             spec: structural_spec(
                 STRUCT_REVERSAL_AFTER_SHOCK,
                 vec![feat::SHOCK_RATIO, feat::SHORT_RETURN],
-                FactorDirection::Positive,
+                FactorOutputSemantics::OutcomeAlpha {
+                    orientation: FactorAlphaOrientation::FeatureToken,
+                },
                 FactorNormalization::WinsorizedZScore,
-                FactorOutputKind::Directional,
+                REVERSAL_AFTER_SHOCK,
             ),
             shock_k,
             shock_cap,
         }),
         computer(ResolutionProximityRegimeFactor {
-            definition_id: provisional_factor_definition_id(
-                STRUCT_RESOLUTION_PROXIMITY_REGIME.as_str(),
-            ),
             spec: structural_spec(
                 STRUCT_RESOLUTION_PROXIMITY_REGIME,
                 vec![feat::PRICE_EXTREMITY, market_names::TIME_TO_RESOLUTION_SECS],
-                FactorDirection::Positive,
+                FactorOutputSemantics::OutcomeAlpha {
+                    orientation: FactorAlphaOrientation::FeatureToken,
+                },
                 FactorNormalization::WinsorizedZScore,
-                FactorOutputKind::Directional,
+                RESOLUTION_PROXIMITY,
             ),
         }),
         computer(SingleFeatureStructuralFactor {
-            definition_id: provisional_factor_definition_id(STRUCT_BOOK_CHURN_INTENSITY.as_str()),
             spec: structural_spec(
                 STRUCT_BOOK_CHURN_INTENSITY,
                 vec![feat::BOOK_CHURN_INTENSITY],
-                FactorDirection::Negative,
+                FactorOutputSemantics::Context {
+                    effect: FactorContextEffect::LowerIsSupportive,
+                },
                 FactorNormalization::WinsorizedZScore,
-                FactorOutputKind::Directional,
+                FEATURE_SCALAR_IDENTITY,
             ),
             input: feat::BOOK_CHURN_INTENSITY,
             headline_label: "book-churn intensity",
         }),
         participant_concentration_factor(structural),
         computer(NegRiskLegSumDriftFactor {
-            definition_id: provisional_factor_definition_id(STRUCT_NEGRISK_LEG_SUM_DRIFT.as_str()),
             spec: structural_spec(
                 STRUCT_NEGRISK_LEG_SUM_DRIFT,
                 vec![
@@ -123,35 +127,32 @@ pub fn structural_factors(
                     feat::NEGRISK_LEG_BID_SUM,
                     feat::NEGRISK_LEG_COUNT,
                 ],
-                // Σ best-ask > 1 means the YES-leg basket is collectively
-                // over-priced → fade it (NO side); Σ < 1 means the basket is a
-                // capital-locked buy → YES side. The signal's sign is therefore
-                // Negative in the leg-sum drift (`Σ − 1`).
-                FactorDirection::Negative,
+                // Event-level basket dislocation is not a single-leg outcome
+                // alpha. Its absolute magnitude is a context risk input until
+                // an atomic all-leg execution owner exists.
+                FactorOutputSemantics::Context {
+                    effect: FactorContextEffect::LowerIsSupportive,
+                },
                 FactorNormalization::WinsorizedZScore,
-                FactorOutputKind::Directional,
+                NEGRISK_LEG_SUM_DRIFT,
             ),
             min_legs,
         }),
         computer(NegRiskConvertEdgeFactor {
-            definition_id: provisional_factor_definition_id(STRUCT_NEGRISK_CONVERT_EDGE.as_str()),
             spec: structural_spec(
                 STRUCT_NEGRISK_CONVERT_EDGE,
                 vec![feat::NEGRISK_CONVERT_EDGE, feat::NEGRISK_LEG_COUNT],
-                // Convert-edge is an event-level capital-efficiency *regime*
-                // signal: it measures whether the basket-vs-adapter route is
-                // mispriced, but does NOT indicate which leg to buy. It is a
-                // magnitude/regime feature (Neutral direction, NormalizedScore)
-                // that the learned model may weight — it never picks a
-                // side in the heuristic net.
-                FactorDirection::Neutral,
+                // Route discrepancy is an event-level context risk. It cannot
+                // choose a single-leg side without an atomic route target.
+                FactorOutputSemantics::Context {
+                    effect: FactorContextEffect::LowerIsSupportive,
+                },
                 FactorNormalization::WinsorizedZScore,
-                FactorOutputKind::NormalizedScore,
+                NEGRISK_CONVERT_EDGE_SEMANTICS,
             ),
             min_legs,
         }),
         computer(FavoriteLongshotFactor {
-            definition_id: provisional_factor_definition_id(STRUCT_FAVORITE_LONGSHOT.as_str()),
             spec: structural_spec(
                 STRUCT_FAVORITE_LONGSHOT,
                 vec![
@@ -159,9 +160,11 @@ pub fn structural_factors(
                     book_names::MID,
                     market_names::TIME_TO_RESOLUTION_SECS,
                 ],
-                FactorDirection::Positive,
+                FactorOutputSemantics::OutcomeAlpha {
+                    orientation: FactorAlphaOrientation::FeatureToken,
+                },
                 FactorNormalization::WinsorizedZScore,
-                FactorOutputKind::Directional,
+                FAVORITE_LONGSHOT,
             ),
             bias_table,
             ic_gate: structural.per_category_ic_gate,
@@ -182,7 +185,6 @@ fn participant_concentration_factor(
 ) -> (FactorDefinitionDocument, Arc<dyn FactorComputer>) {
     let participant = &structural.participant_concentration;
     computer(ParticipantConcentrationFactor {
-        definition_id: provisional_factor_definition_id(STRUCT_PARTICIPANT_CONCENTRATION.as_str()),
         spec: structural_spec(
             STRUCT_PARTICIPANT_CONCENTRATION,
             vec![
@@ -190,9 +192,13 @@ fn participant_concentration_factor(
                 feat::PARTICIPANT_CR1_SHARE,
                 feat::PARTICIPANT_HHI,
             ],
-            FactorDirection::Neutral,
+            // Concentration is an unsigned crowding/risk magnitude; larger
+            // values reduce opportunity quality.
+            FactorOutputSemantics::Context {
+                effect: FactorContextEffect::LowerIsSupportive,
+            },
             FactorNormalization::WinsorizedZScore,
-            FactorOutputKind::NormalizedScore,
+            PARTICIPANT_CONCENTRATION,
         ),
         gini_weight: parse_decimal(
             &participant.gini_weight,
@@ -214,19 +220,19 @@ fn participant_concentration_factor(
 fn structural_spec(
     name: FactorName,
     input_features: Vec<FeatureName>,
-    direction: FactorDirection,
+    output: FactorOutputSemantics,
     normalization: FactorNormalization,
-    output_kind: FactorOutputKind,
+    semantic_key: &'static str,
 ) -> FactorDefinitionDocument {
     FactorDefinitionDocument {
         name,
         family: FactorFamily::Structural,
         input_features,
-        output_kind,
-        default_direction: direction,
+        output,
         normalization,
         owner: "quant-research".to_owned(),
-        quality_gates: Vec::new(),
+        required: false,
+        computation: contract(semantic_key),
     }
 }
 
@@ -249,7 +255,7 @@ fn inert(
         family: spec.family,
         raw_value: None,
         eligibility,
-        direction: spec.default_direction,
+        direction: FactorDirection::Neutral,
         confidence: Probability::ZERO,
         headline,
         drivers: Vec::new(),
@@ -272,7 +278,9 @@ fn scored(
         family: spec.family,
         raw_value: Some(raw_value),
         eligibility: RawFactorEligibility::Normalizable,
-        direction: spec.default_direction,
+        direction: spec
+            .contribution_direction(raw_value)
+            .unwrap_or(FactorDirection::Neutral),
         confidence: Probability::new(data_quality_confidence(features.data_quality)),
         headline,
         drivers,
@@ -288,25 +296,25 @@ fn read(features: &FeatureVector, name: &FeatureName) -> Option<Decimal> {
 // ── reversal_after_shock ────────────────────────────────────────────────────
 
 struct ReversalAfterShockFactor {
-    definition_id: FactorDefinitionId,
     spec: FactorDefinitionDocument,
     shock_k: Decimal,
     shock_cap: Decimal,
 }
 
 impl FactorComputer for ReversalAfterShockFactor {
-    fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id
-    }
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
-    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
+    fn compute_raw(
+        &self,
+        definition_id: FactorDefinitionId,
+        features: &FeatureVector,
+    ) -> QuantResult<RawFactor> {
         let (Some(shock), Some(short_return)) =
             (read(features, &SHOCK_RATIO), read(features, &SHORT_RETURN))
         else {
             return Ok(inert(
-                self.definition_id,
+                definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "no shock-window history".to_owned(),
@@ -316,7 +324,7 @@ impl FactorComputer for ReversalAfterShockFactor {
         // not contribute (raw value absent), it never fabricates a neutral.
         if shock <= self.shock_k {
             return Ok(inert(
-                self.definition_id,
+                definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 format!("shock {shock} below threshold {}", self.shock_k),
@@ -325,7 +333,7 @@ impl FactorComputer for ReversalAfterShockFactor {
         let magnitude = shock.min(self.shock_cap);
         let raw = -sign(short_return) * magnitude;
         Ok(scored(
-            self.definition_id,
+            definition_id,
             &self.spec,
             raw,
             features,
@@ -356,24 +364,24 @@ fn sign(value: Decimal) -> Decimal {
 // ── resolution_proximity_regime ─────────────────────────────────────────────
 
 struct ResolutionProximityRegimeFactor {
-    definition_id: FactorDefinitionId,
     spec: FactorDefinitionDocument,
 }
 
 impl FactorComputer for ResolutionProximityRegimeFactor {
-    fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id
-    }
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
-    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
+    fn compute_raw(
+        &self,
+        definition_id: FactorDefinitionId,
+        features: &FeatureVector,
+    ) -> QuantResult<RawFactor> {
         let (Some(extremity), Some(ttr_secs)) = (
             read(features, &PRICE_EXTREMITY),
             read(features, &TIME_TO_RESOLUTION_SECS),
         ) else {
             return Ok(inert(
-                self.definition_id,
+                definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "missing extremity or time-to-resolution".to_owned(),
@@ -386,7 +394,7 @@ impl FactorComputer for ResolutionProximityRegimeFactor {
         let ttr_days = (ttr_secs / Decimal::from(86_400u64)).max(Decimal::ONE);
         let raw = (extremity / ttr_days).round_dp(12);
         Ok(scored(
-            self.definition_id,
+            definition_id,
             &self.spec,
             raw,
             features,
@@ -408,24 +416,24 @@ impl FactorComputer for ResolutionProximityRegimeFactor {
 // ── book_churn_intensity (single feature) ───────────────────────────────────
 
 struct SingleFeatureStructuralFactor {
-    definition_id: FactorDefinitionId,
     spec: FactorDefinitionDocument,
     input: FeatureName,
     headline_label: &'static str,
 }
 
 impl FactorComputer for SingleFeatureStructuralFactor {
-    fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id
-    }
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
-    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
+    fn compute_raw(
+        &self,
+        definition_id: FactorDefinitionId,
+        features: &FeatureVector,
+    ) -> QuantResult<RawFactor> {
         Ok(read(features, &self.input).map_or_else(
             || {
                 inert(
-                    self.definition_id,
+                    definition_id,
                     &self.spec,
                     RawFactorEligibility::Normalizable,
                     format!("{} unavailable", self.headline_label),
@@ -433,7 +441,7 @@ impl FactorComputer for SingleFeatureStructuralFactor {
             },
             |value| {
                 scored(
-                    self.definition_id,
+                    definition_id,
                     &self.spec,
                     value,
                     features,
@@ -451,7 +459,6 @@ impl FactorComputer for SingleFeatureStructuralFactor {
 // ── participant_concentration ───────────────────────────────────────────────
 
 struct ParticipantConcentrationFactor {
-    definition_id: FactorDefinitionId,
     spec: FactorDefinitionDocument,
     gini_weight: Decimal,
     cr1_weight: Decimal,
@@ -459,22 +466,22 @@ struct ParticipantConcentrationFactor {
 }
 
 impl FactorComputer for ParticipantConcentrationFactor {
-    fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id
-    }
-
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
 
-    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
+    fn compute_raw(
+        &self,
+        definition_id: FactorDefinitionId,
+        features: &FeatureVector,
+    ) -> QuantResult<RawFactor> {
         let (Some(gini), Some(cr1), Some(hhi)) = (
             read(features, &PARTICIPANT_GINI),
             read(features, &PARTICIPANT_CR1_SHARE),
             read(features, &PARTICIPANT_HHI),
         ) else {
             return Ok(inert(
-                self.definition_id,
+                definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "trade-tape participant concentration unavailable".to_owned(),
@@ -487,14 +494,14 @@ impl FactorComputer for ParticipantConcentrationFactor {
         };
         let Some(raw) = composite_concentration(gini, cr1, hhi, &weights) else {
             return Ok(inert(
-                self.definition_id,
+                definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "participant concentration weights disabled".to_owned(),
             ));
         };
         Ok(scored(
-            self.definition_id,
+            definition_id,
             &self.spec,
             raw.round_dp(12),
             features,
@@ -559,7 +566,7 @@ fn negrisk_outcome(
 
 /// Build the raw factor for a neg-risk value transformed by `to_raw`.
 fn negrisk_raw(
-    definition_id: &FactorDefinitionId,
+    definition_id: FactorDefinitionId,
     spec: &FactorDefinitionDocument,
     features: &FeatureVector,
     value_name: FeatureName,
@@ -571,7 +578,7 @@ fn negrisk_raw(
         NegRiskOutcome::Applicable(value) => {
             let raw = to_raw(value).round_dp(12);
             scored(
-                *definition_id,
+                definition_id,
                 spec,
                 raw,
                 features,
@@ -583,13 +590,13 @@ fn negrisk_raw(
             )
         }
         NegRiskOutcome::NotApplicable => inert(
-            *definition_id,
+            definition_id,
             spec,
             RawFactorEligibility::NotApplicable,
             format!("{label} not applicable (binary / too few legs)"),
         ),
         NegRiskOutcome::LegMissing => inert(
-            *definition_id,
+            definition_id,
             spec,
             RawFactorEligibility::Indeterminate(FactorIndeterminateReason::LegBookMissing),
             format!("{label} indeterminate (leg book missing)"),
@@ -598,26 +605,26 @@ fn negrisk_raw(
 }
 
 struct NegRiskLegSumDriftFactor {
-    definition_id: FactorDefinitionId,
     spec: FactorDefinitionDocument,
     min_legs: u32,
 }
 
 impl FactorComputer for NegRiskLegSumDriftFactor {
-    fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id
-    }
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
-    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
+    fn compute_raw(
+        &self,
+        definition_id: FactorDefinitionId,
+        features: &FeatureVector,
+    ) -> QuantResult<RawFactor> {
         let mut raw = negrisk_raw(
-            &self.definition_id,
+            definition_id,
             &self.spec,
             features,
             NEGRISK_LEG_ASK_SUM,
             self.min_legs,
-            |ask_sum| ask_sum - Decimal::ONE,
+            |ask_sum| (ask_sum - Decimal::ONE).abs(),
             "neg-risk leg-sum drift",
         );
         // Corroborate drift confidence with leg tightness: the wider the summed
@@ -651,26 +658,26 @@ impl FeatureVector {
 }
 
 struct NegRiskConvertEdgeFactor {
-    definition_id: FactorDefinitionId,
     spec: FactorDefinitionDocument,
     min_legs: u32,
 }
 
 impl FactorComputer for NegRiskConvertEdgeFactor {
-    fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id
-    }
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
-    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
+    fn compute_raw(
+        &self,
+        definition_id: FactorDefinitionId,
+        features: &FeatureVector,
+    ) -> QuantResult<RawFactor> {
         Ok(negrisk_raw(
-            &self.definition_id,
+            definition_id,
             &self.spec,
             features,
             NEGRISK_CONVERT_EDGE,
             self.min_legs,
-            |edge| edge,
+            |edge| edge.abs(),
             "neg-risk convert edge",
         ))
     }
@@ -679,24 +686,24 @@ impl FactorComputer for NegRiskConvertEdgeFactor {
 // ── favorite_longshot ───────────────────────────────────────────────────────
 
 struct FavoriteLongshotFactor {
-    definition_id: FactorDefinitionId,
     spec: FactorDefinitionDocument,
     bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
     ic_gate: bool,
 }
 
 impl FactorComputer for FavoriteLongshotFactor {
-    fn definition_id(&self) -> FactorDefinitionId {
-        self.definition_id
-    }
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
-    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
+    fn compute_raw(
+        &self,
+        definition_id: FactorDefinitionId,
+        features: &FeatureVector,
+    ) -> QuantResult<RawFactor> {
         // No fitted table ⇒ inert (never a fabricated constant).
         let Some(table) = self.bias_table.as_ref() else {
             return Ok(inert(
-                self.definition_id,
+                definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "no bias table bound".to_owned(),
@@ -707,7 +714,7 @@ impl FactorComputer for FavoriteLongshotFactor {
         let ttr = read(features, &TIME_TO_RESOLUTION_SECS);
         let (Some(category), Some(mid), Some(ttr_secs)) = (category, mid, ttr) else {
             return Ok(inert(
-                self.definition_id,
+                definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "missing category, mid, or time-to-resolution".to_owned(),
@@ -715,7 +722,7 @@ impl FactorComputer for FavoriteLongshotFactor {
         };
         if ttr_secs < Decimal::ZERO {
             return Ok(inert(
-                self.definition_id,
+                definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "negative time-to-resolution".to_owned(),
@@ -723,7 +730,7 @@ impl FactorComputer for FavoriteLongshotFactor {
         }
         let Some(ttr_secs) = ttr_secs.to_u64() else {
             return Ok(inert(
-                self.definition_id,
+                definition_id,
                 &self.spec,
                 RawFactorEligibility::Normalizable,
                 "time-to-resolution is outside u64 range".to_owned(),
@@ -734,7 +741,7 @@ impl FactorComputer for FavoriteLongshotFactor {
             .map_or_else(
                 || {
                     inert(
-                        self.definition_id,
+                        definition_id,
                         &self.spec,
                         RawFactorEligibility::Normalizable,
                         "no significant bias for category / ttr / bucket".to_owned(),
@@ -742,7 +749,7 @@ impl FactorComputer for FavoriteLongshotFactor {
                 },
                 |bias| {
                     scored(
-                        self.definition_id,
+                        definition_id,
                         &self.spec,
                         bias,
                         features,
@@ -773,7 +780,7 @@ mod tests {
     use quant_pivot_models::{
         enums::quant::DataQualityStatus,
         runtime_config::{FactorsConfig, FeaturesConfig},
-        types::{MarketId, SchemaVersion},
+        types::{FactorDefinitionId, MarketId, SchemaVersion},
     };
     use rust_decimal::Decimal;
 
@@ -805,7 +812,10 @@ mod tests {
             .into_iter()
             .find(|(spec, _)| spec.name == STRUCT_NEGRISK_LEG_SUM_DRIFT)
             .expect("leg-sum-drift factor is registered");
-        computer.compute_raw(&vector(values)).unwrap().eligibility
+        computer
+            .compute_raw(FactorDefinitionId::from_v7(), &vector(values))
+            .unwrap()
+            .eligibility
     }
 
     #[test]
@@ -843,6 +853,27 @@ mod tests {
     }
 
     #[test]
+    fn few_legs_not_applicable() {
+        let mut values = BTreeMap::new();
+        values.insert(
+            NEGRISK_LEG_ASK_SUM,
+            FeatureCell::observed(
+                FeatureValue::Decimal(Decimal::ONE),
+                None,
+                FeatureStaleness::Unknown,
+            ),
+        );
+        values.insert(
+            NEGRISK_LEG_COUNT,
+            FeatureCell::observed(FeatureValue::Count(2), None, FeatureStaleness::Unknown),
+        );
+        assert!(matches!(
+            drift_eligibility(values),
+            RawFactorEligibility::NotApplicable
+        ));
+    }
+
+    #[test]
     fn negrisk_leg_sum_market() {
         let mut values = BTreeMap::new();
         // Σ best-ask across 3 legs = 1.08 ⇒ drift = 0.08.
@@ -864,7 +895,9 @@ mod tests {
             .into_iter()
             .find(|(spec, _)| spec.name == STRUCT_NEGRISK_LEG_SUM_DRIFT)
             .expect("factor");
-        let raw = computer.compute_raw(&vector(values)).unwrap();
+        let raw = computer
+            .compute_raw(FactorDefinitionId::from_v7(), &vector(values))
+            .unwrap();
         assert!(matches!(
             raw.eligibility,
             RawFactorEligibility::Normalizable

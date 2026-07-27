@@ -20,13 +20,60 @@ use std::collections::HashSet;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::{api::TrainingDatasetListQuery, query::TimeWindow},
-    enums::quant::TrainingDatasetStatus,
+    domain::{api::TrainingDatasetListQuery, pagination::PageRequest, query::TimeWindow},
+    enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     hashing::CanonicalDigest,
-    types::ContentHash,
+    types::{ContentHash, MarketId, TokenId},
 };
 use quant_pivot_repository::traits::TrainingDatasetRepository;
-use serde_json::json;
+use serde::Serialize;
+
+/// Exact identity of one sample admitted to a calibration fit.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct CalibrationSampleKey {
+    /// Primary calibrated subject.
+    pub subject_key: MarketId,
+    /// Optional instrument dimension. Model-score calibration binds the exact
+    /// outcome token; market-price bias calibrates the market subject itself.
+    pub instrument_key: Option<TokenId>,
+    /// Point-in-time sample boundary.
+    pub sampled_at: DateTime<Utc>,
+}
+
+impl CalibrationSampleKey {
+    /// Build a market-level calibration sample identity.
+    #[must_use]
+    pub const fn for_subject(subject_key: MarketId, sampled_at: DateTime<Utc>) -> Self {
+        Self {
+            subject_key,
+            instrument_key: None,
+            sampled_at,
+        }
+    }
+
+    /// Build an instrument-level calibration sample identity.
+    #[must_use]
+    pub const fn for_instrument(
+        subject_key: MarketId,
+        instrument_key: TokenId,
+        sampled_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            subject_key,
+            instrument_key: Some(instrument_key),
+            sampled_at,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CalibrationSplitHashInput<'a> {
+    contract: &'static str,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    sample_count: u64,
+    sample_keys: &'a [CalibrationSampleKey],
+}
 
 /// True when half-open intervals `[a_start, a_end)` and `[b_start, b_end)` intersect.
 #[must_use]
@@ -52,8 +99,14 @@ pub async fn assert_dataset_disjoint(
     window: &TimeWindow,
     fit_label: &str,
 ) -> QuantResult<()> {
-    let mut query = TrainingDatasetListQuery::default();
-    query.page.size = 100;
+    let mut query = TrainingDatasetListQuery {
+        purpose: Some(DatasetPurpose::Training),
+        page: PageRequest {
+            size: PageRequest::MAX_SIZE,
+            ..PageRequest::default()
+        },
+        ..TrainingDatasetListQuery::default()
+    };
     let mut page = 1_u64;
     loop {
         query.page.page = page;
@@ -62,7 +115,9 @@ pub async fn assert_dataset_disjoint(
             .await
             .map_err(QuantError::from)?;
         for dataset in &batch.items {
-            if dataset.status != TrainingDatasetStatus::Ready {
+            if dataset.status != TrainingDatasetStatus::Ready
+                || dataset.purpose != DatasetPurpose::Training
+            {
                 continue;
             }
             if half_open_windows_overlap(
@@ -128,7 +183,7 @@ pub fn assert_embargoed_after(
 
 /// Content hash anchoring a calibration fit to its exact sample set.
 ///
-/// Hashes the window plus sorted, distinct `(subject_key, sampled_at)` pairs.
+/// Hashes the window plus sorted, distinct subject/instrument/time identities.
 /// Shared by both calibration-artifact families so `calibration_split_hash`
 /// always means the same provenance guarantee.
 ///
@@ -137,26 +192,26 @@ pub fn assert_embargoed_after(
 /// Propagates canonical JSON hashing failures.
 pub fn calibration_split_hash(
     window: &TimeWindow,
-    keys: impl Iterator<Item = (String, DateTime<Utc>)>,
+    keys: impl Iterator<Item = CalibrationSampleKey>,
 ) -> QuantResult<ContentHash> {
-    let mut deduped: Vec<(String, DateTime<Utc>)> =
-        keys.collect::<HashSet<_>>().into_iter().collect();
-    deduped.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    let sample_keys: Vec<_> = deduped
-        .iter()
-        .map(|(subject_key, sampled_at)| {
-            json!({
-                "subject_key": subject_key,
-                "sampled_at": sampled_at,
-            })
-        })
-        .collect();
-    CanonicalDigest::content_hash_json(&json!({
-        "window_start": window.from,
-        "window_end": window.to,
-        "sample_count": deduped.len() as u64,
-        "sample_keys": sample_keys,
-    }))
+    let mut deduped = keys.collect::<HashSet<_>>().into_iter().collect::<Vec<_>>();
+    deduped.sort_by(|a, b| {
+        a.subject_key
+            .cmp(&b.subject_key)
+            .then(a.instrument_key.cmp(&b.instrument_key))
+            .then(a.sampled_at.cmp(&b.sampled_at))
+    });
+    let sample_count =
+        u64::try_from(deduped.len()).map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("calibration split sample count exceeds u64: {error}"),
+        })?;
+    CanonicalDigest::content_hash_json(&CalibrationSplitHashInput {
+        contract: "quant-pivot/calibration-split/v2",
+        window_start: window.from,
+        window_end: window.to,
+        sample_count,
+        sample_keys: &deduped,
+    })
     .map_err(|error| {
         QuantError::from(ResearchError::DatasetBuild {
             detail: format!("calibration split hash failed: {error}"),
@@ -206,5 +261,30 @@ mod tests {
             to: Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap(),
         };
         assert_embargoed_after(&ok, &train, 86_400, "calibration").expect("embargo satisfied");
+    }
+
+    #[test]
+    fn split_commits_instrument_identity() {
+        let sampled_at = Utc
+            .with_ymd_and_hms(2026, 2, 2, 0, 0, 0)
+            .single()
+            .expect("valid fixture timestamp");
+        let window = TimeWindow {
+            from: sampled_at,
+            to: sampled_at + Duration::hours(1),
+        };
+        let market = MarketId::new("market");
+        let yes =
+            CalibrationSampleKey::for_instrument(market.clone(), TokenId::new("yes"), sampled_at);
+        let no = CalibrationSampleKey::for_instrument(market, TokenId::new("no"), sampled_at);
+        let one = calibration_split_hash(&window, [yes.clone()].into_iter()).expect("single key");
+        let both =
+            calibration_split_hash(&window, [yes.clone(), no.clone()].into_iter()).expect("both");
+        let reordered = calibration_split_hash(&window, [no, yes].into_iter()).expect("reordered");
+        assert_ne!(one, both, "the outcome token must enter the split hash");
+        assert_eq!(
+            both, reordered,
+            "input order must not affect the split hash"
+        );
     }
 }

@@ -20,7 +20,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_error::{QuantError, QuantResult, governance::GovernanceError};
+use quant_pivot_error::{
+    QuantError, QuantResult, governance::GovernanceError, research::ResearchError,
+};
 use quant_pivot_models::{
     domain::{
         api::{
@@ -29,9 +31,8 @@ use quant_pivot_models::{
         },
         ports::{GovernanceActor, ModelGovernancePort, PublishModelCommand, RetireModelCommand},
         quant::{
-            BacktestPathSetInfo, BacktestReportInfo, CalibrationArtifactPayload,
-            ModelGovernanceAuditDetail, ModelVersionInfo, NewModelGovernanceAudit, NewModelVersion,
-            ShadowStabilitySummary, TrainingDatasetInfo,
+            BacktestPathSetInfo, BacktestReportInfo, ModelGovernanceAuditDetail, ModelVersionInfo,
+            NewModelGovernanceAudit, NewModelVersion, ShadowStabilitySummary, TrainingDatasetInfo,
         },
     },
     enums::{
@@ -42,11 +43,23 @@ use quant_pivot_models::{
         DecisionPolicySnapshot, QualityGateConfig, sections::ResearchValidationGatesConfig,
     },
     types::{
-        AuditEventId, BacktestReportId, CalibrationArtifactId, DatasetCoverage, FeatureParityRunId,
-        ModelGovernanceAuditId, ModelVersionId, Probability,
+        AuditEventId, BacktestReportId, CalibrationArtifactId, ContentHash, DatasetCoverage,
+        FeatureParityRunId, ModelGovernanceAuditId, ModelVersionId, Probability,
         model_lineage::ModelVersionDerivation,
+        model_metrics::{
+            MODEL_VERSION_METRICS_FORMAT_VERSION, ModelArtifactTrainingLineage,
+            ModelVersionMetricsDefinition,
+        },
         model_quality::{
             GateId, GateIntent, GateOutcome, GateSubject, QualityGateFailure, QualityGateReport,
+        },
+        model_serving::{
+            ModelServingCalibrationArtifactRef, ModelServingContract, ModelServingEstimatorBinding,
+            ModelServingEstimatorInput,
+        },
+        model_training::{
+            GovernedSellFitStatus, MODEL_TRAINING_OBJECTIVE_FORMAT_VERSION,
+            ModelTrainingObjectiveDefinition,
         },
     },
 };
@@ -64,17 +77,21 @@ use quant_pivot_research::{
     },
     model::{
         CalibratedReturnModel, CalibrationArtifactLoader, ModelArtifact, ReturnModelSpec,
-        load_hash_verified_artifact, validate_category_scope_weights,
+        artifact::ModelPayload,
     },
     training::{LeakageFindings, scan_future_leakage},
 };
 use rust_decimal::Decimal;
 
 use crate::{
-    governance::resolve_return_model_calibration,
+    governance::{
+        calibration_loader::VerifiedModelScoreCalibration, resolve_return_model_calibration,
+    },
     runtime_config::DecisionPolicyStore,
     service::{
-        feature_integrity::FeatureParityGatePort, frozen_model_parity::FrozenModelParityService,
+        feature_integrity::FeatureParityGatePort,
+        frozen_model_parity::FrozenModelParityService,
+        model_serving_preimage::{ModelServingPreimageService, VerifiedModelServingPreimage},
         training_dataset,
     },
 };
@@ -93,7 +110,9 @@ pub struct ModelGovernanceDeps {
     pub governance_audit_repo: Arc<dyn ModelGovernanceAuditRepository>,
     /// Training-dataset ledger (promotion).
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
-    /// Content-addressed artifact store (publish-time category-scope guard).
+    /// Shared side-effect-free verifier for every opaque serving commitment.
+    pub serving_preimages: Arc<ModelServingPreimageService>,
+    /// Content-addressed artifact store (hash + exact serving-contract guard).
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Unified calibration-artifact ledger (`bind_calibration` guard).
     pub calibration_repo: Arc<dyn CalibrationArtifactRepository>,
@@ -121,14 +140,9 @@ pub struct ModelGovernanceService {
 /// present only for shadow-gated intents (`Publish` / `AutoExecution`) and
 /// feeds the publish audit's shadow-overlap evidence.
 ///
-/// Also carries the hash-verified [`ModelArtifact`] this evaluation loaded to
-/// compute `return_model_calibrated` — `publish` reuses it for
-/// [`ModelGovernanceService::validate_publish_artifact`] instead of a second,
-/// redundant `load_hash_verified_artifact` round-trip: one load, two checks.
 struct GateEvaluation {
     report: QualityGateReport,
     shadow_summary: Option<ShadowStabilitySummary>,
-    artifact: ModelArtifact,
 }
 
 impl ModelGovernanceService {
@@ -205,16 +219,182 @@ impl ModelGovernanceService {
             .map_err(QuantError::from)
     }
 
-    /// Optional publish guard: Crypto-scoped weighted artifacts must
-    /// carry non-zero weight on at least one domain-crypto factor column.
-    ///
-    /// Takes the already hash-verified `artifact` loaded by `evaluate_gate` and
-    /// never loads it a second time.
-    fn validate_publish_artifact(artifact: &ModelArtifact) -> QuantResult<()> {
-        if let ModelArtifact::WeightedFactor(weighted) = artifact {
-            validate_category_scope_weights(weighted.category_scope, &weighted.weights)?;
+    fn seal_calibrated_artifact(
+        artifact: &ModelArtifact,
+        request: &BindCalibrationRequest,
+        calibrator_hash: ContentHash,
+    ) -> QuantResult<ModelArtifact> {
+        let ModelPayload::WeightedFactor(weighted) = artifact.payload() else {
+            return Err(GovernanceError::IllegalTransition {
+                detail: "bind_calibration requires a weighted-factor buy model artifact".into(),
+            }
+            .into());
+        };
+
+        let new_version_id = ModelVersionId::from_v7();
+        let mut weighted = weighted.as_ref().clone();
+        weighted.return_model = ReturnModelSpec::Calibrated(CalibratedReturnModel {
+            calibrator_ref: request.calibrator_ref,
+            downside_source: request.downside_source,
+        });
+        let payload = ModelPayload::WeightedFactor(Box::new(weighted));
+        let mut bindings = artifact.header().serving_contract().bindings().clone();
+        bindings.model.model_version_id = new_version_id;
+        bindings.model.estimator = payload.serving_estimator_binding(&bindings.factors.plane)?;
+        bindings.model.calibration = Some(ModelServingCalibrationArtifactRef {
+            artifact_id: request.calibrator_ref,
+            kind: CalibrationKind::ModelScore,
+            content_hash: calibrator_hash,
+        });
+        let serving_contract = ModelServingContract::try_seal(bindings).map_err(|error| {
+            GovernanceError::IllegalTransition {
+                detail: format!("cannot seal calibrated model serving contract: {error}"),
+            }
+        })?;
+        ModelArtifact::try_seal(serving_contract, payload)
+    }
+
+    /// Match persisted Sell metrics to the exact sealed serving lineage.
+    fn validate_sell_lineage(
+        version: &ModelVersionInfo,
+        artifact_lineage: &ModelArtifactTrainingLineage,
+    ) -> QuantResult<()> {
+        let contract = version.verified_serving_contract().map_err(|error| {
+            GovernanceError::IllegalTransition {
+                detail: format!(
+                    "sell model version {} has an invalid persisted serving contract: {error}",
+                    version.model_version_id
+                ),
+            }
+        })?;
+        let bindings = contract.bindings();
+        let ModelServingEstimatorBinding::FactorNative { ordered_inputs, .. } =
+            &bindings.model.estimator
+        else {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "sell model version {} must bind a factor-native estimator",
+                    version.model_version_id
+                ),
+            }
+            .into());
+        };
+        let ModelArtifactTrainingLineage::FactorNative {
+            training_dataset_hash,
+            training_input_hash,
+            input_contract_hash,
+            input_transform_hash,
+            factor_inputs,
+        } = artifact_lineage
+        else {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "sell model version {} metrics require factor-native artifact lineage",
+                    version.model_version_id
+                ),
+            }
+            .into());
+        };
+        let transform = &bindings.transform;
+        if *training_dataset_hash != transform.training_dataset_hash
+            || *training_input_hash != transform.training_input_hash
+            || *input_contract_hash != transform.input_contract_hash
+            || *input_transform_hash != transform.input_transform_hash
+        {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "sell model version {} metrics hashes differ from its exact serving transform",
+                    version.model_version_id
+                ),
+            }
+            .into());
+        }
+        let mut expected_factors = Vec::new();
+        for input in ordered_inputs {
+            let ModelServingEstimatorInput::GovernedFactor {
+                factor_definition_id,
+            } = input
+            else {
+                continue;
+            };
+            let factor = bindings
+                .factors
+                .plane
+                .definitions()
+                .iter()
+                .find(|revision| revision.factor_definition_id() == *factor_definition_id)
+                .ok_or_else(|| GovernanceError::IllegalTransition {
+                    detail: format!(
+                        "sell model version {} estimator references unknown factor definition {factor_definition_id}",
+                        version.model_version_id
+                    ),
+                })?;
+            expected_factors.push(factor.factor_name().clone());
+        }
+        if factor_inputs != &expected_factors {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "sell model version {} metrics factor lineage differs from its exact estimator order",
+                    version.model_version_id
+                ),
+            }
+            .into());
         }
         Ok(())
+    }
+
+    /// Require typed, matching Sell training evidence before governance.
+    fn validate_sell_fit(version: &ModelVersionInfo) -> QuantResult<()> {
+        if version.model_family != ModelFamily::HoldVsExitWeighted {
+            return Ok(());
+        }
+        if version.training_objective.format_version != MODEL_TRAINING_OBJECTIVE_FORMAT_VERSION
+            || version.metrics.format_version != MODEL_VERSION_METRICS_FORMAT_VERSION
+        {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "sell model version {} has unsupported training provenance formats",
+                    version.model_version_id
+                ),
+            }
+            .into());
+        }
+        let (
+            ModelTrainingObjectiveDefinition::GovernedSellEstimator {
+                fit_status: objective_status,
+            },
+            ModelVersionMetricsDefinition::GovernedSellEstimator {
+                preparation,
+                artifact_lineage,
+            },
+        ) = (
+            &version.training_objective.definition,
+            &version.metrics.definition,
+        )
+        else {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "sell model version {} requires matching governed Sell objective and metrics",
+                    version.model_version_id
+                ),
+            }
+            .into());
+        };
+        if objective_status != &preparation.fit_status {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "sell model version {} objective and metrics fit statuses disagree",
+                    version.model_version_id
+                ),
+            }
+            .into());
+        }
+        Self::validate_sell_lineage(version, artifact_lineage)?;
+        match objective_status {
+            GovernedSellFitStatus::OofPredictionsRequired => {
+                Err(ResearchError::SellOofEstimatorRequired.into())
+            }
+        }
     }
 }
 
@@ -239,6 +419,7 @@ impl ModelGovernancePort for ModelGovernanceService {
             }
             .into());
         }
+        Self::validate_sell_fit(&version)?;
         if version.training_dataset_id.is_none() {
             return Err(GovernanceError::IllegalTransition {
                 detail: format!(
@@ -269,9 +450,7 @@ impl ModelGovernancePort for ModelGovernanceService {
             .research_method
             .model_promotion
             .required_shadow_window_secs;
-        let evaluation = self
-            .evaluate_gate(&version, GateIntent::Publish, None)
-            .await?;
+        let evaluation = Box::pin(self.evaluate_gate(&version, GateIntent::Publish, None)).await?;
         let report = evaluation.report;
         let summary = evaluation.shadow_summary.ok_or_else(|| {
             QuantError::from(GovernanceError::IllegalTransition {
@@ -291,7 +470,6 @@ impl ModelGovernancePort for ModelGovernanceService {
             ));
         }
 
-        Self::validate_publish_artifact(&evaluation.artifact)?;
         self.commit_publish(PublishCommit {
             version,
             parity_run_id: parity_run.run_id,
@@ -374,9 +552,8 @@ impl ModelGovernancePort for ModelGovernanceService {
             GatePreviewIntent::Publish => GateIntent::Publish,
             GatePreviewIntent::AutoExecution => GateIntent::AutoExecution,
         };
-        let evaluation = self
-            .evaluate_gate(&version, gate_intent, backtest_report_id)
-            .await?;
+        let evaluation =
+            Box::pin(self.evaluate_gate(&version, gate_intent, backtest_report_id)).await?;
         Ok(gate_report_view(&evaluation.report))
     }
 
@@ -401,10 +578,12 @@ impl ModelGovernancePort for ModelGovernanceService {
             .into());
         }
 
-        self.ensure_model_score_calibrator(&request.calibrator_ref, &version.model_version_id)
+        let source = self.deps.serving_preimages.load(&version).await?;
+        let calibrator = self
+            .load_score_calibrator(&request.calibrator_ref, &source)
             .await?;
         let calibrated = self
-            .calibrated_artifact_from_version(&version, &request)
+            .store_calibrated_artifact(&source, &request, calibrator.content_hash())
             .await?;
         self.persist_calibrated_version(&version, &request, calibrated, actor)
             .await
@@ -439,6 +618,14 @@ impl ModelGovernancePort for ModelGovernanceService {
             .ok_or_else(|| GovernanceError::NotFound {
                 entity: "backtest_path_set",
                 id: request.path_set_id.to_string(),
+            })?;
+        path_set
+            .verify_hash()
+            .map_err(|error| GovernanceError::IllegalTransition {
+                detail: format!(
+                    "path set {} failed immutable evidence verification: {error}",
+                    request.path_set_id
+                ),
             })?;
         if path_set.model_version_id != version.model_version_id {
             return Err(GovernanceError::IllegalTransition {
@@ -570,12 +757,12 @@ impl ModelGovernanceService {
         Ok(published)
     }
 
-    async fn ensure_model_score_calibrator(
+    async fn load_score_calibrator(
         &self,
         calibrator_ref: &CalibrationArtifactId,
-        source_model_version_id: &ModelVersionId,
-    ) -> QuantResult<()> {
-        let calibrator = self
+        source: &VerifiedModelServingPreimage,
+    ) -> QuantResult<VerifiedModelScoreCalibration> {
+        let info = self
             .deps
             .calibration_repo
             .find_by_id(calibrator_ref)
@@ -584,60 +771,20 @@ impl ModelGovernanceService {
                 entity: "calibration_artifact",
                 id: calibrator_ref.to_string(),
             })?;
-        if calibrator.kind != CalibrationKind::ModelScore {
-            return Err(GovernanceError::IllegalTransition {
-                detail: format!(
-                    "calibrator {calibrator_ref} has kind {:?}, expected model_score",
-                    calibrator.kind
-                ),
-            }
-            .into());
-        }
-        let CalibrationArtifactPayload::ModelScore(payload) = calibrator.payload else {
-            return Err(GovernanceError::IllegalTransition {
-                detail: format!(
-                    "calibrator {calibrator_ref} payload does not match kind model_score"
-                ),
-            }
-            .into());
-        };
-        if payload.model_version_id != *source_model_version_id {
-            return Err(GovernanceError::IllegalTransition {
-                detail: format!(
-                    "calibrator {calibrator_ref} was fitted for model version {}, not source version {source_model_version_id}",
-                    payload.model_version_id
-                ),
-            }
-            .into());
-        }
-        Ok(())
+        self.deps
+            .serving_preimages
+            .verify_calibrator(source, &info)
+            .await
     }
 
-    async fn calibrated_artifact_from_version(
+    async fn store_calibrated_artifact(
         &self,
-        version: &ModelVersionInfo,
+        source: &VerifiedModelServingPreimage,
         request: &BindCalibrationRequest,
+        calibrator_hash: ContentHash,
     ) -> QuantResult<ModelArtifact> {
-        let bytes = self
-            .deps
-            .artifact_store
-            .get_by_key(&ModelArtifact::artifact_key(&version.artifact_hash)?)
-            .await?;
-        let ModelArtifact::WeightedFactor(mut weighted) = ModelArtifact::from_bytes(&bytes)? else {
-            return Err(GovernanceError::IllegalTransition {
-                detail: "bind_calibration requires a weighted-factor buy model artifact".into(),
-            }
-            .into());
-        };
-
-        let new_version_id = ModelVersionId::from_v7();
-        weighted.header.model_version_id = new_version_id;
-        weighted.return_model = ReturnModelSpec::Calibrated(CalibratedReturnModel {
-            calibrator_ref: request.calibrator_ref,
-            downside_source: request.downside_source,
-        });
-        let calibrated = ModelArtifact::WeightedFactor(weighted);
-        calibrated.validate()?;
+        let calibrated =
+            Self::seal_calibrated_artifact(source.artifact(), request, calibrator_hash)?;
         let artifact_hash = calibrated.content_hash()?;
         self.deps
             .artifact_store
@@ -657,25 +804,37 @@ impl ModelGovernanceService {
         actor: GovernanceActor,
     ) -> QuantResult<ModelVersionInfo> {
         let artifact_hash = calibrated.content_hash()?;
-        let new_version_id = calibrated.header().model_version_id;
+        let serving_contract = calibrated.header().serving_contract().clone();
+        let bindings = serving_contract.bindings();
+        let model = &bindings.model;
+        let new_version_id = model.model_version_id;
+        let model_spec_id = model.model_spec_id;
+        let category_scope = model.category_scope;
+        let profile_ref = model.profile_ref.clone();
+        let training_dataset_id = Some(bindings.dataset.manifest.training_dataset_id);
+        let trade_policy = bindings
+            .trade_policy
+            .as_ref()
+            .map(|binding| (binding.artifact_id, binding.content_hash));
         let next = self
             .deps
             .model_registry_repo
-            .next_version_for_spec(&version.model_spec_id)
+            .next_version_for_spec(&model_spec_id)
             .await?;
         let created = self
             .deps
             .model_registry_repo
             .create_model_version(NewModelVersion {
                 model_version_id: new_version_id,
-                model_spec_id: version.model_spec_id,
+                model_spec_id,
                 version: next,
                 artifact_hash,
-                category_scope: calibrated.category_scope(),
-                profile_ref: version.profile_ref.clone(),
-                training_dataset_id: version.training_dataset_id,
-                trade_policy_artifact_id: calibrated.header().trade_policy_artifact_id,
-                trade_policy_hash: calibrated.header().trade_policy_hash,
+                serving_contract,
+                category_scope,
+                profile_ref,
+                training_dataset_id,
+                trade_policy_artifact_id: trade_policy.map(|(artifact_id, _)| artifact_id),
+                trade_policy_hash: trade_policy.map(|(_, content_hash)| content_hash),
                 publish_path_set_id: None,
                 derivation: ModelVersionDerivation::ReturnCalibration {
                     parent_model_version_id: version.model_version_id,
@@ -744,6 +903,7 @@ impl ModelGovernanceService {
         intent: GateIntent,
         backtest_report_id: Option<&BacktestReportId>,
     ) -> QuantResult<GateEvaluation> {
+        Self::validate_sell_fit(version)?;
         let config = self.deps.runtime_config.current();
         let required_window = config
             .profile_artifacts
@@ -764,14 +924,15 @@ impl ModelGovernanceService {
             sell_thresholds_from_config(&config.profile_artifacts.research_method.model_promotion);
         let model_family = Self::model_family_for_version(version);
 
-        let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
+        let serving_preimage = self.deps.serving_preimages.load(version).await?;
+        let artifact = serving_preimage.artifact();
         // Deep check: the same function
         // report/admission/intent-creation share, not the shallow enum-tag
         // read `ModelArtifact::return_model_is_calibrated` used to be — a
         // calibrator deactivated after `bind_calibration` must fail the
         // publish gate too, not just downstream consumers.
         let return_model_calibrated =
-            resolve_return_model_calibration(self.deps.calibration_loader.as_ref(), &artifact)
+            resolve_return_model_calibration(self.deps.calibration_loader.as_ref(), artifact)
                 .await?
                 .is_some();
 
@@ -838,7 +999,6 @@ impl ModelGovernanceService {
         Ok(GateEvaluation {
             report: decision.report().clone(),
             shadow_summary,
-            artifact,
         })
     }
 
@@ -899,6 +1059,13 @@ impl ModelGovernanceService {
             }
             .into());
         };
+        info.verify_hash()
+            .map_err(|error| GovernanceError::IllegalTransition {
+                detail: format!(
+                    "bound publish_path_set_id {path_set_id} failed immutable evidence \
+                     verification: {error}"
+                ),
+            })?;
         if info.model_version_id != version.model_version_id {
             return Err(GovernanceError::IllegalTransition {
                 detail: format!(
@@ -1170,7 +1337,10 @@ mod path_set_gate_input_tests {
         types::{
             BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
             TrainingDatasetId,
-            backtest::{BacktestPaths, SharpeDistribution},
+            backtest::{
+                BacktestPaths, CpcvFoldArtifact, CpcvFoldArtifacts, CpcvFoldCalibrationPolicy,
+                CpcvFoldRole, CpcvMethodologyBinding, CpcvPathSetSubject, SharpeDistribution,
+            },
         },
     };
     use rust_decimal_macros::dec;
@@ -1190,6 +1360,35 @@ mod path_set_gate_input_tests {
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             window_start: Utc::now(),
             window_end: Utc::now(),
+            subject: CpcvPathSetSubject::new(hash(), hash(), hash(), hash(), hash(), hash()),
+            methodology: CpcvMethodologyBinding::new(
+                hash(),
+                hash(),
+                hash(),
+                CpcvFoldCalibrationPolicy::SubjectHeuristic {
+                    return_model_hash: hash(),
+                },
+            ),
+            fold_artifacts: CpcvFoldArtifacts::try_new(vec![
+                CpcvFoldArtifact {
+                    role: CpcvFoldRole::Validation,
+                    training_groups_hash: hash(),
+                    training_group_count: 1,
+                    model_artifact_hash: hash(),
+                    serving_contract_hash: hash(),
+                    model_payload_hash: hash(),
+                },
+                CpcvFoldArtifact {
+                    role: CpcvFoldRole::Trial { trial_id: 0 },
+                    training_groups_hash: ContentHash::parse(&format!("blake3:{}", "b".repeat(64)))
+                        .expect("trial hash"),
+                    training_group_count: 1,
+                    model_artifact_hash: hash(),
+                    serving_contract_hash: hash(),
+                    model_payload_hash: hash(),
+                },
+            ])
+            .expect("fold artifacts"),
             path_count: 3,
             combination_count: 6,
             paths: BacktestPaths::default(),
@@ -1234,5 +1433,184 @@ mod path_set_gate_input_tests {
         let error = checked_shadow_stability_lookback(u64::MAX)
             .expect_err("lookback multiplication must not saturate");
         assert!(error.to_string().contains("shadow_stability_lookback_secs"));
+    }
+}
+
+#[cfg(test)]
+mod artifact_contract_tests {
+    use quant_pivot_error::{QuantError, research::ResearchError};
+    use quant_pivot_models::{
+        domain::api::BindCalibrationRequest,
+        enums::quant::{CalibrationKind, DownsideSource, PublicationStatus},
+        types::{
+            CalibrationArtifactId, ContentHash,
+            model_metrics::{
+                GovernedSellEstimatorMetrics, ModelArtifactTrainingLineage, ModelVersionMetrics,
+            },
+            model_serving::{ModelServingEstimatorBinding, ModelServingEstimatorInput},
+            model_training::{GovernedSellFitStatus, ModelTrainingObjective},
+        },
+    };
+    use quant_pivot_research::model::{ModelArtifact, ReturnModelSpec, artifact::ModelPayload};
+
+    use super::ModelGovernanceService;
+    use crate::service::model_serving_test_support::{
+        model_artifact, model_version, sell_artifact,
+    };
+
+    fn factor_lineage(artifact: &ModelArtifact) -> ModelArtifactTrainingLineage {
+        let bindings = artifact.header().serving_contract().bindings();
+        let ModelServingEstimatorBinding::FactorNative { ordered_inputs, .. } =
+            &bindings.model.estimator
+        else {
+            panic!("Sell fixture must use a factor-native estimator");
+        };
+        let factor_inputs = ordered_inputs
+            .iter()
+            .filter_map(|input| match input {
+                ModelServingEstimatorInput::GovernedFactor {
+                    factor_definition_id,
+                } => Some(
+                    bindings
+                        .factors
+                        .plane
+                        .definitions()
+                        .iter()
+                        .find(|revision| revision.factor_definition_id() == *factor_definition_id)
+                        .expect("known fixture factor")
+                        .factor_name()
+                        .clone(),
+                ),
+                ModelServingEstimatorInput::ModelIntrinsic { .. } => None,
+            })
+            .collect();
+        let transform = &bindings.transform;
+        ModelArtifactTrainingLineage::FactorNative {
+            training_dataset_hash: transform.training_dataset_hash,
+            training_input_hash: transform.training_input_hash,
+            input_contract_hash: transform.input_contract_hash,
+            input_transform_hash: transform.input_transform_hash,
+            factor_inputs,
+        }
+    }
+
+    #[test]
+    fn calibration_reseals_contract() {
+        let source = model_artifact(None);
+        let source_version_id = source.header().model_version_id();
+        let calibrator_ref = CalibrationArtifactId::from_v7();
+        let calibrator_hash = ContentHash::from_bytes([9; 32]);
+        let request = BindCalibrationRequest {
+            calibrator_ref,
+            downside_source: DownsideSource::MfeMae,
+            reason: "bind independent calibration".to_owned(),
+        };
+
+        let calibrated =
+            ModelGovernanceService::seal_calibrated_artifact(&source, &request, calibrator_hash)
+                .expect("seal calibrated artifact");
+        let contract = calibrated.header().serving_contract();
+        let bindings = contract.bindings();
+        assert_ne!(bindings.model.model_version_id, source_version_id);
+        assert_eq!(
+            bindings.model.calibration.as_ref().map(|binding| (
+                binding.artifact_id,
+                binding.kind,
+                binding.content_hash
+            )),
+            Some((calibrator_ref, CalibrationKind::ModelScore, calibrator_hash))
+        );
+        assert_eq!(
+            bindings.model.estimator,
+            calibrated
+                .payload()
+                .serving_estimator_binding(&bindings.factors.plane)
+                .expect("exact estimator binding")
+        );
+        let ModelPayload::WeightedFactor(weighted) = calibrated.payload() else {
+            panic!("calibrated artifact must remain weighted-factor");
+        };
+        assert!(matches!(
+            weighted.return_model,
+            ReturnModelSpec::Calibrated(ref model) if model.calibrator_ref == calibrator_ref
+        ));
+        calibrated.validate().expect("valid calibrated artifact");
+    }
+
+    #[test]
+    fn sell_oof_publish_rejected() {
+        let artifact = sell_artifact();
+        let mut version = model_version(&artifact, PublicationStatus::Candidate, None);
+        let fit_status = GovernedSellFitStatus::OofPredictionsRequired;
+        version.training_objective = ModelTrainingObjective::governed_sell(fit_status);
+        version.metrics = ModelVersionMetrics::governed_sell(
+            GovernedSellEstimatorMetrics {
+                resolved_label_rows: 128,
+                position_state_rows: 128,
+                fit_status,
+            },
+            factor_lineage(&artifact),
+        );
+
+        let error = ModelGovernanceService::validate_sell_fit(&version)
+            .expect_err("OOF-required Sell model must not enter governance");
+        assert!(matches!(
+            error,
+            QuantError::Research(ResearchError::SellOofEstimatorRequired)
+        ));
+    }
+
+    #[test]
+    fn sell_lineage_mismatch_rejected() {
+        let artifact = sell_artifact();
+        let mut version = model_version(&artifact, PublicationStatus::Candidate, None);
+        let fit_status = GovernedSellFitStatus::OofPredictionsRequired;
+        let mut lineage = factor_lineage(&artifact);
+        let ModelArtifactTrainingLineage::FactorNative {
+            training_input_hash,
+            ..
+        } = &mut lineage
+        else {
+            panic!("Sell fixture must use factor-native lineage");
+        };
+        *training_input_hash = ContentHash::from_bytes([6; 32]);
+        version.training_objective = ModelTrainingObjective::governed_sell(fit_status);
+        version.metrics = ModelVersionMetrics::governed_sell(
+            GovernedSellEstimatorMetrics {
+                resolved_label_rows: 128,
+                position_state_rows: 128,
+                fit_status,
+            },
+            lineage,
+        );
+
+        let error = ModelGovernanceService::validate_sell_fit(&version)
+            .expect_err("Sell lineage mismatch must fail closed");
+        assert!(error.to_string().contains("metrics hashes differ"));
+    }
+
+    #[test]
+    fn sell_format_drift_rejected() {
+        let artifact = sell_artifact();
+        let mut version = model_version(&artifact, PublicationStatus::Candidate, None);
+        let fit_status = GovernedSellFitStatus::OofPredictionsRequired;
+        version.training_objective = ModelTrainingObjective::governed_sell(fit_status);
+        version.metrics = ModelVersionMetrics::governed_sell(
+            GovernedSellEstimatorMetrics {
+                resolved_label_rows: 128,
+                position_state_rows: 128,
+                fit_status,
+            },
+            factor_lineage(&artifact),
+        );
+        version.metrics.format_version += 1;
+
+        let error = ModelGovernanceService::validate_sell_fit(&version)
+            .expect_err("Sell format drift must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported training provenance formats")
+        );
     }
 }

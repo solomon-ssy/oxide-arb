@@ -5,13 +5,8 @@ use sea_orm::entity::prelude::*;
 
 use super::quant_factor_value;
 use crate::{
-    enums::{
-        factor::{FactorDefinitionScope, FactorFamily},
-        quant::PublicationStatus,
-    },
-    types::{
-        ContentHash, FactorDefinitionId, SchemaVersion, UserId, factor::FactorDefinitionDocument,
-    },
+    enums::factor::{FactorDefinitionScope, FactorFamily},
+    types::{ContentHash, FactorDefinitionId, SchemaVersion, factor::FactorDefinitionDocument},
 };
 
 #[sea_orm::model]
@@ -32,10 +27,7 @@ pub struct Model {
     pub output_schema_version: SchemaVersion,
     #[sea_orm(column_type = "JsonBinary")]
     pub definition: FactorDefinitionDocument,
-    pub status: PublicationStatus,
-    pub created_by: Option<UserId>,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 
     #[sea_orm(has_many, relation_enum = "FactorValue")]
     pub factor_value: HasMany<quant_factor_value::Entity>,

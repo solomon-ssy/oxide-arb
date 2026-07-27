@@ -466,8 +466,7 @@ fn build_exit_monitor(
     let audit = Arc::clone(&wiring.infra.exit_signal_evaluation_event_writer);
     let reinferer = ModelBackedExitSignalReinferer::new(ModelBackedExitSignalReinfererDeps {
         model_registry: Arc::clone(&wiring.research.model_registry_repo),
-        factory_builder: Arc::clone(&wiring.research.model_runtime_factory_builder),
-        weight_overlay: Arc::clone(&wiring.governance.weight_overlay),
+        serving_preimages: Arc::clone(&wiring.research.serving_preimages),
         config_versions: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
         recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
         factors: Arc::clone(&wiring.research.factor_repo) as Arc<dyn FactorRepository>,
@@ -488,7 +487,7 @@ fn build_exit_monitor(
     let opportunistic_scorer =
         ModelBackedOpportunisticSellScorer::new(ModelBackedOpportunisticSellScorerDeps {
             model_registry: Arc::clone(&wiring.research.model_registry_repo),
-            factory_builder: Arc::clone(&wiring.research.model_runtime_factory_builder),
+            serving_preimages: Arc::clone(&wiring.research.serving_preimages),
             config: Arc::clone(&wiring.governance.runtime_config),
             recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
             factors: Arc::clone(&wiring.research.factor_repo) as Arc<dyn FactorRepository>,

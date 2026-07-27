@@ -3,45 +3,63 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2LedgerRow, BookStreamSessionRow, ChDigest, ChPrice, ChSchemaVersion, ChShares,
+        BookL2LedgerRow, BookMicrostructureRow, BookStreamSessionRow, ChDigest, ChPrice,
+        ChSchemaVersion, ChShares, ChUsd, MarketResolutionFactInput, MarketResolutionRow,
     },
     domain::{
         data_plane::DecisionSource,
+        market::{
+            CATALOG_OBJECT_SCHEMA_VERSION, CatalogEventChangeInfo, CatalogMarketChangeInfo,
+            EventRegistryInfo, MarketRegistryInfo,
+        },
         quant::{
             CompleteSourceSlice, CompleteTrainingDatasetBuild, FeedbackCohortWindow,
             NewSourceSlice, NewTrainingDatasetPlan, SourceSliceIdentity, SourceSliceIdentityInput,
         },
     },
     enums::{
-        catalog::CatalogTimestampQuality,
+        catalog::{CatalogChangeType, CatalogFilterReasonSet, CatalogTimestampQuality},
         clickhouse::{ChCanonicalBookEventType, ChStreamSessionEndReason, ChStreamSessionState},
-        common::TickSize,
-        market::MarketStatus,
+        common::{CategorySet, TickSize},
+        factor::{FactorFamily, FactorNormalization},
+        market::{EventStatus, MarketStatus},
+        model::ModelFamily,
         quant::{DatasetPurpose, FeedbackCohort, TrainingDatasetStatus},
     },
     hashing::CanonicalDigest,
     types::{
         ArtifactUri, BookSnapshotRef, BookSnapshotSource, Bps, CapabilityRegistryHashes,
-        CatalogDecisionRef, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId,
-        ClobFeeDetails, ClobMarketInfoVersion, ClobMarketInfoVersionId, ClobTokenDescriptor,
-        ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DATASET_COHORT_MANIFEST_FORMAT_VERSION,
-        DATASET_SOURCE_LINEAGE_FORMAT_VERSION, DatasetCohortArtifactRef, DatasetCohortCounts,
-        DatasetCohortManifest, DatasetCoverage, DatasetManifest, DatasetSourceLineage,
-        DecisionCaptureEvidence, DecisionPolicySnapshotId, DecisionSnapshotEvidence, MarketContext,
-        ModelSpecId, Price, Probability, ReaderContractVersion, RecommendationIdentity,
-        ResearchEvaluationTrack, ResearchProfileRef, SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
-        SchemaContractVersion, SchemaVersion, Shares, SourceSliceCatalogProof, SourceSliceId,
-        SourceSliceManifest, SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef,
-        SourceSlicePitCutoffs, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSources, Usd,
-        default_sample_sources,
+        CatalogDecisionRef, CatalogEventChangeId, CatalogEventObjectId, CatalogMarketChangeId,
+        CatalogMarketObjectId, CatalogSyncBatchId, ClobFeeDetails, ClobMarketInfoVersion,
+        ClobMarketInfoVersionId, ClobTokenDescriptor, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
+        DATASET_COHORT_MANIFEST_FORMAT_VERSION, DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+        DatasetCohortArtifactRef, DatasetCohortCounts, DatasetCohortManifest, DatasetCoverage,
+        DatasetManifest, DatasetSourceLineage, DecisionCaptureEvidence, DecisionPolicySnapshotId,
+        DecisionSnapshotEvidence, EvmBlockHash, EvmTransactionHash, MarketContext, ModelSpecId,
+        PayoutRatio, Price, Probability, ReaderContractVersion, RecommendationIdentity,
+        ResearchEvaluationTrack, ResearchProfileArtifact, ResearchProfileDataSource,
+        ResearchProfileRef, SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SchemaContractVersion,
+        SchemaVersion, Shares, SourceSliceCatalogProof, SourceSliceId, SourceSliceManifest,
+        SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoffs,
+        TokenId, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSources, Usd,
+        factor::{
+            FactorAlphaOrientation, FactorComputationContract, FactorDefinitionDocument,
+            FactorDefinitionRef, FactorOutputSemantics, FactorServingPlane,
+        },
+        stable_name::FactorName,
     },
 };
 use quant_pivot_repository::{
-    postgres::{PgModelRegistryRepository, PgSourceSliceRepository, PgTrainingDatasetRepository},
-    traits::{SourceSliceRepository, TrainingDatasetRepository},
+    postgres::{
+        PgModelRegistryRepository, PgPolicyRepository, PgSourceSliceRepository,
+        PgTrainingDatasetRepository,
+    },
+    traits::{
+        ModelRegistryRepository, PolicyRepository, SourceSliceRepository, TrainingDatasetRepository,
+    },
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -174,10 +192,21 @@ fn source_record<T: Serialize>(
 
 const fn source_object_slug(kind: SourceSliceObjectKind) -> &'static str {
     match kind {
+        SourceSliceObjectKind::CatalogMarket => "catalog-market",
+        SourceSliceObjectKind::CatalogEvent => "catalog-event",
         SourceSliceObjectKind::ClobMarketInfo => "clob-market-info",
         SourceSliceObjectKind::L2Ledger => "l2-ledger",
         SourceSliceObjectKind::L2Session => "l2-session",
-        _ => "source-object",
+        SourceSliceObjectKind::L2Gap => "l2-gap",
+        SourceSliceObjectKind::BookMicrostructure => "book-microstructure",
+        SourceSliceObjectKind::TradeTape => "trade-tape",
+        SourceSliceObjectKind::MarketLinkage => "market-linkage",
+        SourceSliceObjectKind::DomainObservation => "domain-observation",
+        SourceSliceObjectKind::CryptoPriceReport => "crypto-price-report",
+        SourceSliceObjectKind::WeatherObservation => "weather-observation",
+        SourceSliceObjectKind::WeatherForecast => "weather-forecast",
+        SourceSliceObjectKind::CalibrationReference => "calibration-reference",
+        SourceSliceObjectKind::Resolution => "resolution",
     }
 }
 
@@ -235,6 +264,7 @@ async fn persist_source_object(
 /// backtest/CPCV integration tests, then seal a canonical manifest.
 pub struct ReplayableSourceSliceFixture {
     pub profile_ref: ResearchProfileRef,
+    pub evaluation_track: ResearchEvaluationTrack,
     pub research_program_hash: ContentHash,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub runtime_config_hash: ContentHash,
@@ -261,6 +291,7 @@ pub struct DatasetSourceSeed {
 /// Inputs for a repository-backed reusable evaluation holdout fixture.
 pub struct EvaluationDatasetSeed {
     pub scope: String,
+    pub source_training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
     pub model_spec_definition_hash: ContentHash,
     pub profile_ref: ResearchProfileRef,
@@ -270,11 +301,221 @@ pub struct EvaluationDatasetSeed {
     pub sample_count: u64,
 }
 
-/// Complete immutable inputs for one Dataset v2 plan/manifest fixture.
+struct EvaluationDatasetSource {
+    model_family: ModelFamily,
+    factor_serving_plane: FactorServingPlane,
+    source_manifest: SourceSliceManifest,
+    knowledge_lag_secs: u64,
+    sample_interval_secs: u64,
+    horizons_secs: Vec<u64>,
+    feature_schema_version: SchemaVersion,
+    sample_sources: TrainingSampleSources,
+    feature_schema_hash: ContentHash,
+    label_schema_hash: ContentHash,
+}
+
+impl EvaluationDatasetSource {
+    async fn load(db: &DatabaseConnection, input: &EvaluationDatasetSeed) -> QuantResult<Self> {
+        let training_dataset = PgTrainingDatasetRepository::new(db.clone())
+            .find_by_id(&input.source_training_dataset_id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "quant_training_dataset",
+                id: input.source_training_dataset_id.to_string(),
+            })?;
+        let materialization =
+            training_dataset
+                .materialization()
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "source Training Dataset {} is not fully materialized",
+                        input.source_training_dataset_id
+                    ),
+                })?;
+        if training_dataset.status != TrainingDatasetStatus::Ready
+            || training_dataset.purpose != DatasetPurpose::Training
+            || training_dataset.model_spec_id != input.model_spec_id
+            || training_dataset.model_spec_definition_hash != input.model_spec_definition_hash
+            || training_dataset.research_profile_artifact_id != input.profile_ref.artifact_id()
+            || training_dataset.decision_policy_snapshot_id != input.decision_policy_snapshot_id
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: "evaluation Dataset source does not match the exact model/profile/policy"
+                    .to_owned(),
+            }
+            .into());
+        }
+        if materialization.manifest.trade_policy_artifact_id.is_some() {
+            return Err(ResearchError::DatasetBuild {
+                detail: "evaluation fixture does not support a trade-policy-bound source Dataset"
+                    .to_owned(),
+            }
+            .into());
+        }
+        let source_slice = PgSourceSliceRepository::new(db.clone())
+            .find_by_id(&training_dataset.source_slice_id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "quant_source_slice",
+                id: training_dataset.source_slice_id.to_string(),
+            })?;
+        let source_manifest = source_slice
+            .manifest
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "source Training Dataset has no complete Source Slice manifest".to_owned(),
+            })?;
+        let model_spec = PgModelRegistryRepository::new(db.clone())
+            .find_model_spec(&input.model_spec_id)
+            .await?
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: format!("evaluation model spec {} is missing", input.model_spec_id),
+            })?;
+        if model_spec.definition_hash != input.model_spec_definition_hash {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "evaluation model spec {} definition hash changed",
+                    input.model_spec_id
+                ),
+            }
+            .into());
+        }
+        let knowledge_lag_secs =
+            u64::try_from(training_dataset.knowledge_lag_secs).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!("source Dataset knowledge lag is invalid: {error}"),
+                }
+            })?;
+        let sample_interval_secs =
+            u64::try_from(training_dataset.sample_interval_secs).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!("source Dataset sample interval is invalid: {error}"),
+                }
+            })?;
+        let sample_sources =
+            training_dataset
+                .sample_sources
+                .clone()
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "source Training Dataset has no frozen sample-source contract"
+                        .to_owned(),
+                })?;
+        Ok(Self {
+            model_family: model_spec.model_family,
+            factor_serving_plane: materialization.factor_serving_plane.clone(),
+            source_manifest,
+            knowledge_lag_secs,
+            sample_interval_secs,
+            horizons_secs: training_dataset.horizons_secs.0.clone(),
+            feature_schema_version: training_dataset.feature_schema_version,
+            sample_sources,
+            feature_schema_hash: *materialization.feature_schema_hash,
+            label_schema_hash: *materialization.label_schema_hash,
+        })
+    }
+
+    fn ledger(
+        self,
+        input: &EvaluationDatasetSeed,
+        dataset_id: TrainingDatasetId,
+        source_lineage: DatasetSourceLineage,
+        cohort_manifest: DatasetCohortManifest,
+    ) -> QuantResult<DatasetLedgerFixture> {
+        let semantic_dataset_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot:test:evaluation-dataset",
+            1,
+            &(
+                dataset_id,
+                input.model_spec_id,
+                input.model_spec_definition_hash,
+                source_lineage.source_slice_identity_hash,
+                input.window_start,
+                input.window_end,
+                self.factor_serving_plane.factor_schema_hash(),
+                self.feature_schema_hash,
+                self.label_schema_hash,
+                input.sample_count,
+            ),
+        )?;
+        let source_fingerprint = CanonicalDigest::content_hash_typed(
+            "quant-pivot:test:evaluation-source-fingerprint",
+            1,
+            &(
+                source_lineage.source_slice_identity_hash,
+                cohort_manifest.artifact.source_hash,
+                input.sample_count,
+            ),
+        )?;
+        DatasetLedgerFixture::try_new(DatasetLedgerSeed {
+            training_dataset_id: dataset_id,
+            model_spec_id: input.model_spec_id,
+            model_family: self.model_family,
+            model_spec_definition_hash: input.model_spec_definition_hash,
+            factor_serving_plane: self.factor_serving_plane,
+            source_lineage,
+            cohort_manifest: Some(cohort_manifest),
+            window_start: input.window_start,
+            window_end: input.window_end,
+            purpose: DatasetPurpose::Evaluation,
+            knowledge_lag_secs: self.knowledge_lag_secs,
+            sample_interval_secs: self.sample_interval_secs,
+            horizons_secs: self.horizons_secs,
+            feature_schema_version: self.feature_schema_version,
+            sample_sources: Some(self.sample_sources),
+            feature_schema_hash: self.feature_schema_hash,
+            label_schema_hash: self.label_schema_hash,
+            semantic_dataset_hash,
+            source_fingerprint,
+            sample_count: input.sample_count,
+        })
+    }
+}
+
+/// Build one valid factor-native serving plane for persistence fixtures.
+pub fn fixture_factor_plane(
+    feature_schema_hash: ContentHash,
+    feature_schema_version: SchemaVersion,
+) -> QuantResult<FactorServingPlane> {
+    let definition = FactorDefinitionDocument {
+        name: FactorName::new("liquidity_depth"),
+        family: FactorFamily::Momentum,
+        input_features: Vec::new(),
+        output: FactorOutputSemantics::OutcomeAlpha {
+            orientation: FactorAlphaOrientation::CanonicalYes,
+        },
+        normalization: FactorNormalization::Rank,
+        owner: "system-tests".to_owned(),
+        required: false,
+        computation: FactorComputationContract {
+            semantic_version: 1,
+            semantic_key: format!(
+                "quant-pivot/system-test-factor-{}@1",
+                feature_schema_hash.hex()
+            ),
+        },
+    };
+    let revision = FactorDefinitionRef::try_seal(
+        definition,
+        feature_schema_hash,
+        feature_schema_version,
+        SchemaVersion::FIRST,
+    )
+    .map_err(|error| ResearchError::DatasetBuild {
+        detail: format!("fixture factor revision is invalid: {error}"),
+    })?;
+    FactorServingPlane::try_seal(vec![revision])
+        .map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("fixture factor plane is invalid: {error}"),
+        })
+        .map_err(Into::into)
+}
+
+/// Complete immutable inputs for one Dataset v3 plan/manifest fixture.
 pub struct DatasetLedgerSeed {
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
+    pub model_family: ModelFamily,
     pub model_spec_definition_hash: ContentHash,
+    pub factor_serving_plane: FactorServingPlane,
     pub source_lineage: DatasetSourceLineage,
     pub cohort_manifest: Option<DatasetCohortManifest>,
     pub window_start: DateTime<Utc>,
@@ -283,17 +524,16 @@ pub struct DatasetLedgerSeed {
     pub knowledge_lag_secs: u64,
     pub sample_interval_secs: u64,
     pub horizons_secs: Vec<u64>,
-    pub feature_schema_version: Option<SchemaVersion>,
+    pub feature_schema_version: SchemaVersion,
     pub sample_sources: Option<TrainingSampleSources>,
     pub feature_schema_hash: ContentHash,
-    pub factor_schema_hash: ContentHash,
     pub label_schema_hash: ContentHash,
     pub semantic_dataset_hash: ContentHash,
     pub source_fingerprint: ContentHash,
     pub sample_count: u64,
 }
 
-/// Canonical matching Dataset v2 plan and manifest.
+/// Canonical matching Dataset v3 plan and manifest.
 pub struct DatasetLedgerFixture {
     pub plan: NewTrainingDatasetPlan,
     pub manifest: DatasetManifest,
@@ -304,7 +544,9 @@ impl DatasetLedgerFixture {
         let DatasetLedgerSeed {
             training_dataset_id,
             model_spec_id,
+            model_family,
             model_spec_definition_hash,
+            factor_serving_plane,
             source_lineage,
             cohort_manifest,
             window_start,
@@ -316,7 +558,6 @@ impl DatasetLedgerFixture {
             feature_schema_version,
             sample_sources,
             feature_schema_hash,
-            factor_schema_hash,
             label_schema_hash,
             semantic_dataset_hash,
             source_fingerprint,
@@ -334,7 +575,11 @@ impl DatasetLedgerFixture {
         let plan = NewTrainingDatasetPlan {
             training_dataset_id,
             model_spec_id,
+            model_family,
             model_spec_definition_hash,
+            factor_schema_hash: factor_serving_plane.factor_schema_hash(),
+            factor_serving_plane: factor_serving_plane.clone(),
+            feature_schema_hash,
             research_profile_artifact_id: source_lineage.research_profile_artifact_id.clone(),
             source_slice_id: source_lineage.source_slice_id,
             pit_cutoff: source_lineage.pit_cutoff,
@@ -361,6 +606,7 @@ impl DatasetLedgerFixture {
             source_lineage,
             cohort_manifest,
             model_spec_id,
+            model_family,
             model_spec_definition_hash,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
@@ -370,8 +616,9 @@ impl DatasetLedgerFixture {
             knowledge_lag_secs,
             sample_interval_secs,
             horizons_secs,
+            feature_schema_version,
             feature_schema_hash,
-            factor_schema_hash,
+            factor_serving_plane,
             label_schema_hash,
             semantic_dataset_hash,
             source_fingerprint,
@@ -458,29 +705,198 @@ pub fn model_learning_cohort(
     })
 }
 
+#[derive(Default)]
 struct ReplayableSourceRecords {
+    catalog_markets: Vec<SourceSliceRecord>,
+    catalog_events: Vec<SourceSliceRecord>,
     market_info: Vec<SourceSliceRecord>,
     ledger: Vec<SourceSliceRecord>,
     sessions: Vec<SourceSliceRecord>,
+    gaps: Vec<SourceSliceRecord>,
+    microstructure: Vec<SourceSliceRecord>,
+    trades: Vec<SourceSliceRecord>,
+    resolutions: Vec<SourceSliceRecord>,
 }
 
-fn replayable_source_records(examples: &[TrainingExample]) -> QuantResult<ReplayableSourceRecords> {
-    let mut unique = BTreeMap::new();
-    for example in examples {
-        unique
-            .entry((example.market_id.clone(), example.token_id.clone()))
-            .or_insert(example);
-    }
-    let mut market_info_records = Vec::with_capacity(unique.len());
-    let mut ledger = Vec::with_capacity(unique.len());
-    let mut sessions = Vec::with_capacity(unique.len());
-    for ((market_id, token_id), example) in unique {
+struct ReplaySourceContext<'a> {
+    index: usize,
+    example: &'a TrainingExample,
+    catalog: &'a CatalogDecisionRef,
+    decision_at: DateTime<Utc>,
+    event_at: DateTime<Utc>,
+    event_at_ms: i64,
+    available_at_ms: i64,
+    scope: String,
+    no_token_id: TokenId,
+}
+
+impl<'a> ReplaySourceContext<'a> {
+    fn try_new(index: usize, example: &'a TrainingExample) -> QuantResult<Self> {
         let decision_at = example.decision_at();
         let event_at = example.decision_boundary.cutoff_for(DecisionSource::Book);
-        let event_at_ms = event_at.timestamp_millis();
         let available_at_ms = decision_at.timestamp_millis();
-        let scope = format!("{market_id}:{token_id}:{available_at_ms}");
-        let stream_session_id = seeded_uuid(&format!("{scope}:stream-session"));
+        let market_id = &example.market_id;
+        let token_id = &example.token_id;
+        let no_token_id = example
+            .selected_market
+            .secondary_token_id
+            .clone()
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: format!(
+                    "replayable Source Slice market {market_id} has no canonical secondary token"
+                ),
+            })?;
+        let capture =
+            example
+                .decision_capture
+                .as_ref()
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "replayable Source Slice example {} has no decision capture",
+                        example.example_id
+                    ),
+                })?;
+
+        Ok(Self {
+            index,
+            example,
+            catalog: &capture.snapshot.catalog,
+            decision_at,
+            event_at,
+            event_at_ms: event_at.timestamp_millis(),
+            available_at_ms,
+            scope: format!("{market_id}:{token_id}:{available_at_ms}"),
+            no_token_id,
+        })
+    }
+}
+
+impl ReplayableSourceRecords {
+    fn push(&mut self, index: usize, example: &TrainingExample) -> QuantResult<()> {
+        let context = ReplaySourceContext::try_new(index, example)?;
+        self.push_catalog(&context)?;
+        self.push_book(&context)?;
+        self.push_market_info(&context)?;
+        self.push_resolution(&context)
+    }
+
+    fn push_catalog(&mut self, context: &ReplaySourceContext<'_>) -> QuantResult<()> {
+        let example = context.example;
+        let market_id = &example.market_id;
+        let token_id = &example.token_id;
+        let catalog = context.catalog;
+        let event = EventRegistryInfo {
+            event_id: example.selected_market.event_id.clone(),
+            title: "Train/backtest Source Slice fixture".to_owned(),
+            slug: format!("fixture-event-{}", context.index),
+            series_slug: None,
+            status: EventStatus::Active,
+            market_ids: vec![market_id.clone()],
+            categories: CategorySet::from(example.selected_market.category),
+            tags: Vec::new(),
+            neg_risk: false,
+            end_date: None,
+            created_at: catalog.event_effective_at,
+            updated_at: catalog.event_effective_at,
+        };
+        let event_change = CatalogEventChangeInfo {
+            event_change_id: catalog.event_change_id,
+            catalog_sync_batch_id: catalog.catalog_sync_batch_id,
+            event_object_id: CatalogEventObjectId::from_content_hash(&catalog.event_content_hash),
+            event_id: example.selected_market.event_id.clone(),
+            source_effective_at: catalog.event_effective_at,
+            source_timestamp_quality: catalog.event_timestamp_quality,
+            available_at: catalog.event_available_at,
+            change_type: CatalogChangeType::GammaScanUpsert,
+            content_hash: catalog.event_content_hash,
+            schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
+            payload: serde_json::to_value(event)
+                .map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!("fixture catalog event serialization failed: {error}"),
+                })?
+                .into(),
+            created_at: catalog.event_available_at,
+        };
+        self.catalog_events.push(source_record(
+            format!("catalog-event:{}", event_change.event_change_id),
+            event_change.source_effective_at,
+            event_change.available_at,
+            &event_change,
+        )?);
+
+        let market = MarketRegistryInfo {
+            market_id: market_id.clone(),
+            event_id: example.selected_market.event_id.clone(),
+            token_yes: token_id.clone(),
+            token_no: context.no_token_id.clone(),
+            question: "Train/backtest fixture market?".to_owned(),
+            slug: format!("fixture-market-{}", context.index),
+            description: None,
+            categories: CategorySet::from(example.selected_market.category),
+            status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
+            outcome: None,
+            neg_risk: false,
+            tick_size: TickSize::Hundredth,
+            tokens: Vec::new(),
+            best_bid: Some(dec!(0.49)),
+            best_ask: Some(dec!(0.51)),
+            depth_usd: example.selected_market.liquidity_usd,
+            min_order_size: dec!(1),
+            liquidity_usd: example.selected_market.liquidity_usd,
+            volume_24h: example.selected_market.volume_24h_usd,
+            start_date: None,
+            end_date: None,
+            resolved_at: None,
+            created_at: Some(catalog.market_effective_at),
+            updated_at: catalog.market_effective_at,
+        };
+        let market_change = CatalogMarketChangeInfo {
+            market_change_id: catalog.market_change_id,
+            catalog_sync_batch_id: catalog.catalog_sync_batch_id,
+            event_change_id: catalog.event_change_id,
+            market_object_id: CatalogMarketObjectId::from_content_hash(
+                &catalog.market_content_hash,
+            ),
+            market_id: market_id.clone(),
+            event_id: example.selected_market.event_id.clone(),
+            source_effective_at: catalog.market_effective_at,
+            source_timestamp_quality: catalog.market_timestamp_quality,
+            source_created_at: Some(catalog.market_effective_at),
+            available_at: catalog.market_available_at,
+            change_type: CatalogChangeType::GammaScanUpsert,
+            content_hash: catalog.market_content_hash,
+            schema_version: CATALOG_OBJECT_SCHEMA_VERSION,
+            payload: serde_json::to_value(market)
+                .map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!("fixture catalog market serialization failed: {error}"),
+                })?
+                .into(),
+            created_at: catalog.market_available_at,
+        };
+        self.catalog_markets.push(source_record(
+            format!("catalog-market:{}", market_change.market_change_id),
+            market_change.source_effective_at,
+            market_change.available_at,
+            &market_change,
+        )?);
+        Ok(())
+    }
+
+    fn push_book(&mut self, context: &ReplaySourceContext<'_>) -> QuantResult<()> {
+        self.push_token_book(context, &context.example.token_id)?;
+        self.push_token_book(context, &context.no_token_id)
+    }
+
+    fn push_token_book(
+        &mut self,
+        context: &ReplaySourceContext<'_>,
+        token_id: &TokenId,
+    ) -> QuantResult<()> {
+        let example = context.example;
+        let market_id = &example.market_id;
+        let stream_session_id =
+            seeded_uuid(&format!("{}:{token_id}:stream-session", context.scope));
         let event = BookL2LedgerRow {
             stream_session_id,
             shard_id: 0,
@@ -498,17 +914,17 @@ fn replayable_source_records(examples: &[TrainingExample]) -> QuantResult<Replay
             trade_side: None,
             trade_size: None,
             fee_rate_bps: None,
-            venue_event_time: event_at_ms,
-            ingress_time: available_at_ms,
-            persisted_time: available_at_ms,
+            venue_event_time: context.event_at_ms,
+            ingress_time: context.available_at_ms,
+            persisted_time: context.available_at_ms,
             event_hash: ChDigest::new([0; 32]),
             schema_version: BookL2LedgerRow::SCHEMA_VERSION,
         }
         .seal()?;
-        ledger.push(source_record(
+        self.ledger.push(source_record(
             format!("ledger:{token_id}:1"),
-            event_at,
-            decision_at,
+            context.event_at,
+            context.decision_at,
             &event,
         )?);
         let session = BookStreamSessionRow {
@@ -517,33 +933,87 @@ fn replayable_source_records(examples: &[TrainingExample]) -> QuantResult<Replay
             ledger_sequence: 1,
             state: ChStreamSessionState::Open,
             end_reason: ChStreamSessionEndReason::None,
-            subscription_token_hash: CanonicalDigest::content_hash_json(&token_id)?,
+            subscription_token_hash: CanonicalDigest::content_hash_json(token_id)?,
             subscription_token_count: 1,
             received_sequence_json: format!(r#"{{"{}":1}}"#, token_id.as_str()),
             persisted_sequence_json: format!(r#"{{"{}":1}}"#, token_id.as_str()),
-            opened_at: event_at_ms,
-            recorded_at: available_at_ms,
+            opened_at: context.event_at_ms,
+            recorded_at: context.available_at_ms,
             schema_version: ChSchemaVersion(2),
         };
-        sessions.push(source_record(
+        self.sessions.push(source_record(
             format!("session:{stream_session_id}:1"),
-            event_at,
-            decision_at,
+            context.event_at,
+            context.decision_at,
             &session,
         )?);
+        let microstructure = BookMicrostructureRow {
+            token_id: token_id.clone(),
+            market_id: Some(market_id.clone()),
+            bucket_time: context.event_at_ms,
+            best_bid_open: Some(ChPrice::from(Price::new(dec!(0.49)))),
+            best_bid_high: Some(ChPrice::from(Price::new(dec!(0.49)))),
+            best_bid_low: Some(ChPrice::from(Price::new(dec!(0.49)))),
+            best_bid_close: Some(ChPrice::from(Price::new(dec!(0.49)))),
+            best_ask_open: Some(ChPrice::from(Price::new(dec!(0.51)))),
+            best_ask_high: Some(ChPrice::from(Price::new(dec!(0.51)))),
+            best_ask_low: Some(ChPrice::from(Price::new(dec!(0.51)))),
+            best_ask_close: Some(ChPrice::from(Price::new(dec!(0.51)))),
+            spread_bps_min: None,
+            spread_bps_avg: None,
+            spread_bps_max: None,
+            mid_price_open: Some(ChPrice::from(Price::new(dec!(0.5)))),
+            mid_price_close: Some(ChPrice::from(Price::new(dec!(0.5)))),
+            top1_depth_usd_avg: Some(ChUsd::from(dec!(100))),
+            top5_depth_usd_avg: Some(ChUsd::from(dec!(200))),
+            top20_depth_usd_avg: Some(ChUsd::from(dec!(300))),
+            imbalance_avg: None,
+            update_count: 1,
+            snapshot_count: 1,
+            delta_count: 0,
+            delete_count: 0,
+            crossed_count: 0,
+            invalid_level_count: 0,
+            gap_count: 0,
+            last_trade_count: 0,
+            max_book_age_ms: 0,
+            schema_version: ChSchemaVersion::FIRST,
+            available_at: context.available_at_ms,
+        };
+        self.microstructure.push(source_record(
+            format!("microstructure:{token_id}:{}", context.event_at_ms),
+            context.event_at,
+            context.decision_at,
+            &microstructure,
+        )?);
+        Ok(())
+    }
+
+    fn push_market_info(&mut self, context: &ReplaySourceContext<'_>) -> QuantResult<()> {
+        let market_id = &context.example.market_id;
+        let token_id = &context.example.token_id;
         let raw_payload = serde_json::json!({
             "market_id": market_id,
             "token_id": token_id,
-            "effective_at": event_at,
-            "available_at": decision_at,
+            "effective_at": context.event_at,
+            "available_at": context.decision_at,
         });
         let market_info = ClobMarketInfoVersion {
-            version_id: ClobMarketInfoVersionId::new(seeded_uuid(&format!("{scope}:market-info"))),
+            version_id: ClobMarketInfoVersionId::new(seeded_uuid(&format!(
+                "{}:market-info",
+                context.scope
+            ))),
             market_id: market_id.clone(),
-            tokens: vec![ClobTokenDescriptor {
-                token_id: token_id.clone(),
-                outcome: "Yes".to_owned(),
-            }],
+            tokens: vec![
+                ClobTokenDescriptor {
+                    token_id: token_id.clone(),
+                    outcome: "Yes".to_owned(),
+                },
+                ClobTokenDescriptor {
+                    token_id: context.no_token_id.clone(),
+                    outcome: "No".to_owned(),
+                },
+            ],
             tick_size: TickSize::Hundredth,
             minimum_order_size: dec!(1),
             neg_risk: false,
@@ -557,30 +1027,117 @@ fn replayable_source_records(examples: &[TrainingExample]) -> QuantResult<Replay
             },
             builder_maker_fee_rate_bps: 0,
             builder_taker_fee_rate_bps: 0,
-            effective_at: event_at,
-            available_at: decision_at,
+            effective_at: context.event_at,
+            available_at: context.decision_at,
             payload_hash: CanonicalDigest::content_hash_json(&raw_payload)?,
             raw_payload,
         };
-        market_info_records.push(source_record(
+        self.market_info.push(source_record(
             format!("market-info:{}:{}", market_id, market_info.version_id),
-            event_at,
-            decision_at,
+            context.event_at,
+            context.decision_at,
             &market_info,
         )?);
+        Ok(())
     }
-    Ok(ReplayableSourceRecords {
-        market_info: market_info_records,
-        ledger,
-        sessions,
-    })
+
+    fn push_resolution(&mut self, context: &ReplaySourceContext<'_>) -> QuantResult<()> {
+        let example = context.example;
+        let market_id = &example.market_id;
+        let token_id = &example.token_id;
+        if let Some(label) = example.labels.first()
+            && let Ok(payout) = PayoutRatio::try_new(label.value)
+        {
+            let source_ordinal =
+                u64::try_from(context.index + 1).map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!("fixture resolution source identity overflow: {error}"),
+                })?;
+            let block_hash = CanonicalDigest::content_hash_json(&(
+                "fixture-resolution-block-v1",
+                market_id,
+                token_id,
+                source_ordinal,
+            ))?;
+            let transaction_hash = CanonicalDigest::content_hash_json(&(
+                "fixture-resolution-transaction-v1",
+                market_id,
+                token_id,
+                source_ordinal,
+            ))?;
+            let checkpoint_hash = CanonicalDigest::content_hash_json(&(
+                "fixture-resolution-checkpoint-v1",
+                market_id,
+                token_id,
+                source_ordinal,
+            ))?;
+            let resolution = MarketResolutionRow::seal(MarketResolutionFactInput {
+                market_id: market_id.clone(),
+                token_ids: [token_id.clone(), context.no_token_id.clone()],
+                payout_ratios: [payout, payout.complement()],
+                resolved_at: label.matured_at.timestamp_millis(),
+                observed_at: label.matured_at.timestamp_millis(),
+                source_block_number: source_ordinal,
+                source_block_hash: EvmBlockHash::parse(format!("0x{}", block_hash.hex())).map_err(
+                    |error| ResearchError::DatasetBuild {
+                        detail: format!("fixture resolution block hash is invalid: {error}"),
+                    },
+                )?,
+                source_transaction_hash: EvmTransactionHash::parse(format!(
+                    "0x{}",
+                    transaction_hash.hex()
+                ))
+                .map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!("fixture resolution transaction hash is invalid: {error}"),
+                })?,
+                source_log_index: source_ordinal,
+                source_checkpoint_hash: checkpoint_hash,
+            })
+            .map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("fixture resolution contract failed: {error}"),
+            })?;
+            self.resolutions.push(source_record(
+                format!("resolution:{market_id}:{source_ordinal}"),
+                label.matured_at,
+                label.matured_at,
+                &resolution,
+            )?);
+        }
+        Ok(())
+    }
+}
+
+fn replayable_source_records(examples: &[TrainingExample]) -> QuantResult<ReplayableSourceRecords> {
+    let mut unique = BTreeMap::new();
+    for example in examples {
+        unique
+            .entry((example.market_id.clone(), example.token_id.clone()))
+            .or_insert(example);
+    }
+    let mut records = ReplayableSourceRecords::default();
+    for (index, example) in unique.into_values().enumerate() {
+        records.push(index, example)?;
+    }
+    Ok(records)
 }
 
 async fn persist_replayable_objects(
     store: &Arc<dyn ArtifactStore>,
     records: ReplayableSourceRecords,
+    profile: &ResearchProfileArtifact,
 ) -> QuantResult<Vec<SourceSliceObjectRef>> {
     let mut objects = vec![
+        persist_source_object(
+            store,
+            SourceSliceObjectKind::CatalogMarket,
+            records.catalog_markets,
+        )
+        .await?,
+        persist_source_object(
+            store,
+            SourceSliceObjectKind::CatalogEvent,
+            records.catalog_events,
+        )
+        .await?,
         persist_source_object(
             store,
             SourceSliceObjectKind::ClobMarketInfo,
@@ -589,7 +1146,44 @@ async fn persist_replayable_objects(
         .await?,
         persist_source_object(store, SourceSliceObjectKind::L2Ledger, records.ledger).await?,
         persist_source_object(store, SourceSliceObjectKind::L2Session, records.sessions).await?,
+        persist_source_object(store, SourceSliceObjectKind::L2Gap, records.gaps).await?,
+        persist_source_object(
+            store,
+            SourceSliceObjectKind::BookMicrostructure,
+            records.microstructure,
+        )
+        .await?,
+        persist_source_object(store, SourceSliceObjectKind::TradeTape, records.trades).await?,
+        persist_source_object(
+            store,
+            SourceSliceObjectKind::Resolution,
+            records.resolutions,
+        )
+        .await?,
     ];
+    let weather_required = profile
+        .required_sources_contains(ResearchProfileDataSource::AviationWeather)
+        || profile.required_sources_contains(ResearchProfileDataSource::GefsEnsemble);
+    if weather_required {
+        for kind in [
+            SourceSliceObjectKind::MarketLinkage,
+            SourceSliceObjectKind::DomainObservation,
+            SourceSliceObjectKind::WeatherObservation,
+            SourceSliceObjectKind::WeatherForecast,
+        ] {
+            objects.push(persist_source_object(store, kind, Vec::new()).await?);
+        }
+    }
+    if profile.required_sources_contains(ResearchProfileDataSource::GhcnhCalibration) {
+        objects.push(
+            persist_source_object(
+                store,
+                SourceSliceObjectKind::CalibrationReference,
+                Vec::new(),
+            )
+            .await?,
+        );
+    }
     objects.sort_by(|left, right| {
         (left.kind, left.uri.as_str()).cmp(&(right.kind, right.uri.as_str()))
     });
@@ -598,14 +1192,20 @@ async fn persist_replayable_objects(
 
 fn replayable_manifest(
     fixture: &ReplayableSourceSliceFixture,
+    profile: &ResearchProfileArtifact,
     market_count: usize,
     objects: Vec<SourceSliceObjectRef>,
 ) -> QuantResult<SourceSliceManifest> {
     let pit_cutoff = fixture.window_end;
+    let weather_required = profile
+        .required_sources_contains(ResearchProfileDataSource::AviationWeather)
+        || profile.required_sources_contains(ResearchProfileDataSource::GefsEnsemble);
+    let calibration_required =
+        profile.required_sources_contains(ResearchProfileDataSource::GhcnhCalibration);
     Ok(SourceSliceManifest {
         format_version: SOURCE_SLICE_MANIFEST_FORMAT_VERSION,
         profile_ref: fixture.profile_ref.clone(),
-        evaluation_track: ResearchEvaluationTrack::ResearchOnly,
+        evaluation_track: fixture.evaluation_track,
         research_program_hash: fixture.research_program_hash,
         window_start: fixture.window_start,
         window_end: fixture.window_end,
@@ -655,8 +1255,8 @@ fn replayable_manifest(
             clob_market_info_available_at: pit_cutoff,
             l2_available_at: pit_cutoff,
             trade_tape_available_at: pit_cutoff,
-            weather_available_at: None,
-            calibration_available_at: None,
+            weather_available_at: weather_required.then_some(pit_cutoff),
+            calibration_available_at: calibration_required.then_some(pit_cutoff),
             resolution_available_at: pit_cutoff,
         },
         invalid_sessions: Vec::new(),
@@ -697,9 +1297,15 @@ pub async fn persist_replayable_source_slice(
     examples: &[TrainingExample],
     fixture: ReplayableSourceSliceFixture,
 ) -> QuantResult<StoredSourceSlice> {
+    let profile = fixture
+        .profile_ref
+        .resolve_builtin_research_profile()
+        .map_err(|detail| ResearchError::DatasetBuild {
+            detail: format!("fixture ResearchProfile resolution failed: {detail}"),
+        })?;
     let records = replayable_source_records(examples)?;
-    let objects = persist_replayable_objects(store, records).await?;
-    let manifest = replayable_manifest(&fixture, examples.len(), objects)?;
+    let objects = persist_replayable_objects(store, records, &profile).await?;
+    let manifest = replayable_manifest(&fixture, &profile, examples.len(), objects)?;
     store_source_manifest(store, manifest).await
 }
 
@@ -779,8 +1385,14 @@ pub async fn seed_dataset_source(
     }
     let research_program_hash =
         CanonicalDigest::content_hash_json(&("dataset-source-program", &input.scope))?;
-    let runtime_config_hash =
-        CanonicalDigest::content_hash_json(&("dataset-source-runtime", &input.scope))?;
+    let runtime_config_hash = PgPolicyRepository::new(db.clone())
+        .load_snapshot(&input.decision_policy_snapshot_id)
+        .await?
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "decision_policy_snapshot",
+            id: input.decision_policy_snapshot_id.to_string(),
+        })?
+        .snapshot_hash;
     let capability_registry_hashes =
         CapabilityRegistryHashes::try_new(vec![CanonicalDigest::content_hash_json(&(
             "dataset-source-capability",
@@ -899,13 +1511,129 @@ pub async fn seed_dataset_source(
     seed_source_manifest(db, &stored).await
 }
 
+async fn seed_evaluation_source(
+    db: &DatabaseConnection,
+    input: DatasetSourceSeed,
+    template: &SourceSliceManifest,
+) -> QuantResult<DatasetSourceLineage> {
+    if input.window_start >= input.window_end || input.window_end > input.pit_cutoff {
+        return Err(ResearchError::DatasetBuild {
+            detail: "evaluation source fixture requires start < end <= cutoff".to_owned(),
+        }
+        .into());
+    }
+    if template.profile_ref != input.profile_ref
+        || template.decision_policy_snapshot_id != input.decision_policy_snapshot_id
+    {
+        return Err(ResearchError::DatasetBuild {
+            detail: "evaluation Source Slice must preserve the training profile and policy"
+                .to_owned(),
+        }
+        .into());
+    }
+    let runtime_config_hash = PgPolicyRepository::new(db.clone())
+        .load_snapshot(&input.decision_policy_snapshot_id)
+        .await?
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "decision_policy_snapshot",
+            id: input.decision_policy_snapshot_id.to_string(),
+        })?
+        .snapshot_hash;
+    if runtime_config_hash != template.runtime_config_hash {
+        return Err(ResearchError::DatasetBuild {
+            detail: "evaluation Source Slice runtime config differs from training".to_owned(),
+        }
+        .into());
+    }
+
+    let mut manifest = template.clone();
+    manifest.window_start = input.window_start;
+    manifest.window_end = input.window_end;
+    manifest.pit_cutoff = input.pit_cutoff;
+    manifest.materialized_at = input.pit_cutoff;
+    manifest.catalog_proof = SourceSliceCatalogProof {
+        base_complete_batch_id: CatalogSyncBatchId::new(seeded_uuid(&format!(
+            "{}:catalog-base",
+            input.scope
+        ))),
+        terminal_batch_id: CatalogSyncBatchId::new(seeded_uuid(&format!(
+            "{}:catalog-terminal",
+            input.scope
+        ))),
+        committed_through: input.pit_cutoff,
+        ordered_batch_chain_hash: CanonicalDigest::content_hash_json(&(
+            "evaluation-source-catalog-chain",
+            &input.scope,
+        ))?,
+        market_count: template.catalog_proof.market_count,
+        event_count: template.catalog_proof.event_count,
+        snapshot_hash: CanonicalDigest::content_hash_json(&(
+            "evaluation-source-catalog-snapshot",
+            &input.scope,
+        ))?,
+    };
+    manifest.pit_cutoffs = SourceSlicePitCutoffs {
+        catalog_available_at: input.pit_cutoff,
+        clob_market_info_available_at: input.pit_cutoff,
+        l2_available_at: input.pit_cutoff,
+        trade_tape_available_at: input.pit_cutoff,
+        weather_available_at: template
+            .pit_cutoffs
+            .weather_available_at
+            .map(|_| input.pit_cutoff),
+        calibration_available_at: template
+            .pit_cutoffs
+            .calibration_available_at
+            .map(|_| input.pit_cutoff),
+        resolution_available_at: input.pit_cutoff,
+    };
+    manifest.invalid_sessions.clear();
+    for (index, object) in manifest.objects.iter_mut().enumerate() {
+        object.uri = ArtifactUri::parse(format!(
+            "s3://fixture/source-slices/{}/{index:02}.parquet",
+            input.scope
+        ))?;
+        object.object_version = format!("fixture-{}", input.scope);
+        object.byte_hash = CanonicalDigest::content_hash_json(&(
+            "evaluation-source-bytes",
+            &input.scope,
+            index,
+            object.kind,
+        ))?;
+        object.min_event_at = object.min_event_at.map(|_| input.window_start);
+        object.max_event_at = object.max_event_at.map(|_| input.window_end);
+        object.min_available_at = object.min_available_at.map(|_| input.window_start);
+        object.max_available_at = object.max_available_at.map(|_| input.pit_cutoff);
+    }
+    manifest
+        .validate()
+        .map_err(|detail| ResearchError::DatasetBuild { detail })?;
+    let manifest_hash = manifest
+        .content_hash()
+        .map_err(|detail| ResearchError::DatasetBuild { detail })?;
+    let stored = StoredSourceSlice {
+        manifest_ref: SourceSliceManifestRef {
+            manifest_uri: ArtifactUri::parse(format!(
+                "s3://fixture/source-slices/{}/manifest-{}.json",
+                input.scope,
+                manifest_hash.hex()
+            ))?,
+            manifest_hash,
+        },
+        manifest,
+    };
+    seed_source_manifest(db, &stored).await
+}
+
 /// Seed a Ready purpose-bound evaluation dataset for report-ledger tests.
 pub async fn seed_evaluation_dataset(
     db: &DatabaseConnection,
     input: EvaluationDatasetSeed,
 ) -> QuantResult<TrainingDatasetId> {
     let dataset_id = TrainingDatasetId::from_v7();
-    let source_lineage = seed_dataset_source(
+    let repository = PgTrainingDatasetRepository::new(db.clone());
+    let source = EvaluationDatasetSource::load(db, &input).await?;
+    let source_lineage = seed_evaluation_source(
         db,
         DatasetSourceSeed {
             scope: format!("{}:source", input.scope),
@@ -915,6 +1643,7 @@ pub async fn seed_evaluation_dataset(
             window_end: input.window_end,
             pit_cutoff: input.window_end + Duration::hours(1),
         },
+        &source.source_manifest,
     )
     .await?;
     let cohort_manifest = model_learning_cohort(
@@ -924,40 +1653,7 @@ pub async fn seed_evaluation_dataset(
         input.window_end,
         input.sample_count,
     )?;
-    let feature_schema_hash =
-        CanonicalDigest::content_hash_json(&("evaluation-feature-schema", &input.scope))?;
-    let factor_schema_hash =
-        CanonicalDigest::content_hash_json(&("evaluation-factor-schema", &input.scope))?;
-    let label_schema_hash =
-        CanonicalDigest::content_hash_json(&("evaluation-label-schema", &input.scope))?;
-    let fixture = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
-        training_dataset_id: dataset_id,
-        model_spec_id: input.model_spec_id,
-        model_spec_definition_hash: input.model_spec_definition_hash,
-        source_lineage,
-        cohort_manifest: Some(cohort_manifest),
-        window_start: input.window_start,
-        window_end: input.window_end,
-        purpose: DatasetPurpose::Evaluation,
-        knowledge_lag_secs: 0,
-        sample_interval_secs: 3_600,
-        horizons_secs: vec![0],
-        feature_schema_version: Some(SchemaVersion::FIRST),
-        sample_sources: Some(TrainingSampleSources(default_sample_sources())),
-        feature_schema_hash,
-        factor_schema_hash,
-        label_schema_hash,
-        semantic_dataset_hash: CanonicalDigest::content_hash_json(&(
-            "evaluation-dataset",
-            &input.scope,
-        ))?,
-        source_fingerprint: CanonicalDigest::content_hash_json(&(
-            "evaluation-source-fingerprint",
-            &input.scope,
-        ))?,
-        sample_count: input.sample_count,
-    })?;
-    let repository = PgTrainingDatasetRepository::new(db.clone());
+    let fixture = source.ledger(&input, dataset_id, source_lineage, cohort_manifest)?;
     repository.create_plan(fixture.plan.clone()).await?;
     repository.start_build(&dataset_id).await?;
     repository

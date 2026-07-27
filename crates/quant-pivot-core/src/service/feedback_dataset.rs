@@ -26,7 +26,8 @@ use quant_pivot_models::{
         FeatureSourceRefs, FeatureVectorId, MODEL_LEARNING_COHORT_FORMAT_VERSION,
         ModelLearningCohortArtifact, ModelLearningCohortRow, ModelSpecId,
         NewModelLearningCohortRow, ResearchJobProgress, SchemaVersion, TokenId, TrainingDatasetId,
-        TrainingSampleSource,
+        TrainingSampleSource, TrainingSampleSources,
+        factor::{FactorDefinitionRef, FactorServingPlane},
     },
 };
 use quant_pivot_repository::traits::{
@@ -34,7 +35,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
-    factors::{FactorSet, FactorValue},
+    factors::FactorValue,
     features::FeatureVector,
     selection::SelectedMarket,
     training::{
@@ -149,28 +150,28 @@ impl FeedbackDatasetService {
         }
         let plan = self
             .dataset_service
-            .plan_feedback(DatasetPlanRequest {
-                model_spec_id: request.model_spec_id,
-                source_lineage: request.source_lineage,
-                cohort_manifest: Some(cohort_manifest),
-                window_start: request.window.window_start(),
-                window_end: request.window.cutoff(),
-                sample_interval_secs: 0,
-                horizons_secs: vec![0],
-                knowledge_lag_secs: materialized.knowledge_lag_secs,
-                feature_schema_version: materialized.feature_schema_version,
-                sample_sources: vec![TrainingSampleSource::RecommendationFeedback],
-                training_dataset_id: Some(request.training_dataset_id),
-                purpose: request.purpose,
-            })
+            .plan_feedback(
+                DatasetPlanRequest {
+                    model_spec_id: request.model_spec_id,
+                    source_lineage: request.source_lineage,
+                    cohort_manifest: Some(cohort_manifest),
+                    window_start: request.window.window_start(),
+                    window_end: request.window.cutoff(),
+                    sample_interval_secs: 0,
+                    horizons_secs: vec![0],
+                    knowledge_lag_secs: materialized.knowledge_lag_secs,
+                    feature_schema_version: materialized.feature_schema_version,
+                    sample_sources: TrainingSampleSources::from(
+                        TrainingSampleSource::RecommendationFeedback,
+                    ),
+                    training_dataset_id: Some(request.training_dataset_id),
+                    purpose: request.purpose,
+                },
+                materialized.factor_serving_plane,
+            )
             .await?;
         self.dataset_service
-            .build_feedback(
-                plan,
-                materialized.examples,
-                materialized.factor_set,
-                materialized.coverage,
-            )
+            .build_feedback(plan, materialized.examples, materialized.coverage)
             .await
     }
 }
@@ -339,7 +340,7 @@ impl FeedbackDatasetService {
 struct MaterializedFeedback {
     rows: Vec<ModelLearningCohortRow>,
     examples: Vec<TrainingExample>,
-    factor_set: FactorSet,
+    factor_serving_plane: FactorServingPlane,
     coverage: DatasetCoverage,
     feature_schema_version: SchemaVersion,
     knowledge_lag_secs: u64,
@@ -388,6 +389,19 @@ impl FeedbackDatasetService {
             }
             .into());
         }
+        if expected_factor_ids.is_empty() {
+            let factor_serving_plane =
+                FactorServingPlane::try_empty().map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!("seal feedback factor-free plane: {error}"),
+                })?;
+            return Self::materialize_rows(
+                eligible,
+                &features,
+                HashMap::new(),
+                &HashMap::new(),
+                factor_serving_plane,
+            );
+        }
         let definitions = self
             .factor_repository
             .find_definitions_by_ids(&expected_factor_ids)
@@ -415,28 +429,37 @@ impl FeedbackDatasetService {
                 .push(factor);
         }
 
-        let factor_set = FactorSet {
-            definitions: expected_factor_ids
-                .iter()
-                .map(|id| {
-                    definitions
-                        .get(id)
-                        .map(|definition| definition.definition.clone())
-                        .ok_or_else(|| {
-                            StorageError::invariant_violation(
-                                Some("quant_factor_definition"),
-                                format!("factor definition {id} disappeared during assembly"),
-                            )
-                        })
+        let revisions = expected_factor_ids
+            .iter()
+            .map(|id| -> QuantResult<FactorDefinitionRef> {
+                let definition = definitions.get(id).ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some("quant_factor_definition"),
+                        format!("factor definition {id} disappeared during assembly"),
+                    )
+                })?;
+                FactorDefinitionRef::try_from(definition).map_err(|error| {
+                    ResearchError::DatasetBuild {
+                        detail: format!(
+                            "reconstruct persisted factor revision {}: {error}",
+                            definition.factor_definition_id
+                        ),
+                    }
+                    .into()
                 })
-                .collect::<Result<Vec<_>, _>>()?,
-        };
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        let factor_serving_plane = FactorServingPlane::try_seal(revisions).map_err(|error| {
+            ResearchError::DatasetBuild {
+                detail: format!("seal feedback factor serving plane: {error}"),
+            }
+        })?;
         Self::materialize_rows(
             eligible,
             &features,
             factors_by_vector,
             &definitions,
-            factor_set,
+            factor_serving_plane,
         )
     }
 
@@ -445,7 +468,7 @@ impl FeedbackDatasetService {
         features: &HashMap<FeatureVectorId, FeatureVectorInfo>,
         mut factors_by_vector: HashMap<FeatureVectorId, Vec<FactorValueInfo>>,
         definitions: &HashMap<FactorDefinitionId, FactorDefinitionInfo>,
-        factor_set: FactorSet,
+        factor_serving_plane: FactorServingPlane,
     ) -> QuantResult<MaterializedFeedback> {
         let mut rows = Vec::with_capacity(eligible.len());
         let mut examples = Vec::with_capacity(eligible.len());
@@ -558,7 +581,7 @@ impl FeedbackDatasetService {
         Ok(MaterializedFeedback {
             rows,
             examples,
-            factor_set,
+            factor_serving_plane,
             coverage: DatasetCoverage {
                 planned_samples: count,
                 built_examples: count,

@@ -7,7 +7,7 @@ use quant_pivot_models::{
     enums::quant::{DatasetPurpose, ResearchJobKind, ResearchJobStatus},
     types::{
         DecisionPolicySnapshotId, ModelSpecId, ResearchJobId, ResearchJobParams, RoleCode,
-        SchemaVersion, TrainingDatasetId, WorkerId, default_sample_sources,
+        SchemaVersion, TrainingDatasetId, TrainingSampleSources, WorkerId,
     },
 };
 use quant_pivot_repository::{postgres::PgResearchJobRepository, traits::ResearchJobRepository};
@@ -34,7 +34,7 @@ fn new_job(job_id: ResearchJobId) -> NewResearchJob {
             horizons_secs: vec![3_600],
             knowledge_lag_secs: 1,
             feature_schema_version: SchemaVersion::FIRST,
-            sample_sources: default_sample_sources(),
+            sample_sources: TrainingSampleSources::default(),
             reason: "pg-research-job-it".to_owned(),
             training_dataset_id: Some(TrainingDatasetId::from_v7()),
         }),

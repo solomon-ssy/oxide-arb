@@ -1,68 +1,19 @@
-//! Factor-definition governance HTTP contract.
-//!
-//! | Method | Path | Permission | Purpose |
-//! |--------|------|------------|---------|
-//! | POST | `/research/factors/register` | `factor_definition:create` | Register enabled definitions as draft |
-//! | POST | `/research/factors/publish-batch` | `factor_definition:publish` | Publish a batch of definitions |
-//! | POST | `/research/factors/{id}/publish` | `factor_definition:publish` | Promote draft/retired definition |
-//! | POST | `/research/factors/{id}/retire` | `factor_definition:retire` | Retire a published definition |
+//! Read-only factor-definition catalog HTTP contract.
 
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use validator::Validate;
 
 use crate::{
     domain::{pagination::PageRequest, quant::FactorDefinitionInfo},
-    enums::{
-        factor::{FactorDefinitionScope, FactorFamily},
-        quant::PublicationStatus,
-    },
-    types::FactorDefinitionId,
+    enums::factor::{FactorDefinitionScope, FactorFamily},
+    types::factor::FactorOutputSemantics,
 };
 
-/// Inbound body for `POST /research/factors/{id}/publish`.
-#[derive(Debug, Clone, Deserialize, Validate)]
-pub struct PublishFactorRequest {
-    /// Operator reason recorded on the HTTP operation log.
-    #[validate(length(min = 1, max = 1024))]
-    pub reason: String,
-}
-
-/// Inbound body for `POST /research/factors/{id}/retire`.
-#[derive(Debug, Clone, Deserialize, Validate)]
-pub struct RetireFactorRequest {
-    /// Operator reason recorded on the HTTP operation log.
-    #[validate(length(min = 1, max = 1024))]
-    pub reason: String,
-}
-
-/// Inbound body for `POST /research/factors/register`.
+/// Outbound projection of an immutable factor definition.
 ///
-/// The enabled factor set is resolved server-side from the active runtime
-/// config; the operator only supplies the audit reason.
-#[derive(Debug, Clone, Deserialize, Validate)]
-pub struct RegisterFactorDefinitionsRequest {
-    /// Operator reason recorded on the HTTP operation log.
-    #[validate(length(min = 1, max = 1024))]
-    pub reason: String,
-}
-
-/// Inbound body for `POST /research/factors/publish-batch`.
-#[derive(Debug, Clone, Deserialize, Validate)]
-pub struct PublishFactorsBatchRequest {
-    /// Factor definitions to publish (already-published ids are a no-op).
-    #[validate(length(min = 1))]
-    pub factor_definition_ids: Vec<FactorDefinitionId>,
-    /// Operator reason recorded on the HTTP operation log.
-    #[validate(length(min = 1, max = 1024))]
-    pub reason: String,
-}
-
-/// Outbound projection of a governed factor definition.
-///
-/// The normalization method, direction, input features, and quality gates are
+/// The normalization method, output semantics, input features, and requiredness are
 /// projected out of the governed typed definition so the catalog surfaces the
 /// factor's contract without shipping the raw blob.
 #[derive(Debug, Clone, Serialize)]
@@ -75,19 +26,15 @@ pub struct FactorDefinitionView {
     pub scope: String,
     pub input_schema_version: String,
     pub output_schema_version: String,
-    pub status: String,
     /// Normalization method (`winsorized_zscore` / `rank` / `min_max`).
     pub normalization: String,
-    /// Default contribution direction (`positive` / `negative` / `neutral`).
-    pub direction: String,
+    /// Tagged outcome-alpha or side-neutral context semantics.
+    pub output: FactorOutputSemantics,
     /// Stable feature names this factor consumes.
     pub input_features: Vec<String>,
-    /// Whether the factor is required (declares at least one quality gate).
+    /// Whether missing/indeterminate output rejects the market.
     pub required: bool,
-    /// Names of the quality gates governing this factor.
-    pub quality_gates: Vec<String>,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 }
 
 /// Which factor value plane the collinearity matrix is computed over.
@@ -146,15 +93,14 @@ pub struct FactorCollinearityQuery {
     pub source: Option<FactorCollinearitySource>,
 }
 
-/// Paginated filter for the factor-definition governance catalog.
+/// Paginated filter for the factor-definition catalog.
 ///
-/// `factor_family` / `scope` slice the taxonomy; `status` narrows the
-/// publication lifecycle. The pagination window is the shared [`PageRequest`].
+/// `factor_family` and `scope` slice the taxonomy. The pagination window is the
+/// shared [`PageRequest`].
 #[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct FactorDefinitionListQuery {
     pub factor_family: Option<FactorFamily>,
     pub scope: Option<FactorDefinitionScope>,
-    pub status: Option<PublicationStatus>,
     #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
@@ -164,17 +110,13 @@ impl From<FactorDefinitionInfo> for FactorDefinitionView {
     fn from(info: FactorDefinitionInfo) -> Self {
         let definition = info.definition;
         let normalization = definition.normalization.to_string();
-        let direction = definition.default_direction.to_string();
+        let output = definition.output;
         let input_features = definition
             .input_features
             .into_iter()
             .map(|feature| feature.to_string())
             .collect();
-        let quality_gates: Vec<_> = definition
-            .quality_gates
-            .into_iter()
-            .map(|gate| gate.name)
-            .collect();
+        let required = definition.required;
         Self {
             factor_definition_id: info.factor_definition_id.to_string(),
             definition_hash: info.definition_hash.to_string(),
@@ -184,14 +126,11 @@ impl From<FactorDefinitionInfo> for FactorDefinitionView {
             scope: info.scope.to_string(),
             input_schema_version: info.input_schema_version.to_string(),
             output_schema_version: info.output_schema_version.to_string(),
-            status: info.status.to_string(),
-            required: !quality_gates.is_empty(),
+            required,
             normalization,
-            direction,
+            output,
             input_features,
-            quality_gates,
             created_at: info.created_at,
-            updated_at: info.updated_at,
         }
     }
 }

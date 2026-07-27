@@ -6,7 +6,6 @@ pub mod backtest_path_set;
 pub mod calibration_artifact;
 pub mod execution_read;
 pub mod execution_recovery;
-pub mod factor_governance;
 pub mod feature_integrity;
 pub mod feature_parity_execution;
 pub mod market_linkage;
@@ -34,10 +33,6 @@ pub use calibration_artifact::{
 };
 pub use execution_read::ExecutionReadPort;
 pub use execution_recovery::ExecutionRecoveryPort;
-pub use factor_governance::{
-    FactorGovernancePort, PublishFactorCommand, PublishFactorsBatchCommand,
-    RegisterFactorDefinitionsCommand, RetireFactorCommand,
-};
 pub use feature_integrity::{FeatureIntegrityActionContext, FeatureIntegrityPort};
 pub use feature_parity_execution::FeatureParityExecutionPort;
 pub use market_linkage::MarketLinkageGovernancePort;

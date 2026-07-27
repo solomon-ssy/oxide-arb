@@ -36,10 +36,7 @@ use quant_pivot_research::{
     backtest::PortfolioCaps,
     features::MarketDecisionCapture,
     hashing::ResearchHasher,
-    model::{
-        CalibrationArtifactLoader, ResolvedCalibration, SignalCandidate,
-        load_hash_verified_artifact,
-    },
+    model::{CalibrationArtifactLoader, ModelArtifact, ResolvedCalibration, SignalCandidate},
     portfolio::{
         AccountSnapshot, CorrelationConstraint, CorrelationEstimator, CorrelationInput,
         CorrelationMarket, DefaultPortfolioPlanner, DrawdownState, PlanCandidate,
@@ -216,9 +213,10 @@ impl DefaultReportBuilder {
         let features = self
             .build_features(&context, &selection, decision_snapshot.as_ref())
             .await?;
-        let model_outcome = match self
-            .run_model_stage(&request, &context, &selection, &account, &equity, &features)
-            .await?
+        let model_outcome = match Box::pin(
+            self.run_model_stage(&request, &context, &selection, &account, &equity, &features),
+        )
+        .await?
         {
             Err(report) => return Ok(report),
             Ok(outcome) => outcome,
@@ -314,7 +312,7 @@ impl DefaultReportBuilder {
             return Ok(Err(report));
         }
 
-        let model_outcome = self.run_model(context, selection, features).await?;
+        let model_outcome = Box::pin(self.run_model(context, selection, features)).await?;
         let artifacts = FeatureStageArtifacts {
             captures: features.captures.clone(),
             data_quality_snapshot: features.data_quality_snapshot.clone(),
@@ -583,10 +581,7 @@ impl DefaultReportBuilder {
             .deps
             .model_runner
             .active_requirements(ActiveModelRequirementsRequest {
-                features: &config.profile_artifacts.features.definition,
-                factors: &config.profile_artifacts.scoring.definition,
-                domain: &config.profile_artifacts.domain.definition,
-                model: &config.model_routing.model,
+                policy: &version,
                 decision_at: boundary.decision_at(),
             })
             .await?;
@@ -620,21 +615,22 @@ impl DefaultReportBuilder {
         Option<ResolvedCalibration>,
         Option<TradePolicyArtifactInfo>,
     )> {
-        let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
+        let artifact =
+            ModelArtifact::load_verified(self.deps.artifact_store.as_ref(), version).await?;
         let resolved =
             resolve_return_model_calibration(self.deps.calibration_loader.as_ref(), &artifact)
                 .await?;
         let header = artifact.header();
         let trade_policy = match (
-            header.trade_policy_artifact_id.as_ref(),
-            header.trade_policy_hash.as_ref(),
+            header.trade_policy_artifact_id(),
+            header.trade_policy_hash(),
         ) {
             (None, None) => None,
             (Some(artifact_id), Some(expected_hash)) => {
                 let policy = self
                     .deps
                     .trade_policy_repo
-                    .find(artifact_id)
+                    .find(&artifact_id)
                     .await?
                     .ok_or_else(|| ReportError::InvariantViolation {
                         stage: "model_policy_binding",
@@ -643,7 +639,7 @@ impl DefaultReportBuilder {
                 let computed_hash = ResearchHasher::canonical(&policy.payload_json)?;
                 if policy.status != TradePolicyStatus::Published
                     || !policy.payload_json.is_publishable()
-                    || &policy.content_hash != expected_hash
+                    || policy.content_hash != expected_hash
                     || computed_hash != policy.content_hash
                 {
                     return Err(ReportError::InvariantViolation {
@@ -748,23 +744,29 @@ impl DefaultReportBuilder {
             .iter()
             .map(|info| info.feature_vector_id)
             .collect::<Vec<_>>();
-        self.deps
-            .model_runner
-            .run(ModelRunRequest {
-                decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
-                market_selection_id: Some(selection.market_selection_id),
-                selection: &selection.included,
-                feature_vectors: &features.accepted,
-                feature_vector_ids: &feature_vector_ids,
-                feature_evidence,
-                features: &context.config.profile_artifacts.features.definition,
-                factors: &context.config.profile_artifacts.scoring.definition,
-                domain: &context.config.profile_artifacts.domain.definition,
-                model: &context.config.model_routing.model,
-                top_n: bounded_usize(context.top_n)?,
-                boundary: context.boundary.clone(),
-            })
-            .await
+        let outcome = Box::pin(self.deps.model_runner.run(ModelRunRequest {
+            decision_policy_snapshot_id: context.version.decision_policy_snapshot_id,
+            market_selection_id: Some(selection.market_selection_id),
+            selection: &selection.included,
+            feature_vectors: &features.accepted,
+            feature_vector_ids: &feature_vector_ids,
+            feature_evidence,
+            serving: &context.active.serving,
+            top_n: bounded_usize(context.top_n)?,
+            boundary: context.boundary.clone(),
+        }))
+        .await?;
+        if outcome.model_version_id != context.active.model_version_id {
+            return Err(ReportError::InvariantViolation {
+                stage: "model_runner",
+                detail: format!(
+                    "run authority {} differs from report authority {}",
+                    outcome.model_version_id, context.active.model_version_id
+                ),
+            }
+            .into());
+        }
+        Ok(outcome)
     }
 
     fn plan_portfolio(
@@ -990,7 +992,7 @@ impl DefaultReportBuilder {
             decision_policy_snapshot_id: input.context.version.decision_policy_snapshot_id,
             runtime_config: &input.context.config,
             runtime_mode: self.deps.runtime_controls.quant_runtime_mode(),
-            model_version_id: input.context.active.model_version_id,
+            model_version_id: input.model_outcome.model_version_id,
             profile_ref: input.context.active.version.profile_ref.clone(),
             market_selection_id: input.selection.market_selection_id,
             market_selection_hash: input.selection.selector_hash,

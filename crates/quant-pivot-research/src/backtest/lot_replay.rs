@@ -39,7 +39,10 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::types::PositionId;
+use quant_pivot_models::{
+    enums::quant::OutcomeSide,
+    types::{OutcomeTokenBinding, PositionId},
+};
 use rust_decimal::Decimal;
 
 use crate::{
@@ -310,7 +313,48 @@ fn score_on_path_decision(args: &OnPathDecisionArgs<'_>) -> QuantResult<OnPathSt
         .filter(|factor| !is_position_state_factor(&factor.name))
         .cloned()
         .collect();
+    let lot_context =
+        args.decision
+            .lot_context
+            .as_ref()
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: format!(
+                    "lot {} decision at {} is missing outcome orientation",
+                    args.sequence.position_id,
+                    args.decision.decision_at()
+                ),
+            })?;
+    let secondary_token = args
+        .decision
+        .selected_market
+        .secondary_token_id
+        .as_ref()
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: format!(
+                "lot {} decision at {} has no binary secondary token",
+                args.sequence.position_id,
+                args.decision.decision_at()
+            ),
+        })?;
+    let (yes_token, no_token) = match lot_context.outcome_side {
+        OutcomeSide::Yes => (&args.decision.token_id, secondary_token),
+        OutcomeSide::No => (secondary_token, &args.decision.token_id),
+    };
+    let outcome_binding = OutcomeTokenBinding::try_new(
+        args.decision.market_id.clone(),
+        yes_token.clone(),
+        no_token.clone(),
+        args.decision.token_id.clone(),
+        lot_context.outcome_side,
+    )
+    .map_err(|error| ResearchError::ValidationMethodology {
+        detail: format!(
+            "lot {} has an invalid outcome binding: {error}",
+            args.sequence.position_id
+        ),
+    })?;
     let score = args.model.score(&SellScoreInput {
+        outcome_binding,
         market_factors,
         position_state,
     })?;
@@ -434,7 +478,10 @@ mod tests {
     use quant_pivot_error::QuantResult;
     use quant_pivot_models::{
         domain::data_plane::DecisionClock,
-        enums::{common::MarketCategory, quant::DataQualityStatus},
+        enums::{
+            common::MarketCategory,
+            quant::{DataQualityStatus, OutcomeSide},
+        },
         types::{
             Bps, ContentHash, MarketId, ModelVersionId, OrderIntentId, PositionId, Price,
             Probability, SchemaVersion, Shares, TokenId, TrainingExampleId, TrainingSampleSource,
@@ -448,6 +495,7 @@ mod tests {
         SellNullBaseline, replay_lot_null_baseline,
     };
     use crate::{
+        execution_semantics::BookFidelity,
         features::{FeatureName, FeatureVector},
         model::{
             LabelSelector, PositionStateFeatures, SellScore, SellScoreInput, SellScorerRuntime,
@@ -475,15 +523,14 @@ mod tests {
     fn decision(as_of: DateTime<Utc>, label_value: Decimal, remaining: Decimal) -> TrainingExample {
         let market_id = MarketId::new("0xmarket");
         let token_id = TokenId::new("yes");
+        let mut selected_market =
+            fixtures::selected_market(&market_id, &token_id, MarketCategory::Sports);
+        selected_market.secondary_token_id = Some(TokenId::new("no"));
         TrainingExample {
             example_id: TrainingExampleId::from_v7(),
             market_id: market_id.clone(),
             token_id: token_id.clone(),
-            selected_market: fixtures::selected_market(
-                &market_id,
-                &token_id,
-                MarketCategory::Sports,
-            ),
+            selected_market,
             decision_boundary: DecisionClock::new(0).boundary(as_of).expect("boundary"),
             sample_source: TrainingSampleSource::ExitDecision,
             feature_vector: FeatureVector {
@@ -508,6 +555,7 @@ mod tests {
             lot_context: Some(LotTrainingContext {
                 order_intent_id: OrderIntentId::from_v7(),
                 position_id: PositionId::from_v7(),
+                outcome_side: OutcomeSide::Yes,
                 remaining_shares: Shares::new(remaining),
                 avg_price: Price::new(dec!(0.5)),
                 peak_mark: None,
@@ -515,7 +563,7 @@ mod tests {
                 max_hold_secs: 86_400,
             }),
             position_state: Some(PositionStateFeatures::test_fixture()),
-            book_fidelity: None,
+            book_fidelity: Some(BookFidelity::FullL2),
         }
     }
 
@@ -717,8 +765,8 @@ mod tests {
     #[test]
     fn position_state_inputs_formula() {
         let count = PositionStateFeatures::test_fixture()
-            .position_state_signed()
+            .direct_exit_evidence()
             .len();
-        assert_eq!(count, 3);
+        assert_eq!(count, 4);
     }
 }

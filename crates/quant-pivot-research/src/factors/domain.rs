@@ -37,15 +37,18 @@ use rust_decimal::{
 use crate::{
     factors::{
         computer::FactorComputer,
-        identity::provisional_factor_definition_id,
         names::{
             DOMAIN_CRYPTO_BETA_REGIME, DOMAIN_CRYPTO_STRIKE_PRESSURE,
             DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY, DOMAIN_WEATHER_ENSEMBLE_SPREAD,
             DOMAIN_WEATHER_NOAA_RESOLUTION_BASIS_RISK, DOMAIN_WEATHER_OBSERVED_EXTREME_HEADROOM,
         },
+        semantics::{
+            CRYPTO_BETA_REGIME, CRYPTO_STRIKE_PRESSURE, WEATHER_CONTEXT_IDENTITY,
+            WEATHER_ENSEMBLE_PROBABILITY, WEATHER_OBSERVED_BAND_DISTANCE, contract,
+        },
         value::{
-            FactorDefinitionDocument, FactorDriver, FactorName, FactorOutputKind, RawFactor,
-            RawFactorEligibility,
+            FactorAlphaOrientation, FactorContextEffect, FactorDefinitionDocument, FactorDriver,
+            FactorName, FactorOutputSemantics, RawFactor, RawFactorEligibility,
         },
     },
     features::{
@@ -156,35 +159,56 @@ pub fn weather_domain_factors() -> Vec<(FactorDefinitionDocument, Arc<dyn Factor
         (
             DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY,
             ENSEMBLE_BIN_PROBABILITY,
-            FactorDirection::Positive,
+            FactorOutputSemantics::OutcomeAlpha {
+                orientation: FactorAlphaOrientation::CanonicalYes,
+            },
+            FactorNormalization::MinMax,
+            WEATHER_ENSEMBLE_PROBABILITY,
         ),
         (
             DOMAIN_WEATHER_ENSEMBLE_SPREAD,
             ENSEMBLE_SPREAD,
-            FactorDirection::Negative,
+            FactorOutputSemantics::Context {
+                effect: FactorContextEffect::LowerIsSupportive,
+            },
+            FactorNormalization::Rank,
+            WEATHER_CONTEXT_IDENTITY,
         ),
         (
             DOMAIN_WEATHER_OBSERVED_EXTREME_HEADROOM,
             OBSERVED_EXTREME_HEADROOM,
-            FactorDirection::Neutral,
+            // Observed distance from the governed band is outcome evidence,
+            // not a universally monotone context modifier. Until the
+            // projection also binds statistic, remaining maturity, and both
+            // band boundaries it remains auditable but estimator-ineligible.
+            FactorOutputSemantics::Diagnostic,
+            FactorNormalization::Rank,
+            WEATHER_OBSERVED_BAND_DISTANCE,
         ),
         (
             DOMAIN_WEATHER_NOAA_RESOLUTION_BASIS_RISK,
             NOAA_RESOLUTION_BASIS_RISK,
-            FactorDirection::Negative,
+            FactorOutputSemantics::Context {
+                effect: FactorContextEffect::LowerIsSupportive,
+            },
+            FactorNormalization::Rank,
+            WEATHER_CONTEXT_IDENTITY,
         ),
     ]
     .into_iter()
-    .map(|(name, feature, direction)| {
+    .map(|(name, feature, output, normalization, semantic_key)| {
         let spec = FactorDefinitionDocument {
             name,
             family: FactorFamily::DomainWeather,
-            input_features: vec![feature.clone()],
-            output_kind: FactorOutputKind::NormalizedScore,
-            default_direction: direction,
-            normalization: FactorNormalization::Rank,
+            // `market.category` is an executable routing input: changing or
+            // removing it changes this factor from Normalizable to
+            // NotApplicable even when the Weather feature remains present.
+            input_features: vec![feature.clone(), CATEGORY],
+            output,
+            normalization,
             owner: "quant-pivot".to_owned(),
-            quality_gates: Vec::new(),
+            required: false,
+            computation: contract(semantic_key),
         };
         let computer = WeatherIdentityFactor {
             spec: spec.clone(),
@@ -199,17 +223,18 @@ pub fn weather_domain_factors() -> Vec<(FactorDefinitionDocument, Arc<dyn Factor
 fn crypto_spec(
     name: &FactorName,
     input_features: Vec<FeatureName>,
-    direction: FactorDirection,
+    output: FactorOutputSemantics,
+    semantic_key: &'static str,
 ) -> FactorDefinitionDocument {
     FactorDefinitionDocument {
         name: name.clone(),
         family: FactorFamily::DomainCrypto,
         input_features,
-        output_kind: FactorOutputKind::NormalizedScore,
-        default_direction: direction,
+        output,
         normalization: FactorNormalization::WinsorizedZScore,
         owner: "quant-pivot".to_owned(),
-        quality_gates: Vec::new(),
+        required: false,
+        computation: contract(semantic_key),
     }
 }
 
@@ -222,24 +247,31 @@ fn strike_pressure_factor() -> (FactorDefinitionDocument, Arc<dyn FactorComputer
         vec![
             domain_crypto::DISTANCE_TO_STRIKE,
             domain_crypto::TIME_TO_OBSERVATION,
+            CATEGORY,
         ],
-        FactorDirection::Positive,
+        FactorOutputSemantics::OutcomeAlpha {
+            orientation: FactorAlphaOrientation::CanonicalYes,
+        },
+        CRYPTO_STRIKE_PRESSURE,
     );
     let computer = StrikePressureFactor { spec: spec.clone() };
     (spec, Arc::new(computer))
 }
 
-/// `domain_crypto_beta_regime`: the underlying's volatility-normalized trend
-/// (momentum per unit realized vol) — the regime the market's crypto subject
-/// is currently trading in.
+/// `domain_crypto_beta_regime`: absolute volatility-normalized trend magnitude.
+///
+/// The contract comparator needed to orient the signed trend toward canonical
+/// YES is not part of this feature, so the value is diagnostic only.
 fn beta_regime_factor() -> (FactorDefinitionDocument, Arc<dyn FactorComputer>) {
     let spec = crypto_spec(
         &DOMAIN_CRYPTO_BETA_REGIME,
         vec![
             domain_crypto::UNDERLYING_MOMENTUM,
             domain_crypto::UNDERLYING_REALIZED_VOL,
+            CATEGORY,
         ],
-        FactorDirection::Positive,
+        FactorOutputSemantics::Diagnostic,
+        CRYPTO_BETA_REGIME,
     );
     let computer = BetaRegimeFactor { spec: spec.clone() };
     (spec, Arc::new(computer))
@@ -298,6 +330,7 @@ fn read_input(features: &FeatureVector, name: &FeatureName) -> InputState {
 
 /// Assemble a raw domain factor (shared by both computers).
 fn raw(
+    definition_id: FactorDefinitionId,
     spec: &FactorDefinitionDocument,
     raw_value: Option<Decimal>,
     eligibility: RawFactorEligibility,
@@ -310,12 +343,14 @@ fn raw(
         Probability::ZERO
     };
     RawFactor {
-        definition_id: provisional_factor_definition_id(spec.name.as_str()),
+        definition_id,
         name: spec.name.clone(),
         family: spec.family,
         raw_value,
         eligibility,
-        direction: spec.default_direction,
+        direction: raw_value
+            .and_then(|value| spec.contribution_direction(value))
+            .unwrap_or(FactorDirection::Neutral),
         confidence,
         headline,
         drivers,
@@ -324,8 +359,9 @@ fn raw(
 }
 
 /// The structurally-not-applicable cell for markets outside the vertical.
-fn not_applicable(spec: &FactorDefinitionDocument) -> RawFactor {
+fn not_applicable(definition_id: FactorDefinitionId, spec: &FactorDefinitionDocument) -> RawFactor {
     raw(
+        definition_id,
         spec,
         None,
         RawFactorEligibility::NotApplicable,
@@ -336,8 +372,9 @@ fn not_applicable(spec: &FactorDefinitionDocument) -> RawFactor {
 
 /// The domain-missing cell: category-mapped but inputs absent (unresolved
 /// linkage / source gap). Never a silent zero.
-fn domain_missing(spec: &FactorDefinitionDocument) -> RawFactor {
+fn domain_missing(definition_id: FactorDefinitionId, spec: &FactorDefinitionDocument) -> RawFactor {
     raw(
+        definition_id,
         spec,
         None,
         RawFactorEligibility::Normalizable,
@@ -352,31 +389,39 @@ struct WeatherIdentityFactor {
 }
 
 impl FactorComputer for WeatherIdentityFactor {
-    fn definition_id(&self) -> FactorDefinitionId {
-        provisional_factor_definition_id(self.spec.name.as_str())
-    }
-
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
 
-    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
+    fn compute_raw(
+        &self,
+        definition_id: FactorDefinitionId,
+        features: &FeatureVector,
+    ) -> QuantResult<RawFactor> {
         if !(features).routes_to_weather() {
-            return Ok(not_applicable(&self.spec));
+            return Ok(not_applicable(definition_id, &self.spec));
         }
         match read_input(features, &self.feature) {
-            InputState::Present(value) => Ok(raw(
-                &self.spec,
-                Some(value),
-                RawFactorEligibility::Normalizable,
-                format!("{} = {value}", self.feature),
-                vec![FactorDriver {
-                    feature_name: self.feature.clone(),
-                    contribution: value,
-                }],
-            )),
-            InputState::NotApplicable => Ok(not_applicable(&self.spec)),
-            InputState::Missing => Ok(domain_missing(&self.spec)),
+            InputState::Present(value) => {
+                let projected = if self.spec.is_outcome_alpha() {
+                    (Decimal::from(2) * value - Decimal::ONE).round_dp(RESEARCH_DECIMAL_SCALE)
+                } else {
+                    value
+                };
+                Ok(raw(
+                    definition_id,
+                    &self.spec,
+                    Some(projected),
+                    RawFactorEligibility::Normalizable,
+                    format!("{} = {value}; projected = {projected}", self.feature),
+                    vec![FactorDriver {
+                        feature_name: self.feature.clone(),
+                        contribution: value,
+                    }],
+                ))
+            }
+            InputState::NotApplicable => Ok(not_applicable(definition_id, &self.spec)),
+            InputState::Missing => Ok(domain_missing(definition_id, &self.spec)),
         }
     }
 }
@@ -386,17 +431,17 @@ struct StrikePressureFactor {
 }
 
 impl FactorComputer for StrikePressureFactor {
-    fn definition_id(&self) -> FactorDefinitionId {
-        provisional_factor_definition_id(self.spec.name.as_str())
-    }
-
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
 
-    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
+    fn compute_raw(
+        &self,
+        definition_id: FactorDefinitionId,
+        features: &FeatureVector,
+    ) -> QuantResult<RawFactor> {
         if !(features).routes_to_crypto() {
-            return Ok(not_applicable(&self.spec));
+            return Ok(not_applicable(definition_id, &self.spec));
         }
         let (distance_state, tto_state) = (
             read_input(features, &DISTANCE_TO_STRIKE),
@@ -408,25 +453,26 @@ impl FactorComputer for StrikePressureFactor {
             // The market maps to crypto, but this specific signal structurally
             // does not apply to it (e.g. a market shape this factor's inputs
             // are never computed for) — distinct from a transient data gap.
-            return Ok(not_applicable(&self.spec));
+            return Ok(not_applicable(definition_id, &self.spec));
         }
         let (InputState::Present(distance), InputState::Present(tto_secs)) =
             (distance_state, tto_state)
         else {
-            return Ok(domain_missing(&self.spec));
+            return Ok(domain_missing(definition_id, &self.spec));
         };
         // pressure = distance × sqrt(1 day / max(tto, 1 min)): the same
         // distance is more decisive with less time left. The sqrt crosses into
         // f64 and is quantized before it can enter the factor plane.
         let Some(tto) = tto_secs.to_f64() else {
-            return Ok(domain_missing(&self.spec));
+            return Ok(domain_missing(definition_id, &self.spec));
         };
         let urgency = (SECS_PER_DAY / tto.max(60.0)).sqrt();
         let Some(urgency) = Decimal::from_f64(urgency).filter(|value| !value.is_zero()) else {
-            return Ok(domain_missing(&self.spec));
+            return Ok(domain_missing(definition_id, &self.spec));
         };
         let pressure = (distance * urgency).round_dp(RESEARCH_DECIMAL_SCALE);
         Ok(raw(
+            definition_id,
             &self.spec,
             Some(pressure),
             RawFactorEligibility::Normalizable,
@@ -450,17 +496,17 @@ struct BetaRegimeFactor {
 }
 
 impl FactorComputer for BetaRegimeFactor {
-    fn definition_id(&self) -> FactorDefinitionId {
-        provisional_factor_definition_id(self.spec.name.as_str())
-    }
-
     fn spec(&self) -> &FactorDefinitionDocument {
         &self.spec
     }
 
-    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
+    fn compute_raw(
+        &self,
+        definition_id: FactorDefinitionId,
+        features: &FeatureVector,
+    ) -> QuantResult<RawFactor> {
         if !(features).routes_to_crypto() {
-            return Ok(not_applicable(&self.spec));
+            return Ok(not_applicable(definition_id, &self.spec));
         }
         let (momentum_state, vol_state) = (
             read_input(features, &UNDERLYING_MOMENTUM),
@@ -469,19 +515,20 @@ impl FactorComputer for BetaRegimeFactor {
         if matches!(momentum_state, InputState::NotApplicable)
             || matches!(vol_state, InputState::NotApplicable)
         {
-            return Ok(not_applicable(&self.spec));
+            return Ok(not_applicable(definition_id, &self.spec));
         }
         let (InputState::Present(momentum), InputState::Present(vol)) = (momentum_state, vol_state)
         else {
-            return Ok(domain_missing(&self.spec));
+            return Ok(domain_missing(definition_id, &self.spec));
         };
         // Vol-normalized trend; a zero-vol window carries no regime signal
         // (missing, never a division blow-up or a fabricated extreme).
         if vol <= Decimal::ZERO {
-            return Ok(domain_missing(&self.spec));
+            return Ok(domain_missing(definition_id, &self.spec));
         }
-        let regime = (momentum / vol).round_dp(RESEARCH_DECIMAL_SCALE);
+        let regime = (momentum / vol).abs().round_dp(RESEARCH_DECIMAL_SCALE);
         Ok(raw(
+            definition_id,
             &self.spec,
             Some(regime),
             RawFactorEligibility::Normalizable,
@@ -508,13 +555,19 @@ mod tests {
     use quant_pivot_models::{
         enums::{common::MarketCategory, domain::DomainFamily, quant::DataQualityStatus},
         runtime_config::DomainConfig,
-        types::{MarketId, SchemaVersion, TokenId},
+        types::{FactorDefinitionId, MarketId, SchemaVersion, TokenId},
     };
     use rust_decimal_macros::dec;
 
-    use super::{DomainFactorRegistry, crypto_domain_factors};
+    use super::{DomainFactorRegistry, crypto_domain_factors, weather_domain_factors};
     use crate::{
-        factors::value::RawFactorEligibility,
+        factors::{
+            names::DOMAIN_CRYPTO_STRIKE_PRESSURE,
+            value::{
+                FactorAlphaOrientation, FactorContextEffect, FactorOutputSemantics,
+                RawFactorEligibility,
+            },
+        },
         features::{
             DomainFeatureSlice, FeatureCell, FeatureStaleness, FeatureValue, FeatureVector,
             NullReason,
@@ -523,12 +576,24 @@ mod tests {
                     DISTANCE_TO_STRIKE, TIME_TO_OBSERVATION, UNDERLYING_MOMENTUM,
                     UNDERLYING_REALIZED_VOL,
                 },
+                domain_weather::{
+                    ENSEMBLE_BIN_PROBABILITY, ENSEMBLE_SPREAD, NOAA_RESOLUTION_BASIS_RISK,
+                    OBSERVED_EXTREME_HEADROOM,
+                },
                 market::CATEGORY,
             },
         },
     };
 
     fn vector(category: MarketCategory, domain: Option<DomainFeatureSlice>) -> FeatureVector {
+        vector_with_quality(category, domain, DataQualityStatus::Fresh)
+    }
+
+    fn vector_with_quality(
+        category: MarketCategory,
+        domain: Option<DomainFeatureSlice>,
+        data_quality: DataQualityStatus,
+    ) -> FeatureVector {
         let mut generic = BTreeMap::new();
         generic.insert(
             CATEGORY,
@@ -545,7 +610,7 @@ mod tests {
             generic_schema_version: SchemaVersion::FIRST,
             generic,
             domain,
-            data_quality: DataQualityStatus::Fresh,
+            data_quality,
         }
     }
 
@@ -586,6 +651,32 @@ mod tests {
         }
     }
 
+    fn weather_slice() -> DomainFeatureSlice {
+        let values = [
+            (ENSEMBLE_BIN_PROBABILITY, dec!(0.6)),
+            (ENSEMBLE_SPREAD, dec!(3.2)),
+            (OBSERVED_EXTREME_HEADROOM, dec!(1.5)),
+            (NOAA_RESOLUTION_BASIS_RISK, dec!(0.1)),
+        ]
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name,
+                FeatureCell::observed(
+                    FeatureValue::Decimal(value),
+                    None,
+                    FeatureStaleness::Unknown,
+                ),
+            )
+        })
+        .collect();
+        DomainFeatureSlice {
+            family: DomainFamily::Weather,
+            schema_version: SchemaVersion::new(3),
+            values,
+        }
+    }
+
     #[test]
     fn registry_routes_category_gate() {
         let registry = DomainFactorRegistry::build(&DomainConfig::default());
@@ -604,7 +695,9 @@ mod tests {
         // Mapped category + present slice → scored raw values.
         let scored = vector(MarketCategory::Crypto, Some(crypto_slice()));
         for (_, computer) in &factors {
-            let raw = computer.compute_raw(&scored).expect("compute");
+            let raw = computer
+                .compute_raw(FactorDefinitionId::from_v7(), &scored)
+                .expect("compute");
             assert!(raw.raw_value.is_some(), "{} must score", raw.name);
             assert_eq!(raw.eligibility, RawFactorEligibility::Normalizable);
         }
@@ -612,7 +705,9 @@ mod tests {
         // Mapped category, no slice → domain missing (never zero).
         let missing = vector(MarketCategory::Crypto, None);
         for (_, computer) in &factors {
-            let raw = computer.compute_raw(&missing).expect("compute");
+            let raw = computer
+                .compute_raw(FactorDefinitionId::from_v7(), &missing)
+                .expect("compute");
             assert!(raw.raw_value.is_none());
             assert!(raw.confidence.inner().is_zero());
             assert_eq!(raw.eligibility, RawFactorEligibility::Normalizable);
@@ -621,7 +716,9 @@ mod tests {
         // Unmapped category → structurally not applicable.
         let sports = vector(MarketCategory::Sports, None);
         for (_, computer) in &factors {
-            let raw = computer.compute_raw(&sports).expect("compute");
+            let raw = computer
+                .compute_raw(FactorDefinitionId::from_v7(), &sports)
+                .expect("compute");
             assert_eq!(raw.eligibility, RawFactorEligibility::NotApplicable);
         }
     }
@@ -649,7 +746,10 @@ mod tests {
         };
         let (_, strike_pressure) = &crypto_domain_factors()[0];
         let raw = strike_pressure
-            .compute_raw(&vector(MarketCategory::Crypto, Some(slice)))
+            .compute_raw(
+                FactorDefinitionId::from_v7(),
+                &vector(MarketCategory::Crypto, Some(slice)),
+            )
             .expect("compute");
         assert_eq!(raw.eligibility, RawFactorEligibility::NotApplicable);
         assert!(raw.raw_value.is_none());
@@ -661,8 +761,162 @@ mod tests {
         let factors = crypto_domain_factors();
         let (_, beta) = &factors[1];
         let raw = beta
-            .compute_raw(&vector(MarketCategory::Crypto, Some(crypto_slice())))
+            .compute_raw(
+                FactorDefinitionId::from_v7(),
+                &vector(MarketCategory::Crypto, Some(crypto_slice())),
+            )
             .expect("compute");
         assert_eq!(raw.raw_value, Some(dec!(2)), "0.01 / 0.005");
+    }
+
+    #[test]
+    fn domain_lineage_is_exact() {
+        let definition_id = FactorDefinitionId::from_v7();
+        let crypto = crypto_domain_factors();
+        let expected_crypto = [
+            vec![DISTANCE_TO_STRIKE, TIME_TO_OBSERVATION, CATEGORY],
+            vec![UNDERLYING_MOMENTUM, UNDERLYING_REALIZED_VOL, CATEGORY],
+        ];
+        let crypto_vector = vector(MarketCategory::Crypto, Some(crypto_slice()));
+        let wrong_crypto = vector(MarketCategory::Weather, Some(crypto_slice()));
+        let mut missing_crypto = crypto_vector.clone();
+        missing_crypto.generic.remove(&CATEGORY);
+
+        for ((spec, computer), expected) in crypto.iter().zip(expected_crypto) {
+            assert_eq!(spec.input_features, expected);
+            let expected_output = if spec.name == DOMAIN_CRYPTO_STRIKE_PRESSURE {
+                FactorOutputSemantics::OutcomeAlpha {
+                    orientation: FactorAlphaOrientation::CanonicalYes,
+                }
+            } else {
+                FactorOutputSemantics::Diagnostic
+            };
+            assert_eq!(spec.output, expected_output);
+            for raw in [
+                computer
+                    .compute_raw(definition_id, &crypto_vector)
+                    .expect("compute routed crypto"),
+                computer
+                    .compute_raw(definition_id, &wrong_crypto)
+                    .expect("compute category-changed crypto"),
+                computer
+                    .compute_raw(definition_id, &missing_crypto)
+                    .expect("compute category-missing crypto"),
+            ] {
+                assert_eq!(raw.input_feature_refs, spec.input_features);
+                assert!(
+                    raw.drivers
+                        .iter()
+                        .all(|driver| spec.input_features.contains(&driver.feature_name)),
+                    "{} emitted an undeclared driver",
+                    spec.name
+                );
+            }
+            let routed = computer
+                .compute_raw(definition_id, &crypto_vector)
+                .expect("compute routed crypto");
+            assert_eq!(routed.eligibility, RawFactorEligibility::Normalizable);
+            assert!(routed.raw_value.is_some());
+            for unrouted in [&wrong_crypto, &missing_crypto] {
+                let raw = computer
+                    .compute_raw(definition_id, unrouted)
+                    .expect("compute unrouted crypto");
+                assert_eq!(raw.eligibility, RawFactorEligibility::NotApplicable);
+                assert!(raw.raw_value.is_none());
+                assert_ne!(raw.raw_value, routed.raw_value);
+            }
+        }
+
+        let weather = weather_domain_factors();
+        let expected_weather = [
+            (
+                vec![ENSEMBLE_BIN_PROBABILITY, CATEGORY],
+                FactorOutputSemantics::OutcomeAlpha {
+                    orientation: FactorAlphaOrientation::CanonicalYes,
+                },
+            ),
+            (
+                vec![ENSEMBLE_SPREAD, CATEGORY],
+                FactorOutputSemantics::Context {
+                    effect: FactorContextEffect::LowerIsSupportive,
+                },
+            ),
+            (
+                vec![OBSERVED_EXTREME_HEADROOM, CATEGORY],
+                FactorOutputSemantics::Diagnostic,
+            ),
+            (
+                vec![NOAA_RESOLUTION_BASIS_RISK, CATEGORY],
+                FactorOutputSemantics::Context {
+                    effect: FactorContextEffect::LowerIsSupportive,
+                },
+            ),
+        ];
+        let weather_vector = vector(MarketCategory::Weather, Some(weather_slice()));
+        let wrong_weather = vector(MarketCategory::Crypto, Some(weather_slice()));
+        let mut missing_weather = weather_vector.clone();
+        missing_weather.generic.remove(&CATEGORY);
+
+        for ((spec, computer), (expected, output)) in weather.iter().zip(expected_weather) {
+            assert_eq!(spec.input_features, expected);
+            assert_eq!(spec.output, output);
+            let routed = computer
+                .compute_raw(definition_id, &weather_vector)
+                .expect("compute routed weather");
+            assert_eq!(routed.input_feature_refs, spec.input_features);
+            assert_eq!(routed.eligibility, RawFactorEligibility::Normalizable);
+            assert!(routed.raw_value.is_some());
+            assert!(
+                routed
+                    .drivers
+                    .iter()
+                    .all(|driver| spec.input_features.contains(&driver.feature_name)),
+                "{} emitted an undeclared driver",
+                spec.name
+            );
+            for unrouted in [&wrong_weather, &missing_weather] {
+                let raw = computer
+                    .compute_raw(definition_id, unrouted)
+                    .expect("compute unrouted weather");
+                assert_eq!(raw.input_feature_refs, spec.input_features);
+                assert_eq!(raw.eligibility, RawFactorEligibility::NotApplicable);
+                assert!(raw.raw_value.is_none());
+                assert_ne!(raw.raw_value, routed.raw_value);
+            }
+        }
+    }
+
+    #[test]
+    fn domain_confidence_ignores_quality() {
+        let crypto = vector_with_quality(
+            MarketCategory::Crypto,
+            Some(crypto_slice()),
+            DataQualityStatus::Insufficient,
+        );
+        let weather = vector_with_quality(
+            MarketCategory::Weather,
+            Some(weather_slice()),
+            DataQualityStatus::Insufficient,
+        );
+        let raw = crypto_domain_factors()
+            .into_iter()
+            .map(|(_, computer)| {
+                computer
+                    .compute_raw(FactorDefinitionId::from_v7(), &crypto)
+                    .expect("compute crypto")
+            })
+            .chain(weather_domain_factors().into_iter().map(|(_, computer)| {
+                computer
+                    .compute_raw(FactorDefinitionId::from_v7(), &weather)
+                    .expect("compute weather")
+            }))
+            .collect::<Vec<_>>();
+
+        assert_eq!(raw.len(), 6);
+        assert!(raw.iter().all(|factor| factor.raw_value.is_some()));
+        assert!(
+            raw.iter()
+                .all(|factor| factor.confidence.inner() == dec!(1))
+        );
     }
 }

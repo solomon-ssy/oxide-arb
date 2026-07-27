@@ -9,14 +9,14 @@ use quant_pivot_models::{
     types::{ContentHash, ModelRunId, ModelVersionId},
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    QueryFilter, QueryOrder,
+    ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
+    sea_query::Expr,
 };
 
-use crate::traits::ModelRunRepository;
+use crate::{postgres::primitives, traits::ModelRunRepository};
 
 /// Postgres-backed model-run repository: create a `Running` run, then finalize it
-/// to a terminal state through the guarded [`Self::succeed`] / [`Self::fail`]
+/// to a terminal state through guarded success, failure, or cancellation
 /// transitions.
 pub struct PgModelRunRepository {
     db: DatabaseConnection,
@@ -29,9 +29,20 @@ impl PgModelRunRepository {
         Self { db }
     }
 
-    /// Load a `Running` run for finalization, rejecting a missing row or an
-    /// already-terminal transition.
-    async fn load_running(&self, model_run_id: &ModelRunId) -> Result<Model, StorageError> {
+    async fn terminal_result(
+        &self,
+        model_run_id: &ModelRunId,
+        mut rows: Vec<Model>,
+    ) -> Result<ModelRunInfo, StorageError> {
+        if let Some(row) = rows.pop() {
+            if !rows.is_empty() {
+                return Err(StorageError::invariant_violation(
+                    Some(QUANT_MODEL_RUN),
+                    "model-run compare-and-set finalized more than one row",
+                ));
+            }
+            return Ok(row.into());
+        }
         let Some(row) = Entity::find_by_id(*model_run_id)
             .one(&self.db)
             .await
@@ -39,17 +50,14 @@ impl PgModelRunRepository {
         else {
             return Err(StorageError::not_found(QUANT_MODEL_RUN, model_run_id));
         };
-        if row.status != ModelRunStatus::Running {
-            return Err(StorageError::state_conflict(
-                QUANT_MODEL_RUN,
-                Some(model_run_id),
-                format!(
-                    "cannot finalize from non-running status {}",
-                    row.status.as_str()
-                ),
-            ));
-        }
-        Ok(row)
+        Err(StorageError::state_conflict(
+            QUANT_MODEL_RUN,
+            Some(model_run_id),
+            format!(
+                "cannot finalize from non-running status {}",
+                row.status.as_str()
+            ),
+        ))
     }
 }
 
@@ -96,21 +104,30 @@ impl ModelRunRepository for PgModelRunRepository {
         &self,
         model_run_id: &ModelRunId,
         output_hash: ContentHash,
-        finished_at: DateTime<Utc>,
         model_version_id: Option<ModelVersionId>,
     ) -> Result<ModelRunInfo, StorageError> {
-        let mut active = self.load_running(model_run_id).await?.into_active_model();
-        active.status = ActiveValue::Set(ModelRunStatus::Succeeded);
-        active.output_hash = ActiveValue::Set(Some(output_hash));
-        active.finished_at = ActiveValue::Set(Some(finished_at));
+        let mut update = Entity::update_many()
+            .col_expr(
+                Column::Status,
+                primitives::enum_value(&ModelRunStatus::Succeeded),
+            )
+            .col_expr(Column::OutputHash, Expr::value(Some(output_hash)))
+            .col_expr(
+                Column::ErrorCode,
+                Expr::value(Option::<ModelRunErrorCode>::None),
+            )
+            .col_expr(Column::ErrorMessage, Expr::value(Option::<String>::None))
+            .col_expr(Column::FinishedAt, Expr::cust("statement_timestamp()"))
+            .filter(Column::ModelRunId.eq(*model_run_id))
+            .filter(Column::Status.eq(ModelRunStatus::Running));
         if let Some(version_id) = model_version_id {
-            active.model_version_id = ActiveValue::Set(Some(version_id));
+            update = update.col_expr(Column::ModelVersionId, Expr::value(Some(version_id)));
         }
-        active
-            .update(&self.db)
+        let rows = update
+            .exec_with_returning(&self.db)
             .await
-            .map_err(StorageError::from)
-            .map(Into::into)
+            .map_err(StorageError::from)?;
+        self.terminal_result(model_run_id, rows).await
     }
 
     async fn fail(
@@ -118,17 +135,46 @@ impl ModelRunRepository for PgModelRunRepository {
         model_run_id: &ModelRunId,
         error_code: ModelRunErrorCode,
         error_message: String,
-        finished_at: DateTime<Utc>,
     ) -> Result<ModelRunInfo, StorageError> {
-        let mut active = self.load_running(model_run_id).await?.into_active_model();
-        active.status = ActiveValue::Set(ModelRunStatus::Failed);
-        active.error_code = ActiveValue::Set(Some(error_code));
-        active.error_message = ActiveValue::Set(Some(error_message));
-        active.finished_at = ActiveValue::Set(Some(finished_at));
-        active
-            .update(&self.db)
+        let rows = Entity::update_many()
+            .col_expr(
+                Column::Status,
+                primitives::enum_value(&ModelRunStatus::Failed),
+            )
+            .col_expr(Column::OutputHash, Expr::value(Option::<ContentHash>::None))
+            .col_expr(Column::ErrorCode, primitives::enum_value(&error_code))
+            .col_expr(Column::ErrorMessage, Expr::value(Some(error_message)))
+            .col_expr(Column::FinishedAt, Expr::cust("statement_timestamp()"))
+            .filter(Column::ModelRunId.eq(*model_run_id))
+            .filter(Column::Status.eq(ModelRunStatus::Running))
+            .exec_with_returning(&self.db)
             .await
-            .map_err(StorageError::from)
-            .map(Into::into)
+            .map_err(StorageError::from)?;
+        self.terminal_result(model_run_id, rows).await
+    }
+
+    async fn cancel(
+        &self,
+        model_run_id: &ModelRunId,
+        reason: String,
+    ) -> Result<ModelRunInfo, StorageError> {
+        let rows = Entity::update_many()
+            .col_expr(
+                Column::Status,
+                primitives::enum_value(&ModelRunStatus::Cancelled),
+            )
+            .col_expr(Column::OutputHash, Expr::value(Option::<ContentHash>::None))
+            .col_expr(
+                Column::ErrorCode,
+                primitives::enum_value(&ModelRunErrorCode::CancelledByOperator),
+            )
+            .col_expr(Column::ErrorMessage, Expr::value(Some(reason)))
+            .col_expr(Column::FinishedAt, Expr::cust("statement_timestamp()"))
+            .filter(Column::ModelRunId.eq(*model_run_id))
+            .filter(Column::Status.eq(ModelRunStatus::Running))
+            .exec_with_returning(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        self.terminal_result(model_run_id, rows).await
     }
 }

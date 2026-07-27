@@ -55,12 +55,15 @@ use rust_decimal::Decimal;
 
 use crate::pit::platform::ch_historical::snapshot_from_row;
 
-/// One `(market, token)` instant the replay will resolve point-in-time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One `(market, primary token)` instant the replay will resolve point-in-time.
+///
+/// The token may be either catalog YES or catalog NO. Materialization validates
+/// the exact pair and orients the resolved book/feature row to this token.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReplaySample {
     /// Market the sample scores.
     pub market_id: MarketId,
-    /// Primary (YES) outcome token.
+    /// Primary outcome token for this sample.
     pub token_id: TokenId,
 }
 
@@ -863,23 +866,38 @@ fn window_subjects(samples: &[ReplaySample]) -> WindowSubjects {
     }
 }
 
-/// Project a market catalog row into a selection entry (primary = YES token).
+/// Project a market catalog row into a selection entry oriented to `primary_token_id`.
 ///
 /// Liquidity and volume come from the exact PIT catalog change. The offline
 /// plane never substitutes a live selection snapshot or re-derives these fields
 /// from a different evidence source.
-#[must_use]
-pub fn selected_market(info: &MarketRegistryInfo) -> SelectedMarket {
-    SelectedMarket {
+pub fn selected_market(
+    info: &MarketRegistryInfo,
+    primary_token_id: &TokenId,
+) -> QuantResult<SelectedMarket> {
+    let (primary_token_id, secondary_token_id) = if *primary_token_id == info.token_yes {
+        (info.token_yes.clone(), info.token_no.clone())
+    } else if *primary_token_id == info.token_no {
+        (info.token_no.clone(), info.token_yes.clone())
+    } else {
+        return Err(ResearchError::PitResolution {
+            detail: format!(
+                "replay token {primary_token_id} matches neither catalog token {} nor {} for market {}",
+                info.token_yes, info.token_no, info.market_id
+            ),
+        }
+        .into());
+    };
+    Ok(SelectedMarket {
         market_id: info.market_id.clone(),
         event_id: info.event_id.clone(),
         category: info.primary_category(),
-        primary_token_id: info.token_yes.clone(),
-        secondary_token_id: Some(info.token_no.clone()),
+        primary_token_id,
+        secondary_token_id: Some(secondary_token_id),
         liquidity_usd: info.liquidity_usd,
         volume_24h_usd: info.volume_24h,
         source_refs: Vec::new(),
-    }
+    })
 }
 
 /// Build the trailing PIT feature window for one `(token, as_of)`.
@@ -1091,8 +1109,59 @@ mod tests {
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::market::{MarketRegistryInfo, TokenInfo},
+        enums::{
+            catalog::CatalogFilterReasonSet,
+            common::{CategorySet, MarketCategory, TickSize},
+            market::MarketStatus,
+        },
+        types::{EventId, MarketId, TokenId},
+    };
+    use rust_decimal_macros::dec;
 
-    use super::book_prefetch_start;
+    use super::{book_prefetch_start, selected_market};
+
+    fn market() -> MarketRegistryInfo {
+        MarketRegistryInfo {
+            market_id: MarketId::from("market"),
+            event_id: EventId::from("event"),
+            token_yes: TokenId::from("yes"),
+            token_no: TokenId::from("no"),
+            question: "test?".to_owned(),
+            slug: "test".to_owned(),
+            description: None,
+            categories: CategorySet::from(MarketCategory::Other),
+            status: MarketStatus::Active,
+            filter_reasons: CatalogFilterReasonSet::default(),
+            outcome: None,
+            neg_risk: false,
+            tick_size: TickSize::Hundredth,
+            tokens: vec![
+                TokenInfo {
+                    token_id: TokenId::from("yes"),
+                    outcome: "Yes".to_owned(),
+                    neg_risk: false,
+                },
+                TokenInfo {
+                    token_id: TokenId::from("no"),
+                    outcome: "No".to_owned(),
+                    neg_risk: false,
+                },
+            ],
+            best_bid: None,
+            best_ask: None,
+            depth_usd: None,
+            min_order_size: dec!(5),
+            liquidity_usd: None,
+            volume_24h: None,
+            start_date: None,
+            end_date: None,
+            resolved_at: None,
+            created_at: None,
+            updated_at: Utc::now(),
+        }
+    }
 
     #[test]
     fn book_non_zero_before() {
@@ -1122,5 +1191,18 @@ mod tests {
             .expect("prefetch start");
 
         assert_eq!(from, window_start - ChronoDuration::seconds(10));
+    }
+
+    #[test]
+    fn selected_market_orients_no() {
+        let selected = selected_market(&market(), &TokenId::from("no")).expect("NO market");
+
+        assert_eq!(selected.primary_token_id, TokenId::from("no"));
+        assert_eq!(selected.secondary_token_id, Some(TokenId::from("yes")));
+    }
+
+    #[test]
+    fn selected_rejects_unknown_token() {
+        assert!(selected_market(&market(), &TokenId::from("other")).is_err());
     }
 }

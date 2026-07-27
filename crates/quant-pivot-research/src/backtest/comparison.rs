@@ -9,17 +9,19 @@
 
 use std::collections::BTreeMap;
 
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::common::MarketCategory,
-    types::{ContentHash, ModelVersionId, backtest::CategoryRankIcDelta},
+    types::{
+        ContentHash, ModelVersionId,
+        backtest::{CategoryRankIcDelta, ModelComparisonHashInput},
+    },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     backtest::{BacktestRunResult, SampleOutcome},
-    hashing::ResearchHasher,
     precision::RESEARCH_DECIMAL_SCALE,
     stats,
 };
@@ -53,12 +55,65 @@ pub struct ModelComparisonReport {
     pub comparison_hash: ContentHash,
 }
 
+impl ModelComparisonReport {
+    /// Recompute the canonical comparison hash from every immutable field.
+    pub fn recomputed_hash(&self) -> QuantResult<ContentHash> {
+        ModelComparisonHashInput {
+            baseline_model_version_id: &self.baseline_model_version_id,
+            candidate_model_version_id: &self.candidate_model_version_id,
+            baseline_report_hash: &self.baseline_report_hash,
+            candidate_report_hash: &self.candidate_report_hash,
+            rank_ic_delta: self.rank_ic_delta,
+            hit_rate_delta: self.hit_rate_delta,
+            realized_pnl_delta: self.realized_pnl_delta,
+            score_correlation: self.score_correlation,
+            side_disagreement_rate: self.side_disagreement_rate,
+            common_samples: self.common_samples,
+            category_breakdown_diff: &self.category_breakdown_diff,
+        }
+        .content_hash()
+        .map_err(Into::into)
+    }
+
+    /// Require the persisted comparison hash to match its exact canonical preimage.
+    pub fn verify_hash(&self) -> QuantResult<()> {
+        let recomputed = self.recomputed_hash()?;
+        if recomputed != self.comparison_hash {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "model comparison hash mismatch: stored {}, recomputed {recomputed}",
+                    self.comparison_hash
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+}
+
 impl BacktestRunResult {
     /// Compute the head-to-head comparison of `candidate` against this baseline.
     ///
     /// Both runs must come from the same replay window; samples are joined on
     /// `(as_of, market, token)` for the correlation / disagreement metrics.
     pub fn compare(&self, candidate: &Self) -> QuantResult<ModelComparisonReport> {
+        self.report.verify_hash()?;
+        candidate.report.verify_hash()?;
+        if self.report.dataset_id != candidate.report.dataset_id
+            || self.report.decision_policy_snapshot_id
+                != candidate.report.decision_policy_snapshot_id
+            || self.report.window_start != candidate.report.window_start
+            || self.report.window_end != candidate.report.window_end
+        {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "model comparison requires the same Dataset, policy, and half-open window; \
+                     baseline report {} differs from candidate report {}",
+                    self.report.backtest_report_id, candidate.report.backtest_report_id
+                ),
+            }
+            .into());
+        }
         let rank_ic_delta =
             (candidate.report.rank_ic - self.report.rank_ic).round_dp(RESEARCH_DECIMAL_SCALE);
         let hit_rate_delta = (candidate.report.hit_rate.inner() - self.report.hit_rate.inner())
@@ -72,7 +127,7 @@ impl BacktestRunResult {
 
         let category_breakdown_diff = self.category_diff(candidate);
 
-        let comparison_hash = ResearchHasher::canonical(&ComparisonHashInput {
+        let comparison_hash = ModelComparisonHashInput {
             baseline_model_version_id: &self.report.model_version_id,
             candidate_model_version_id: &candidate.report.model_version_id,
             baseline_report_hash: &self.report.report_hash,
@@ -84,7 +139,8 @@ impl BacktestRunResult {
             side_disagreement_rate,
             common_samples,
             category_breakdown_diff: &category_breakdown_diff,
-        })?;
+        }
+        .content_hash()?;
 
         Ok(ModelComparisonReport {
             baseline_model_version_id: self.report.model_version_id,
@@ -269,7 +325,7 @@ mod tests {
         realized_pnl: Decimal,
         samples: Vec<SampleOutcome>,
     ) -> BacktestRunResult {
-        let report = BacktestReport {
+        let mut report = BacktestReport {
             backtest_report_id: BacktestReportId::from_v7(),
             model_version_id: ModelVersionId::from_v7(),
             dataset_id: TrainingDatasetId::from_v7(),
@@ -310,6 +366,7 @@ mod tests {
             },
             report_hash: hash(report_seed),
         };
+        report.report_hash = report.recomputed_hash().expect("report hash");
         BacktestRunResult {
             report,
             sample_outcomes: samples,
@@ -328,7 +385,7 @@ mod tests {
             ],
         );
         // Candidate scores correlate but flips the side on market 1.
-        let candidate = result(
+        let mut candidate = result(
             "bb",
             dec!(0.25),
             dec!(180),
@@ -337,6 +394,14 @@ mod tests {
                 sample(1, dec!(0.25), dec!(-20), OutcomeSide::No),
             ],
         );
+        candidate.report.dataset_id = baseline.report.dataset_id;
+        candidate.report.decision_policy_snapshot_id = baseline.report.decision_policy_snapshot_id;
+        candidate.report.window_start = baseline.report.window_start;
+        candidate.report.window_end = baseline.report.window_end;
+        candidate.report.report_hash = candidate
+            .report
+            .recomputed_hash()
+            .expect("aligned candidate report hash");
 
         let comparison = baseline.compare(&candidate).expect("compare");
         assert_eq!(
@@ -363,21 +428,22 @@ mod tests {
                 .to_string()
                 .starts_with("blake3:")
         );
+        comparison.verify_hash().expect("comparison hash preimage");
+        let mut tampered = comparison;
+        tampered.rank_ic_delta += dec!(0.01);
+        assert!(
+            tampered.verify_hash().is_err(),
+            "a cached comparison field mutation must invalidate its canonical hash"
+        );
     }
-}
 
-/// Canonical-hash projection of every comparison field except the hash itself.
-#[derive(Serialize)]
-struct ComparisonHashInput<'a> {
-    baseline_model_version_id: &'a ModelVersionId,
-    candidate_model_version_id: &'a ModelVersionId,
-    baseline_report_hash: &'a ContentHash,
-    candidate_report_hash: &'a ContentHash,
-    rank_ic_delta: Decimal,
-    hit_rate_delta: Decimal,
-    realized_pnl_delta: Decimal,
-    score_correlation: Decimal,
-    side_disagreement_rate: Decimal,
-    common_samples: u64,
-    category_breakdown_diff: &'a [CategoryRankIcDelta],
+    #[test]
+    fn comparison_rejects_subject_drift() {
+        let baseline = result("baseline", dec!(0.10), dec!(100), Vec::new());
+        let candidate = result("candidate", dec!(0.20), dec!(120), Vec::new());
+        assert!(
+            baseline.compare(&candidate).is_err(),
+            "a public comparison must reject a different Dataset/policy/window subject"
+        );
+    }
 }

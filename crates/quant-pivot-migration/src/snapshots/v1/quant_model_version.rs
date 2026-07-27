@@ -16,6 +16,9 @@ pub struct Model {
     pub version: i32,
     #[sea_orm(column_type = "Text")]
     pub artifact_hash: String,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub serving_contract: Json,
+    pub serving_contract_hash: Vec<u8>,
     #[sea_orm(column_type = r#"custom("qp_market_category")"#)]
     pub category_scope: Option<QpMarketCategory>,
     #[sea_orm(column_type = "Text")]

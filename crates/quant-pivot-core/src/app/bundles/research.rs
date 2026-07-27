@@ -3,13 +3,11 @@
 use std::sync::Arc;
 
 use quant_pivot_compute::ComputeExecutor;
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
     config::DeployConfig,
-    domain::ports::{
-        CalibrationArtifactFitPort, FactorGovernancePort, ModelGovernancePort, ModelSpecPort,
-    },
+    domain::ports::{CalibrationArtifactFitPort, ModelGovernancePort, ModelSpecPort},
 };
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
@@ -20,24 +18,22 @@ use quant_pivot_repository::{
         MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
         ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
         ModelRunRepository, PolicyRepository, PositionRepository, QuantFactReadRepository,
-        ShadowComparisonRepository, SourceSliceRepository, TradePolicyRepository,
-        TradeTapeBlockCursorRepository, TrainingDatasetRepository,
+        ResearchReadinessEvidenceRepository, ShadowComparisonRepository, SourceSliceRepository,
+        TradePolicyRepository, TradeTapeBlockCursorRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, build_artifact_store},
     gates::{DefaultModelQualityGate, ModelQualityGate},
-    model::{
-        CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, ModelRuntimeFactoryBuilder,
-    },
+    model::CalibrationArtifactLoader,
     selection::{ConfiguredMarketSelector, MarketSelector},
 };
 
 use super::{DataBundle, GovernanceBundle, InfraBundle};
 use crate::{
     governance::{
-        CoreCalibrationArtifactLoader, FactorGovernanceDeps, FactorGovernanceService,
-        ModelGovernanceDeps, ModelGovernanceService, ModelSpecDeps, ModelSpecService,
+        CoreCalibrationArtifactLoader, ModelGovernanceDeps, ModelGovernanceService, ModelSpecDeps,
+        ModelSpecService,
     },
     prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
     service::{
@@ -47,6 +43,14 @@ use crate::{
         feature_pipeline::{FeaturePipelineDeps, FeaturePipelineService},
         frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
         model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
+        model_serving_generation::ModelServingGenerationStore,
+        model_serving_preimage::{ModelServingPreimageDeps, ModelServingPreimageService},
+        model_serving_registry::ModelServingRuntimeRegistry,
+        research_readiness::{
+            EvidenceAttestor, EvidenceScopeIdentity, ResearchReadinessEvidenceService,
+        },
+        trade_policy_evidence::{TradePolicyEvidenceVerifier, TradePolicyEvidenceVerifierDeps},
+        trade_policy_preimage::{TradePolicyPreimageVerifier, TradePolicyPreimageVerifierDeps},
         training_dataset::{
             TrainingDatasetService, TrainingDatasetServiceDeps, TrainingDatasetServiceWire,
         },
@@ -103,6 +107,19 @@ pub struct ResearchBundle {
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     /// Full frozen dataset/model verification used by training and publish.
     pub frozen_model_parity: Arc<FrozenModelParityService>,
+    /// Canonical deep verifier for every opaque model-serving preimage.
+    pub serving_preimages: Arc<ModelServingPreimageService>,
+    /// Process-wide bounded cache for fully verified serving runtimes/planes.
+    pub runtime_registry: Arc<ModelServingRuntimeRegistry>,
+    /// Sole atomic owner of complete active/shadow/category serving
+    /// generations.
+    pub serving_generations: Arc<ModelServingGenerationStore>,
+    /// Process-wide verifier for signed operational readiness evidence.
+    pub research_readiness: Arc<ResearchReadinessEvidenceService>,
+    /// Canonical resolver for immutable trade-policy evidence graphs.
+    pub trade_policy_evidence: Arc<TradePolicyEvidenceVerifier>,
+    /// Canonical resolver for executable `TradePolicy` serving dependency graphs.
+    pub trade_policy_preimages: Arc<TradePolicyPreimageVerifier>,
     /// Online inference orchestrator: selection/features/factors → candidates.
     pub model_runner: Arc<ModelRunner>,
     /// Frozen training-dataset ledger persistence.
@@ -123,12 +140,8 @@ pub struct ResearchBundle {
     pub governance_audit_repo: Arc<dyn ModelGovernanceAuditRepository>,
     /// Offline governance orchestration: publish / rollback / dataset promotion.
     pub model_governance: Arc<dyn ModelGovernancePort>,
-    /// Factor-definition publish / retire orchestration.
-    pub factor_governance: Arc<dyn FactorGovernancePort>,
     /// Model-spec authoring (the offline research lifecycle root write path).
     pub model_spec: Arc<dyn ModelSpecPort>,
-    /// Schema-bound runtime factory builder (loads model artifacts).
-    pub model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
     /// Resolves `model_score` calibration artifacts for runtime + Kelly safety.
     pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     /// Historical fact read port (PIT book / microstructure / settlement).
@@ -166,6 +179,23 @@ struct ResearchPipelines {
     factor_pipeline: Arc<FactorPipelineService>,
 }
 
+struct ResearchEvidence {
+    readiness: Arc<ResearchReadinessEvidenceService>,
+    trade_policy: Arc<TradePolicyEvidenceVerifier>,
+}
+
+#[derive(Clone, Copy)]
+struct ModelGovernanceAssembly<'a, 'b> {
+    deps: &'a ResearchBundleDeps<'b>,
+    artifact_store: &'a Arc<dyn ArtifactStore>,
+    model_registry_repo: &'a Arc<dyn ModelRegistryRepository>,
+    shadow_comparison_repo: &'a Arc<dyn ShadowComparisonRepository>,
+    offline: &'a OfflineResearchRepos,
+    calibration_loader: &'a Arc<dyn CalibrationArtifactLoader>,
+    frozen_model_parity: &'a Arc<FrozenModelParityService>,
+    serving_preimages: &'a Arc<ModelServingPreimageService>,
+}
+
 fn assemble_research_pipelines(
     deps: &ResearchBundleDeps<'_>,
     market_linkage_repo: &Arc<dyn MarketLinkageRepository>,
@@ -197,7 +227,6 @@ fn assemble_research_pipelines(
     let factor_pipeline = Arc::new(FactorPipelineService::new(
         Arc::clone(&factor_repo),
         Arc::clone(&deps.infra.factor_event_writer),
-        Arc::clone(&deps.governance.bias_table),
         Arc::clone(deps.compute),
     ));
     ResearchPipelines {
@@ -209,27 +238,51 @@ fn assemble_research_pipelines(
     }
 }
 
+fn assemble_research_evidence(
+    deps: &ResearchBundleDeps<'_>,
+    artifact_store: &Arc<dyn ArtifactStore>,
+) -> QuantResult<ResearchEvidence> {
+    let repos = &deps.infra.repos;
+    let evidence_scope = EvidenceScopeIdentity::from_config(
+        &deps.deploy.db.clickhouse,
+        &deps.deploy.research.artifact_store,
+    )?;
+    let readiness = Arc::new(ResearchReadinessEvidenceService::new(
+        Arc::clone(&repos.research_readiness) as Arc<dyn ResearchReadinessEvidenceRepository>,
+        Arc::clone(artifact_store),
+        EvidenceAttestor::from_config(&deps.deploy.research.evidence_attestation)?,
+        &evidence_scope,
+    )?);
+    let trade_policy = Arc::new(TradePolicyEvidenceVerifier::new(
+        TradePolicyEvidenceVerifierDeps {
+            artifacts: Arc::clone(artifact_store),
+            policies: Arc::clone(&repos.trade_policy) as Arc<dyn TradePolicyRepository>,
+            readiness: Arc::clone(&readiness),
+        },
+    ));
+    Ok(ResearchEvidence {
+        readiness,
+        trade_policy,
+    })
+}
+
 impl ResearchBundle {
     /// Build the research bundle from deploy config plus wired infra/data handles.
     ///
     /// No report scheduler or trigger is wired here; report orchestration belongs
     /// to the report bundle. The feature and factor pipelines are ready for
     /// on-demand invocation with a frozen runtime-config snapshot per round.
-    pub fn assemble(deps: &ResearchBundleDeps<'_>) -> QuantResult<Self> {
+    pub async fn assemble(deps: &ResearchBundleDeps<'_>) -> QuantResult<Self> {
         let repos = &deps.infra.repos;
         let artifact_store: Arc<dyn ArtifactStore> =
             build_artifact_store(&deps.deploy.research.artifact_store)?;
+        let evidence = assemble_research_evidence(deps, &artifact_store)?;
         let market_selector: Arc<dyn MarketSelector> = Arc::new(ConfiguredMarketSelector::new());
         let market_selection_repo: Arc<dyn MarketSelectionRepository> =
             Arc::clone(&repos.market_selection) as Arc<dyn MarketSelectionRepository>;
         let market_linkage_repo: Arc<dyn MarketLinkageRepository> =
             Arc::clone(&repos.market_linkage) as Arc<dyn MarketLinkageRepository>;
         let pipelines = assemble_research_pipelines(deps, &market_linkage_repo);
-        let candidate_provider = pipelines.candidate_provider;
-        let feature_repo = pipelines.feature_repo;
-        let feature_pipeline = pipelines.feature_pipeline;
-        let factor_repo = pipelines.factor_repo;
-        let factor_pipeline = pipelines.factor_pipeline;
 
         let model_run_repo: Arc<dyn ModelRunRepository> =
             Arc::clone(&repos.model_run) as Arc<dyn ModelRunRepository>;
@@ -239,23 +292,62 @@ impl ResearchBundle {
             Arc::new(CoreCalibrationArtifactLoader::new(
                 Arc::clone(&repos.calibration_artifact) as Arc<dyn CalibrationArtifactRepository>,
             ));
-        let model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder> =
-            Arc::new(DefaultModelRuntimeFactoryBuilder::new(
-                Arc::clone(&artifact_store),
-                Arc::clone(&calibration_loader),
-            ));
         let shadow_comparison_repo: Arc<dyn ShadowComparisonRepository> =
             Arc::clone(&repos.shadow_comparison) as Arc<dyn ShadowComparisonRepository>;
+        let offline = Self::assemble_offline_repositories(deps);
+        let trade_policy_preimages = Arc::new(TradePolicyPreimageVerifier::new(
+            TradePolicyPreimageVerifierDeps {
+                trade_policy_repo: Arc::clone(&repos.trade_policy)
+                    as Arc<dyn TradePolicyRepository>,
+                dataset_repo: Arc::clone(&offline.training_dataset),
+                model_registry_repo: Arc::clone(&model_registry_repo),
+                evidence: Arc::clone(&evidence.trade_policy),
+            },
+        ));
+        let serving_preimages =
+            Arc::new(ModelServingPreimageService::new(ModelServingPreimageDeps {
+                model_registry_repo: Arc::clone(&model_registry_repo),
+                dataset_repo: Arc::clone(&offline.training_dataset),
+                source_slice_repo: Arc::clone(&repos.source_slice)
+                    as Arc<dyn SourceSliceRepository>,
+                policy_repo: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
+                calibration_repo: Arc::clone(&repos.calibration_artifact)
+                    as Arc<dyn CalibrationArtifactRepository>,
+                trade_policy_preimages: Arc::clone(&trade_policy_preimages),
+                artifact_store: Arc::clone(&artifact_store),
+            }));
+        let runtime_registry = Arc::new(ModelServingRuntimeRegistry::new(
+            deps.deploy.research.model_serving_registry,
+            Arc::clone(&serving_preimages),
+        )?);
+        let active_bundle = deps
+            .governance
+            .runtime_config
+            .active_bundle()
+            .ok_or_else(|| {
+                QuantError::config(
+                    "active policy bundle metadata is unavailable during serving bootstrap",
+                )
+            })?;
+        let serving_generations = Arc::new(
+            ModelServingGenerationStore::bootstrap(
+                Arc::clone(&model_registry_repo),
+                Arc::clone(&runtime_registry),
+                active_bundle,
+            )
+            .await?,
+        );
+        deps.governance
+            .applicator
+            .attach_model_serving(Arc::clone(&serving_generations))?;
         let model_runner = Self::assemble_model_runner(
             deps,
             &model_run_repo,
             &model_registry_repo,
             &shadow_comparison_repo,
-            &model_runtime_factory_builder,
-            &factor_pipeline,
+            &serving_generations,
+            &pipelines.factor_pipeline,
         );
-
-        let offline = Self::assemble_offline_repositories(deps);
 
         let frozen_model_parity = Arc::new(FrozenModelParityService::new(FrozenModelParityDeps {
             dataset_repo: Arc::clone(&offline.training_dataset),
@@ -265,16 +357,16 @@ impl ResearchBundle {
             artifact_store: Arc::clone(&artifact_store),
             evidence_writer: (deps.infra).frozen_parity_evidence_writer(),
         }));
-        let model_governance = Self::assemble_model_governance(
+        let model_governance = Self::assemble_model_governance(ModelGovernanceAssembly {
             deps,
-            &artifact_store,
-            &model_registry_repo,
-            &shadow_comparison_repo,
-            &offline,
-            &calibration_loader,
-            &frozen_model_parity,
-        );
-        let factor_governance = Self::assemble_factor_governance(&factor_repo);
+            artifact_store: &artifact_store,
+            model_registry_repo: &model_registry_repo,
+            shadow_comparison_repo: &shadow_comparison_repo,
+            offline: &offline,
+            calibration_loader: &calibration_loader,
+            frozen_model_parity: &frozen_model_parity,
+            serving_preimages: &serving_preimages,
+        });
         let model_spec: Arc<dyn ModelSpecPort> = Arc::new(ModelSpecService::new(ModelSpecDeps {
             model_registry: Arc::clone(&model_registry_repo),
             runtime_config: Arc::clone(&deps.governance.runtime_config),
@@ -287,14 +379,20 @@ impl ResearchBundle {
             artifact_store,
             market_selector,
             market_selection_repo,
-            candidate_provider,
-            feature_repo,
-            feature_pipeline,
-            factor_repo,
-            factor_pipeline,
+            candidate_provider: pipelines.candidate_provider,
+            feature_repo: pipelines.feature_repo,
+            feature_pipeline: pipelines.feature_pipeline,
+            factor_repo: pipelines.factor_repo,
+            factor_pipeline: pipelines.factor_pipeline,
             model_run_repo,
             model_registry_repo,
             frozen_model_parity,
+            serving_preimages,
+            runtime_registry,
+            serving_generations,
+            research_readiness: evidence.readiness,
+            trade_policy_evidence: evidence.trade_policy,
+            trade_policy_preimages,
             model_runner,
             training_dataset_repo: offline.training_dataset,
             source_slice_repo: Arc::clone(&repos.source_slice) as Arc<dyn SourceSliceRepository>,
@@ -305,9 +403,7 @@ impl ResearchBundle {
             shadow_comparison_repo,
             governance_audit_repo: offline.governance_audit,
             model_governance,
-            factor_governance,
             model_spec,
-            model_runtime_factory_builder,
             calibration_loader,
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
             catalog_ledger_repo: Arc::clone(&deps.data.catalog_ledger_repo),
@@ -356,22 +452,20 @@ impl ResearchBundle {
         model_run_repo: &Arc<dyn ModelRunRepository>,
         model_registry_repo: &Arc<dyn ModelRegistryRepository>,
         shadow_comparison_repo: &Arc<dyn ShadowComparisonRepository>,
-        factory_builder: &Arc<dyn ModelRuntimeFactoryBuilder>,
+        serving_generations: &Arc<ModelServingGenerationStore>,
         factor_pipeline: &Arc<FactorPipelineService>,
     ) -> Arc<ModelRunner> {
         Arc::new(ModelRunner::new(ModelRunnerDeps {
             model_run_repo: Arc::clone(model_run_repo),
             model_registry_repo: Arc::clone(model_registry_repo),
             shadow_comparison_repo: Arc::clone(shadow_comparison_repo),
-            factory_builder: Arc::clone(factory_builder),
+            serving_generations: Arc::clone(serving_generations),
             factor_pipeline: Arc::clone(factor_pipeline),
             signal_writer: Arc::clone(&deps.infra.signal_candidate_event_writer),
             model_input_writer: Arc::clone(&deps.infra.model_input_event_writer),
             alerts: Arc::new(DispatcherAlertSink::new(Arc::clone(
                 &deps.governance.alerts,
             ))),
-            weight_overlay: Arc::clone(&deps.governance.weight_overlay),
-            bias_table: Arc::clone(&deps.governance.bias_table),
         }))
     }
 
@@ -393,14 +487,18 @@ impl ResearchBundle {
 
     /// Wire offline publish / rollback / dataset-promotion governance.
     fn assemble_model_governance(
-        deps: &ResearchBundleDeps<'_>,
-        artifact_store: &Arc<dyn ArtifactStore>,
-        model_registry_repo: &Arc<dyn ModelRegistryRepository>,
-        shadow_comparison_repo: &Arc<dyn ShadowComparisonRepository>,
-        offline: &OfflineResearchRepos,
-        calibration_loader: &Arc<dyn CalibrationArtifactLoader>,
-        frozen_model_parity: &Arc<FrozenModelParityService>,
+        assembly: ModelGovernanceAssembly<'_, '_>,
     ) -> Arc<dyn ModelGovernancePort> {
+        let ModelGovernanceAssembly {
+            deps,
+            artifact_store,
+            model_registry_repo,
+            shadow_comparison_repo,
+            offline,
+            calibration_loader,
+            frozen_model_parity,
+            serving_preimages,
+        } = assembly;
         let gate: Arc<dyn ModelQualityGate> = Arc::new(DefaultModelQualityGate::new());
         Arc::new(ModelGovernanceService::new(ModelGovernanceDeps {
             model_registry_repo: Arc::clone(model_registry_repo),
@@ -409,6 +507,7 @@ impl ResearchBundle {
             shadow_comparison_repo: Arc::clone(shadow_comparison_repo),
             governance_audit_repo: Arc::clone(&offline.governance_audit),
             dataset_repo: Arc::clone(&offline.training_dataset),
+            serving_preimages: Arc::clone(serving_preimages),
             artifact_store: Arc::clone(artifact_store),
             calibration_repo: Arc::clone(&deps.infra.repos.calibration_artifact)
                 as Arc<dyn CalibrationArtifactRepository>,
@@ -420,14 +519,6 @@ impl ResearchBundle {
             )
                 as Arc<dyn FeatureParityRepository>)),
             frozen_model_parity: Arc::clone(frozen_model_parity),
-        }))
-    }
-
-    fn assemble_factor_governance(
-        factor_repo: &Arc<dyn FactorRepository>,
-    ) -> Arc<dyn FactorGovernancePort> {
-        Arc::new(FactorGovernanceService::new(FactorGovernanceDeps {
-            factor_repo: Arc::clone(factor_repo),
         }))
     }
 }

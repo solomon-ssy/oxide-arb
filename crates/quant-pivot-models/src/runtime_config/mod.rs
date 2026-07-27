@@ -5,7 +5,7 @@ pub mod sections;
 pub mod validation;
 pub mod wire;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use quant_pivot_error::{
     QuantError,
@@ -22,16 +22,17 @@ use sea_orm::FromJsonQueryResult;
 pub use sections::{
     AutoExecutionConfig, CryptoCrossCheckConfig, CryptoDomainConfig, DataQualityConfig,
     DomainConfig, EntryConditionWorkerConfig, ExecutionConfig, FactorCrossSectionConfig,
-    FactorNormalizationConfig, FactorOrthogonalizeConfig, FactorsConfig, FavoriteLongshotConfig,
-    FeaturesConfig, KellySafetyConfig, MAX_REPORT_TOP_N, ModelCalibrationConfig, ModelConfig,
-    MomentumFeaturesConfig, NegRiskStructuralConfig, ParticipantConcentrationConfig,
-    PerFactorNormalization, PolicyValidationConfig, PortfolioBudget, PortfolioConfig,
-    PortfolioConstraints, QualityGateConfig, ReportScheduleConfig, ReportsConfig, ResearchConfig,
-    ResearchTrainingConfig, ResearchValidationConfig, ResearchValidationCpcvConfig,
-    ResearchValidationGatesConfig, ResearchValidationPboConfig, ResearchValidationPurgeConfig,
-    ResearchValidationTrialsConfig, ReversalAfterShockConfig, SelectionConfig,
-    SellQualityGateConfig, SemiAutoConfig, StructuralFactorsConfig, StructuralFeaturesConfig,
-    TrainingConfig, WeatherDomainConfig,
+    FactorHeadConfig, FactorNormalizationConfig, FactorOrthogonalizeConfig, FactorsConfig,
+    FavoriteLongshotConfig, FeaturesConfig, KellySafetyConfig, MAX_REPORT_TOP_N,
+    ModelCalibrationConfig, ModelConfig, MomentumFeaturesConfig, NegRiskStructuralConfig,
+    ParticipantConcentrationConfig, PerFactorNormalization, PolicyValidationConfig,
+    PortfolioBudget, PortfolioConfig, PortfolioConstraints, QualityGateConfig,
+    ReportScheduleConfig, ReportsConfig, ResearchConfig, ResearchTrainingConfig,
+    ResearchValidationConfig, ResearchValidationCpcvConfig, ResearchValidationGatesConfig,
+    ResearchValidationPboConfig, ResearchValidationPurgeConfig, ResearchValidationTrialsConfig,
+    ReversalAfterShockConfig, SelectionConfig, SellQualityGateConfig, SellScorerConfig,
+    SemiAutoConfig, StructuralFactorsConfig, StructuralFeaturesConfig, TrainingConfig,
+    WeatherDomainConfig,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Error as SerdeJsonError, Value};
@@ -39,19 +40,21 @@ use thiserror::Error;
 pub use wire::{
     CapitalPolicy, ConfidenceSizeCurve, CorrelationConfig, DecimalValue, DrawdownMultiplierPolicy,
     EmergencyExitKind, EmergencyExitPolicy, EntryOrderPolicy, ExecutionBreakerConfig,
-    ExitMonitorPolicy, ExitSignalReinferencePolicy, FactorWeights, FeatureFamily,
-    FeatureStalenessPolicy, KillSwitchPolicy, MASKED_SECRET, MissingFactorPolicy, ModelVersionRef,
-    NeutralizeDimension, NotificationPolicies, OpportunisticSellPolicy,
-    OutcomeReconciliationPolicy, PortfolioOptimizerConfig, RankLossKind, ReconciliationPolicy,
-    ReportDeliveryPolicy, ScheduleCadence, SizingModelConfig, SmallCrossSectionPolicy,
-    TrainingOptimizerKind,
+    ExitMonitorPolicy, ExitSignalReinferencePolicy, FeatureFamily, FeatureStalenessPolicy,
+    KillSwitchPolicy, MASKED_SECRET, MissingFactorPolicy, ModelVersionRef, NeutralizeDimension,
+    NotificationPolicies, OpportunisticSellPolicy, OutcomeReconciliationPolicy,
+    PortfolioOptimizerConfig, RankLossKind, ReconciliationPolicy, ReportDeliveryPolicy,
+    ScheduleCadence, SizingModelConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
 };
 
 use crate::{
-    enums::runtime_config::{
-        CheckOutcome, ConfigResourceKind, PolicyApplyBoundary, PolicyConsumer,
-        PolicyPreflightCheckKind, PolicyPreflightDetailCode, PolicyValidationCode,
-        PolicyValidationSeverity, ProfileArtifactKind,
+    enums::{
+        common::MarketCategory,
+        runtime_config::{
+            CheckOutcome, ConfigResourceKind, PolicyApplyBoundary, PolicyConsumer,
+            PolicyPreflightCheckKind, PolicyPreflightDetailCode, PolicyValidationCode,
+            PolicyValidationSeverity, ProfileArtifactKind,
+        },
     },
     hashing::CanonicalDigest,
     types::{
@@ -127,6 +130,117 @@ impl Default for ModelRouting {
         Self {
             schema_version: POLICY_RESOURCE_SCHEMA_VERSION,
             model: ModelConfig::default(),
+        }
+    }
+}
+
+/// Exact Buy-side route represented by one report and one durable model run.
+///
+/// `Pooled` may contain only non-vertical market categories. `Crypto` and
+/// `Weather` are isolated category routes because their `ResearchProfile`,
+/// domain-source, factor-plane, and serving-contract preimages are distinct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BuyModelRoute {
+    Pooled,
+    Crypto,
+    Weather,
+}
+
+impl BuyModelRoute {
+    #[must_use]
+    pub const fn category(self) -> Option<MarketCategory> {
+        match self {
+            Self::Pooled => None,
+            Self::Crypto => Some(MarketCategory::Crypto),
+            Self::Weather => Some(MarketCategory::Weather),
+        }
+    }
+}
+
+impl TryFrom<&SelectionConfig> for BuyModelRoute {
+    type Error = ConfigError;
+
+    fn try_from(selection: &SelectionConfig) -> Result<Self, Self::Error> {
+        let categories = selection
+            .enabled_categories
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if categories.len() != selection.enabled_categories.len() {
+            return Err(ConfigError::InvalidValue {
+                field: "selection.enabled_categories".to_owned(),
+                reason: "duplicate categories are not a canonical report scope".to_owned(),
+            });
+        }
+        let verticals = categories
+            .iter()
+            .copied()
+            .filter(|category| matches!(category, MarketCategory::Crypto | MarketCategory::Weather))
+            .collect::<Vec<_>>();
+        match verticals.as_slice() {
+            [] => Ok(Self::Pooled),
+            [MarketCategory::Crypto] if categories.len() == 1 => Ok(Self::Crypto),
+            [MarketCategory::Weather] if categories.len() == 1 => Ok(Self::Weather),
+            _ => Err(ConfigError::InvalidValue {
+                field: "selection.enabled_categories".to_owned(),
+                reason: "Crypto or Weather must be the sole category in one report; vertical \
+                         contracts cannot share a pooled model run"
+                    .to_owned(),
+            }),
+        }
+    }
+}
+
+impl TryFrom<Option<MarketCategory>> for BuyModelRoute {
+    type Error = ConfigError;
+
+    fn try_from(category: Option<MarketCategory>) -> Result<Self, Self::Error> {
+        match category {
+            None => Ok(Self::Pooled),
+            Some(MarketCategory::Crypto) => Ok(Self::Crypto),
+            Some(MarketCategory::Weather) => Ok(Self::Weather),
+            Some(category) => Err(ConfigError::InvalidValue {
+                field: "model.category_scope".to_owned(),
+                reason: format!(
+                    "{category} cannot own a category-specific Buy route; only Crypto and Weather \
+                     are vertical routes"
+                ),
+            }),
+        }
+    }
+}
+
+impl ModelConfig {
+    /// Resolve the exact active pointer for one report route.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed configuration error when the route has no pointer.
+    /// Category routes never fall back to the pooled pointer.
+    pub fn active_pointer(&self, route: BuyModelRoute) -> Result<&ModelVersionRef, ConfigError> {
+        match route {
+            BuyModelRoute::Pooled => {
+                self.active_model_version_id
+                    .as_ref()
+                    .ok_or_else(|| ConfigError::MissingField {
+                        section: "model".to_owned(),
+                        field: "active_model_version_id".to_owned(),
+                    })
+            }
+            BuyModelRoute::Crypto => self
+                .category_model_pointers
+                .get(&MarketCategory::Crypto)
+                .ok_or_else(|| ConfigError::MissingField {
+                    section: "model.category_model_pointers".to_owned(),
+                    field: MarketCategory::Crypto.to_string(),
+                }),
+            BuyModelRoute::Weather => self
+                .category_model_pointers
+                .get(&MarketCategory::Weather)
+                .ok_or_else(|| ConfigError::MissingField {
+                    section: "model.category_model_pointers".to_owned(),
+                    field: MarketCategory::Weather.to_string(),
+                }),
         }
     }
 }
@@ -466,7 +580,7 @@ pub struct ImmutableProfileArtifactHashes {
 #[serde(tag = "profile_kind", content = "document", rename_all = "snake_case")]
 pub enum PolicyProfileDocument {
     Feature(FeatureProfileArtifact),
-    Scoring(ScoringProfileArtifact),
+    Scoring(Box<ScoringProfileArtifact>),
     Domain(DomainProfileArtifact),
     ResearchMethod(Box<ResearchMethodProfileArtifact>),
 }
@@ -555,7 +669,7 @@ impl ImmutableProfileArtifacts {
     pub fn documents(&self) -> [PolicyProfileDocument; 4] {
         [
             PolicyProfileDocument::Feature(self.features.clone()),
-            PolicyProfileDocument::Scoring(self.scoring.clone()),
+            PolicyProfileDocument::Scoring(Box::new(self.scoring.clone())),
             PolicyProfileDocument::Domain(self.domain.clone()),
             PolicyProfileDocument::ResearchMethod(Box::new(self.research_method.clone())),
         ]
@@ -713,7 +827,7 @@ impl DecisionPolicySnapshotDocument {
             }
         };
         let scoring = match resolve(&self.profile_artifact_refs.scoring)? {
-            PolicyProfileDocument::Scoring(document) => document,
+            PolicyProfileDocument::Scoring(document) => *document,
             document => {
                 return Err(PolicySnapshotError::ArtifactKindMismatch {
                     id: self.profile_artifact_refs.scoring.profile_artifact_id,

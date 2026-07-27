@@ -58,7 +58,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    model::{CalibrationArtifactLoader, load_hash_verified_artifact},
+    model::{CalibrationArtifactLoader, ModelArtifact},
 };
 
 use crate::{
@@ -613,7 +613,7 @@ async fn recheck_return_model_calibrated(
         .ok_or_else(|| ExecutionError::IntentDenied {
             reason: format!("model version {model_version_id} not found for calibration recheck"),
         })?;
-    let artifact = load_hash_verified_artifact(artifact_store, &version).await?;
+    let artifact = ModelArtifact::load_verified(artifact_store.as_ref(), &version).await?;
     let resolved = resolve_return_model_calibration(calibration_loader.as_ref(), &artifact).await?;
     if resolved.is_none() {
         return Err(ExecutionError::IntentDenied {
@@ -1527,17 +1527,12 @@ mod tests {
             },
             enums::{
                 common::MarketCategory,
-                model::ModelFamily,
                 quant::{DownsideSource, PublicationStatus},
             },
-            runtime_config::FactorCrossSectionConfig,
             types::{
-                BacktestPathSetId, CalibrationArtifactId, ContentHash, ModelInputContract,
-                ModelSpecId, ModelVersionId,
+                BacktestPathSetId, CalibrationArtifactId, ModelRunId, ModelSpecId, ModelVersionId,
                 calibration::{MonotoneMapping, ReliabilityReport},
-                model_metrics::ModelVersionMetrics,
                 model_quality::QualityGateReport,
-                model_training::ModelTrainingObjective,
             },
         };
         use quant_pivot_repository::traits::{
@@ -1545,22 +1540,16 @@ mod tests {
         };
         use quant_pivot_research::{
             artifact::{ArtifactStore, LocalArtifactStore},
-            factors::{FrozenReferenceQuantiles, names::LIQUIDITY_DEPTH},
             model::{
-                CalibratedReturnModel, CalibrationArtifactLoader, FactorWeight, ModelArtifact,
-                ModelArtifactHeader, ResolvedCalibration, ReturnModelSpec, ScoreMultiplierSpec,
-                SubstitutionConfidenceRules, WeightedFactorModelArtifact,
-                model_input_contract_hash,
+                CalibratedReturnModel, CalibrationArtifactLoader, ModelArtifact,
+                ResolvedCalibration, ReturnModelSpec,
             },
         };
         use rust_decimal::Decimal;
 
         use crate::{
             execution::intent_service::recheck_return_model_calibrated,
-            test_fixtures::{
-                execution_pg_seed::fixture_profile_ref,
-                model_spec_fixtures::model_spec_lineage_fixture,
-            },
+            service::model_serving_test_support::{artifact_with_return, model_version},
         };
 
         struct FakeRegistry {
@@ -1583,6 +1572,13 @@ mod tests {
             }
             async fn create_model_version(
                 &self,
+                _version: NewModelVersion,
+            ) -> Result<ModelVersionInfo, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn commit_training_model_version(
+                &self,
+                _model_run_id: &ModelRunId,
                 _version: NewModelVersion,
             ) -> Result<ModelVersionInfo, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
@@ -1706,99 +1702,21 @@ mod tests {
             Arc::new(LocalArtifactStore::new(root))
         }
 
-        fn header(model_version_id: ModelVersionId) -> ModelArtifactHeader {
-            ModelArtifactHeader {
-                model_version_id,
-                model_spec_definition_hash: ContentHash::parse(&format!(
-                    "blake3:{}",
-                    "0".repeat(64)
-                ))
-                .expect("hash"),
-                profile_ref: fixture_profile_ref(),
-                model_family: ModelFamily::WeightedFactor,
-                feature_schema_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64)))
-                    .expect("hash"),
-                factor_schema_hash: ContentHash::parse(&format!("blake3:{}", "2".repeat(64)))
-                    .expect("hash"),
-                trade_policy_artifact_id: None,
-                trade_policy_hash: None,
-            }
-        }
-
-        fn weighted_artifact(
-            model_version_id: ModelVersionId,
-            return_model: ReturnModelSpec,
-        ) -> ModelArtifact {
-            let input_contract = ModelInputContract::single_required("book.mid");
-            let input_contract_hash =
-                model_input_contract_hash(&input_contract).expect("input contract hash");
-            ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
-                header: header(model_version_id),
-                training_dataset_hash: ContentHash::parse(&format!("blake3:{}", "3".repeat(64)))
-                    .expect("hash"),
-                training_input_hash: ContentHash::parse(&format!("blake3:{}", "4".repeat(64)))
-                    .expect("hash"),
-                input_contract,
-                input_contract_hash,
-                weights: vec![FactorWeight {
-                    factor: LIQUIDITY_DEPTH,
-                    weight: rust_decimal::Decimal::ONE,
-                }],
-                prediction_horizon_secs: 86_400,
-                multipliers: ScoreMultiplierSpec::conservative(),
-                substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-                return_model,
-                factor_cross_section: FactorCrossSectionConfig::default(),
-                frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
-                objective_report: None,
-                category_scope: None,
-            }))
-        }
-
         /// Seeds a real `ModelVersionInfo` + a hash-verified artifact into a
         /// real (file-backed, no Docker) `LocalArtifactStore` — no fake
-        /// needed for `ArtifactStore`/`load_hash_verified_artifact` itself.
+        /// needed for `ArtifactStore`/`ModelArtifact::load_verified` itself.
         async fn seeded(
             return_model: ReturnModelSpec,
         ) -> (Arc<dyn ArtifactStore>, ModelVersionInfo) {
             let store = temp_store();
-            let model_version_id = ModelVersionId::from_v7();
-            let artifact = weighted_artifact(model_version_id, return_model);
+            let artifact = artifact_with_return(None, return_model);
             let digest = artifact.content_hash().expect("hash");
             let key = ModelArtifact::artifact_key(&digest).expect("key");
             store
                 .put(key, &artifact.to_bytes().expect("bytes"))
                 .await
                 .expect("put");
-            let (model_spec_thesis, model_spec_definition_hash) =
-                model_spec_lineage_fixture("intent-service-test-spec");
-            let version = ModelVersionInfo {
-                model_version_id,
-                model_spec_id: ModelSpecId::from_v7(),
-                model_spec_name: "intent-service-test-spec".to_owned(),
-                model_family: ModelFamily::WeightedFactor,
-                model_spec_thesis,
-                model_spec_definition_hash,
-                version: 1,
-                artifact_hash: digest,
-                category_scope: None,
-                profile_ref: fixture_profile_ref(),
-                training_dataset_id: None,
-                trade_policy_artifact_id: None,
-                trade_policy_hash: None,
-                publish_path_set_id: None,
-                derivation_kind: ModelVersionInfo::training_derivation_kind(),
-                parent_model_version_id: None,
-                calibration_artifact_id: None,
-                derivation_evidence_hash: None,
-                metrics: ModelVersionMetrics::not_measured("test fixture"),
-                training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-                quality_gate_report: None,
-                publication_status: PublicationStatus::Published,
-                published_at: Some(Utc::now()),
-                retired_at: None,
-                created_at: Utc::now(),
-            };
+            let version = model_version(&artifact, PublicationStatus::Published, None);
             (store, version)
         }
 

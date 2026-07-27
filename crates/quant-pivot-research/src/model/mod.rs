@@ -2,7 +2,7 @@
 //! serialized artifacts, and the training contract.
 //!
 //! Online closure terminus: `FactorValue → QuantModelRuntime →
-//! SignalCandidate`. The runtime/factory traits and artifact shell support the
+//! SignalCandidate`. The runtime contract and artifact shell support the
 //! weighted-factor runtime and the feature-gated classical trainer/runtime.
 
 pub mod artifact;
@@ -13,14 +13,12 @@ pub mod classical;
 #[cfg(feature = "ml-classical")]
 pub mod classical_runtime;
 pub mod degrade;
-pub mod factory;
+pub mod factor_heads;
 pub mod favorite_longshot;
 pub mod objective;
 #[cfg(feature = "optimize")]
 pub mod optimize;
-pub mod overlay;
 pub mod reliability;
-pub mod routing;
 pub mod runtime;
 pub mod score_percentile;
 pub mod sell_scorer;
@@ -29,19 +27,17 @@ pub mod trainer;
 pub mod weighted;
 
 pub use artifact::{
-    CalibratedReturnModel, ClassicalModelArtifact, ClassicalModelMetrics, ClassicalOutputSemantics,
-    DataQualityMultipliers, EncodedColumn, EncodedColumnKind, EncodedColumnName, FactorWeight,
-    FeatureImportance, FittedInputColumn, FittedInputTransform, HeuristicReturnModel,
-    HorizonMultipliers, LiquidityMultipliers, LiquidityTier, ModelArtifact, ModelArtifactHeader,
-    ReturnEstimate, ReturnModelSpec, ScoreMultiplierSpec, SellScorerArtifact, SellScorerOutputSpec,
-    SubstitutionConfidenceRules, TrainingObjectiveReport, WeightedFactorModelArtifact,
-    model_input_contract_hash,
+    CalibratedReturnModel, ClassicalModelMetrics, ClassicalOutputSemantics, DataQualityMultipliers,
+    EncodedColumn, EncodedColumnKind, EncodedColumnName, FeatureImportance, FittedInputColumn,
+    FittedInputTransform, HeuristicReturnModel, HorizonMultipliers, LiquidityMultipliers,
+    LiquidityTier, ModelArtifact, ModelArtifactHeader, ReturnEstimate, ReturnModelSpec,
+    ScoreMultiplierSpec, SellScorerOutputSpec, SubstitutionConfidenceRules,
+    TrainingObjectiveReport, model_input_contract_hash,
 };
 pub use calibrator::{
     CalibrationArtifactLoader, ProbabilityCalibrator, ResolvedCalibration, apply_mapping,
     isotonic::IsotonicCalibrator, platt::PlattCalibrator, validate_mapping,
 };
-pub use category_scope::{infer_training_category_scope, validate_category_scope_weights};
 #[cfg(feature = "ml-classical")]
 pub use classical::{
     CLASSICAL_CRATE_NAME, CLASSICAL_CRATE_VERSION, ClassicalAdapterRegistry, ClassicalModelAdapter,
@@ -50,21 +46,13 @@ pub use classical::{
 #[cfg(feature = "ml-classical")]
 pub use classical_runtime::ClassicalRuntime;
 pub use degrade::{DegradeAction, InferenceStage};
-pub use factory::{
-    ActiveSchemaBinding, DefaultModelRuntimeFactory, DefaultModelRuntimeFactoryBuilder,
-    ModelRuntimeFactoryBuilder, load_hash_verified_artifact,
-};
 pub use favorite_longshot::{BiasFitConfig, BiasSample, FavoriteLongshotBiasTable};
 pub use objective::{ObjectiveComponentReport, RankingDiagnostics};
-pub use overlay::WeightOverlay;
 pub use reliability::{ReliabilitySample, compute_reliability};
-pub use routing::{
-    ModelRouting, generic_model_version_id, resolve_model_route, version_id_for_category,
-};
 pub use runtime::{
     FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow,
-    MarketInferenceContext, ModelInputAuditRow, ModelInputAuditState, ModelRuntimeFactory,
-    ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput, QuantModelRuntime,
+    MarketInferenceContext, ModelInputAuditRow, ModelInputAuditState, ModelRuntimeInput,
+    ModelRuntimeMetrics, ModelRuntimeOutput, QuantModelRuntime,
 };
 pub use score_percentile::annotate;
 pub use sell_scorer::{
@@ -77,8 +65,8 @@ pub use signal::{
     canonical_business_prediction_hash, signal_candidate_event, signal_candidate_events,
 };
 pub use trainer::{
-    CancellationProbe, LabelSelector, ModelTrainer, TrainModelRequest, TrainedModelArtifact,
-    ValidationReport, ValidationSpec, WeightedFactorTrainer, fit_frozen_reference_quantiles,
+    CancellationProbe, LabelSelector, ModelTrainer, TrainModelRequest, ValidationReport,
+    ValidationSpec, WeightedFactorTrainer, fit_frozen_reference_quantiles,
     weighted_training_input_hash,
 };
 pub use weighted::WeightedFactorRuntime;

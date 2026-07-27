@@ -60,7 +60,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     prefetch::historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec},
-    service::calibration_shared::{assert_dataset_disjoint, calibration_split_hash},
+    service::calibration_shared::{
+        CalibrationSampleKey, assert_dataset_disjoint, calibration_split_hash,
+    },
 };
 
 /// Validate the relational discriminator against the already-decoded payload.
@@ -492,9 +494,9 @@ impl CalibrationArtifactFitPort for BiasTableFitService {
         // separate model-validation concern.
         let split_hash = calibration_split_hash(
             &window,
-            samples
-                .iter()
-                .map(|s| (s.market_id.to_string(), s.sampled_at)),
+            samples.iter().map(|sample| {
+                CalibrationSampleKey::for_subject(sample.market_id.clone(), sample.sampled_at)
+            }),
         )?;
 
         progress.report(ResearchJobProgress::with_total("fit", 0, 1));

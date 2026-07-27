@@ -35,7 +35,7 @@ pub mod dashboard;
 pub mod data_quality;
 pub mod domain_sources;
 pub mod execution_orders;
-pub mod factor_governance;
+pub mod factor_catalog;
 pub mod feature_integrity;
 pub mod health;
 pub mod market_linkages;
@@ -105,7 +105,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(domain_sources::route_specs());
     specs.extend(structural_monitor::route_specs());
     specs.extend(model_governance::route_specs());
-    specs.extend(factor_governance::route_specs());
+    specs.extend(factor_catalog::route_specs());
     specs.extend(feature_integrity::route_specs());
     specs.extend(quant_reports::route_specs());
     specs.extend(quant_recommendations::route_specs());
@@ -218,6 +218,36 @@ mod tests {
                 "/research/feature-integrity/events",
                 "/research/feature-integrity/runs/full",
                 "/research/feature-integrity/latch/acknowledge",
+            ]
+        );
+    }
+
+    #[test]
+    fn factor_routes_read_only() {
+        let routes = protected_route_specs()
+            .into_iter()
+            .filter(|spec| spec.path.starts_with("/research/factors"))
+            .map(|spec| (spec.method, spec.path, spec.rule))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            routes,
+            [
+                (
+                    Method::GET,
+                    "/research/factors",
+                    Rule::ResourceOp(ResourceType::FactorDefinition, Operation::Read),
+                ),
+                (
+                    Method::GET,
+                    "/research/factors/collinearity",
+                    Rule::ResourceOp(ResourceType::FactorDefinition, Operation::Read),
+                ),
+                (
+                    Method::GET,
+                    "/research/factors/{id}",
+                    Rule::ResourceOp(ResourceType::FactorDefinition, Operation::Read),
+                ),
             ]
         );
     }

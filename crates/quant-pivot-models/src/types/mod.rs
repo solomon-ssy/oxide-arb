@@ -22,9 +22,11 @@ pub mod model_input;
 pub mod model_lineage;
 pub mod model_metrics;
 pub mod model_quality;
+pub mod model_serving;
 pub mod model_spec;
 pub mod model_training;
 pub mod money;
+pub mod outcome_binding;
 pub mod persistence_document;
 pub mod portfolio_plan;
 pub mod recommendation_identity;
@@ -111,16 +113,16 @@ pub use ids::{
     DomainSourceExpectationId, DomainSourceId, DriftReportId, EntryConditionArtifactId,
     EntryConditionAuditId, EntryConditionEvaluationOutboxId, EntryConditionInstanceId,
     EquitySnapshotId, EventId, ExecutionAccountId, ExecutionOrderId, ExecutionTradeRefId,
-    ExecutionTransactionRefId, FactorBundleId, FactorDefinitionId, FactorGovernanceAuditId,
-    FactorValueId, FeatureParityCandidateId, FeatureParityEventId, FeatureParityRunId,
-    FeatureParityStateId, FeatureParitySubjectId, FeatureVectorId, FeedbackRunId,
-    FeedbackRunStageId, MarketId, MarketLinkageId, MarketSelectionId, MenuId, ModelArtifactId,
-    ModelComparisonReportId, ModelGovernanceAuditId, ModelRunId, ModelSpecId, ModelVersionId,
-    OperationAction, OperationLogId, OrderId, OrderIntentId, PolicyActivationId, PolicyApprovalId,
-    PolicyRevisionId, PortfolioPlanId, PositionId, PreproductionResetNonce, ProfileAllocationId,
-    ProfileArtifactId, RecommendationId, RecommendationReportId, ReconciliationId,
-    ReportDataQualitySnapshotId, ReportRunId, ReportScheduleGapId, ReportScheduleId, ResearchJobId,
-    ResearchProfileId, ResearchReadinessEvidenceId, RoleCode, RoleId, RuntimeControlTransitionId,
+    ExecutionTransactionRefId, FactorDefinitionId, FactorValueId, FeatureParityCandidateId,
+    FeatureParityEventId, FeatureParityRunId, FeatureParityStateId, FeatureParitySubjectId,
+    FeatureVectorId, FeedbackCycleId, FeedbackEvaluationUseId, FeedbackStageEventId, MarketId,
+    MarketLinkageId, MarketSelectionId, MenuId, ModelComparisonReportId, ModelGovernanceAuditId,
+    ModelRunId, ModelSpecId, ModelVersionId, OperationAction, OperationLogId, OrderId,
+    OrderIntentId, PolicyActivationId, PolicyApprovalId, PolicyRevisionId, PortfolioPlanId,
+    PositionId, PreproductionResetNonce, ProfileAllocationId, ProfileArtifactId, RecommendationId,
+    RecommendationReportId, ReconciliationId, ReportDataQualitySnapshotId, ReportRunId,
+    ReportScheduleGapId, ReportScheduleId, ResearchJobId, ResearchProfileId,
+    ResearchReadinessEvidenceId, RoleCode, RoleId, RuntimeControlTransitionId,
     SettlementAuthorizationId, SettlementChainSubmissionId, SettlementExternalCursorId,
     SettlementGovernedActionId, SettlementInventoryLotId, SettlementRedeemId,
     SettlementRedeemLotId, ShadowComparisonId, SignalCandidateId, SourceSliceId, TokenId,
@@ -137,6 +139,7 @@ pub use model_input::{
     ModelInputContract, ModelInputRequiredness, ModelInputSpec, ModelTrainingContract,
 };
 pub use money::{Bps, PayoutRatio, PayoutRatioError, Price, Probability, Shares, Usd};
+pub use outcome_binding::{OutcomeTokenBinding, OutcomeTokenBindingError};
 pub use persistence_document::{
     ExternalJsonDocument, OperationDetailDocument, OperationDetailError,
 };
@@ -222,6 +225,7 @@ pub use training::{
     DATASET_SOURCE_LINEAGE_FORMAT_VERSION, DatasetCohortArtifactRef, DatasetCohortCounts,
     DatasetCohortManifest, DatasetManifest, DatasetManifestContractError, DatasetSourceLineage,
     MODEL_LEARNING_COHORT_FORMAT_VERSION, ModelLearningCohortArtifact, ModelLearningCohortRow,
-    NewModelLearningCohortRow, TrainingSampleSource, TrainingSampleSources, default_sample_sources,
+    NewModelLearningCohortRow, TrainingSampleSource, TrainingSampleSources,
+    TrainingSampleSourcesError,
 };
 pub use venue_fill::{FeeEvidence, FeeEvidencePriority, VenueFillObservation};

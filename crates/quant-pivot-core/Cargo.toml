@@ -61,6 +61,7 @@ teloxide   = { workspace = true, features = ["macros"] }
 reqwest    = { workspace = true, features = ["json"] }
 
 # ── Cache ──────────────────────────────────────────────────────────
+moka = { workspace = true }
 
 # ── Misc ───────────────────────────────────────────────────────────
 rand = { workspace = true }
@@ -71,6 +72,7 @@ tokio = { workspace = true, features = ["test-util"] }
 serde_json = { workspace = true }
 loom = { workspace = true }
 proptest = { workspace = true }
+sea-orm = { workspace = true }
 
 [features]
 default = ["serving", "research-jobs", "domain-chainlink"]

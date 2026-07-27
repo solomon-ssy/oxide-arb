@@ -3,6 +3,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::domain::data_plane::DecisionSource;
+
 /// The data source a feature value was derived from, for audit / replay.
 ///
 /// Single taxonomy of "where a feature value came from" — attached to evidence
@@ -20,9 +22,12 @@ pub enum EvidenceSourceKind {
     TradeTape,
     /// Derived/computed from other in-memory inputs.
     Derived,
-    /// An external-vertical domain observation (`quant_domain_observation`
-    /// window: Binance klines / Chainlink oracle quotes).
-    DomainExternal,
+    /// A crypto-domain observation (`quant_domain_observation`: Binance
+    /// klines / Chainlink oracle quotes).
+    DomainCrypto,
+    /// A weather-domain observation (`quant_domain_observation`: ensemble
+    /// forecasts / station observations / NOAA resolution data).
+    DomainWeather,
     /// A version from the append-only market-linkage ledger.
     Linkage,
 }
@@ -38,8 +43,27 @@ impl EvidenceSourceKind {
             Self::ClickHouseFact => "clickhouse_fact",
             Self::TradeTape => "trade_tape",
             Self::Derived => "derived",
-            Self::DomainExternal => "domain_external",
+            Self::DomainCrypto => "domain_crypto",
+            Self::DomainWeather => "domain_weather",
             Self::Linkage => "linkage",
+        }
+    }
+
+    /// The governed point-in-time clock that bounds this evidence source.
+    ///
+    /// `Derived` evidence inherits the enclosing decision boundary and
+    /// therefore has no independent source clock.
+    #[must_use]
+    pub const fn decision_source(self) -> Option<DecisionSource> {
+        match self {
+            Self::Book => Some(DecisionSource::Book),
+            Self::GammaMetadata => Some(DecisionSource::Catalog),
+            Self::ClickHouseFact => Some(DecisionSource::Microstructure),
+            Self::TradeTape => Some(DecisionSource::TradeTape),
+            Self::Derived => None,
+            Self::DomainCrypto => Some(DecisionSource::DomainCrypto),
+            Self::DomainWeather => Some(DecisionSource::DomainWeather),
+            Self::Linkage => Some(DecisionSource::Linkage),
         }
     }
 }

@@ -16,7 +16,7 @@ use crate::{
         BacktestPathSetId, CalibrationArtifactId, ContentHash, ModelSpecId, ModelVersionId,
         ResearchProfileArtifactId, TradePolicyArtifactId, TrainingDatasetId,
         model_metrics::ModelVersionMetrics, model_quality::QualityGateReport,
-        model_training::ModelTrainingObjective,
+        model_serving::ModelServingContract, model_training::ModelTrainingObjective,
     },
 };
 
@@ -29,6 +29,10 @@ pub struct Model {
     pub model_spec_id: ModelSpecId,
     pub version: i32,
     pub artifact_hash: ContentHash,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub serving_contract: ModelServingContract,
+    /// Raw BLAKE3-256 digest normalized beside the typed JSON contract.
+    pub serving_contract_hash: Vec<u8>,
     /// Queryable copy of the immutable artifact scope. Runtime loading still
     /// verifies the artifact bytes; catalog reads never deserialize N objects.
     #[sea_orm(column_type = r#"custom("qp_market_category")"#)]

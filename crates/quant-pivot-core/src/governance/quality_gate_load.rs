@@ -10,9 +10,24 @@
 //!   `passed = false` (quality-failed models must not shadow).
 //! - **Publication status** enforces that config `active_model_version_id` resolves
 //!   to a `Published` row and shadow ids resolve to `Candidate` / `Shadow`.
+//! - **Serving contract** revalidates the normalized contract hash and every
+//!   model-version projection before either active or shadow loading.
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{domain::quant::ModelVersionInfo, enums::quant::PublicationStatus};
+
+/// Revalidate the persisted contract hash and every model-version projection.
+fn serving_contract_ok(version: &ModelVersionInfo) -> Result<(), String> {
+    version
+        .verified_serving_contract()
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "model {} has an invalid persisted serving contract: {error}",
+                version.model_version_id
+            )
+        })
+}
 
 /// Whether the persisted gate report is fresh enough for a non-published load.
 ///
@@ -86,6 +101,7 @@ pub fn shadow_load_ok(
     min_age_secs: u64,
     now: DateTime<Utc>,
 ) -> Result<(), String> {
+    serving_contract_ok(version)?;
     shadow_publication_status_ok(version)?;
     quality_gate_passed_ok(version)?;
     quality_gate_staleness_ok(version, min_age_secs, now)
@@ -97,6 +113,7 @@ pub fn active_load_ok(
     min_age_secs: u64,
     now: DateTime<Utc>,
 ) -> Result<(), String> {
+    serving_contract_ok(version)?;
     active_publication_status_ok(version)?;
     quality_gate_staleness_ok(version, min_age_secs, now)
 }
@@ -106,24 +123,20 @@ mod tests {
     use chrono::{DateTime, Duration, Utc};
     use quant_pivot_models::{
         domain::quant::ModelVersionInfo,
-        enums::{model::ModelFamily, quant::PublicationStatus},
+        enums::quant::PublicationStatus,
         types::{
-            ContentHash, ModelSpecId, ModelVersionId,
-            model_metrics::ModelVersionMetrics,
+            ContentHash, ModelVersionId,
             model_quality::{
                 GateIntent, GateSubject, QUALITY_GATE_REPORT_FORMAT_VERSION, QualityGateReport,
             },
-            model_training::ModelTrainingObjective,
         },
     };
 
     use super::{
-        active_publication_status_ok, quality_gate_passed_ok, quality_gate_staleness_ok,
-        shadow_publication_status_ok,
+        active_load_ok, active_publication_status_ok, quality_gate_passed_ok,
+        quality_gate_staleness_ok, shadow_load_ok, shadow_publication_status_ok,
     };
-    use crate::test_fixtures::{
-        execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
-    };
+    use crate::service::model_serving_test_support::{model_artifact, model_version};
 
     fn report(evaluated_at: DateTime<Utc>, passed: bool) -> QualityGateReport {
         QualityGateReport {
@@ -143,35 +156,7 @@ mod tests {
         status: PublicationStatus,
         quality_gate_report: Option<QualityGateReport>,
     ) -> ModelVersionInfo {
-        let (model_spec_thesis, model_spec_definition_hash) =
-            model_spec_lineage_fixture("quality-gate-load-test-spec");
-        ModelVersionInfo {
-            model_version_id: ModelVersionId::from_v7(),
-            model_spec_id: ModelSpecId::from_v7(),
-            model_spec_name: "quality-gate-load-test-spec".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            model_spec_thesis,
-            model_spec_definition_hash,
-            version: 1,
-            artifact_hash: ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash"),
-            category_scope: None,
-            profile_ref: fixture_profile_ref(),
-            training_dataset_id: None,
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
-            publish_path_set_id: None,
-            derivation_kind: ModelVersionInfo::training_derivation_kind(),
-            parent_model_version_id: None,
-            calibration_artifact_id: None,
-            derivation_evidence_hash: None,
-            metrics: ModelVersionMetrics::not_measured("test fixture"),
-            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-            quality_gate_report,
-            publication_status: status,
-            published_at: None,
-            retired_at: None,
-            created_at: Utc::now(),
-        }
+        model_version(&model_artifact(None), status, quality_gate_report)
     }
 
     #[test]
@@ -231,5 +216,20 @@ mod tests {
         assert!(
             shadow_publication_status_ok(&version(PublicationStatus::Candidate, None,),).is_ok()
         );
+    }
+
+    #[test]
+    fn loads_reject_contract_drift() {
+        let mut active = version(PublicationStatus::Published, None);
+        active.serving_contract_hash = ContentHash::from_bytes([7; 32]);
+        let active_error =
+            active_load_ok(&active, 86_400, Utc::now()).expect_err("active drift must fail");
+        assert!(active_error.contains("invalid persisted serving contract"));
+
+        let mut shadow = version(PublicationStatus::Candidate, None);
+        shadow.serving_contract_hash = ContentHash::from_bytes([8; 32]);
+        let shadow_error =
+            shadow_load_ok(&shadow, 86_400, Utc::now()).expect_err("shadow drift must fail");
+        assert!(shadow_error.contains("invalid persisted serving contract"));
     }
 }

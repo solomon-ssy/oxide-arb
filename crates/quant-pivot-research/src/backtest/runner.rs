@@ -11,18 +11,15 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::{DataQualityStatus, FillRequirement, OutcomeSide},
     types::{
-        BacktestReportId, ContentHash, DecisionPolicySnapshotId, ExposureBreakdown, ModelVersionId,
-        Probability, TrainingDatasetId, Usd,
-        backtest::{CategoryMetric, ExpectedVsRealized, PnlCurvePoint, PnlSimulation},
+        ContentHash, ExposureBreakdown, Usd,
+        backtest::{BacktestReportHashInput, PnlCurvePoint, PnlSimulation},
     },
 };
 use rust_decimal::Decimal;
-use serde::Serialize;
 
 use crate::{
     backtest::{
@@ -31,7 +28,6 @@ use crate::{
         SampleOutcome, metrics, simulator,
     },
     execution_semantics::{BookWalkOutcome, LiquidityRole, walk_buy_cash_budget},
-    hashing::ResearchHasher,
     model::runtime::{MarketInferenceContext, ModelInputAuditState, ModelRuntimeOutput},
     portfolio::{
         allocator::{
@@ -417,7 +413,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
         pnl_curve: m.pnl_curve.to_vec(),
     };
 
-    let report_hash = ContentHash::try_from(&ReportHashInput {
+    let report_hash = BacktestReportHashInput {
         backtest_report_id: &request.backtest_report_id,
         model_version_id: &request.model_version_id,
         dataset_id: &request.dataset_id,
@@ -437,7 +433,8 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
         category_breakdown: &category_breakdown,
         tail_loss,
         report_pnl_simulation: &report_pnl_simulation,
-    })?;
+    }
+    .content_hash()?;
 
     Ok(BacktestReport {
         backtest_report_id: request.backtest_report_id,
@@ -463,35 +460,47 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
     })
 }
 
-/// Canonical-hash projection of every report field except the hash itself.
-#[derive(Serialize)]
-struct ReportHashInput<'a> {
-    backtest_report_id: &'a BacktestReportId,
-    model_version_id: &'a ModelVersionId,
-    dataset_id: &'a TrainingDatasetId,
-    decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
-    window_start: DateTime<Utc>,
-    window_end: DateTime<Utc>,
-    coverage: Decimal,
-    sample_count: u64,
-    missing_feature_count: u64,
-    rank_ic: Decimal,
-    sharpe: Decimal,
-    hit_rate: Probability,
-    expected_vs_realized: &'a ExpectedVsRealized,
-    max_drawdown: Decimal,
-    turnover: Decimal,
-    liquidity_feasibility: Probability,
-    category_breakdown: &'a [CategoryMetric],
-    tail_loss: Decimal,
-    report_pnl_simulation: &'a PnlSimulation,
-}
+impl BacktestReport {
+    /// Recompute the canonical report hash from every immutable report field.
+    pub fn recomputed_hash(&self) -> QuantResult<ContentHash> {
+        BacktestReportHashInput {
+            backtest_report_id: &self.backtest_report_id,
+            model_version_id: &self.model_version_id,
+            dataset_id: &self.dataset_id,
+            decision_policy_snapshot_id: &self.decision_policy_snapshot_id,
+            window_start: self.window_start,
+            window_end: self.window_end,
+            coverage: self.coverage,
+            sample_count: self.sample_count,
+            missing_feature_count: self.missing_feature_count,
+            rank_ic: self.rank_ic,
+            sharpe: self.sharpe,
+            hit_rate: self.hit_rate,
+            expected_vs_realized: &self.expected_vs_realized,
+            max_drawdown: self.max_drawdown,
+            turnover: self.turnover,
+            liquidity_feasibility: self.liquidity_feasibility,
+            category_breakdown: &self.category_breakdown,
+            tail_loss: self.tail_loss,
+            report_pnl_simulation: &self.report_pnl_simulation,
+        }
+        .content_hash()
+        .map_err(QuantError::from)
+    }
 
-impl TryFrom<&ReportHashInput<'_>> for ContentHash {
-    type Error = QuantError;
-
-    fn try_from(input: &ReportHashInput<'_>) -> Result<Self, Self::Error> {
-        ResearchHasher::canonical(input)
+    /// Require the persisted report hash to match its exact canonical preimage.
+    pub fn verify_hash(&self) -> QuantResult<()> {
+        let recomputed = self.recomputed_hash()?;
+        if recomputed != self.report_hash {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "backtest report {} hash mismatch: stored {}, recomputed {recomputed}",
+                    self.backtest_report_id, self.report_hash
+                ),
+            }
+            .into());
+        }
+        Ok(())
     }
 }
 
@@ -502,14 +511,12 @@ mod tests {
         domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
         enums::{
             common::MarketCategory,
-            factor::FactorFamily,
             quant::{DataQualityStatus, FactorDirection},
         },
-        runtime_config::FactorCrossSectionConfig,
         types::{
-            BacktestReportId, Bps, DecisionPolicySnapshotId, FactorDefinitionId, MarketId,
-            ModelInputContract, ModelRunId, ModelVersionId, PayoutRatio, Price, Probability,
-            Shares, TokenId, TrainingDatasetId, Usd, builtin_research_profiles,
+            BacktestReportId, Bps, DecisionPolicySnapshotId, MarketId, ModelRunId, ModelVersionId,
+            PayoutRatio, Price, Probability, Shares, TokenId, TrainingDatasetId, Usd,
+            factor::FactorExplanation,
         },
     };
     use rust_decimal::Decimal;
@@ -522,67 +529,20 @@ mod tests {
             BacktestTick, Backtester, MarketOutcome, PortfolioCaps,
         },
         execution_semantics::PitFeeSchedule,
-        factors::{
-            FactorExplanation, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,
-            names::MOMENTUM_ROC,
-        },
+        factors::{FactorValue, NormalizedFactor},
         model::{
-            ReturnModelSpec,
-            artifact::{
-                FactorWeight, ModelArtifactHeader, ScoreMultiplierSpec,
-                SubstitutionConfidenceRules, WeightedFactorModelArtifact,
-                model_input_contract_hash,
-            },
+            artifact::ModelArtifact,
             runtime::{
-                FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelFamily,
-                ModelRuntimeInput,
+                FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelRuntimeInput,
             },
             weighted::WeightedFactorRuntime,
         },
-        test_support::content_hash as hash,
+        test_support::{content_hash as hash, weighted_factor_plane},
     };
 
     impl WeightedFactorRuntime {
         fn backtest_fixture() -> Self {
-            let input_contract = ModelInputContract::single_required("book.mid");
-            let input_contract_hash =
-                model_input_contract_hash(&input_contract).expect("input contract hash");
-            Self::new(
-                WeightedFactorModelArtifact {
-                    header: ModelArtifactHeader {
-                        model_version_id: ModelVersionId::from_v7(),
-                        model_spec_definition_hash: hash("spec"),
-                        profile_ref: builtin_research_profiles()
-                            .expect("built-in profiles")
-                            .remove(0)
-                            .profile_ref,
-                        model_family: ModelFamily::WeightedFactor,
-                        feature_schema_hash: hash("aa"),
-                        factor_schema_hash: hash("bb"),
-                        trade_policy_artifact_id: None,
-                        trade_policy_hash: None,
-                    },
-                    training_dataset_hash: hash("cc"),
-                    training_input_hash: hash("dd"),
-                    input_contract,
-                    input_contract_hash,
-                    weights: vec![FactorWeight {
-                        factor: MOMENTUM_ROC,
-                        weight: dec!(1),
-                    }],
-                    prediction_horizon_secs: 86_400,
-                    multipliers: ScoreMultiplierSpec::conservative(),
-                    substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-                    return_model: ReturnModelSpec::heuristic_default(),
-                    factor_cross_section: FactorCrossSectionConfig::default(),
-                    frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
-                    objective_report: None,
-                    category_scope: None,
-                },
-                None,
-                None,
-            )
-            .expect("runtime")
+            Self::new(ModelArtifact::weighted_fixture(), None).expect("runtime")
         }
     }
 
@@ -592,23 +552,40 @@ mod tests {
         } else {
             FactorDirection::Negative
         };
+        let plane = weighted_factor_plane();
+        let factors = plane
+            .definitions()
+            .iter()
+            .map(|revision| {
+                let factor_direction = if revision.definition().is_outcome_alpha() {
+                    direction
+                } else {
+                    FactorDirection::Neutral
+                };
+                let raw_value = match factor_direction {
+                    FactorDirection::Positive | FactorDirection::Neutral => dec!(1),
+                    FactorDirection::Negative => dec!(-1),
+                };
+                FactorValue {
+                    definition_id: revision.factor_definition_id(),
+                    name: revision.factor_name().clone(),
+                    family: revision.definition().family,
+                    raw_value: Some(raw_value),
+                    normalization: NormalizedFactor::cross_section(Probability::new(dec!(0.9))),
+                    direction: factor_direction,
+                    confidence: Probability::new(dec!(1)),
+                    explanation: FactorExplanation {
+                        headline: "t".to_owned(),
+                        drivers: Vec::new(),
+                    },
+                    input_feature_refs: Vec::new(),
+                }
+            })
+            .collect();
         FactorInferenceRow {
             market_id: MarketId::new(market),
             token_id: TokenId::new("yes"),
-            factors: vec![FactorValue {
-                definition_id: FactorDefinitionId::from_v7(),
-                name: MOMENTUM_ROC,
-                family: FactorFamily::Momentum,
-                raw_value: Some(dec!(1)),
-                normalization: NormalizedFactor::cross_section(Probability::new(dec!(0.9))),
-                direction,
-                confidence: Probability::new(dec!(1)),
-                explanation: FactorExplanation {
-                    headline: "t".to_owned(),
-                    drivers: Vec::new(),
-                },
-                input_feature_refs: Vec::new(),
-            }],
+            factors,
             context: MarketInferenceContext {
                 secondary_token_id: Some(TokenId::new("no")),
                 yes_price: Price::new(dec!(0.5)),
@@ -759,6 +736,13 @@ mod tests {
         assert!(
             report.report_hash.to_string().starts_with("blake3:"),
             "canonical report hash"
+        );
+        report.verify_hash().expect("report hash preimage");
+        let mut tampered = report.clone();
+        tampered.rank_ic += dec!(0.01);
+        assert!(
+            tampered.verify_hash().is_err(),
+            "a cached report field mutation must invalidate its canonical hash"
         );
     }
 

@@ -1,7 +1,6 @@
 //! [`CoreCalibrationArtifactLoader`]: resolves `model_score` calibration artifacts.
 //!
-//! Loads a [`CalibrationArtifactId`] into compute-domain [`ResolvedCalibration`] for
-//! `quant-pivot-research`'s `DefaultModelRuntimeFactory`.
+//! Loads a [`CalibrationArtifactId`] into compute-domain [`ResolvedCalibration`].
 //!
 //! Implements the research-crate-owned [`CalibrationArtifactLoader`] port over
 //! the persistence-crate `CalibrationArtifactRepository` — the same
@@ -14,17 +13,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::{quant::CalibrationArtifactPayload, query::TimeWindow},
+    domain::{
+        quant::{CalibrationArtifactInfo, CalibrationArtifactPayload},
+        query::TimeWindow,
+    },
     enums::quant::CalibrationKind,
-    hashing::CanonicalDigest,
     types::{CalibrationArtifactId, ContentHash, calibration::ModelScoreCalibrationPayload},
 };
 use quant_pivot_repository::traits::CalibrationArtifactRepository;
-use quant_pivot_research::model::{
-    CalibrationArtifactLoader, ModelArtifact, ResolvedCalibration, validate_mapping,
-};
-use rust_decimal::Decimal;
-use serde::Serialize;
+use quant_pivot_research::model::{CalibrationArtifactLoader, ModelArtifact, ResolvedCalibration};
 
 /// Resolve a model artifact's return-model calibration state through the
 /// **single** deep check shared by every production consumer.
@@ -60,19 +57,6 @@ pub async fn resolve_return_model_calibration(
     Ok(Some(resolved))
 }
 
-/// Canonical projection for the `model_score` content hash — recomputable
-/// purely from fields persisted on the row (`fit_window`,
-/// `calibration_split_hash`, and the self-contained payload), the same
-/// "verify with no external context" shape `market_price_bias`'s
-/// `BiasTableCanonical` uses. Shared by the fit service (mints the hash) and
-/// this loader (re-verifies it fail-closed on every load).
-#[derive(Serialize)]
-struct ModelScoreCanonical<'a> {
-    fit_window: &'a TimeWindow,
-    calibration_split_hash: &'a ContentHash,
-    payload: &'a ModelScoreCalibrationPayload,
-}
-
 /// Compute the content-addressed hash for a `model_score` calibration
 /// artifact from its persisted, self-contained fields.
 ///
@@ -84,16 +68,101 @@ pub fn model_score_content_hash(
     calibration_split_hash: &ContentHash,
     payload: &ModelScoreCalibrationPayload,
 ) -> QuantResult<ContentHash> {
-    CanonicalDigest::content_hash_json(&ModelScoreCanonical {
-        fit_window,
-        calibration_split_hash,
-        payload,
-    })
-    .map_err(|error| {
-        QuantError::from(ResearchError::DatasetBuild {
-            detail: format!("model-score calibration content hash failed: {error}"),
+    payload
+        .content_hash(fit_window.from, fit_window.to, calibration_split_hash)
+        .map_err(|error| QuantError::from(ResearchError::DatasetBuild { detail: error }))
+}
+
+/// Integrity-gated immutable projection of a persisted `model_score` row.
+///
+/// Lifecycle is intentionally not part of this value: fitting creates an
+/// inactive artifact and governance must verify its immutable preimage before
+/// activating it, while serving additionally requires the row to be active.
+/// Both paths therefore share this exact content/payload verifier without
+/// weakening their distinct lifecycle rules.
+pub(crate) struct VerifiedModelScoreCalibration {
+    artifact_id: CalibrationArtifactId,
+    content_hash: ContentHash,
+    fit_window: TimeWindow,
+    payload: ModelScoreCalibrationPayload,
+}
+
+impl VerifiedModelScoreCalibration {
+    #[must_use]
+    pub(crate) const fn artifact_id(&self) -> CalibrationArtifactId {
+        self.artifact_id
+    }
+
+    #[must_use]
+    pub(crate) const fn content_hash(&self) -> ContentHash {
+        self.content_hash
+    }
+
+    #[must_use]
+    pub(crate) const fn fit_window(&self) -> &TimeWindow {
+        &self.fit_window
+    }
+
+    #[must_use]
+    pub(crate) const fn payload(&self) -> &ModelScoreCalibrationPayload {
+        &self.payload
+    }
+}
+
+impl TryFrom<&CalibrationArtifactInfo> for VerifiedModelScoreCalibration {
+    type Error = QuantError;
+
+    fn try_from(info: &CalibrationArtifactInfo) -> Result<Self, Self::Error> {
+        if info.kind != CalibrationKind::ModelScore {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "calibration artifact `{}` is kind `{}`, expected `model_score`",
+                    info.artifact_id,
+                    info.kind.as_str()
+                ),
+            }
+            .into());
+        }
+        let CalibrationArtifactPayload::ModelScore(payload) = &info.payload else {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "calibration artifact `{}` kind/payload discriminator mismatch",
+                    info.artifact_id
+                ),
+            }
+            .into());
+        };
+        let fit_window = TimeWindow::new(info.fit_window_start, info.fit_window_end);
+        let recomputed =
+            model_score_content_hash(&fit_window, &info.calibration_split_hash, payload)?;
+        if recomputed != info.content_hash {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "calibration artifact `{}` content hash mismatch: stored {}, recomputed \
+                     {recomputed}",
+                    info.artifact_id, info.content_hash
+                ),
+            }
+            .into());
+        }
+        validate_model_score_payload(payload, info.sample_count)?;
+        Ok(Self {
+            artifact_id: info.artifact_id,
+            content_hash: info.content_hash,
+            fit_window,
+            payload: payload.as_ref().clone(),
         })
-    })
+    }
+}
+
+impl From<VerifiedModelScoreCalibration> for ResolvedCalibration {
+    fn from(verified: VerifiedModelScoreCalibration) -> Self {
+        Self {
+            artifact_id: verified.artifact_id,
+            mapping: verified.payload.mapping,
+            reliability: verified.payload.reliability,
+        }
+    }
 }
 
 /// Loads and validates `model_score` calibration artifacts.
@@ -124,14 +193,7 @@ impl CalibrationArtifactLoader for CoreCalibrationArtifactLoader {
                     ),
                 })
             })?;
-        if info.kind != CalibrationKind::ModelScore {
-            return Err(QuantError::from(ResearchError::DatasetBuild {
-                detail: format!(
-                    "calibration artifact `{artifact_id}` is kind `{}`, expected `model_score`",
-                    info.kind.as_str()
-                ),
-            }));
-        }
+        let verified = VerifiedModelScoreCalibration::try_from(&info)?;
         // Fail-closed governance: a calibrator that was never bound/activated
         // (or was superseded — `active` lifecycle) must never
         // resolve. The `Calibrated` return model's `calibrator_ref` is only
@@ -146,35 +208,7 @@ impl CalibrationArtifactLoader for CoreCalibrationArtifactLoader {
                 ),
             }));
         }
-        let fit_window = TimeWindow::new(info.fit_window_start, info.fit_window_end);
-        let CalibrationArtifactPayload::ModelScore(payload) = &info.payload else {
-            return Err(QuantError::from(ResearchError::DatasetBuild {
-                detail: format!(
-                    "calibration artifact `{artifact_id}` kind/payload discriminator mismatch"
-                ),
-            }));
-        };
-        // Fail-closed integrity: recompute the content hash from the
-        // persisted, self-contained fields and verify it against the stored
-        // hash — symmetric with `FavoriteLongshotBiasTable::from_persisted`.
-        // A tampered or corrupted payload must never silently bind.
-        let recomputed =
-            model_score_content_hash(&fit_window, &info.calibration_split_hash, payload)?;
-        if recomputed != info.content_hash {
-            return Err(QuantError::from(ResearchError::DatasetBuild {
-                detail: format!(
-                    "calibration artifact `{artifact_id}` content hash mismatch: stored {} \
-                     recomputed {recomputed}",
-                    info.content_hash
-                ),
-            }));
-        }
-        validate_model_score_payload(payload, info.sample_count)?;
-        Ok(ResolvedCalibration {
-            artifact_id: *artifact_id,
-            mapping: payload.mapping.clone(),
-            reliability: payload.reliability.clone(),
-        })
+        Ok(ResolvedCalibration::from(verified))
     }
 }
 
@@ -182,77 +216,16 @@ fn validate_model_score_payload(
     payload: &ModelScoreCalibrationPayload,
     persisted_sample_count: i64,
 ) -> QuantResult<()> {
-    validate_mapping(&payload.mapping)?;
-    let reliability = &payload.reliability;
     let persisted_sample_count =
         u64::try_from(persisted_sample_count).map_err(|error| ResearchError::DatasetBuild {
             detail: format!("calibration artifact sample_count is invalid: {error}"),
         })?;
-    if reliability.n_samples == 0
-        || reliability.n_samples != persisted_sample_count
-        || reliability.bins.is_empty()
-    {
-        return Err(ResearchError::DatasetBuild {
-            detail: format!(
-                "calibration reliability sample contract is invalid: persisted={persisted_sample_count}, report={}, bins={}",
-                reliability.n_samples,
-                reliability.bins.len()
-            ),
+    payload.validate(persisted_sample_count).map_err(|detail| {
+        ResearchError::DatasetBuild {
+            detail: format!("model-score calibration payload is invalid: {detail}"),
         }
-        .into());
-    }
-    if reliability.brier_score < Decimal::ZERO
-        || reliability.brier_score > Decimal::ONE
-        || reliability.log_loss < Decimal::ZERO
-        || reliability.ece < Decimal::ZERO
-        || reliability.ece > Decimal::ONE
-    {
-        return Err(ResearchError::DatasetBuild {
-            detail: "calibration reliability metrics are outside their valid ranges".to_owned(),
-        }
-        .into());
-    }
-    let mut sample_total = 0_u64;
-    let mut previous_hi = Decimal::ZERO;
-    for bin in &reliability.bins {
-        if bin.sample_count == 0
-            || bin.predicted_lo < Decimal::ZERO
-            || bin.predicted_lo >= bin.predicted_hi
-            || bin.predicted_hi > Decimal::ONE
-            || bin.predicted_lo < previous_hi
-            || bin.mean_predicted.inner() < bin.predicted_lo
-            || bin.mean_predicted.inner() > bin.predicted_hi
-            || bin.empirical_frequency.inner() < Decimal::ZERO
-            || bin.empirical_frequency.inner() > Decimal::ONE
-            || bin.wilson_ci.0.inner() < Decimal::ZERO
-            || bin.wilson_ci.0.inner() > bin.wilson_ci.1.inner()
-            || bin.wilson_ci.1.inner() > Decimal::ONE
-        {
-            return Err(ResearchError::DatasetBuild {
-                detail: format!(
-                    "calibration reliability bin [{}, {}] is structurally invalid",
-                    bin.predicted_lo, bin.predicted_hi
-                ),
-            }
-            .into());
-        }
-        sample_total = sample_total.checked_add(bin.sample_count).ok_or_else(|| {
-            ResearchError::DatasetBuild {
-                detail: "calibration reliability sample count overflow".to_owned(),
-            }
-        })?;
-        previous_hi = bin.predicted_hi;
-    }
-    if sample_total != reliability.n_samples {
-        return Err(ResearchError::DatasetBuild {
-            detail: format!(
-                "calibration reliability bins contain {sample_total} samples, expected {}",
-                reliability.n_samples
-            ),
-        }
-        .into());
-    }
-    Ok(())
+        .into()
+    })
 }
 
 #[cfg(test)]
@@ -265,12 +238,20 @@ mod tests {
         domain::{
             api::CalibrationArtifactListQuery,
             pagination::Paginated,
-            quant::{CalibrationArtifactInfo, NewCalibrationArtifact},
+            quant::{
+                CalibrationArtifactInfo, ModelScoreCalibrationCommit,
+                ModelScoreCalibrationCommitOutcome, NewCalibrationArtifact,
+            },
         },
+        enums::model::ModelFamily,
         types::{
-            ModelVersionId, Probability, TrainingDatasetId,
+            DecisionPolicySnapshotId, ModelSpecId, ModelVersionId, Probability, TrainingDatasetId,
+            builtin_research_profiles,
             calibration::{
-                IsotonicKnot, ModelScoreCalibrationPayload, MonotoneMapping,
+                IsotonicKnot, MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
+                ModelScoreCalibrationDatasetBinding, ModelScoreCalibrationFitContract,
+                ModelScoreCalibrationModelBinding, ModelScoreCalibrationPayload,
+                ModelScoreCalibrationPolicyBinding, MonotoneMapping,
                 PublishedWeatherStationLeadBias, ReliabilityBin, ReliabilityReport,
             },
         },
@@ -297,6 +278,13 @@ mod tests {
             &self,
             _artifact: NewCalibrationArtifact,
         ) -> Result<CalibrationArtifactInfo, StorageError> {
+            unimplemented!("not exercised by loader tests")
+        }
+
+        async fn commit_model_score(
+            &self,
+            _commit: ModelScoreCalibrationCommit,
+        ) -> Result<ModelScoreCalibrationCommitOutcome, StorageError> {
             unimplemented!("not exercised by loader tests")
         }
 
@@ -358,16 +346,53 @@ mod tests {
             fit_window_end: fit_window.to,
             calibration_split_hash,
             sample_count: 1_000,
-            payload: CalibrationArtifactPayload::ModelScore(payload),
+            payload: CalibrationArtifactPayload::ModelScore(Box::new(payload)),
             active,
             created_at: Utc::now(),
         }
     }
 
     fn dummy_payload() -> ModelScoreCalibrationPayload {
+        let profile = builtin_research_profiles()
+            .expect("builtin profiles")
+            .into_iter()
+            .next()
+            .expect("builtin profile");
+        let training_dataset_id = TrainingDatasetId::from_v7();
+        let snapshot_hash = fake_content_hash(11);
         ModelScoreCalibrationPayload {
-            model_version_id: ModelVersionId::from_v7(),
-            calibration_dataset_id: TrainingDatasetId::from_v7(),
+            format_version: MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
+            fit_contract: ModelScoreCalibrationFitContract {
+                model: ModelScoreCalibrationModelBinding {
+                    model_version_id: ModelVersionId::from_v7(),
+                    artifact_hash: fake_content_hash(2),
+                    serving_contract_hash: fake_content_hash(3),
+                    model_spec_id: ModelSpecId::from_v7(),
+                    model_spec_definition_hash: fake_content_hash(4),
+                    model_family: ModelFamily::WeightedFactor,
+                    profile_ref: profile.profile_ref.clone(),
+                    category_scope: profile.spec.category,
+                    prediction_horizon_secs: profile.spec.target_horizon_secs,
+                    training_dataset_id,
+                    training_dataset_hash: fake_content_hash(5),
+                },
+                calibration_dataset: ModelScoreCalibrationDatasetBinding {
+                    calibration_dataset_id: TrainingDatasetId::from_v7(),
+                    dataset_hash: fake_content_hash(6),
+                    manifest_hash: fake_content_hash(7),
+                    artifact_bytes_hash: fake_content_hash(8),
+                    source_slice_manifest_hash: fake_content_hash(9),
+                    feature_schema_hash: fake_content_hash(10),
+                    factor_schema_hash: fake_content_hash(12),
+                    label_schema_hash: fake_content_hash(13),
+                },
+                policy_snapshot: ModelScoreCalibrationPolicyBinding {
+                    decision_policy_snapshot_id: DecisionPolicySnapshotId::from_content_hash(
+                        &snapshot_hash,
+                    ),
+                    snapshot_hash,
+                },
+            },
             mapping: MonotoneMapping::Isotonic {
                 knots: vec![IsotonicKnot {
                     score: dec!(0.5),

@@ -13,22 +13,28 @@
 //! too-small or degenerate cross-section yields
 //! [`NormalizedFactor::Indeterminate`](crate::factors::normalize::NormalizedFactor).
 
-use std::{collections::BTreeMap, slice, sync::Arc};
+use std::{slice, sync::Arc};
 
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    enums::factor::{FactorIndeterminateReason, NormalizationSource},
+    enums::quant::FactorDirection,
+    enums::{
+        common::MarketCategory,
+        factor::{FactorIndeterminateReason, NormalizationSource},
+    },
     runtime_config::{
         DomainConfig, FactorCrossSectionConfig, FactorsConfig, FeaturesConfig, MissingFactorPolicy,
         SmallCrossSectionPolicy,
     },
-    types::{ContentHash, FactorDefinitionId, Probability},
+    types::{
+        ContentHash, FactorDefinitionId, Probability,
+        factor::{FACTOR_VALUE_OUTPUT_SCHEMA_VERSION, FactorDefinitionRef, FactorServingPlane},
+    },
 };
 use rust_decimal::Decimal;
 
 use crate::{
     factors::{
-        FactorDefinitionIdentity, factor_definition_identity,
         normalize::{
             CrossSectionalNormalizer, NormalizedFactor, RawFactorColumn, indeterminate_present,
             resolve_normalizer,
@@ -36,7 +42,7 @@ use crate::{
         reference::FrozenReferenceQuantiles,
         registry::FactorRegistry,
         value::{
-            FactorDefinitionDocument, FactorEligibility, FactorExplanation, FactorName, FactorSet,
+            FactorDefinitionDocument, FactorEligibility, FactorExplanation, FactorName,
             FactorValue, MarketFactorOutcome, RawFactor, RawFactorEligibility, ScoredFactor,
         },
     },
@@ -61,9 +67,6 @@ type FactorEntry = (FactorDefinitionDocument, Arc<dyn FactorComputer>);
 /// of their inputs. Normalization (including the cross-section) is the
 /// [`FactorEngine`]'s responsibility, never the computer's.
 pub trait FactorComputer: Send + Sync {
-    /// Governing factor-definition id.
-    fn definition_id(&self) -> FactorDefinitionId;
-
     /// The governed specification this computer implements.
     fn spec(&self) -> &FactorDefinitionDocument;
 
@@ -73,14 +76,23 @@ pub trait FactorComputer: Send + Sync {
     ///
     /// Returns an error only on an irrecoverable computation failure; a missing
     /// input is modeled as [`RawFactor`] with `raw_value = None`, not an error.
-    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor>;
+    fn compute_raw(
+        &self,
+        definition_id: FactorDefinitionId,
+        features: &FeatureVector,
+    ) -> QuantResult<RawFactor>;
+}
+
+struct FactorEngineContract {
+    feature_contract_hash: ContentHash,
+    serving_plane: FactorServingPlane,
 }
 
 /// The factor engine: a governed registry plus the normalization + policy logic
 /// that turns raw factors into explainable [`MarketFactorOutcome`]s.
 pub struct FactorEngine {
     registry: FactorRegistry,
-    identities: Result<(ContentHash, BTreeMap<FactorName, FactorDefinitionIdentity>), String>,
+    contract: Result<FactorEngineContract, String>,
 }
 
 impl FactorEngine {
@@ -94,7 +106,8 @@ impl FactorEngine {
     /// so parameter tuning never re-keys the registry.
     ///
     /// `bias_table` binds the favorite-longshot factor; `None` keeps it inert.
-    /// The table is runtime data — it does not affect `factor_schema_hash`.
+    /// The table is runtime data whose artifact commitment is owned by the
+    /// model-serving contract rather than the factor plane.
     #[must_use]
     pub fn new(
         factors: &FactorsConfig,
@@ -102,30 +115,67 @@ impl FactorEngine {
         domain: &DomainConfig,
         bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
     ) -> Self {
-        let registry = FactorRegistry::build(factors, features, domain, bias_table);
-        let identities = (|| {
+        Self::from_registry(
+            FactorRegistry::build(factors, features, domain, bias_table),
+            features,
+        )
+    }
+
+    /// Build the exact factor engine for one immutable `ResearchProfile` scope.
+    ///
+    /// `None` is an explicit pooled scope and excludes all domain factors.
+    /// Domain-mapped categories include only their own vertical's revisions.
+    #[must_use]
+    pub fn for_model_scope(
+        factors: &FactorsConfig,
+        features: &FeaturesConfig,
+        domain: &DomainConfig,
+        category_scope: Option<MarketCategory>,
+        bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
+    ) -> Self {
+        Self::from_registry(
+            FactorRegistry::for_model_scope(factors, features, domain, category_scope, bias_table),
+            features,
+        )
+    }
+
+    fn from_registry(registry: FactorRegistry, features: &FeaturesConfig) -> Self {
+        let contract = (|| {
             let feature_schema = FeatureSchema::build(features)?;
             let feature_contract_hash = ResearchHasher::feature_schema(&feature_schema)?;
-            let mut by_name = BTreeMap::new();
-            for (spec, _) in registry.factors() {
-                let identity = factor_definition_identity(spec, &feature_contract_hash)?;
-                if by_name.insert(spec.name.clone(), identity).is_some() {
-                    return Err(ResearchError::FactorComputation {
-                        detail: format!(
-                            "duplicate logical factor name in governed registry: {}",
-                            spec.name
-                        ),
-                    }
-                    .into());
+            let definitions = registry
+                .factors()
+                .iter()
+                .map(|(spec, _)| {
+                    FactorDefinitionRef::try_seal(
+                        spec.clone(),
+                        feature_contract_hash,
+                        feature_schema.version(),
+                        FACTOR_VALUE_OUTPUT_SCHEMA_VERSION,
+                    )
+                    .map_err(|error| {
+                        ResearchError::FactorComputation {
+                            detail: format!(
+                                "seal factor definition revision `{}`: {error}",
+                                spec.name
+                            ),
+                        }
+                        .into()
+                    })
+                })
+                .collect::<QuantResult<Vec<_>>>()?;
+            let serving_plane = FactorServingPlane::try_seal(definitions).map_err(|error| {
+                ResearchError::FactorComputation {
+                    detail: format!("seal factor serving plane: {error}"),
                 }
-            }
-            QuantResult::Ok((feature_contract_hash, by_name))
+            })?;
+            QuantResult::Ok(FactorEngineContract {
+                feature_contract_hash,
+                serving_plane,
+            })
         })()
         .map_err(|error| error.to_string());
-        Self {
-            registry,
-            identities,
-        }
+        Self { registry, contract }
     }
 
     /// The governed registry backing this engine.
@@ -140,65 +190,50 @@ impl FactorEngine {
     ///
     /// Returns the schema/hash construction failure captured at engine build.
     pub fn feature_contract_hash(&self) -> QuantResult<ContentHash> {
-        self.identities
+        self.contract
             .as_ref()
-            .map(|(hash, _)| *hash)
+            .map(|contract| contract.feature_contract_hash)
             .map_err(|detail| {
                 ResearchError::FactorComputation {
-                    detail: format!("factor definition identity construction failed: {detail}"),
+                    detail: format!("factor serving contract construction failed: {detail}"),
                 }
                 .into()
             })
     }
 
-    /// Content-addressed identity of one enabled logical factor.
+    /// Exact canonical factor plane frozen by this engine.
     ///
     /// # Errors
     ///
-    /// Returns an identity-construction error or an unknown factor error.
-    pub fn definition_identity(
-        &self,
-        factor: &FactorName,
-    ) -> QuantResult<FactorDefinitionIdentity> {
-        let (_, identities) = self.identities.as_ref().map_err(|detail| {
-            QuantError::from(ResearchError::FactorComputation {
-                detail: format!("factor definition identity construction failed: {detail}"),
+    /// Returns the revision/plane construction failure captured at engine build.
+    pub fn serving_plane(&self) -> QuantResult<&FactorServingPlane> {
+        self.contract
+            .as_ref()
+            .map(|contract| &contract.serving_plane)
+            .map_err(|detail| {
+                ResearchError::FactorComputation {
+                    detail: format!("factor serving contract construction failed: {detail}"),
+                }
+                .into()
             })
-        })?;
-        identities.get(factor).cloned().ok_or_else(|| {
-            ResearchError::FactorComputation {
-                detail: format!("factor `{factor}` is absent from the governed registry"),
-            }
-            .into()
-        })
     }
 
-    /// Content-addressed identities of all enabled factors in registry order.
+    /// Exact content-addressed revision for one enabled logical factor.
     ///
     /// # Errors
     ///
-    /// Returns an identity-construction or registry-consistency error.
-    pub fn definition_identities(&self) -> QuantResult<Vec<FactorDefinitionIdentity>> {
-        self.registry
-            .factors()
+    /// Returns a contract-construction error or an unknown factor error.
+    pub fn definition_ref(&self, factor: &FactorName) -> QuantResult<&FactorDefinitionRef> {
+        self.serving_plane()?
+            .definitions()
             .iter()
-            .map(|(spec, _)| self.definition_identity(&spec.name))
-            .collect()
-    }
-
-    /// The governed factor set (for `factor_schema_hash` binding).
-    #[must_use]
-    pub fn factor_set(&self) -> FactorSet {
-        self.registry.factor_set()
-    }
-
-    /// The canonical `factor_schema_hash` of the enabled factor set.
-    ///
-    /// # Errors
-    ///
-    /// Propagates canonical-hash serialization failures.
-    pub fn factor_schema_hash(&self) -> QuantResult<ContentHash> {
-        ResearchHasher::factor_schema(&self.factor_set())
+            .find(|definition| definition.factor_name() == factor)
+            .ok_or_else(|| {
+                ResearchError::FactorComputation {
+                    detail: format!("factor `{factor}` is absent from the governed registry"),
+                }
+                .into()
+            })
     }
 
     /// Compute every enabled factor for a single market.
@@ -313,12 +348,9 @@ impl FactorEngine {
         let floor = config.min_factor_confidence.value;
         let policy = config.missing_factor_policy;
         let factors = self.registry.factors();
-        let definition_ids: Vec<FactorDefinitionId> = factors
+        let definitions: Vec<&FactorDefinitionRef> = factors
             .iter()
-            .map(|(spec, _)| {
-                self.definition_identity(&spec.name)
-                    .map(|identity| identity.factor_definition_id)
-            })
+            .map(|(spec, _)| self.definition_ref(&spec.name))
             .collect::<QuantResult<_>>()?;
         let normalizers = resolve_normalizers(factors, config)?;
         let min_cross_section_size =
@@ -328,7 +360,7 @@ impl FactorEngine {
                 }
             })?;
 
-        let raw_by_market = build_raw_by_market(factors, &definition_ids, features, parallel)?;
+        let raw_by_market = build_raw_by_market(factors, &definitions, features, parallel)?;
         let norm_grid = build_norm_grid(
             factors,
             &normalizers,
@@ -340,7 +372,7 @@ impl FactorEngine {
         )?;
         Ok(assemble_outcomes(
             features,
-            factors,
+            &definitions,
             &raw_by_market,
             &norm_grid,
             floor,
@@ -370,17 +402,17 @@ fn resolve_normalizers(
 /// Stage A — the raw factor grid, market-major (`raw[market][factor]`).
 fn build_raw_by_market(
     factors: &[FactorEntry],
-    definition_ids: &[FactorDefinitionId],
+    definitions: &[&FactorDefinitionRef],
     features: &[FeatureVector],
     parallel: bool,
 ) -> QuantResult<Vec<Vec<RawFactor>>> {
     let compute_row = |vector: &FeatureVector| -> QuantResult<Vec<RawFactor>> {
         factors
             .iter()
-            .zip(definition_ids)
-            .map(|((_, computer), definition_id)| {
-                let mut raw = computer.compute_raw(vector)?;
-                raw.definition_id = *definition_id;
+            .zip(definitions)
+            .map(|((_, computer), definition)| {
+                let mut raw = computer.compute_raw(definition.factor_definition_id(), vector)?;
+                raw.canonicalize_against(definition)?;
                 Ok(raw)
             })
             .collect()
@@ -404,12 +436,28 @@ fn build_norm_grid(
     parallel: bool,
 ) -> QuantResult<Vec<Vec<NormalizedFactor>>> {
     let normalize_factor = |index: usize| -> QuantResult<Vec<NormalizedFactor>> {
+        let definition = &factors[index].0;
         let column = RawFactorColumn {
-            factor: factors[index].0.name.clone(),
+            factor: definition.name.clone(),
             values: raw_by_market
                 .iter()
-                .map(|row| row[index].raw_value)
-                .collect(),
+                .map(|row| {
+                    row[index]
+                        .raw_value
+                        .map(|raw| {
+                            definition.normalization_input(raw).ok_or_else(|| {
+                                ResearchError::FactorComputation {
+                                    detail: format!(
+                                        "factor `{}` emitted negative raw value {raw} for unsigned output",
+                                        definition.name
+                                    ),
+                                }
+                                .into()
+                            })
+                        })
+                        .transpose()
+                })
+                .collect::<QuantResult<Vec<_>>>()?,
         };
         normalize_one_factor(
             normalizers[index].as_ref(),
@@ -447,34 +495,36 @@ fn normalize_one_factor(
         SmallCrossSectionPolicy::Indeterminate => {
             indeterminate_present(column, FactorIndeterminateReason::CrossSectionTooSmall)
         }
-        SmallCrossSectionPolicy::FrozenReferenceQuantile => references
-            .get(&column.factor)
-            .filter(|reference| reference.sorted_values.len() >= min_size)
-            .map_or_else(
-                || indeterminate_present(column, FactorIndeterminateReason::NoFrozenReference),
-                |reference| {
-                    column
-                        .values
-                        .iter()
-                        .map(|value| {
-                            value.map_or(NormalizedFactor::MissingInput, |raw| {
-                                NormalizedFactor::Scored {
-                                    score: reference.percentile(raw),
-                                    source: NormalizationSource::FrozenReferenceQuantile,
-                                    clamp: None,
-                                }
-                            })
-                        })
-                        .collect()
-                },
-            ),
+        SmallCrossSectionPolicy::FrozenReferenceQuantile => {
+            let Some(reference) = references
+                .get(&column.factor)
+                .filter(|reference| reference.sample_count() >= min_size)
+            else {
+                return Ok(indeterminate_present(
+                    column,
+                    FactorIndeterminateReason::NoFrozenReference,
+                ));
+            };
+            column
+                .values
+                .iter()
+                .map(|value| match value {
+                    None => Ok(NormalizedFactor::MissingInput),
+                    Some(raw) => Ok(NormalizedFactor::Scored {
+                        score: reference.percentile(*raw)?,
+                        source: NormalizationSource::FrozenReferenceQuantile,
+                        clamp: None,
+                    }),
+                })
+                .collect::<QuantResult<Vec<_>>>()?
+        }
     })
 }
 
 /// Stage C — assemble one [`MarketFactorOutcome`] per market, preserving order.
 fn assemble_outcomes(
     features: &[FeatureVector],
-    factors: &[FactorEntry],
+    definitions: &[&FactorDefinitionRef],
     raw_by_market: &[Vec<RawFactor>],
     norm_grid: &[Vec<NormalizedFactor>],
     floor: Decimal,
@@ -484,7 +534,7 @@ fn assemble_outcomes(
     let assemble_one = |market: usize, vector: &FeatureVector| -> MarketFactorOutcome {
         assemble_market(
             vector,
-            factors,
+            definitions,
             &raw_by_market[market],
             norm_grid,
             market,
@@ -509,19 +559,20 @@ fn assemble_outcomes(
 /// the floor rejects the market under `RejectCandidate`).
 fn assemble_market(
     vector: &FeatureVector,
-    factors: &[FactorEntry],
+    definitions: &[&FactorDefinitionRef],
     raw_row: &[RawFactor],
     norm_grid: &[Vec<NormalizedFactor>],
     market: usize,
     floor: Decimal,
     policy: MissingFactorPolicy,
 ) -> MarketFactorOutcome {
-    let mut scored = Vec::with_capacity(factors.len());
+    let mut scored = Vec::with_capacity(definitions.len());
     let mut reject: Option<FactorEligibility> = None;
-    for (index, (spec, _)) in factors.iter().enumerate() {
+    for (index, revision) in definitions.iter().enumerate() {
+        let spec = revision.definition();
         let raw = &raw_row[index];
         let normalized = norm_grid[index][market].clone();
-        let scored_factor = assemble(raw, normalized, floor);
+        let scored_factor = assemble(revision, raw, normalized, floor);
         if reject.is_none()
             && spec.is_required()
             && policy == MissingFactorPolicy::RejectCandidate
@@ -546,7 +597,13 @@ fn assemble_market(
 /// confidence meets the floor. Missing inputs (`confidence = 0`), scores below
 /// the floor (also zeroed), and indeterminate cross-sections never contribute —
 /// and are never coerced to a neutral placeholder score.
-fn assemble(raw: &RawFactor, normalized: NormalizedFactor, floor: Decimal) -> ScoredFactor {
+fn assemble(
+    revision: &FactorDefinitionRef,
+    raw: &RawFactor,
+    normalized: NormalizedFactor,
+    floor: Decimal,
+) -> ScoredFactor {
+    let definition = revision.definition();
     // A factor computer can short-circuit normalization for a cell that is
     // structurally not applicable (binary market) or that should have computed
     // but had a structurally-absent input (missing neg-risk leg book). Neither
@@ -557,6 +614,18 @@ fn assemble(raw: &RawFactor, normalized: NormalizedFactor, floor: Decimal) -> Sc
         RawFactorEligibility::NotApplicable => NormalizedFactor::NotApplicable,
         RawFactorEligibility::Indeterminate(reason) => NormalizedFactor::Indeterminate { reason },
     };
+    let normalized = match (&normalized, raw.raw_value) {
+        (NormalizedFactor::Scored { source, clamp, .. }, Some(value))
+            if definition.is_outcome_alpha() && value.is_zero() =>
+        {
+            NormalizedFactor::Scored {
+                score: Probability::ZERO,
+                source: *source,
+                clamp: clamp.clone(),
+            }
+        }
+        _ => normalized,
+    };
     let scored = matches!(normalized, NormalizedFactor::Scored { .. });
     // A factor with no usable normalized score reports zero confidence: a missing
     // input or an indeterminate cross-section is not "confident" about anything,
@@ -564,7 +633,9 @@ fn assemble(raw: &RawFactor, normalized: NormalizedFactor, floor: Decimal) -> Sc
     // operators (and the persisted fact / report breakdown). Only a scored factor
     // carries its raw confidence forward — unless it falls below the floor, in
     // which case confidence is zeroed so downstream scorers cannot partially weight it.
-    let mut confidence = if scored {
+    let is_suppressed_alpha =
+        definition.is_outcome_alpha() && raw.raw_value.is_some_and(|value| value.is_zero());
+    let mut confidence = if scored && !is_suppressed_alpha {
         raw.confidence
     } else {
         Probability::ZERO
@@ -574,18 +645,21 @@ fn assemble(raw: &RawFactor, normalized: NormalizedFactor, floor: Decimal) -> Sc
         confidence = Probability::ZERO;
     }
     let value = FactorValue {
-        definition_id: raw.definition_id,
-        name: raw.name.clone(),
-        family: raw.family,
+        definition_id: revision.factor_definition_id(),
+        name: definition.name.clone(),
+        family: definition.family,
         raw_value: raw.raw_value,
         normalization: normalized,
-        direction: raw.direction,
+        direction: raw
+            .raw_value
+            .and_then(|value| definition.contribution_direction(value))
+            .unwrap_or(FactorDirection::Neutral),
         confidence,
         explanation: FactorExplanation {
             headline: raw.headline.clone(),
             drivers: raw.drivers.clone(),
         },
-        input_feature_refs: raw.input_feature_refs.clone(),
+        input_feature_refs: definition.input_features.clone(),
     };
     ScoredFactor {
         value,

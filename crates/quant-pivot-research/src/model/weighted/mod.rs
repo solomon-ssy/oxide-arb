@@ -20,37 +20,38 @@
 //! Cross-sectional `net` uses `ndarray` batch reduction; money fields remain
 //! `Decimal` / newtypes after quantization.
 
-use std::{cmp::Reverse, collections::BTreeMap, time::Instant};
-mod batch;
+use std::{cmp::Reverse, collections::HashMap, time::Instant};
 
 use async_trait::async_trait;
-use batch::ScoringBatchLayout;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::{
         common::MarketCategory,
+        factor::FactorFamily,
+        model::ModelFamily,
         quant::{DataQualityStatus, ModelWeightSource, OutcomeSide},
     },
     runtime_config::FactorCrossSectionConfig,
     types::{
-        ContentHash, ModelRunId, ModelVersionId, Price, Probability, SignalCandidateId, TokenId,
-        Usd,
+        ContentHash, ModelRunId, ModelVersionId, OutcomeTokenBinding, Price, Probability,
+        SignalCandidateId, TokenId,
+        factor::{FactorAlphaOrientation, FactorServingPlane},
     },
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::{
-    factors::{FactorName, FrozenReferenceQuantiles, NormalizedFactor},
+    factors::{FrozenReferenceQuantiles, NormalizedFactor, value::FactorScoringProjection},
     features::FeatureName,
     model::{
-        artifact::WeightedFactorModelArtifact,
+        artifact::{ModelArtifact, ModelArtifactHeader, ModelPayload, WeightedFactorModelPayload},
         calibrator::ResolvedCalibration,
-        overlay::WeightOverlay,
+        factor_heads::score_factor_heads,
         runtime::{
-            FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelFamily,
-            ModelInputAuditRow, ModelInputAuditState, ModelRuntimeInput, ModelRuntimeMetrics,
-            ModelRuntimeOutput, QuantModelRuntime,
+            FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelInputAuditRow,
+            ModelInputAuditState, ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput,
+            QuantModelRuntime,
         },
         signal::{FactorContribution, ModelExplanation, SignalCandidate, SignalWarning},
     },
@@ -62,89 +63,129 @@ const EXPLANATION_TOP_K: usize = 3;
 
 /// A governed weighted-factor scorer bound to one frozen artifact.
 pub struct WeightedFactorRuntime {
-    artifact: WeightedFactorModelArtifact,
-    weights: BTreeMap<FactorName, Decimal>,
-    batch_layout: ScoringBatchLayout,
-    weight_source: ModelWeightSource,
+    header: ModelArtifactHeader,
+    payload: WeightedFactorModelPayload,
     /// Resolved `ProbabilityCalibrator` data when `artifact.return_model` is
-    /// `Calibrated` — bound once at load time by the factory,
+    /// `Calibrated` — bound once from the verified serving preimage,
     /// never re-fetched per candidate. `None` for `Heuristic`.
     calibration: Option<ResolvedCalibration>,
 }
 
 impl WeightedFactorRuntime {
-    /// Build a runtime from a validated weighted artifact, optionally applying a
-    /// non-persisted [`WeightOverlay`] over a non-published candidate / shadow
-    /// version, and the resolved calibrator when the artifact's return model is
-    /// `Calibrated` (the loader — `quant-pivot-core`'s
-    /// `DefaultModelRuntimeFactory` — fails the load closed if it cannot
+    /// Build a runtime from a validated weighted artifact and the resolved
+    /// calibrator when the payload's return model is `Calibrated` (the loader —
+    /// `quant-pivot-core`'s
+    /// the verified serving-preimage owner fails the load closed if it cannot
     /// resolve a `Calibrated` artifact's `calibrator_ref`, so this is `None`
     /// only for `Heuristic`).
     ///
-    /// When `overlay` is `Some`, it **replaces** the artifact's weight table
-    /// (fail-closed: it must cover exactly the artifact's factor set) and the
-    /// runtime records [`ModelWeightSource::ConfigOverlay`]. The overlay never alters
-    /// the artifact bytes or its content hash. When `None`, the frozen artifact
-    /// weights are used ([`ModelWeightSource::Artifact`]).
-    ///
     /// # Errors
     ///
-    /// Propagates [`WeightedFactorModelArtifact::validate`] (unnormalized or
-    /// negative weights, empty weight set) and overlay resolution (unknown or
-    /// missing factor).
+    /// Propagates [`ModelArtifact::validate`] for any contract/payload mismatch.
     pub fn new(
-        artifact: WeightedFactorModelArtifact,
-        overlay: Option<WeightOverlay>,
+        artifact: ModelArtifact,
         calibration: Option<ResolvedCalibration>,
     ) -> QuantResult<Self> {
-        artifact.validate()?;
-        let artifact_weights = artifact.weight_index();
-        let (weights, weight_source) = match overlay {
-            Some(overlay) => (
-                overlay.resolve_against(&artifact_weights)?,
-                ModelWeightSource::ConfigOverlay,
-            ),
-            None => (artifact_weights, ModelWeightSource::Artifact),
+        let (header, payload) = artifact.into_parts()?;
+        let ModelPayload::WeightedFactor(payload) = payload else {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "weighted runtime requires a WeightedFactor payload".to_owned(),
+            }
+            .into());
         };
-        let batch_layout = ScoringBatchLayout::from_weights(&weights)?;
         Ok(Self {
-            artifact,
-            weights,
-            batch_layout,
-            weight_source,
+            header,
+            payload: *payload,
             calibration,
         })
     }
 
-    /// Collect per-factor signed contributions for one row (explanations + confidence).
+    /// Collect canonical alpha and multiplicative context contributions.
     fn row_contributions(
+        &self,
         row: &FactorInferenceRow,
-        weights: &BTreeMap<FactorName, Decimal>,
-    ) -> (Decimal, Decimal, Vec<FactorContribution>) {
-        let mut confidence_mass = Decimal::ZERO;
-        let mut confidence_weighted = Decimal::ZERO;
-        let mut contributions: Vec<FactorContribution> = Vec::new();
-
-        for factor in &row.factors {
-            let Some(weight) = weights.get(&factor.name) else {
-                continue;
+        outcome_binding: &OutcomeTokenBinding,
+    ) -> QuantResult<Vec<FactorContribution>> {
+        let plane = &self.header.serving_contract().bindings().factors.plane;
+        let alpha_weights = self
+            .payload
+            .factor_head
+            .alpha_weights
+            .iter()
+            .map(|weight| (weight.factor_definition_id, weight.weight))
+            .collect::<HashMap<_, _>>();
+        let context_weights = self
+            .payload
+            .factor_head
+            .context_weights
+            .iter()
+            .map(|weight| (weight.factor_definition_id, weight))
+            .collect::<HashMap<_, _>>();
+        let mut contributions = Vec::with_capacity(plane.definitions().len());
+        for revision in plane.definitions() {
+            let factor = row
+                .factors
+                .iter()
+                .find(|factor| factor.definition_id == revision.factor_definition_id())
+                .ok_or_else(|| ResearchError::Inference {
+                    detail: format!(
+                        "factor row omitted sealed revision {}",
+                        revision.factor_definition_id()
+                    ),
+                })?;
+            let projection = factor.scoring_projection(revision)?;
+            let (weight, contribution) = match projection {
+                Some(FactorScoringProjection::OutcomeAlpha {
+                    orientation,
+                    strength,
+                    confidence,
+                }) => {
+                    let weight = alpha_weights
+                        .get(&revision.factor_definition_id())
+                        .copied()
+                        .ok_or_else(|| ResearchError::Inference {
+                            detail: format!(
+                                "alpha head omitted sealed revision {}",
+                                revision.factor_definition_id()
+                            ),
+                        })?;
+                    let yes_strength = match orientation {
+                        FactorAlphaOrientation::FeatureToken => {
+                            Decimal::from(outcome_binding.feature_to_yes_sign()) * strength
+                        }
+                        FactorAlphaOrientation::CanonicalYes => strength,
+                    };
+                    (
+                        weight,
+                        (weight * confidence.inner() * yes_strength)
+                            .round_dp(RESEARCH_DECIMAL_SCALE),
+                    )
+                }
+                Some(FactorScoringProjection::Context {
+                    adequacy,
+                    confidence,
+                }) => {
+                    let weight = context_weights
+                        .get(&revision.factor_definition_id())
+                        .copied()
+                        .ok_or_else(|| ResearchError::Inference {
+                            detail: format!(
+                                "context head omitted sealed revision {}",
+                                revision.factor_definition_id()
+                            ),
+                        })?;
+                    let penalty = weight.penalty_strength
+                        * confidence.inner()
+                        * (Decimal::ONE - adequacy.inner());
+                    (
+                        weight.penalty_strength,
+                        (-penalty).round_dp(RESEARCH_DECIMAL_SCALE),
+                    )
+                }
+                Some(FactorScoringProjection::Diagnostic { .. }) | None => {
+                    (Decimal::ZERO, Decimal::ZERO)
+                }
             };
-            if weight.is_zero() {
-                continue;
-            }
-            let confidence = factor.confidence.inner();
-            // Only a scored factor contributes to net / confidence mass; a
-            // missing-input or indeterminate factor is surfaced in the breakdown
-            // with a zero contribution (never a fabricated neutral score).
-            let contribution = factor.normalized_score().map_or(Decimal::ZERO, |score| {
-                let direction = Decimal::from(factor.direction.as_i8());
-                let signed = direction * score.inner() * confidence;
-                (*weight * signed).round_dp(RESEARCH_DECIMAL_SCALE)
-            });
-            if factor.is_scored() && confidence > Decimal::ZERO {
-                confidence_mass += weight;
-                confidence_weighted += *weight * confidence;
-            }
             contributions.push(FactorContribution {
                 definition_id: factor.definition_id,
                 name: factor.name.clone(),
@@ -154,7 +195,7 @@ impl WeightedFactorRuntime {
                 normalized_score: factor.normalized_score(),
                 normalization_source: factor.normalization_source(),
                 indeterminate_reason: factor.indeterminate_reason(),
-                weight: *weight,
+                weight,
                 contribution,
                 confidence: factor.confidence,
                 direction: factor.direction,
@@ -166,52 +207,42 @@ impl WeightedFactorRuntime {
                     .collect(),
             });
         }
-
-        (confidence_mass, confidence_weighted, contributions)
+        Ok(contributions)
     }
 
-    /// Score one market row from a precomputed directional net, or `None` when
-    /// there is no directional signal or the chosen side cannot be priced.
-    fn score_row_with_net(
+    /// Score one market row through the canonical two-head algebra.
+    fn score_row(
         &self,
         row: &FactorInferenceRow,
-        net: Decimal,
         model_run_id: &ModelRunId,
         as_of: DateTime<Utc>,
     ) -> QuantResult<Option<SignalCandidate>> {
-        if net.is_zero() {
+        let outcome_binding = Self::outcome_binding(row)?;
+        let substitution_reliability = self.substitution_reliability(&row.context);
+        let horizon_multiplier = self.payload.horizon_multipliers.multiplier_for(
+            row.context.time_to_resolution_secs,
+            self.header.prediction_horizon_secs(),
+        );
+        let score = score_factor_heads(
+            &row.factors,
+            &self.header.serving_contract().bindings().factors.plane,
+            &self.payload.factor_head,
+            &outcome_binding,
+            substitution_reliability,
+            horizon_multiplier,
+        )?;
+        let Some(outcome_side) = score.outcome_side else {
             return Ok(None);
-        }
-
-        let outcome_side = if net.is_sign_positive() {
-            OutcomeSide::Yes
-        } else {
-            OutcomeSide::No
         };
         let Some((token_id, entry_price_ref)) = Self::resolve_entry(row, outcome_side) else {
             return Ok(None);
         };
-
-        let (confidence_mass, confidence_weighted, contributions) =
-            Self::row_contributions(row, &self.weights);
-
-        let conviction = net.abs();
-        let composite_score = self.apply_multipliers(conviction, &row.context);
-        let confidence = self.apply_confidence(confidence_mass, confidence_weighted, &row.context);
-        let data_quality_score = clamp_unit(
-            self.artifact
-                .multipliers
-                .data_quality
-                .multiplier_for(row.context.data_quality),
-        );
-        let liquidity_score = clamp_unit(
-            self.artifact
-                .multipliers
-                .liquidity
-                .multiplier_for(row.context.liquidity_usd.map(Usd::inner)),
-        );
-
-        let estimate = self.artifact.return_model.estimate(
+        let contributions = self.row_contributions(row, &outcome_binding)?;
+        let composite_score = clamp_unit(score.composite_score);
+        let confidence = clamp_unit(score.reliability);
+        let data_quality_score = self.family_adequacy(row, FactorFamily::DataQuality)?;
+        let liquidity_score = self.family_adequacy(row, FactorFamily::Liquidity)?;
+        let estimate = self.payload.return_model.estimate(
             composite_score.inner(),
             confidence.inner(),
             entry_price_ref,
@@ -225,7 +256,8 @@ impl WeightedFactorRuntime {
             "heuristic"
         };
         let headline = format!(
-            "buy {outcome_side}: composite {composite_score}, confidence {confidence} ({provenance} return)"
+            "buy {outcome_side}: alpha {}, composite {composite_score}, reliability {confidence} ({provenance} return)",
+            score.yes_alpha
         );
 
         Ok(Some(SignalCandidate {
@@ -240,20 +272,46 @@ impl WeightedFactorRuntime {
             downside_bps: estimate.downside_bps,
             win_probability: estimate.win_probability,
             entry_price_ref,
-            suggested_horizon_secs: self.artifact.prediction_horizon_secs,
+            suggested_horizon_secs: self.header.prediction_horizon_secs(),
             factor_breakdown: contributions,
             model_explanation: ModelExplanation {
                 headline,
                 top_positive,
                 top_negative,
             },
-            rejection_warnings: context_warnings(&row.context, &self.artifact),
+            rejection_warnings: context_warnings(&row.context, liquidity_score, data_quality_score),
             rank_before_portfolio: 0,
             liquidity_score,
             data_quality_score,
             model_score_percentile: Probability::ZERO,
             decision_at: as_of,
         }))
+    }
+
+    fn outcome_binding(row: &FactorInferenceRow) -> QuantResult<OutcomeTokenBinding> {
+        let no_token_id =
+            row.context
+                .secondary_token_id
+                .clone()
+                .ok_or_else(|| ResearchError::Inference {
+                    detail: format!(
+                        "market {} has no canonical NO token for factor-head scoring",
+                        row.market_id
+                    ),
+                })?;
+        OutcomeTokenBinding::try_new(
+            row.market_id.clone(),
+            row.token_id.clone(),
+            no_token_id,
+            row.token_id.clone(),
+            OutcomeSide::Yes,
+        )
+        .map_err(|error| {
+            ResearchError::Inference {
+                detail: format!("invalid outcome-token binding: {error}"),
+            }
+            .into()
+        })
     }
 
     /// Resolve the target token + executable entry price for the chosen outcome.
@@ -272,56 +330,79 @@ impl WeightedFactorRuntime {
         }
     }
 
-    /// Apply the governed data-quality / liquidity / horizon multipliers and
-    /// clamp the result into `[0, 1]`.
-    fn apply_multipliers(
-        &self,
-        conviction: Decimal,
-        context: &MarketInferenceContext,
-    ) -> Probability {
-        let multipliers = &self.artifact.multipliers;
-        let dq = multipliers
-            .data_quality
-            .multiplier_for(context.data_quality);
-        let liquidity = multipliers
-            .liquidity
-            .multiplier_for(context.liquidity_usd.map(Usd::inner));
-        let horizon = multipliers.horizon.multiplier_for(
-            context.time_to_resolution_secs,
-            self.artifact.prediction_horizon_secs,
-        );
-        clamp_unit(conviction * dq * liquidity * horizon)
-    }
-
-    /// Compute the confidence aggregate and apply the governed substitution
-    /// penalty for every audited imputation.
-    fn apply_confidence(
-        &self,
-        confidence_mass: Decimal,
-        confidence_weighted: Decimal,
-        context: &MarketInferenceContext,
-    ) -> Probability {
-        let base = if confidence_mass > Decimal::ZERO {
-            confidence_weighted / confidence_mass
-        } else {
-            Decimal::ZERO
-        };
-        let penalty = context
+    fn substitution_reliability(&self, context: &MarketInferenceContext) -> Decimal {
+        context
             .substitution_reasons
             .iter()
             .fold(Decimal::ONE, |acc, reason| {
                 acc * self
-                    .artifact
+                    .payload
                     .substitution_confidence_rules
                     .multiplier_for(*reason)
-            });
-        clamp_unit(base * penalty)
+            })
+    }
+
+    fn family_adequacy(
+        &self,
+        row: &FactorInferenceRow,
+        family: FactorFamily,
+    ) -> QuantResult<Probability> {
+        let plane = &self.header.serving_contract().bindings().factors.plane;
+        let context_weights = self
+            .payload
+            .factor_head
+            .context_weights
+            .iter()
+            .map(|weight| (weight.factor_definition_id, weight))
+            .collect::<HashMap<_, _>>();
+        let mut numerator = Decimal::ZERO;
+        let mut denominator = Decimal::ZERO;
+        for revision in plane
+            .definitions()
+            .iter()
+            .filter(|revision| revision.definition().family == family)
+        {
+            let factor = row
+                .factors
+                .iter()
+                .find(|factor| factor.definition_id == revision.factor_definition_id())
+                .ok_or_else(|| ResearchError::Inference {
+                    detail: format!(
+                        "factor row omitted sealed revision {}",
+                        revision.factor_definition_id()
+                    ),
+                })?;
+            if factor.is_not_applicable() {
+                factor.validate_against(revision)?;
+                continue;
+            }
+            let Some(weight) = context_weights
+                .get(&revision.factor_definition_id())
+                .copied()
+            else {
+                continue;
+            };
+            denominator += weight.coverage_weight;
+            if let Some(FactorScoringProjection::Context {
+                adequacy,
+                confidence,
+            }) = factor.scoring_projection(revision)?
+            {
+                numerator += weight.coverage_weight * confidence.inner() * adequacy.inner();
+            }
+        }
+        if denominator.is_zero() {
+            Ok(Probability::ZERO)
+        } else {
+            Ok(clamp_unit(numerator / denominator))
+        }
     }
 
     fn input_audit(&self, table: &FactorInferenceTable) -> QuantResult<Vec<ModelInputAuditRow>> {
-        let input_contract_hash = self.artifact.input_contract_hash;
-        let transform_hash = self.artifact.input_transform_hash()?;
-        let training_input_hash = self.artifact.training_input_hash;
+        let transform = &self.header.serving_contract().bindings().transform;
+        let input_contract_hash = transform.input_contract_hash;
+        let transform_hash = transform.input_transform_hash;
+        let training_input_hash = transform.training_input_hash;
         let row_count = table
             .rows
             .iter()
@@ -357,8 +438,8 @@ impl WeightedFactorRuntime {
                     })
                     .transpose()?;
                 audit.push(ModelInputAuditRow {
-                    model_version_id: self.artifact.header.model_version_id,
-                    model_family: self.artifact.header.model_family,
+                    model_version_id: self.header.model_version_id(),
+                    model_family: self.header.model_family(),
                     market_id: row.market_id.clone(),
                     raw_input_name: factor.name.to_string(),
                     raw_state,
@@ -378,7 +459,7 @@ impl WeightedFactorRuntime {
 #[async_trait]
 impl QuantModelRuntime for WeightedFactorRuntime {
     fn model_version_id(&self) -> ModelVersionId {
-        self.artifact.header.model_version_id
+        self.header.model_version_id()
     }
 
     fn model_family(&self) -> ModelFamily {
@@ -386,27 +467,31 @@ impl QuantModelRuntime for WeightedFactorRuntime {
     }
 
     fn feature_schema_hash(&self) -> ContentHash {
-        self.artifact.header.feature_schema_hash
+        self.header.feature_schema_hash()
     }
 
     fn required_features(&self) -> Vec<FeatureName> {
-        self.artifact.required_features()
+        self.payload.required_features()
     }
 
     fn category_scope(&self) -> Option<MarketCategory> {
-        self.artifact.category_scope
+        self.header.category_scope()
     }
 
     fn weight_source(&self) -> ModelWeightSource {
-        self.weight_source
+        ModelWeightSource::Artifact
     }
 
     fn factor_cross_section(&self) -> Option<&FactorCrossSectionConfig> {
-        Some(&self.artifact.factor_cross_section)
+        Some(&self.payload.factor_cross_section)
+    }
+
+    fn factor_serving_plane(&self) -> Option<&FactorServingPlane> {
+        Some(&self.header.serving_contract().bindings().factors.plane)
     }
 
     fn frozen_reference_quantiles(&self) -> Option<&FrozenReferenceQuantiles> {
-        Some(&self.artifact.frozen_reference_quantiles)
+        Some(&self.payload.frozen_reference_quantiles)
     }
 
     async fn infer_batch(&self, input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
@@ -418,14 +503,10 @@ impl QuantModelRuntime for WeightedFactorRuntime {
             })?;
         let input_audit = self.input_audit(&table)?;
 
-        let nets = self.batch_layout.compute_nets(&table.rows)?;
         let mut candidates: Vec<SignalCandidate> = table
             .rows
             .iter()
-            .zip(nets)
-            .map(|(row, net)| {
-                self.score_row_with_net(row, net, &table.model_run_id, table.decision_at)
-            })
+            .map(|row| self.score_row(row, &table.model_run_id, table.decision_at))
             .collect::<QuantResult<Vec<_>>>()?
             .into_iter()
             .flatten()
@@ -514,20 +595,21 @@ fn split_contributions(
 /// Non-fatal, context-derived warnings attached to a candidate.
 fn context_warnings(
     context: &MarketInferenceContext,
-    artifact: &WeightedFactorModelArtifact,
+    liquidity_score: Probability,
+    data_quality_score: Probability,
 ) -> Vec<SignalWarning> {
     let mut warnings = Vec::new();
-    let liquidity_multiplier = artifact
-        .multipliers
-        .liquidity
-        .multiplier_for(context.liquidity_usd.map(Usd::inner));
-    if liquidity_multiplier <= artifact.multipliers.liquidity.floor {
+    if context.liquidity_usd.is_none() || liquidity_score.inner() < Decimal::new(5, 1) {
         warnings.push(SignalWarning::ThinLiquidity);
     }
-    if matches!(
-        context.data_quality,
-        DataQualityStatus::Degraded | DataQualityStatus::Stale | DataQualityStatus::Insufficient
-    ) {
+    if data_quality_score.inner() < Decimal::new(5, 1)
+        || matches!(
+            context.data_quality,
+            DataQualityStatus::Degraded
+                | DataQualityStatus::Stale
+                | DataQualityStatus::Insufficient
+        )
+    {
         warnings.push(SignalWarning::StaleFeatures);
     }
     warnings
@@ -538,101 +620,81 @@ mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
         enums::{
-            factor::{FactorFamily, FactorIndeterminateReason},
+            factor::FactorIndeterminateReason,
             quant::{DataQualityStatus, FactorDirection, OutcomeSide},
         },
-        runtime_config::FactorCrossSectionConfig,
         types::{
-            FactorDefinitionId, MarketId, ModelInputContract, ModelRunId, ModelVersionId, Price,
-            Probability, TokenId, Usd, builtin_research_profiles,
+            MarketId, ModelInputContract, ModelRunId, Price, Probability, TokenId, Usd,
+            factor::FactorExplanation,
         },
     };
+    use rust_decimal::{Decimal, prelude::ToPrimitive};
     use rust_decimal_macros::dec;
 
     use super::WeightedFactorRuntime;
     use crate::{
         factors::{
-            FactorExplanation, FactorName, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,
+            FactorName, FactorValue, NormalizedFactor,
             names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
         },
         model::{
-            ReturnModelSpec,
-            artifact::{
-                FactorWeight, ModelArtifactHeader, ScoreMultiplierSpec,
-                SubstitutionConfidenceRules, WeightedFactorModelArtifact,
-                model_input_contract_hash,
-            },
+            artifact::{ModelArtifact, model_input_contract_hash},
             runtime::{
-                FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelFamily,
+                FactorInferenceRow, FactorInferenceTable, MarketInferenceContext,
                 ModelInputAuditState, ModelRuntimeInput, QuantModelRuntime,
             },
         },
-        test_support::content_hash as hash,
+        test_support::weighted_factor_plane,
     };
 
     fn factor(
-        name: FactorName,
+        name: &FactorName,
         normalized: Probability,
         direction: FactorDirection,
     ) -> FactorValue {
+        let plane = weighted_factor_plane();
+        let revision = plane
+            .definitions()
+            .iter()
+            .find(|revision| revision.factor_name() == name)
+            .expect("factor fixture revision");
+        let is_alpha = revision.definition().is_outcome_alpha();
+        let raw_value = if is_alpha {
+            match direction {
+                FactorDirection::Positive => dec!(1),
+                FactorDirection::Negative => dec!(-1),
+                FactorDirection::Neutral => Decimal::ZERO,
+            }
+        } else {
+            dec!(1)
+        };
+        let direction = revision
+            .definition()
+            .contribution_direction(raw_value)
+            .expect("fixture factor direction");
+        let normalized = if is_alpha && direction == FactorDirection::Neutral {
+            Probability::ZERO
+        } else {
+            normalized
+        };
+        let confidence = if is_alpha && direction == FactorDirection::Neutral {
+            Probability::ZERO
+        } else {
+            Probability::new(dec!(0.9))
+        };
         FactorValue {
-            definition_id: FactorDefinitionId::from_v7(),
-            name,
-            family: FactorFamily::Liquidity,
-            raw_value: Some(dec!(1)),
+            definition_id: revision.factor_definition_id(),
+            name: revision.factor_name().clone(),
+            family: revision.definition().family,
+            raw_value: Some(raw_value),
             normalization: NormalizedFactor::cross_section(normalized),
             direction,
-            confidence: Probability::new(dec!(0.9)),
+            confidence,
             explanation: FactorExplanation {
                 headline: "t".to_owned(),
                 drivers: Vec::new(),
             },
             input_feature_refs: Vec::new(),
-        }
-    }
-
-    impl WeightedFactorModelArtifact {
-        fn weighted_fixture() -> Self {
-            let input_contract = ModelInputContract::single_required("book.mid");
-            let input_contract_hash =
-                model_input_contract_hash(&input_contract).expect("input contract hash");
-            Self {
-                header: ModelArtifactHeader {
-                    model_version_id: ModelVersionId::from_v7(),
-                    model_spec_definition_hash: hash("spec"),
-                    profile_ref: builtin_research_profiles()
-                        .expect("built-in profiles")
-                        .remove(0)
-                        .profile_ref,
-                    model_family: ModelFamily::WeightedFactor,
-                    feature_schema_hash: hash("aa"),
-                    factor_schema_hash: hash("bb"),
-                    trade_policy_artifact_id: None,
-                    trade_policy_hash: None,
-                },
-                training_dataset_hash: hash("cc"),
-                training_input_hash: hash("dd"),
-                input_contract,
-                input_contract_hash,
-                weights: vec![
-                    FactorWeight {
-                        factor: LIQUIDITY_DEPTH,
-                        weight: dec!(0.5),
-                    },
-                    FactorWeight {
-                        factor: MOMENTUM_ROC,
-                        weight: dec!(0.5),
-                    },
-                ],
-                prediction_horizon_secs: 86_400,
-                multipliers: ScoreMultiplierSpec::conservative(),
-                substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-                return_model: ReturnModelSpec::heuristic_default(),
-                factor_cross_section: FactorCrossSectionConfig::default(),
-                frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
-                objective_report: None,
-                category_scope: None,
-            }
         }
     }
 
@@ -660,8 +722,8 @@ mod tests {
             market_id: MarketId::new(market),
             token_id: TokenId::new("yes"),
             factors: vec![
-                factor(LIQUIDITY_DEPTH, Probability::new(dec!(0.8)), direction),
-                factor(MOMENTUM_ROC, Probability::new(dec!(0.6)), direction),
+                factor(&LIQUIDITY_DEPTH, Probability::new(dec!(0.8)), direction),
+                factor(&MOMENTUM_ROC, Probability::new(dec!(0.6)), direction),
             ],
             context: MarketInferenceContext::weighted_fixture(),
         }
@@ -673,8 +735,7 @@ mod tests {
             model_input_contract_hash(&ModelInputContract::single_required("book.mid"))
                 .expect("contract hash");
         let runtime =
-            WeightedFactorRuntime::new(WeightedFactorModelArtifact::weighted_fixture(), None, None)
-                .expect("runtime");
+            WeightedFactorRuntime::new(ModelArtifact::weighted_fixture(), None).expect("runtime");
         let table = FactorInferenceTable {
             model_run_id: ModelRunId::from_v7(),
             decision_at: Utc::now(),
@@ -713,27 +774,47 @@ mod tests {
         }
         assert_eq!(output.runtime_metrics.markets_scored, 2);
         assert_eq!(output.input_audit.len(), 4);
-        assert!(output.input_audit.iter().all(|row| {
-            row.raw_state == ModelInputAuditState::Scored
-                && row.raw_value.as_deref() == Some("1")
-                && row
-                    .encoded_value_bits
-                    .is_some_and(|bits| f64::from_bits(bits).is_finite())
-                && row.input_contract_hash == expected_contract_hash
-                && row.transform_hash.as_bytes().iter().any(|byte| *byte != 0)
-                && row
+        let liquidity_name = LIQUIDITY_DEPTH;
+        let momentum_name = MOMENTUM_ROC;
+        let expected_audit = [
+            ("0xstrong", liquidity_name.as_str(), "1", dec!(0.8)),
+            ("0xstrong", momentum_name.as_str(), "1", dec!(0.6)),
+            ("0xbear", liquidity_name.as_str(), "1", dec!(0.8)),
+            ("0xbear", momentum_name.as_str(), "-1", dec!(0.6)),
+        ];
+        for (audit, (market, factor, raw_value, encoded_value)) in
+            output.input_audit.iter().zip(expected_audit)
+        {
+            assert_eq!(audit.market_id.as_str(), market);
+            assert_eq!(audit.raw_input_name, factor);
+            assert_eq!(audit.raw_state, ModelInputAuditState::Scored);
+            assert_eq!(audit.raw_value.as_deref(), Some(raw_value));
+            assert_eq!(
+                audit.encoded_value_bits,
+                encoded_value.to_f64().map(f64::to_bits)
+            );
+            assert_eq!(audit.input_contract_hash, expected_contract_hash);
+            assert!(
+                audit
+                    .transform_hash
+                    .as_bytes()
+                    .iter()
+                    .any(|byte| *byte != 0)
+            );
+            assert!(
+                audit
                     .training_input_hash
                     .as_bytes()
                     .iter()
                     .any(|byte| *byte != 0)
-        }));
+            );
+        }
     }
 
     #[tokio::test]
     async fn weighted_never_missing_no() {
         let runtime =
-            WeightedFactorRuntime::new(WeightedFactorModelArtifact::weighted_fixture(), None, None)
-                .expect("runtime");
+            WeightedFactorRuntime::new(ModelArtifact::weighted_fixture(), None).expect("runtime");
         let mut bearish = row("0xmissing-no", false);
         bearish.context.no_price = None;
         let output = runtime
@@ -751,15 +832,16 @@ mod tests {
     #[tokio::test]
     async fn weighted_keeps_missing_without() {
         let runtime =
-            WeightedFactorRuntime::new(WeightedFactorModelArtifact::weighted_fixture(), None, None)
-                .expect("runtime");
+            WeightedFactorRuntime::new(ModelArtifact::weighted_fixture(), None).expect("runtime");
         let mut missing = factor(
-            LIQUIDITY_DEPTH,
+            &LIQUIDITY_DEPTH,
             Probability::new(dec!(0.8)),
             FactorDirection::Positive,
         );
         missing.raw_value = None;
         missing.normalization = NormalizedFactor::MissingInput;
+        missing.direction = FactorDirection::Neutral;
+        missing.confidence = Probability::ZERO;
         let table = FactorInferenceTable {
             model_run_id: ModelRunId::from_v7(),
             decision_at: Utc::now(),
@@ -769,7 +851,7 @@ mod tests {
                 factors: vec![
                     missing,
                     factor(
-                        MOMENTUM_ROC,
+                        &MOMENTUM_ROC,
                         Probability::new(dec!(0.6)),
                         FactorDirection::Positive,
                     ),
@@ -797,19 +879,18 @@ mod tests {
     #[tokio::test]
     async fn neutral_factors_no_candidate() {
         let runtime =
-            WeightedFactorRuntime::new(WeightedFactorModelArtifact::weighted_fixture(), None, None)
-                .expect("runtime");
+            WeightedFactorRuntime::new(ModelArtifact::weighted_fixture(), None).expect("runtime");
         let neutral_row = FactorInferenceRow {
             market_id: MarketId::new("0xflat"),
             token_id: TokenId::new("yes"),
             factors: vec![
                 factor(
-                    LIQUIDITY_DEPTH,
+                    &LIQUIDITY_DEPTH,
                     Probability::new(dec!(0.5)),
                     FactorDirection::Neutral,
                 ),
                 factor(
-                    MOMENTUM_ROC,
+                    &MOMENTUM_ROC,
                     Probability::new(dec!(0.5)),
                     FactorDirection::Neutral,
                 ),
@@ -838,12 +919,17 @@ mod tests {
         // is surfaced in the breakdown with a zero contribution and no fabricated
         // normalized score — never a silent neutral.
         let runtime =
-            WeightedFactorRuntime::new(WeightedFactorModelArtifact::weighted_fixture(), None, None)
-                .expect("runtime");
+            WeightedFactorRuntime::new(ModelArtifact::weighted_fixture(), None).expect("runtime");
+        let plane = weighted_factor_plane();
+        let momentum_revision = plane
+            .definitions()
+            .iter()
+            .find(|revision| revision.factor_name() == &MOMENTUM_ROC)
+            .expect("momentum fixture revision");
         let indeterminate = FactorValue {
-            definition_id: FactorDefinitionId::from_v7(),
-            name: MOMENTUM_ROC,
-            family: FactorFamily::Momentum,
+            definition_id: momentum_revision.factor_definition_id(),
+            name: momentum_revision.factor_name().clone(),
+            family: momentum_revision.definition().family,
             raw_value: Some(dec!(1)),
             normalization: NormalizedFactor::Indeterminate {
                 reason: FactorIndeterminateReason::CrossSectionTooSmall,
@@ -861,7 +947,7 @@ mod tests {
             token_id: TokenId::new("yes"),
             factors: vec![
                 factor(
-                    LIQUIDITY_DEPTH,
+                    &LIQUIDITY_DEPTH,
                     Probability::new(dec!(0.8)),
                     FactorDirection::Positive,
                 ),
@@ -878,28 +964,16 @@ mod tests {
             .infer_batch(ModelRuntimeInput::FactorTable(table))
             .await
             .expect("infer");
-        let candidate = output
-            .candidates
-            .iter()
-            .find(|c| c.market_id.as_str() == "0xmixed")
-            .expect("the scored factor still yields a candidate");
-        let momentum = candidate
-            .factor_breakdown
-            .iter()
-            .find(|entry| entry.name == MOMENTUM_ROC)
-            .expect("indeterminate factor is surfaced in the breakdown");
         assert!(
-            momentum.normalized_score.is_none(),
-            "indeterminate factor carries no normalized score"
+            output.candidates.is_empty(),
+            "context evidence alone cannot choose an outcome side"
         );
-        assert_eq!(
-            momentum.contribution,
-            dec!(0),
-            "indeterminate factor contributes nothing"
-        );
-        assert_eq!(
-            momentum.indeterminate_reason,
-            Some(FactorIndeterminateReason::CrossSectionTooSmall)
-        );
+        let momentum = output
+            .input_audit
+            .iter()
+            .find(|entry| entry.raw_input_name == MOMENTUM_ROC.as_str())
+            .expect("indeterminate factor audit");
+        assert_eq!(momentum.raw_state, ModelInputAuditState::Indeterminate);
+        assert!(momentum.encoded_value_bits.is_none());
     }
 }

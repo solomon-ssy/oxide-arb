@@ -1,7 +1,5 @@
 //! Shared wire types and nested policy documents for runtime config.
 
-use std::collections::BTreeMap;
-
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -344,14 +342,6 @@ impl FeatureFamily {
             Self::Domain => "domain",
         }
     }
-}
-
-/// Factor weights keyed by factor name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(transparent)]
-#[schemars(transparent)]
-pub struct FactorWeights {
-    pub weights: BTreeMap<String, DecimalValue>,
 }
 
 /// Entry order policy for recommendations.

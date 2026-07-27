@@ -37,11 +37,18 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
         &self,
         path_set: NewBacktestPathSet,
     ) -> Result<BacktestPathSetInfo, StorageError> {
-        Entity::insert(path_set.into_active_model())
+        path_set
+            .verify_hash()
+            .map_err(|error| StorageError::InvariantViolation {
+                entity: Some("quant_backtest_path_set"),
+                detail: error.to_string(),
+            })?;
+        let info = Entity::insert(path_set.into_active_model())
             .exec_with_returning(&self.db)
             .await
             .map_err(StorageError::from)
-            .map(Into::into)
+            .map(Into::into)?;
+        verify_path_set(info)
     }
 
     async fn find_by_id(
@@ -52,21 +59,22 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
             .one(&self.db)
             .await
             .map_err(StorageError::from)
-            .map(|row| row.map(Into::into))
+            .and_then(|row| row.map(Into::into).map(verify_path_set).transpose())
     }
 
     async fn list_by_model_version(
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<Vec<BacktestPathSetInfo>, StorageError> {
-        list_fk_desc::<Entity, _, _, _>(
+        let rows = list_fk_desc::<Entity, _, _, _>(
             &self.db,
             Column::ModelVersionId,
             *model_version_id,
             Column::CreatedAt,
             Into::into,
         )
-        .await
+        .await?;
+        rows.into_iter().map(verify_path_set).collect()
     }
 
     async fn page(
@@ -81,7 +89,7 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
             )
             .add_option(query.from.map(|from| Column::CreatedAt.gte(from)))
             .add_option(query.to.map(|to| Column::CreatedAt.lt(to)));
-        paginate_mapped(
+        let page = paginate_mapped(
             Entity::find()
                 .filter(condition)
                 .order_by_desc(Column::CreatedAt),
@@ -89,6 +97,21 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
             PageWindow::from_query(&query),
             Into::into,
         )
-        .await
+        .await?;
+        let items = page
+            .items
+            .into_iter()
+            .map(verify_path_set)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Paginated::new(items, page.total, page.page, page.size))
     }
+}
+
+fn verify_path_set(info: BacktestPathSetInfo) -> Result<BacktestPathSetInfo, StorageError> {
+    info.verify_hash()
+        .map_err(|error| StorageError::InvariantViolation {
+            entity: Some("quant_backtest_path_set"),
+            detail: error.to_string(),
+        })?;
+    Ok(info)
 }

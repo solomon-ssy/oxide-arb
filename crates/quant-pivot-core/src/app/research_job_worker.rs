@@ -45,8 +45,8 @@ use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
     traits::{
         CalibrationArtifactRepository, FactWriter, FeatureParityRepository, PolicyRepository,
-        RecommendationReportRepository, ReportRunRepository, ResearchReadinessEvidenceRepository,
-        ServingEvidenceRepository, TradePolicyRepository,
+        RecommendationReportRepository, ReportRunRepository, ServingEvidenceRepository,
+        TradePolicyRepository,
     },
 };
 use tokio::{
@@ -71,9 +71,6 @@ use crate::service::{
     durable_feature_parity::{DurableFeatureParityDeps, DurableFeatureParitySource},
     feature_parity_executor::{FeatureParityExecutor, ReportFeatureParityIncidentResponse},
     model_calibration_fit::ModelCalibrationFitService,
-    research_readiness::{
-        EvidenceAttestor, EvidenceScopeIdentity, ResearchReadinessEvidenceService,
-    },
     trade_policy::{TradePolicyService, TradePolicyServiceDeps},
 };
 
@@ -316,33 +313,19 @@ impl AppContext {
         let bias_table_repo = Arc::clone(&self.infra.repos.calibration_artifact)
             as Arc<dyn CalibrationArtifactRepository>;
         let config = self.config.quant.research_jobs;
-        let evidence_scope = EvidenceScopeIdentity::from_config(
-            &self.config.db.clickhouse,
-            &self.config.research.artifact_store,
-        )?;
-        let readiness = Arc::new(ResearchReadinessEvidenceService::new(
-            Arc::clone(&self.infra.repos.research_readiness)
-                as Arc<dyn ResearchReadinessEvidenceRepository>,
-            Arc::clone(&self.research.artifact_store),
-            EvidenceAttestor::from_config(&self.config.research.evidence_attestation)?,
-            &evidence_scope,
-        )?);
+        let readiness = Arc::clone(&self.research.research_readiness);
         let backtest_port = Arc::new(CoreBacktestPort::from_research(
             &self.research,
             Arc::clone(&runtime_config),
-            Arc::clone(&bias_table_repo),
         ));
-        let cpcv_backtest_port = Arc::new(CoreCpcvBacktestPort::from_research(
-            &self.research,
-            Arc::clone(&runtime_config),
-            Arc::clone(&bias_table_repo),
-        ));
+        let cpcv_backtest_port = Arc::new(CoreCpcvBacktestPort::from_research(&self.research));
         let model_calibration_fit: Arc<dyn ModelCalibrationFitPort> =
             Arc::new(ModelCalibrationFitService::new(
                 Arc::clone(&backtest_port),
                 Arc::clone(&self.research.model_registry_repo),
                 Arc::clone(&self.research.training_dataset_repo),
                 Arc::clone(&bias_table_repo),
+                Arc::clone(&self.research.model_run_repo),
                 Arc::clone(&runtime_config),
             ));
         let serving_evidence = Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
@@ -360,7 +343,7 @@ impl AppContext {
             parity: Arc::clone(&self.infra.repos.feature_parity)
                 as Arc<dyn FeatureParityRepository>,
             model_runs: Arc::clone(&self.research.model_run_repo),
-            model_registry: Arc::clone(&self.research.model_registry_repo),
+            serving_generations: Arc::clone(&self.research.serving_generations),
             runtime_configs: Arc::clone(&runtime_config),
             selections: Arc::clone(&self.research.market_selection_repo),
             feature_vectors: Arc::clone(&self.research.feature_repo),
@@ -374,7 +357,6 @@ impl AppContext {
             clob_market_info: Arc::clone(&self.research.clob_market_info_repo),
             linkages: Arc::clone(&self.research.market_linkage_repo),
             calibration_artifacts: Arc::clone(&bias_table_repo),
-            runtime_factory: Arc::clone(&self.research.model_runtime_factory_builder),
         }));
         let executor = ResearchJobExecutor {
             datasets: Arc::clone(&dataset_port),
@@ -417,9 +399,7 @@ impl AppContext {
                     as Arc<dyn PolicyRepository>,
                 source_slices: Arc::clone(&self.research.source_slice_repo),
                 readiness,
-                model_runtime_factory_builder: Arc::clone(
-                    &self.research.model_runtime_factory_builder,
-                ),
+                serving_preimages: Arc::clone(&self.research.serving_preimages),
             })),
         };
         runner.spawn(TaskId::ResearchJobWorker, move |token| async move {

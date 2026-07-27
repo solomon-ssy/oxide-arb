@@ -8,12 +8,15 @@ use super::{
     research_profile_artifact,
 };
 use crate::{
-    enums::quant::{DatasetPurpose, FeedbackCohort, TrainingDatasetStatus},
+    enums::{
+        model::ModelFamily,
+        quant::{DatasetPurpose, FeedbackCohort, TrainingDatasetStatus},
+    },
     types::{
         ArtifactUri, ContentHash, DatasetCohortManifest, DatasetCoverage, DatasetManifest,
         DatasetSourceLineage, DecisionPolicySnapshotId, ModelSpecId, ResearchProfileArtifactId,
         SchemaVersion, SourceSliceId, TrainingDatasetId, TrainingHorizonsSecs,
-        TrainingSampleSources,
+        TrainingSampleSources, factor::FactorServingPlane,
     },
 };
 
@@ -24,7 +27,10 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
+    pub model_family: ModelFamily,
     pub model_spec_definition_hash: ContentHash,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub factor_serving_plane: FactorServingPlane,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub source_slice_id: SourceSliceId,
     pub pit_cutoff: DateTime<Utc>,
@@ -37,8 +43,8 @@ pub struct Model {
     pub window_end: DateTime<Utc>,
     pub status: TrainingDatasetStatus,
     pub purpose: DatasetPurpose,
-    pub feature_schema_hash: Option<ContentHash>,
-    pub factor_schema_hash: Option<ContentHash>,
+    pub feature_schema_hash: ContentHash,
+    pub factor_schema_hash: ContentHash,
     pub label_schema_hash: Option<ContentHash>,
     pub dataset_hash: Option<ContentHash>,
     pub manifest_hash: Option<ContentHash>,
@@ -51,7 +57,7 @@ pub struct Model {
     pub sample_interval_secs: i64,
     #[sea_orm(column_type = "JsonBinary")]
     pub horizons_secs: TrainingHorizonsSecs,
-    pub feature_schema_version: Option<SchemaVersion>,
+    pub feature_schema_version: SchemaVersion,
     #[sea_orm(column_type = "JsonBinary")]
     pub sample_sources: Option<TrainingSampleSources>,
     #[sea_orm(column_type = "JsonBinary")]

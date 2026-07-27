@@ -15,7 +15,7 @@ use quant_pivot_models::{
     domain::{quant::NewExecutionAccount, runtime::CoreEventPublisher},
     types::{EvmAddress, EvmCodeHash},
 };
-use quant_pivot_repository::traits::ExecutionAccountRepository;
+use quant_pivot_repository::traits::{ExecutionAccountRepository, PolicyRepository};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -53,7 +53,7 @@ impl AppContext {
             events: &events,
             settlement_discovery_wake: &settlement_discovery_wake,
         })?;
-        let governance = GovernanceBundle::assemble(GovernanceBundleDeps {
+        let mut governance = GovernanceBundle::assemble(GovernanceBundleDeps {
             deploy: &deploy,
             metrics: &metrics,
             infra: &infra,
@@ -67,7 +67,8 @@ impl AppContext {
             infra: &infra,
             data: &data,
             governance: &governance,
-        })?;
+        })
+        .await?;
         // One authenticated CLOB client (single L1+L2 identity) shared by the
         // account (collateral reads) and execution (order writes) bundles. Fails
         // closed at boot if the private key is missing or auth fails — report_only
@@ -121,6 +122,9 @@ impl AppContext {
             .attach_execution_breaker(Arc::clone(&execution.breaker));
         governance.bootstrap_execution_recovery().await?;
         governance.bootstrap_bias_table().await?;
+        governance.start_policy_reconciler(
+            Arc::clone(&infra.repos.runtime_config) as Arc<dyn PolicyRepository>
+        )?;
 
         Ok(Self {
             config: deploy,

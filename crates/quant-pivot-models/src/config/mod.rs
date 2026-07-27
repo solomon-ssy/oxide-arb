@@ -66,7 +66,8 @@ use quant_pivot_error::{
     QuantResult, config::ConfigError, config_validation::ConfigValidationReport,
 };
 pub use research::{
-    ArtifactStoreDeployConfig, ArtifactStoreKind, EvidenceAttestationConfig, ResearchDeployConfig,
+    ArtifactStoreDeployConfig, ArtifactStoreKind, EvidenceAttestationConfig,
+    ModelServingRegistryConfig, ResearchDeployConfig,
 };
 use serde::Deserialize;
 pub use web::{JwtConfig, WebConfig};

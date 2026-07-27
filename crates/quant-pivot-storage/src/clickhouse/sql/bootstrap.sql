@@ -384,8 +384,9 @@ CREATE TABLE IF NOT EXISTS quant_feature_event (
         'clickhouse_fact' = 3,
         'trade_tape' = 4,
         'derived' = 5,
-        'domain_external' = 6,
-        'linkage' = 7
+        'domain_crypto' = 6,
+        'linkage' = 7,
+        'domain_weather' = 8
     ),
     `evidence_source_kind` Nullable(
         Enum8(
@@ -394,8 +395,9 @@ CREATE TABLE IF NOT EXISTS quant_feature_event (
             'clickhouse_fact' = 3,
             'trade_tape' = 4,
             'derived' = 5,
-            'domain_external' = 6,
-            'linkage' = 7
+            'domain_crypto' = 6,
+            'linkage' = 7,
+            'domain_weather' = 8
         )
     ),
     `evidence_reference` Nullable(String),

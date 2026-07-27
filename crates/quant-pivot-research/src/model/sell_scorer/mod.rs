@@ -2,12 +2,12 @@
 //!
 //! Symmetric to the Buy-side [`WeightedFactorRuntime`](crate::model::weighted::WeightedFactorRuntime),
 //! but it scores the **exit** decision for one open lot instead of an entry
-//! ranking. The signed ranking net folds together the market factors and the
-//! lot's own position-state pseudo-factors:
+//! ranking. The market factor head and four model-intrinsic position inputs
+//! remain separate, content-addressed estimator coordinates:
 //!
 //! ```text
-//! signedᵢ = dir_signᵢ · normalizedᵢ · confidenceᵢ (∈ [-1, 1])
-//! net = Σ weightᵢ · signedᵢ (∈ [-1, 1], +⇒ exit)
+//! market_exit = -held_sign · canonical_yes_alpha
+//! net = market_weight · market_exit + Σ intrinsic_weightᵢ · evidenceᵢ
 //! alpha_bps = output_spec.max_exit_alpha_bps · net (may be < 0 ⇒ hold)
 //! p_exit = 1 / (1 + e^{-gain·net}) (∈ (0, 1))
 //! confidence = weighted_mean(confidenceᵢ) (∈ [0, 1])
@@ -20,15 +20,13 @@
 pub mod position_state;
 pub mod trainer;
 
-use std::collections::BTreeMap;
-
 pub use position_state::{
     LotStateInput, PositionStateFeatures, is_position_state_factor,
-    position_state_signed_contribution,
+    position_state_exit_contribution,
 };
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::types::{
-    Bps, ContentHash, ModelVersionId, OpportunisticExitPolicy, Probability,
+    Bps, ContentHash, ModelVersionId, OpportunisticExitPolicy, OutcomeTokenBinding, Probability,
 };
 use rust_decimal::{
     Decimal,
@@ -37,15 +35,20 @@ use rust_decimal::{
 pub use trainer::{SellScorerTrainer, TrainSellScorerRequest};
 
 use crate::{
-    factors::{FactorName, FactorValue},
+    factors::FactorValue,
     features::FeatureName,
-    model::artifact::SellScorerArtifact,
+    model::{
+        artifact::{ModelArtifact, ModelArtifactHeader, ModelPayload, SellScorerPayload},
+        factor_heads::{score_factor_heads, sell_market_alpha},
+    },
     precision::RESEARCH_DECIMAL_SCALE,
 };
 
 /// Inputs to one hold-vs-exit scoring call.
 #[derive(Debug, Clone)]
 pub struct SellScoreInput {
+    /// Exact catalog pair and held feature-token orientation.
+    pub outcome_binding: OutcomeTokenBinding,
     /// Already-normalized market factors for the lot's market / token.
     pub market_factors: Vec<FactorValue>,
     /// Lot position-state pseudo-factors.
@@ -89,8 +92,8 @@ pub trait SellScorerRuntime: Send + Sync {
 
 /// A governed weighted hold-vs-exit scorer bound to one frozen artifact.
 pub struct WeightedSellScorerRuntime {
-    artifact: SellScorerArtifact,
-    weights: BTreeMap<FactorName, Decimal>,
+    header: ModelArtifactHeader,
+    payload: SellScorerPayload,
 }
 
 impl WeightedSellScorerRuntime {
@@ -98,57 +101,56 @@ impl WeightedSellScorerRuntime {
     ///
     /// # Errors
     ///
-    /// Propagates [`SellScorerArtifact::validate`] (unnormalized / negative
-    /// weights, non-positive gain, out-of-range default exit fraction).
-    pub fn new(artifact: SellScorerArtifact) -> QuantResult<Self> {
-        artifact.validate()?;
-        let weights = artifact.weight_index();
-        Ok(Self { artifact, weights })
+    /// Propagates [`ModelArtifact::validate`] for any contract/payload mismatch.
+    pub fn new(artifact: ModelArtifact) -> QuantResult<Self> {
+        let (header, payload) = artifact.into_parts()?;
+        let ModelPayload::SellScorer(payload) = payload else {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "sell runtime requires a HoldVsExitWeighted payload".to_owned(),
+            }
+            .into());
+        };
+        Ok(Self {
+            header,
+            payload: *payload,
+        })
     }
 
-    /// Fold the market factors and position-state pseudo-factors into the signed
-    /// ranking net and the weighted-mean confidence.
-    fn net_and_confidence(&self, input: &SellScoreInput) -> (Decimal, Probability) {
-        let mut net = Decimal::ZERO;
-        let mut confidence_mass = Decimal::ZERO;
-        let mut confidence_weighted = Decimal::ZERO;
-
-        for factor in &input.market_factors {
-            let Some(weight) = self.weights.get(&factor.name) else {
-                continue;
-            };
-            if weight.is_zero() {
-                continue;
+    /// Combine the canonical market head with the exact intrinsic estimator inputs.
+    fn net_and_confidence(&self, input: &SellScoreInput) -> QuantResult<(Decimal, Probability)> {
+        let market_score = score_factor_heads(
+            &input.market_factors,
+            &self.header.serving_contract().bindings().factors.plane,
+            &self.payload.factor_head,
+            &input.outcome_binding,
+            Decimal::ONE,
+            Decimal::ONE,
+        )?;
+        let market_exit = sell_market_alpha(&market_score, &input.outcome_binding)?;
+        let mut net = self.payload.estimator.market_head_weight * market_exit;
+        let mut confidence_mass = self.payload.estimator.market_head_weight;
+        let mut confidence_weighted =
+            self.payload.estimator.market_head_weight * market_score.reliability;
+        let evidence = input.position_state.direct_exit_evidence();
+        if evidence.len() != self.payload.estimator.intrinsic_weights.len() {
+            return Err(ResearchError::Inference {
+                detail: "sell intrinsic projection width differs from estimator binding".to_owned(),
             }
-            // Only a scored factor contributes; missing / indeterminate factors
-            // add nothing (no fabricated neutral).
-            let Some(score) = factor.normalized_score() else {
-                continue;
-            };
-            let signed =
-                Decimal::from(factor.direction.as_i8()) * score.inner() * factor.confidence.inner();
-            net += *weight * signed;
-            if factor.confidence.inner() > Decimal::ZERO {
-                confidence_mass += *weight;
-                confidence_weighted += *weight * factor.confidence.inner();
-            }
+            .into());
         }
-
-        for (name, signed) in input.position_state.position_state_signed() {
-            let Some(signed) = signed else {
+        for ((_, evidence), weight) in evidence
+            .into_iter()
+            .zip(&self.payload.estimator.intrinsic_weights)
+        {
+            let Some(evidence) = evidence else {
                 continue;
             };
-            let Some(weight) = self.weights.get(&name) else {
-                continue;
-            };
-            if weight.is_zero() {
+            if weight.weight.is_zero() {
                 continue;
             }
-            net += *weight * signed;
-            // Only an observed position-state value carries confidence; missing
-            // mark/peak evidence was skipped above rather than encoded as zero.
-            confidence_mass += *weight;
-            confidence_weighted += *weight;
+            net += weight.weight * evidence;
+            confidence_mass += weight.weight;
+            confidence_weighted += weight.weight;
         }
 
         let confidence = if confidence_mass > Decimal::ZERO {
@@ -159,36 +161,45 @@ impl WeightedSellScorerRuntime {
         let net = net
             .round_dp(RESEARCH_DECIMAL_SCALE)
             .clamp(-Decimal::ONE, Decimal::ONE);
-        (
+        Ok((
             net,
             Probability::new(confidence.clamp(Decimal::ZERO, Decimal::ONE)),
-        )
+        ))
     }
 }
 
 impl SellScorerRuntime for WeightedSellScorerRuntime {
     fn model_version_id(&self) -> ModelVersionId {
-        self.artifact.header.model_version_id
+        self.header.model_version_id()
     }
 
     fn feature_schema_hash(&self) -> ContentHash {
-        self.artifact.header.feature_schema_hash
+        self.header.feature_schema_hash()
     }
 
     fn required_features(&self) -> Vec<FeatureName> {
-        self.artifact.required_features()
+        self.payload.required_features()
     }
 
     fn score(&self, input: &SellScoreInput) -> QuantResult<SellScore> {
-        let (net, confidence) = self.net_and_confidence(input);
-        let spec = &self.artifact.output_spec;
+        input
+            .outcome_binding
+            .validate()
+            .map_err(|error| ResearchError::InvalidModelArtifact {
+                detail: format!("sell input outcome binding is invalid: {error}"),
+            })?;
+        let (net, confidence) = self.net_and_confidence(input)?;
+        let spec = &self.payload.output_spec;
         let exit_alpha = (spec.max_exit_alpha_bps * net).round_dp(RESEARCH_DECIMAL_SCALE);
         let p_exit_better = logistic_probability(spec.p_exit_gain * net)?;
-        let net_pos = net.max(Decimal::ZERO);
-        let recommended = (spec.default_sell_pct
-            + (Decimal::ONE - spec.default_sell_pct) * net_pos)
-            .clamp(Decimal::ZERO, Decimal::ONE)
-            .round_dp(RESEARCH_DECIMAL_SCALE);
+        let recommended = if net <= spec.exit_deadband {
+            Decimal::ZERO
+        } else {
+            let conviction = (net - spec.exit_deadband) / (Decimal::ONE - spec.exit_deadband);
+            (spec.default_sell_pct + (Decimal::ONE - spec.default_sell_pct) * conviction)
+                .clamp(Decimal::ZERO, Decimal::ONE)
+                .round_dp(RESEARCH_DECIMAL_SCALE)
+        };
         Ok(SellScore {
             exit_alpha_bps: Bps::new(exit_alpha),
             p_exit_better,
@@ -290,11 +301,8 @@ fn logistic_probability(z: Decimal) -> QuantResult<Probability> {
 #[cfg(test)]
 mod tests {
     use quant_pivot_models::{
-        enums::{factor::FactorFamily, quant::FactorDirection},
-        types::{
-            FactorDefinitionId, ModelInputContract, ModelVersionId, Probability,
-            builtin_research_profiles,
-        },
+        enums::quant::{FactorDirection, OutcomeSide},
+        types::{MarketId, OutcomeTokenBinding, Probability, TokenId, factor::FactorExplanation},
     };
     use rust_decimal_macros::dec;
 
@@ -303,66 +311,37 @@ mod tests {
         WeightedSellScorerRuntime, logistic_probability,
     };
     use crate::{
-        factors::{FactorExplanation, FactorName, FactorValue, NormalizedFactor, names},
-        model::{
-            artifact::{
-                FactorWeight, ModelArtifactHeader, SellScorerArtifact, SellScorerOutputSpec,
-                model_input_contract_hash,
-            },
-            runtime::ModelFamily,
-        },
-        test_support::content_hash as hash,
+        factors::{FactorName, FactorValue, NormalizedFactor, names},
+        model::artifact::ModelArtifact,
+        test_support::weighted_factor_plane,
     };
 
-    impl SellScorerArtifact {
-        fn test_fixture() -> Self {
-            let input_contract = ModelInputContract::single_required("book.mid");
-            let input_contract_hash =
-                model_input_contract_hash(&input_contract).expect("input contract hash");
-            Self {
-                header: ModelArtifactHeader {
-                    model_version_id: ModelVersionId::from_v7(),
-                    model_spec_definition_hash: hash("spec"),
-                    profile_ref: builtin_research_profiles()
-                        .expect("built-in profiles")
-                        .remove(0)
-                        .profile_ref,
-                    model_family: ModelFamily::HoldVsExitWeighted,
-                    feature_schema_hash: hash("aa"),
-                    factor_schema_hash: hash("bb"),
-                    trade_policy_artifact_id: None,
-                    trade_policy_hash: None,
-                },
-                weights: vec![
-                    FactorWeight {
-                        factor: names::MOMENTUM_ROC,
-                        weight: dec!(0.5),
-                    },
-                    FactorWeight {
-                        factor: names::POSITION_UNREALIZED_PNL,
-                        weight: dec!(0.5),
-                    },
-                ],
-                prediction_horizon_secs: 86_400,
-                output_spec: SellScorerOutputSpec::conservative(),
-                label_schema_hash: hash("cc"),
-                training_dataset_hash: hash("dd"),
-                training_input_hash: hash("ee"),
-                input_contract,
-                input_contract_hash,
-                objective_report: None,
+    fn market_factor(name: &FactorName, direction: FactorDirection) -> FactorValue {
+        let plane = weighted_factor_plane();
+        let revision = plane
+            .definitions()
+            .iter()
+            .find(|revision| revision.factor_name() == name)
+            .expect("sell factor fixture revision");
+        let raw_value = if revision.definition().is_outcome_alpha() {
+            match direction {
+                FactorDirection::Positive => dec!(1),
+                FactorDirection::Negative => dec!(-1),
+                FactorDirection::Neutral => dec!(0),
             }
-        }
-    }
-
-    fn market_factor(name: FactorName, direction: FactorDirection) -> FactorValue {
+        } else {
+            dec!(1)
+        };
         FactorValue {
-            definition_id: FactorDefinitionId::from_v7(),
-            name,
-            family: FactorFamily::Momentum,
-            raw_value: Some(dec!(1)),
+            definition_id: revision.factor_definition_id(),
+            name: revision.factor_name().clone(),
+            family: revision.definition().family,
+            raw_value: Some(raw_value),
             normalization: NormalizedFactor::cross_section(Probability::new(dec!(0.8))),
-            direction,
+            direction: revision
+                .definition()
+                .contribution_direction(raw_value)
+                .expect("sell factor direction"),
             confidence: Probability::new(dec!(0.9)),
             explanation: FactorExplanation {
                 headline: "t".to_owned(),
@@ -372,16 +351,32 @@ mod tests {
         }
     }
 
+    fn market_factors(direction: FactorDirection) -> Vec<FactorValue> {
+        vec![
+            market_factor(&names::LIQUIDITY_DEPTH, FactorDirection::Neutral),
+            market_factor(&names::MOMENTUM_ROC, direction),
+        ]
+    }
+
+    fn outcome_binding() -> OutcomeTokenBinding {
+        OutcomeTokenBinding::try_new(
+            MarketId::from("market"),
+            TokenId::from("yes"),
+            TokenId::from("no"),
+            TokenId::from("yes"),
+            OutcomeSide::Yes,
+        )
+        .expect("outcome binding")
+    }
+
     #[test]
     fn strong_exit_signal_exit() {
         let runtime =
-            WeightedSellScorerRuntime::new(SellScorerArtifact::test_fixture()).expect("runtime");
+            WeightedSellScorerRuntime::new(ModelArtifact::sell_fixture()).expect("runtime");
         let score = runtime
             .score(&SellScoreInput {
-                market_factors: vec![market_factor(
-                    names::MOMENTUM_ROC,
-                    FactorDirection::Positive,
-                )],
+                outcome_binding: outcome_binding(),
+                market_factors: market_factors(FactorDirection::Negative),
                 position_state: PositionStateFeatures {
                     unrealized_pnl_pct: Some(dec!(0.2)),
                     time_in_trade_ratio: dec!(0.5),
@@ -398,13 +393,11 @@ mod tests {
     #[test]
     fn hold_signal_scores_exit() {
         let runtime =
-            WeightedSellScorerRuntime::new(SellScorerArtifact::test_fixture()).expect("runtime");
+            WeightedSellScorerRuntime::new(ModelArtifact::sell_fixture()).expect("runtime");
         let score = runtime
             .score(&SellScoreInput {
-                market_factors: vec![market_factor(
-                    names::MOMENTUM_ROC,
-                    FactorDirection::Negative,
-                )],
+                outcome_binding: outcome_binding(),
+                market_factors: market_factors(FactorDirection::Positive),
                 position_state: PositionStateFeatures {
                     unrealized_pnl_pct: Some(dec!(-0.2)),
                     time_in_trade_ratio: dec!(0.0),

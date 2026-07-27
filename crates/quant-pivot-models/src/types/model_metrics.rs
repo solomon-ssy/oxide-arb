@@ -8,12 +8,13 @@ use crate::{
     enums::{model::ClassicalKind, quant::ModelSerializationFormat},
     types::{
         ContentHash,
+        model_training::GovernedSellFitStatus,
         stable_name::{FactorName, ModelMetricName},
     },
 };
 
 /// System-owned schema version for [`ModelVersionMetrics`].
-pub const MODEL_VERSION_METRICS_FORMAT_VERSION: u16 = 1;
+pub const MODEL_VERSION_METRICS_FORMAT_VERSION: u16 = 2;
 
 /// Loss decomposition for one LTR evaluation partition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,9 +91,18 @@ pub struct ModelFeatureImportance {
     pub importance: Decimal,
 }
 
+/// Verified preparation evidence for a governed Hold-vs-Exit estimator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedSellEstimatorMetrics {
+    pub resolved_label_rows: u64,
+    pub position_state_rows: u64,
+    pub fit_status: GovernedSellFitStatus,
+}
+
 /// Minimal, non-duplicative lineage copied from the canonical model artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum ModelArtifactTrainingLineage {
     FactorNative {
         training_dataset_hash: ContentHash,
@@ -114,7 +124,7 @@ pub enum ModelArtifactTrainingLineage {
 
 /// Closed set of model-version metric families.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum ModelVersionMetricsDefinition {
     LearningToRank {
         in_sample: LearningToRankInSampleMetrics,
@@ -126,6 +136,10 @@ pub enum ModelVersionMetricsDefinition {
         in_sample: ClassicalInSampleMetrics,
         validation: ModelValidationMetrics,
         feature_importances: Vec<ModelFeatureImportance>,
+        artifact_lineage: ModelArtifactTrainingLineage,
+    },
+    GovernedSellEstimator {
+        preparation: GovernedSellEstimatorMetrics,
         artifact_lineage: ModelArtifactTrainingLineage,
     },
     /// No quantitative training result exists for a governed hand-authored artifact.
@@ -178,6 +192,20 @@ impl ModelVersionMetrics {
     }
 
     #[must_use]
+    pub const fn governed_sell(
+        preparation: GovernedSellEstimatorMetrics,
+        artifact_lineage: ModelArtifactTrainingLineage,
+    ) -> Self {
+        Self {
+            format_version: MODEL_VERSION_METRICS_FORMAT_VERSION,
+            definition: ModelVersionMetricsDefinition::GovernedSellEstimator {
+                preparation,
+                artifact_lineage,
+            },
+        }
+    }
+
+    #[must_use]
     pub fn not_measured(rationale: impl Into<String>) -> Self {
         Self {
             format_version: MODEL_VERSION_METRICS_FORMAT_VERSION,
@@ -192,7 +220,10 @@ impl ModelVersionMetrics {
 mod tests {
     use serde_json::json;
 
-    use super::ModelVersionMetrics;
+    use super::{GovernedSellEstimatorMetrics, ModelArtifactTrainingLineage, ModelVersionMetrics};
+    use crate::types::{
+        ContentHash, model_training::GovernedSellFitStatus, stable_name::FactorName,
+    };
 
     #[test]
     fn metrics_reject_unknown_fields() {
@@ -207,5 +238,38 @@ mod tests {
         let mut invalid = value;
         invalid["definition"]["kind"] = json!("future_metrics");
         assert!(serde_json::from_value::<ModelVersionMetrics>(invalid).is_err());
+    }
+
+    #[test]
+    fn sell_metrics_preserve_lineage() {
+        let hash = ContentHash::from_bytes([7; 32]);
+        let metrics = ModelVersionMetrics::governed_sell(
+            GovernedSellEstimatorMetrics {
+                resolved_label_rows: 11,
+                position_state_rows: 9,
+                fit_status: GovernedSellFitStatus::OofPredictionsRequired,
+            },
+            ModelArtifactTrainingLineage::FactorNative {
+                training_dataset_hash: hash,
+                training_input_hash: hash,
+                input_contract_hash: hash,
+                input_transform_hash: hash,
+                factor_inputs: vec![FactorName::new("alpha.signal")],
+            },
+        );
+        let value = serde_json::to_value(metrics).expect("serialize sell metrics");
+        assert_eq!(value["format_version"], json!(2));
+        assert_eq!(
+            value["definition"]["kind"],
+            json!("governed_sell_estimator")
+        );
+        assert_eq!(
+            value["definition"]["preparation"]["fit_status"],
+            json!("oof_predictions_required")
+        );
+        assert_eq!(
+            value["definition"]["artifact_lineage"]["factor_inputs"][0],
+            json!("alpha.signal")
+        );
     }
 }

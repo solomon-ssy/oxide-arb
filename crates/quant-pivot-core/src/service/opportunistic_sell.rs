@@ -25,15 +25,15 @@ use quant_pivot_models::{
         clickhouse::{ChExitSignalEvaluatorKind, ChExitSignalVerdict},
         quant::QuantRuntimeMode,
     },
-    types::{ModelVersionId, Price},
+    types::{ModelVersionId, OutcomeTokenBinding, Price},
 };
 use quant_pivot_repository::traits::{
     FactorRepository, ModelRegistryRepository, RecommendationRepository,
 };
 use quant_pivot_research::{
     model::{
-        LotStateInput, ModelRuntimeFactoryBuilder, SellScore, SellScoreInput, SellSignalPolicy,
-        sell_signal_fires, sell_signal_target,
+        LotStateInput, SellScore, SellScoreInput, SellSignalPolicy, sell_signal_fires,
+        sell_signal_target,
     },
     pit::PointInTimeSnapshotSource,
     selection::ModelFeatureRequirements,
@@ -47,9 +47,13 @@ use crate::{
     },
     prefetch::feature_window::FeatureWindowProvider,
     runtime_config::DecisionPolicyStore,
-    service::model_backed_reinferer::{
-        LiveFeatureBuildRequest, build_live_feature_vector, exit_model_load_ok, fresh_exit_outcome,
-        liquidity_score_cap, runtime_decision_boundary, schema_binding, selected_market_for_lot,
+    service::{
+        model_backed_reinferer::{
+            LiveFeatureBuildRequest, build_live_feature_vector, exit_model_load_ok,
+            fresh_exit_outcome, liquidity_score_cap, runtime_decision_boundary,
+            selected_market_for_lot,
+        },
+        model_serving_preimage::ModelServingPreimageService,
     },
 };
 
@@ -75,7 +79,7 @@ pub trait OpportunisticSellScorer: Send + Sync {
 /// Dependencies for [`ModelBackedOpportunisticSellScorer`].
 pub struct ModelBackedOpportunisticSellScorerDeps {
     pub model_registry: Arc<dyn ModelRegistryRepository>,
-    pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
+    pub serving_preimages: Arc<ModelServingPreimageService>,
     pub config: Arc<DecisionPolicyStore>,
     /// Source of the recommendation's governed factor-definition set.
     pub recommendations: Arc<dyn RecommendationRepository>,
@@ -134,17 +138,16 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
             return Ok(None);
         }
 
-        let binding = schema_binding(
-            &config.profile_artifacts.features.definition,
-            &config.profile_artifacts.scoring.definition,
-            &config.profile_artifacts.domain.definition,
-            None,
-        )?;
-        let factory = self.deps.factory_builder.build(binding);
-        let runtime = match factory.load_sell_scorer(&version).await {
-            Ok(runtime) => runtime,
+        let runtime = match self.deps.serving_preimages.load(&version).await {
+            Ok(source) => match source.sell_runtime() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::warn!(%error, %version_id, "opportunistic sell: sell scorer build failed");
+                    return Ok(None);
+                }
+            },
             Err(error) => {
-                tracing::warn!(%error, %version_id, "opportunistic sell: sell scorer load failed");
+                tracing::warn!(%error, %version_id, "opportunistic sell: sell scorer preimage load failed");
                 return Ok(None);
             }
         };
@@ -163,6 +166,14 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
             return Ok(None);
         };
         let market = selected_market_for_lot(&snapshot, lot)?;
+        let outcome_binding = OutcomeTokenBinding::try_new(
+            lot.market_id.clone(),
+            snapshot.market.token_yes.clone(),
+            snapshot.market.token_no.clone(),
+            lot.token_id.clone(),
+            lot.side,
+        )
+        .map_err(|error| QuantError::config(error.to_string()))?;
         let requirements = ModelFeatureRequirements::generic_only(runtime.required_features());
         let Some(liquidity_cap_usd) = liquidity_score_cap(config.as_ref()) else {
             return Ok(None);
@@ -216,6 +227,7 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
         }
         .position_state_features()?;
         let score = runtime.score(&SellScoreInput {
+            outcome_binding,
             market_factors,
             position_state,
         })?;

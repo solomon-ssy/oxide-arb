@@ -10,6 +10,7 @@ use crate::{
     domain::quant::{FeedbackCohortWindow, FeedbackResolutionEvidence},
     enums::{
         common::MarketCategory,
+        model::ModelFamily,
         quant::{
             CohortCensorReason, CohortExclusionReason, DatasetPurpose, FeedbackCohort, OutcomeSide,
         },
@@ -20,13 +21,14 @@ use crate::{
         FactorDefinitionId, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelSpecId,
         ModelVersionId, PayoutRatio, ReaderContractVersion, RecommendationId,
         RecommendationReportId, ReportDataQualitySnapshotId, ResearchProfileArtifactId,
-        SchemaContractVersion, SourceSliceId, SourceSliceManifest, SourceSliceManifestRef, TokenId,
-        TradePolicyArtifactId, TrainingDatasetId, TrainingExampleId,
+        SchemaContractVersion, SchemaVersion, SourceSliceId, SourceSliceManifest,
+        SourceSliceManifestRef, TokenId, TradePolicyArtifactId, TrainingDatasetId,
+        TrainingExampleId, factor::FactorServingPlane,
     },
 };
 
 /// Breaking dataset artifact and manifest wire version.
-pub const DATASET_ARTIFACT_FORMAT_VERSION: u32 = 2;
+pub const DATASET_ARTIFACT_FORMAT_VERSION: u32 = 3;
 /// Immutable source-lineage document version.
 pub const DATASET_SOURCE_LINEAGE_FORMAT_VERSION: u32 = 1;
 /// Immutable feedback-cohort manifest version.
@@ -103,6 +105,14 @@ pub enum DatasetManifestContractError {
     InvalidModelLearningRow,
     #[error("model-learning cohort artifact counts do not match its rows")]
     ModelLearningArtifactCountMismatch,
+    #[error("dataset factor serving plane is invalid: {detail}")]
+    InvalidFactorPlane { detail: String },
+    #[error("dataset model family and factor serving plane disagree")]
+    FactorPlaneFamilyMismatch,
+    #[error("dataset factor serving plane does not bind its feature schema hash")]
+    FactorPlaneFeatureMismatch,
+    #[error("dataset factor serving plane does not bind its feature schema version")]
+    FactorPlaneSchemaMismatch,
 }
 
 /// Canonically ordered set of exact capability-registry versions.
@@ -736,6 +746,7 @@ pub struct DatasetManifest {
     pub source_lineage: DatasetSourceLineage,
     pub cohort_manifest: Option<DatasetCohortManifest>,
     pub model_spec_id: ModelSpecId,
+    pub model_family: ModelFamily,
     /// Immutable semantic definition bound before dataset materialization.
     pub model_spec_definition_hash: ContentHash,
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
@@ -746,8 +757,11 @@ pub struct DatasetManifest {
     pub knowledge_lag_secs: u64,
     pub sample_interval_secs: u64,
     pub horizons_secs: Vec<u64>,
+    pub feature_schema_version: SchemaVersion,
     pub feature_schema_hash: ContentHash,
-    pub factor_schema_hash: ContentHash,
+    /// Complete immutable factor revision set. Its scalar schema hash is a
+    /// derived persistence/index projection, never an independent owner.
+    pub factor_serving_plane: FactorServingPlane,
     pub label_schema_hash: ContentHash,
     pub semantic_dataset_hash: ContentHash,
     pub source_fingerprint: ContentHash,
@@ -762,6 +776,7 @@ struct DatasetManifestDocument {
     source_lineage: DatasetSourceLineage,
     cohort_manifest: Option<DatasetCohortManifest>,
     model_spec_id: ModelSpecId,
+    model_family: ModelFamily,
     model_spec_definition_hash: ContentHash,
     trade_policy_artifact_id: Option<TradePolicyArtifactId>,
     trade_policy_hash: Option<ContentHash>,
@@ -771,8 +786,9 @@ struct DatasetManifestDocument {
     knowledge_lag_secs: u64,
     sample_interval_secs: u64,
     horizons_secs: Vec<u64>,
+    feature_schema_version: SchemaVersion,
     feature_schema_hash: ContentHash,
-    factor_schema_hash: ContentHash,
+    factor_serving_plane: FactorServingPlane,
     label_schema_hash: ContentHash,
     semantic_dataset_hash: ContentHash,
     source_fingerprint: ContentHash,
@@ -780,6 +796,12 @@ struct DatasetManifestDocument {
 }
 
 impl DatasetManifest {
+    /// Strict scalar projection used by relational indexes and joins.
+    #[must_use]
+    pub const fn factor_schema_hash(&self) -> ContentHash {
+        self.factor_serving_plane.factor_schema_hash()
+    }
+
     pub fn validate(&self) -> Result<(), DatasetManifestContractError> {
         if self.format_version != DATASET_ARTIFACT_FORMAT_VERSION {
             return Err(DatasetManifestContractError::UnsupportedFormat {
@@ -787,6 +809,34 @@ impl DatasetManifest {
                 expected: DATASET_ARTIFACT_FORMAT_VERSION,
                 actual: self.format_version,
             });
+        }
+        self.factor_serving_plane.validate().map_err(|error| {
+            DatasetManifestContractError::InvalidFactorPlane {
+                detail: error.to_string(),
+            }
+        })?;
+        let factor_free = self.factor_serving_plane.definitions().is_empty();
+        if self.model_family.is_classical() != factor_free {
+            return Err(DatasetManifestContractError::FactorPlaneFamilyMismatch);
+        }
+        if self.feature_schema_version.get() < 1 {
+            return Err(DatasetManifestContractError::FactorPlaneSchemaMismatch);
+        }
+        if self
+            .factor_serving_plane
+            .definitions()
+            .iter()
+            .any(|definition| definition.feature_contract_hash() != self.feature_schema_hash)
+        {
+            return Err(DatasetManifestContractError::FactorPlaneFeatureMismatch);
+        }
+        if self
+            .factor_serving_plane
+            .definitions()
+            .iter()
+            .any(|definition| definition.input_schema_version() != self.feature_schema_version)
+        {
+            return Err(DatasetManifestContractError::FactorPlaneSchemaMismatch);
         }
         self.source_lineage.validate()?;
         if self.window_start >= self.window_end {
@@ -862,6 +912,7 @@ impl TryFrom<DatasetManifestDocument> for DatasetManifest {
             source_lineage: document.source_lineage,
             cohort_manifest: document.cohort_manifest,
             model_spec_id: document.model_spec_id,
+            model_family: document.model_family,
             model_spec_definition_hash: document.model_spec_definition_hash,
             trade_policy_artifact_id: document.trade_policy_artifact_id,
             trade_policy_hash: document.trade_policy_hash,
@@ -871,8 +922,9 @@ impl TryFrom<DatasetManifestDocument> for DatasetManifest {
             knowledge_lag_secs: document.knowledge_lag_secs,
             sample_interval_secs: document.sample_interval_secs,
             horizons_secs: document.horizons_secs,
+            feature_schema_version: document.feature_schema_version,
             feature_schema_hash: document.feature_schema_hash,
-            factor_schema_hash: document.factor_schema_hash,
+            factor_serving_plane: document.factor_serving_plane,
             label_schema_hash: document.label_schema_hash,
             semantic_dataset_hash: document.semantic_dataset_hash,
             source_fingerprint: document.source_fingerprint,
@@ -897,11 +949,112 @@ pub enum TrainingSampleSource {
 }
 
 /// Ordered sample-source contract frozen on a dataset plan.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, FromJsonQueryResult)]
 #[serde(transparent)]
-pub struct TrainingSampleSources(pub Vec<TrainingSampleSource>);
+pub struct TrainingSampleSources(Vec<TrainingSampleSource>);
 
-#[must_use]
-pub fn default_sample_sources() -> Vec<TrainingSampleSource> {
-    vec![TrainingSampleSource::HistoricalPit]
+/// Stable validation failures for a frozen sample-source contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TrainingSampleSourcesError {
+    #[error("training sample sources must not be empty")]
+    Empty,
+    #[error("training sample sources must be strictly ordered and unique")]
+    NonCanonical,
+}
+
+impl TrainingSampleSources {
+    #[must_use]
+    pub fn as_slice(&self) -> &[TrainingSampleSource] {
+        &self.0
+    }
+}
+
+impl Default for TrainingSampleSources {
+    fn default() -> Self {
+        Self(vec![TrainingSampleSource::HistoricalPit])
+    }
+}
+
+impl From<TrainingSampleSource> for TrainingSampleSources {
+    fn from(source: TrainingSampleSource) -> Self {
+        Self(vec![source])
+    }
+}
+
+impl TryFrom<Vec<TrainingSampleSource>> for TrainingSampleSources {
+    type Error = TrainingSampleSourcesError;
+
+    fn try_from(sources: Vec<TrainingSampleSource>) -> Result<Self, Self::Error> {
+        if sources.is_empty() {
+            return Err(TrainingSampleSourcesError::Empty);
+        }
+        if sources.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(TrainingSampleSourcesError::NonCanonical);
+        }
+        Ok(Self(sources))
+    }
+}
+
+impl<'de> Deserialize<'de> for TrainingSampleSources {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(Vec::<TrainingSampleSource>::deserialize(deserializer)?)
+            .map_err(D::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod sample_source_tests {
+    use serde_json::{from_str, to_string};
+
+    use super::{TrainingSampleSource, TrainingSampleSources, TrainingSampleSourcesError};
+
+    #[test]
+    fn default_is_historical() {
+        assert_eq!(
+            TrainingSampleSources::default().as_slice(),
+            [TrainingSampleSource::HistoricalPit]
+        );
+    }
+
+    #[test]
+    fn invalid_contracts_fail() {
+        assert_eq!(
+            TrainingSampleSources::try_from(Vec::new()),
+            Err(TrainingSampleSourcesError::Empty)
+        );
+        assert_eq!(
+            TrainingSampleSources::try_from(vec![
+                TrainingSampleSource::HistoricalPit,
+                TrainingSampleSource::HistoricalPit,
+            ]),
+            Err(TrainingSampleSourcesError::NonCanonical)
+        );
+        assert_eq!(
+            TrainingSampleSources::try_from(vec![
+                TrainingSampleSource::ExitDecision,
+                TrainingSampleSource::HistoricalPit,
+            ]),
+            Err(TrainingSampleSourcesError::NonCanonical)
+        );
+    }
+
+    #[test]
+    fn serde_rejects_drift() {
+        let sources = TrainingSampleSources::try_from(vec![
+            TrainingSampleSource::HistoricalPit,
+            TrainingSampleSource::ExitDecision,
+        ])
+        .expect("canonical sample sources");
+        let encoded = to_string(&sources).expect("serialize sample sources");
+        assert_eq!(
+            from_str::<TrainingSampleSources>(&encoded).expect("deserialize sample sources"),
+            sources
+        );
+        assert!(
+            from_str::<TrainingSampleSources>(r#"["exit_decision","historical_pit"]"#,).is_err()
+        );
+    }
 }

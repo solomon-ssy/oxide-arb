@@ -118,48 +118,57 @@ impl LotStateInput {
 pub fn is_position_state_factor(name: &FactorName) -> bool {
     matches!(
         name.as_str(),
-        "position_unrealized_pnl_pct" | "position_time_in_trade" | "position_peak_drawdown"
+        "position_take_profit_pressure"
+            | "position_stop_loss_pressure"
+            | "position_time_in_trade"
+            | "position_peak_drawdown"
     )
 }
 
 impl PositionStateFeatures {
-    /// The signed `[-1, 1]` position-state contributions keyed by pseudo-factor name.
+    /// Independent `[0, 1]` direct-exit evidence keyed by intrinsic input name.
+    ///
+    /// Profit and loss are deliberately separate coordinates: both may support
+    /// an exit, while neither can cancel the other by sign convention.
     #[must_use]
-    pub fn position_state_signed(&self) -> Vec<(FactorName, Option<Decimal>)> {
+    pub fn direct_exit_evidence(&self) -> Vec<(FactorName, Option<Decimal>)> {
+        let take_profit = self
+            .unrealized_pnl_pct
+            .map(|value| clamp_unit(value.max(Decimal::ZERO) / unrealized_pnl_scale()));
+        let stop_loss = self
+            .unrealized_pnl_pct
+            .map(|value| clamp_unit((-value).max(Decimal::ZERO) / unrealized_pnl_scale()));
         vec![
-            (
-                names::POSITION_UNREALIZED_PNL,
-                self.unrealized_pnl_pct
-                    .map(|value| clamp_signed(value / unrealized_pnl_scale())),
-            ),
+            (names::POSITION_TAKE_PROFIT_PRESSURE, take_profit),
+            (names::POSITION_STOP_LOSS_PRESSURE, stop_loss),
             (
                 names::POSITION_TIME_IN_TRADE,
-                Some(clamp_signed(self.time_in_trade_ratio)),
+                Some(clamp_unit(self.time_in_trade_ratio)),
             ),
             (
                 names::POSITION_PEAK_DRAWDOWN,
-                self.peak_mark_drawdown.map(clamp_signed),
+                self.peak_mark_drawdown.map(clamp_unit),
             ),
         ]
     }
 }
 
-/// Signed contribution for one position-state pseudo-factor (training simplex fit).
+/// Direct-exit contribution for one position-state intrinsic input.
 #[must_use]
-pub fn position_state_signed_contribution(
+pub fn position_state_exit_contribution(
     state: &PositionStateFeatures,
     factor: &FactorName,
 ) -> Option<Decimal> {
     (state)
-        .position_state_signed()
+        .direct_exit_evidence()
         .into_iter()
         .find(|(name, _)| name == factor)
-        .and_then(|(_, signed)| signed)
+        .and_then(|(_, evidence)| evidence)
 }
 
-fn clamp_signed(value: Decimal) -> Decimal {
+fn clamp_unit(value: Decimal) -> Decimal {
     value
-        .clamp(-Decimal::ONE, Decimal::ONE)
+        .clamp(Decimal::ZERO, Decimal::ONE)
         .round_dp(RESEARCH_DECIMAL_SCALE)
 }
 
@@ -183,10 +192,14 @@ fn checked_difference(label: &str, left: Decimal, right: Decimal) -> QuantResult
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use super::{LotStateInput, position_state_signed_contribution};
-    use crate::factors::{names, names::POSITION_UNREALIZED_PNL};
+    use super::{LotStateInput, position_state_exit_contribution};
+    use crate::factors::{
+        names,
+        names::{POSITION_STOP_LOSS_PRESSURE, POSITION_TAKE_PROFIT_PRESSURE},
+    };
 
     #[test]
     fn position_state_matches_formula() {
@@ -209,8 +222,10 @@ mod tests {
                 .peak_mark_drawdown
                 .is_some_and(|value| value > dec!(0))
         );
-        let signed = position_state_signed_contribution(&state, &POSITION_UNREALIZED_PNL);
-        assert!(signed.is_some_and(|value| value > dec!(0)));
+        let take_profit = position_state_exit_contribution(&state, &POSITION_TAKE_PROFIT_PRESSURE);
+        let stop_loss = position_state_exit_contribution(&state, &POSITION_STOP_LOSS_PRESSURE);
+        assert!(take_profit.is_some_and(|value| value > dec!(0)));
+        assert_eq!(stop_loss, Some(dec!(0)));
     }
 
     #[test]
@@ -229,8 +244,36 @@ mod tests {
         assert_eq!(state.unrealized_pnl_pct, None);
         assert_eq!(state.peak_mark_drawdown, None);
         assert_eq!(
-            position_state_signed_contribution(&state, &names::POSITION_UNREALIZED_PNL),
+            position_state_exit_contribution(&state, &names::POSITION_TAKE_PROFIT_PRESSURE),
             None
+        );
+    }
+
+    #[test]
+    fn pressures_support_exit() {
+        let opened = Utc.timestamp_opt(1_000, 0).single().expect("ts");
+        let state = |mark| {
+            (LotStateInput {
+                avg_price: dec!(0.50),
+                mark: Some(mark),
+                opened_at: opened,
+                now: opened + Duration::seconds(60),
+                max_hold_secs: 3_600,
+                peak_mark: Some(mark),
+            })
+            .position_state_features()
+            .expect("position state")
+        };
+        let profit = state(dec!(0.60));
+        let loss = state(dec!(0.40));
+
+        assert!(
+            position_state_exit_contribution(&profit, &POSITION_TAKE_PROFIT_PRESSURE)
+                .is_some_and(|value| value > Decimal::ZERO)
+        );
+        assert!(
+            position_state_exit_contribution(&loss, &POSITION_STOP_LOSS_PRESSURE)
+                .is_some_and(|value| value > Decimal::ZERO)
         );
     }
 }

@@ -1,6 +1,6 @@
 //! Offline backtest orchestration.
 //!
-//! Replays a registered model over exact immutable v2 Parquet rows plus their
+//! Replays a registered model over exact immutable v3 Parquet rows plus their
 //! Dataset-bound Source Slice execution facts. Frozen
 //! selection context, `FeatureCell`s, factor values, and labels are the sole
 //! evaluation input. Historical rematerialization is a separate parity job and
@@ -19,19 +19,21 @@ use chrono::{DateTime, Utc};
 use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
-    domain::quant::{
-        BacktestReportInfo, JobProgressSink, ModelComparisonReportInfo, ModelVersionInfo,
-        NewBacktestReport, NewModelComparisonReport, NewModelRun, TrainingDatasetInfo,
+    domain::{
+        governance::DecisionPolicySnapshotInfo,
+        quant::{
+            BacktestReportInfo, JobProgressSink, ModelComparisonReportInfo, ModelVersionInfo,
+            NewBacktestReport, NewModelComparisonReport, NewModelRun, TrainingDatasetInfo,
+        },
+        query::TimeWindow,
     },
-    enums::quant::{
-        DatasetPurpose, ModelRunErrorCode, ModelRunKind, ModelRunStatus, TrainingDatasetStatus,
-    },
+    enums::quant::{DatasetPurpose, ModelRunErrorCode, ModelRunKind},
     hashing::CanonicalDigest,
-    runtime_config::PortfolioConfig,
     types::{
-        BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, MarketId,
-        ModelComparisonReportId, ModelRunId, ModelVersionId, PayoutRatio, ResearchJobProgress,
-        TokenId, TrainingDatasetId,
+        BacktestReportId, Bps, DecisionPolicySnapshotId, MarketId, ModelComparisonReportId,
+        ModelRunId, ModelVersionId, PayoutRatio, ResearchJobProgress, ResearchProfileArtifact,
+        TokenId, TrainingDatasetId, calibration::ModelScoreCalibrationFitContract,
+        model_serving::ModelServingPolicySnapshotBinding,
     },
 };
 use quant_pivot_repository::traits::{
@@ -46,7 +48,7 @@ use quant_pivot_research::{
         ModelComparisonReport, PortfolioCaps, PortfolioReplayBacktester, SampleOutcome,
     },
     execution_semantics::{PitFeeSchedule, aggressive_buy_limit},
-    model::{ActiveSchemaBinding, ModelRuntimeFactoryBuilder, QuantModelRuntime},
+    model::QuantModelRuntime,
     training::{LabelName, TrainingExample},
 };
 use rust_decimal::Decimal;
@@ -54,15 +56,19 @@ use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    governance::policy_snapshot::VerifiedPolicySnapshotBinding,
     prefetch::{
         replay_page::{MAX_REPLAY_PAGE_MARKETS, ReplayPage, ReplayPageRequest},
         source_slice::{FrozenSourceSlice, SourceSliceReader},
     },
     projection::inference_batch::build_frozen_runtime_input,
-    service::training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
+    service::{
+        model_serving_preimage::{ModelServingPreimageService, VerifiedReplayDataset},
+        training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
+    },
 };
 
-/// Repository + store + factory dependencies for the backtest service.
+/// Repository, store, and verified-preimage dependencies for the backtest service.
 pub struct BacktestServiceDeps {
     /// Process-wide offline CPU and memory governor.
     pub compute: Arc<ComputeExecutor>,
@@ -78,8 +84,8 @@ pub struct BacktestServiceDeps {
     pub backtest_report_repo: Arc<dyn BacktestReportRepository>,
     /// Pairwise comparison-report ledger (pair mode).
     pub comparison_report_repo: Arc<dyn ModelComparisonReportRepository>,
-    /// Runtime factory builder (loads the model under test).
-    pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
+    /// Canonical full-graph model and replay-Dataset preimage verifier.
+    pub serving_preimages: Arc<ModelServingPreimageService>,
 }
 
 /// A backtest request resolved by the admin port.
@@ -99,40 +105,63 @@ pub struct BacktestInput {
 /// Calibration reuses the deterministic replay computation but does not write
 /// a `quant_backtest_report`: that ledger is reserved for reusable evaluation
 /// evidence and its `evaluation_dataset_id` invariant.
-pub struct CalibrationReplayInput {
+pub(crate) struct CalibrationReplayInput {
     /// Model version whose scores are being calibrated.
-    pub model_version_id: ModelVersionId,
+    pub source_model: ModelVersionId,
     /// Independent purpose-bound calibration dataset.
-    pub calibration_dataset_id: TrainingDatasetId,
+    pub calibration_dataset: TrainingDatasetId,
     /// Frozen decision-policy snapshot governing the replay.
-    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub policy_snapshot: DecisionPolicySnapshotId,
+}
+
+/// Exact samples and immutable provenance produced by one calibration replay.
+pub(crate) struct CalibrationReplayEvidence {
+    /// Running ledger row whose terminal state is owned by the calibrator
+    /// producer after fit and artifact persistence finish.
+    pub model_run_id: ModelRunId,
+    /// Per-sample score/outcome evidence.
+    pub samples: Vec<SampleOutcome>,
+    /// Exact catalog window of the deeply verified Calibration Dataset.
+    pub fit_window: TimeWindow,
+    /// Canonical model, Dataset/Source Slice, and policy preimages.
+    pub fit_contract: ModelScoreCalibrationFitContract,
 }
 
 /// Offline backtest service, bound to one frozen runtime-config snapshot.
 pub struct BacktestService {
     deps: BacktestServiceDeps,
+    policy_binding: ModelServingPolicySnapshotBinding,
     caps: PortfolioCaps,
-    bias_table_hash: Option<ContentHash>,
     entry_max_slippage_bps: Bps,
 }
 
 impl BacktestService {
-    /// Assemble the service from deps + the frozen replay/portfolio config.
+    /// Assemble the service from dependencies and one canonical frozen policy
+    /// snapshot.
     ///
     /// # Errors
     ///
-    /// Returns a typed validation error when any frozen portfolio cap is not a
-    /// valid decimal; invalid caps never become a zero budget/cap.
+    /// Returns a typed validation error when the snapshot identity, revision
+    /// projections, four profile artifacts, or portfolio caps are invalid.
     pub fn new(
         deps: BacktestServiceDeps,
-        portfolio: &PortfolioConfig,
-        bias_table_hash: Option<ContentHash>,
-        entry_max_slippage_bps: Bps,
+        policy: &DecisionPolicySnapshotInfo,
     ) -> QuantResult<Self> {
+        let policy_binding = ModelServingPolicySnapshotBinding::from(
+            VerifiedPolicySnapshotBinding::try_from(policy)?,
+        );
+        let caps = PortfolioCaps::try_from(&policy.snapshot.execution_risk.portfolio)?;
+        let entry_max_slippage_bps = Bps::new(Decimal::from(
+            policy
+                .snapshot
+                .execution_risk
+                .entry_order_policy
+                .max_slippage_bps,
+        ));
         Ok(Self {
             deps,
-            caps: PortfolioCaps::try_from(portfolio)?,
-            bias_table_hash,
+            policy_binding,
+            caps,
             entry_max_slippage_bps,
         })
     }
@@ -144,18 +173,57 @@ impl BacktestService {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<BacktestReportInfo> {
-        let version = self.find_version(&input.model_version_id).await?;
-        let dataset = self
-            .load_ready_dataset(
-                &input.evaluation_dataset_id,
-                DatasetPurpose::Evaluation,
-                "backtest",
-            )
-            .await?;
-        Ok(self
-            .run_recorded(&version, &dataset, &input, &progress, &cancel)
-            .await?
-            .info)
+        let prepared = Box::pin(self.prepare(
+            &input.model_version_id,
+            &input.evaluation_dataset_id,
+            input.decision_policy_snapshot_id,
+            DatasetPurpose::Evaluation,
+        ))
+        .await?;
+        Ok(
+            Box::pin(self.run_recorded(prepared, &input, &progress, &cancel))
+                .await?
+                .info,
+        )
+    }
+
+    /// Verify every canonical replay preimage without creating a run, report,
+    /// comparison, or other evidence row.
+    pub async fn verify(&self, input: &BacktestInput) -> QuantResult<()> {
+        let prepared = Box::pin(self.prepare(
+            &input.model_version_id,
+            &input.evaluation_dataset_id,
+            input.decision_policy_snapshot_id,
+            DatasetPurpose::Evaluation,
+        ))
+        .await?;
+        drop(prepared);
+        Ok(())
+    }
+
+    /// Verify both candidate and baseline before a cached comparison can be
+    /// returned or either model run can be created.
+    pub async fn verify_comparison(
+        &self,
+        input: &BacktestInput,
+        baseline_version_id: ModelVersionId,
+    ) -> QuantResult<()> {
+        let candidate = Box::pin(self.prepare(
+            &input.model_version_id,
+            &input.evaluation_dataset_id,
+            input.decision_policy_snapshot_id,
+            DatasetPurpose::Evaluation,
+        ))
+        .await?;
+        let baseline = Box::pin(self.prepare(
+            &baseline_version_id,
+            &input.evaluation_dataset_id,
+            input.decision_policy_snapshot_id,
+            DatasetPurpose::Evaluation,
+        ))
+        .await?;
+        drop((candidate, baseline));
+        Ok(())
     }
 
     /// Pair mode: replay the candidate (`input.model_version_id`) and the
@@ -169,34 +237,34 @@ impl BacktestService {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<(BacktestReportInfo, ModelComparisonReportInfo)> {
-        let candidate_version = self.find_version(&input.model_version_id).await?;
-        let baseline_version = self.find_version(&baseline_version_id).await?;
-        let dataset = self
-            .load_ready_dataset(
-                &input.evaluation_dataset_id,
-                DatasetPurpose::Evaluation,
-                "backtest comparison",
-            )
-            .await?;
+        // Both exact contracts are resolved before the first candidate run is
+        // created. A bad baseline can therefore never leave half a pair.
+        let candidate_prepared = Box::pin(self.prepare(
+            &input.model_version_id,
+            &input.evaluation_dataset_id,
+            input.decision_policy_snapshot_id,
+            DatasetPurpose::Evaluation,
+        ))
+        .await?;
+        let baseline_prepared = Box::pin(self.prepare(
+            &baseline_version_id,
+            &input.evaluation_dataset_id,
+            input.decision_policy_snapshot_id,
+            DatasetPurpose::Evaluation,
+        ))
+        .await?;
 
-        let candidate = self
-            .run_recorded(&candidate_version, &dataset, &input, &progress, &cancel)
-            .await?;
+        let candidate =
+            Box::pin(self.run_recorded(candidate_prepared, &input, &progress, &cancel)).await?;
         let baseline_input = BacktestInput {
             model_version_id: baseline_version_id,
             evaluation_dataset_id: input.evaluation_dataset_id,
             decision_policy_snapshot_id: input.decision_policy_snapshot_id,
             backtest_report_id: None,
         };
-        let baseline = self
-            .run_recorded(
-                &baseline_version,
-                &dataset,
-                &baseline_input,
-                &progress,
-                &cancel,
-            )
-            .await?;
+        let baseline =
+            Box::pin(self.run_recorded(baseline_prepared, &baseline_input, &progress, &cancel))
+                .await?;
 
         let comparison = baseline.result.compare(&candidate.result)?;
         let info = self
@@ -208,59 +276,58 @@ impl BacktestService {
     /// Replay a calibration dataset to harvest per-sample `(score, outcome)`
     /// pairs for `ProbabilityCalibrator` fitting.
     ///
-    /// The replay writes a purpose-specific `Calibration` model run, while the
-    /// resulting calibration artifact owns the exact dataset lineage. It does
-    /// not write an evaluation backtest report.
-    pub async fn run_for_calibration(
+    /// The replay writes a purpose-specific `Calibration` model run. Replay
+    /// failure marks it failed; replay success leaves it `Running` so the sole
+    /// calibrator producer can bind the terminal output to the persisted
+    /// calibration artifact. It does not write an evaluation backtest report.
+    pub(crate) async fn run_for_calibration(
         &self,
         input: CalibrationReplayInput,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
-    ) -> QuantResult<Vec<SampleOutcome>> {
-        let version = self.find_version(&input.model_version_id).await?;
-        let dataset = self
-            .load_ready_dataset(
-                &input.calibration_dataset_id,
-                DatasetPurpose::Calibration,
-                "model calibration replay",
-            )
-            .await?;
+    ) -> QuantResult<CalibrationReplayEvidence> {
+        let prepared = Box::pin(self.prepare(
+            &input.source_model,
+            &input.calibration_dataset,
+            input.policy_snapshot,
+            DatasetPurpose::Calibration,
+        ))
+        .await?;
+        let fit_contract = prepared.calibration_contract.clone().ok_or_else(|| {
+            ResearchError::InvalidModelArtifact {
+                detail: "calibration replay did not resolve its exact fit contract".to_owned(),
+            }
+        })?;
+        let fit_window =
+            TimeWindow::new(prepared.dataset.window_start, prepared.dataset.window_end);
         let model_run_id = ModelRunId::from_v7();
         self.create_run(
             &model_run_id,
-            input.model_version_id,
-            input.decision_policy_snapshot_id,
-            &dataset,
+            input.source_model,
+            input.policy_snapshot,
+            &prepared.dataset,
             ModelRunKind::Calibration,
         )
         .await?;
 
-        let replay = self
-            .replay(
-                ReplayCtx {
-                    backtest_report_id: &BacktestReportId::from_v7(),
-                    model_run_id: &model_run_id,
-                    version: &version,
-                    dataset: &dataset,
-                    decision_policy_snapshot_id: input.decision_policy_snapshot_id,
-                },
-                &progress,
-                &cancel,
-            )
-            .await;
+        let replay = Box::pin(self.replay(
+            ReplayCtx {
+                backtest_report_id: BacktestReportId::from_v7(),
+                model_run_id,
+                prepared,
+                decision_policy_snapshot_id: input.policy_snapshot,
+            },
+            &progress,
+            &cancel,
+        ))
+        .await;
         match replay {
-            Ok(result) => {
-                self.deps
-                    .model_run_repo
-                    .succeed(
-                        &model_run_id,
-                        result.report.report_hash,
-                        Utc::now(),
-                        Some(version.model_version_id),
-                    )
-                    .await?;
-                Ok(result.sample_outcomes)
-            }
+            Ok(result) => Ok(CalibrationReplayEvidence {
+                model_run_id,
+                samples: result.sample_outcomes,
+                fit_window,
+                fit_contract,
+            }),
             Err(error) => {
                 let _ = self
                     .deps
@@ -269,7 +336,6 @@ impl BacktestService {
                         &model_run_id,
                         ModelRunErrorCode::CalibrationFailed,
                         error.to_string(),
-                        Utc::now(),
                     )
                     .await;
                 Err(error)
@@ -295,12 +361,114 @@ impl BacktestService {
             })
     }
 
+    /// Resolve and verify every immutable preimage, then load the runtime.
+    /// Nothing in this path creates evidence or mutates a repository.
+    async fn prepare(
+        &self,
+        model_version_id: &ModelVersionId,
+        dataset_id: &TrainingDatasetId,
+        policy_id: DecisionPolicySnapshotId,
+        purpose: DatasetPurpose,
+    ) -> QuantResult<PreparedReplay> {
+        let version = self.find_version(model_version_id).await?;
+        let source = self.deps.serving_preimages.load(&version).await?;
+        let source_policy = &source
+            .artifact()
+            .header()
+            .serving_contract()
+            .bindings()
+            .policy_snapshot;
+        if policy_id != self.policy_binding.decision_policy_snapshot_id
+            || source_policy != &self.policy_binding
+        {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "backtest policy snapshot {policy_id} differs from exact model source {}",
+                    self.policy_binding.decision_policy_snapshot_id
+                ),
+            }
+            .into());
+        }
+        let dataset = self.find_dataset(dataset_id).await?;
+        let replay = Box::pin(
+            self.deps
+                .serving_preimages
+                .verify_replay_dataset(&source, &dataset, purpose),
+        )
+        .await?;
+        let calibration_contract = if purpose == DatasetPurpose::Calibration {
+            Some(
+                Box::pin(
+                    self.deps
+                        .serving_preimages
+                        .calibration_fit_contract(&source, &dataset),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let (examples, frozen_source) = self
+            .load_replay_artifacts(&replay, source.profile())
+            .await?;
+
+        // Runtime construction is intentionally last and consumes only the
+        // already verified source retained above.
+        let model = source.buy_runtime()?;
+        Ok(PreparedReplay {
+            version,
+            dataset,
+            model,
+            examples,
+            frozen_source,
+            calibration_contract,
+        })
+    }
+
+    async fn load_replay_artifacts(
+        &self,
+        replay: &VerifiedReplayDataset<'_>,
+        profile: &ResearchProfileArtifact,
+    ) -> QuantResult<(Vec<TrainingExample>, FrozenSourceSlice)> {
+        let dataset = replay.dataset();
+        let materialization = replay.materialization();
+        let bytes = self
+            .deps
+            .artifact_store
+            .get(materialization.parquet_uri)
+            .await?;
+        let examples = verify_frozen_dataset_artifact(dataset, &bytes)?;
+        let frozen = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
+            .read_ref(&dataset.source_lineage.source_slice)
+            .await?;
+        dataset
+            .source_lineage
+            .verify_manifest(&frozen.manifest)
+            .map_err(|error| ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "Dataset source lineage differs from the verified Source Slice: {error}"
+                ),
+            })?;
+        frozen
+            .manifest
+            .validate_for_profile(
+                profile,
+                &dataset.source_lineage.research_program_hash,
+                dataset.window_start,
+                dataset.window_end,
+                dataset.pit_cutoff,
+            )
+            .map_err(|detail| ResearchError::InvalidModelArtifact {
+                detail: format!("Source Slice profile/PIT preimage failed: {detail}"),
+            })?;
+        Ok((examples, frozen))
+    }
+
     /// Create the run record, replay, and finalize it (succeed/fail), returning
     /// the report info, the run result (for comparison), and the run id.
     async fn run_recorded(
         &self,
-        version: &ModelVersionInfo,
-        dataset: &TrainingDatasetInfo,
+        prepared: PreparedReplay,
         input: &BacktestInput,
         progress: &Arc<dyn JobProgressSink>,
         cancel: &CancellationToken,
@@ -313,24 +481,22 @@ impl BacktestService {
             &model_run_id,
             input.model_version_id,
             input.decision_policy_snapshot_id,
-            dataset,
+            &prepared.dataset,
             ModelRunKind::Backtest,
         )
         .await?;
 
-        match self
-            .run_inner(
-                RunInnerCtx {
-                    backtest_report_id: &backtest_report_id,
-                    model_run_id: &model_run_id,
-                    version,
-                    dataset,
-                    input,
-                },
-                progress,
-                cancel,
-            )
-            .await
+        match Box::pin(self.run_inner(
+            RunInnerCtx {
+                backtest_report_id,
+                model_run_id,
+                prepared,
+                input,
+            },
+            progress,
+            cancel,
+        ))
+        .await
         {
             Ok((info, result)) => {
                 self.deps
@@ -338,8 +504,7 @@ impl BacktestService {
                     .succeed(
                         &model_run_id,
                         info.report_hash,
-                        Utc::now(),
-                        Some(version.model_version_id),
+                        Some(input.model_version_id),
                     )
                     .await?;
                 Ok(RecordedRun {
@@ -356,7 +521,6 @@ impl BacktestService {
                         &model_run_id,
                         ModelRunErrorCode::ActiveInferenceFailed,
                         error.to_string(),
-                        Utc::now(),
                     )
                     .await;
                 Err(error)
@@ -409,26 +573,23 @@ impl BacktestService {
         let RunInnerCtx {
             backtest_report_id,
             model_run_id,
-            version,
-            dataset,
+            prepared,
             input,
         } = ctx;
-        let result = self
-            .replay(
-                ReplayCtx {
-                    backtest_report_id,
-                    model_run_id,
-                    version,
-                    dataset,
-                    decision_policy_snapshot_id: input.decision_policy_snapshot_id,
-                },
-                progress,
-                cancel,
-            )
-            .await?;
+        let result = Box::pin(self.replay(
+            ReplayCtx {
+                backtest_report_id,
+                model_run_id,
+                prepared,
+                decision_policy_snapshot_id: input.decision_policy_snapshot_id,
+            },
+            progress,
+            cancel,
+        ))
+        .await?;
 
         progress.report(ResearchJobProgress::indeterminate("finalize", 0));
-        let info = self.persist_report(model_run_id, &result.report).await?;
+        let info = self.persist_report(&model_run_id, &result.report).await?;
         Ok((info, result))
     }
 
@@ -436,51 +597,27 @@ impl BacktestService {
     /// owns the result.
     async fn replay(
         &self,
-        ctx: ReplayCtx<'_>,
+        ctx: ReplayCtx,
         progress: &Arc<dyn JobProgressSink>,
         cancel: &CancellationToken,
     ) -> QuantResult<BacktestRunResult> {
         let ReplayCtx {
             backtest_report_id,
             model_run_id,
-            version,
-            dataset,
+            prepared,
             decision_policy_snapshot_id,
         } = ctx;
-        let materialization = require_dataset_materialization(dataset)?;
-        // Load the model under test, bound to the dataset's frozen schema.
-        let binding = ActiveSchemaBinding {
-            feature_schema_hash: *materialization.feature_schema_hash,
-            factor_schema_hash: *materialization.factor_schema_hash,
-            bias_table_hash: self.bias_table_hash,
-        };
-        let factory = self.deps.factory_builder.build(binding);
-        // Backtests are deterministic and never apply a config weight overlay.
-        let model = factory.load(version, None).await?;
-
-        // Exact frozen bytes are the evaluation input; no rematerialization is
-        // permitted on this path.
-        let bytes = self
-            .deps
-            .artifact_store
-            .get(materialization.parquet_uri)
-            .await?;
-        let examples = verify_frozen_dataset_artifact(dataset, &bytes)?;
-        let source_slice = dataset
-            .manifest
-            .as_ref()
-            .ok_or_else(|| ResearchError::DatasetBuild {
-                detail: "backtest dataset has no immutable v2 manifest".to_owned(),
-            })?
-            .source_lineage
-            .source_slice
-            .clone();
-        let frozen_source = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
-            .read_ref(&source_slice)
-            .await?;
+        let PreparedReplay {
+            version,
+            dataset,
+            model,
+            examples,
+            frozen_source,
+            calibration_contract: _,
+        } = prepared;
 
         let request = BacktestRequest {
-            backtest_report_id: *backtest_report_id,
+            backtest_report_id,
             model_version_id: version.model_version_id,
             dataset_id: dataset.training_dataset_id,
             decision_policy_snapshot_id,
@@ -496,7 +633,7 @@ impl BacktestService {
             examples,
             caps: self.caps.clone(),
             request,
-            model_run_id: *model_run_id,
+            model_run_id,
             sink: Arc::clone(progress),
             cancel: cancel.clone(),
             frozen_source,
@@ -570,41 +707,21 @@ impl BacktestService {
         Ok(info)
     }
 
-    async fn load_ready_dataset(
+    async fn find_dataset(
         &self,
         training_dataset_id: &TrainingDatasetId,
-        expected_purpose: DatasetPurpose,
-        operation: &'static str,
     ) -> QuantResult<TrainingDatasetInfo> {
-        let dataset = self
-            .deps
+        self.deps
             .dataset_repo
             .find_by_id(training_dataset_id)
             .await?
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "training_dataset",
-                id: training_dataset_id.to_string(),
-            })?;
-        if dataset.status != TrainingDatasetStatus::Ready {
-            return Err(ResearchError::DatasetBuild {
-                detail: format!(
-                    "{operation} requires a Ready dataset, got {}",
-                    dataset.status.as_str()
-                ),
-            }
-            .into());
-        }
-        if dataset.purpose != expected_purpose {
-            return Err(ResearchError::DatasetBuild {
-                detail: format!(
-                    "{operation} requires purpose={}, got {}",
-                    expected_purpose.as_str(),
-                    dataset.purpose.as_str()
-                ),
-            }
-            .into());
-        }
-        Ok(dataset)
+            .ok_or_else(|| {
+                StorageError::NotFound {
+                    entity: "training_dataset",
+                    id: training_dataset_id.to_string(),
+                }
+                .into()
+            })
     }
 
     async fn create_run(
@@ -626,35 +743,37 @@ impl BacktestService {
                 market_selection_id: None,
                 window_start: dataset.window_start,
                 window_end: dataset.window_end,
-                status: ModelRunStatus::Running,
                 input_hash: *materialization.dataset_hash,
-                output_hash: None,
-                error_code: None,
-                error_message: None,
-                started_at: Utc::now(),
-                finished_at: None,
             })
             .await?;
         Ok(())
     }
 }
 
-/// Borrowed inputs for one recorded backtest replay (pre-assigned ids + the
-/// resolved model version, frozen dataset, and request).
+/// Fully verified replay state. Runtime construction is complete, but no
+/// evidence row has been created.
+struct PreparedReplay {
+    version: ModelVersionInfo,
+    dataset: TrainingDatasetInfo,
+    model: Arc<dyn QuantModelRuntime>,
+    examples: Vec<TrainingExample>,
+    frozen_source: FrozenSourceSlice,
+    calibration_contract: Option<ModelScoreCalibrationFitContract>,
+}
+
+/// Inputs for one recorded backtest replay.
 struct RunInnerCtx<'a> {
-    backtest_report_id: &'a BacktestReportId,
-    model_run_id: &'a ModelRunId,
-    version: &'a ModelVersionInfo,
-    dataset: &'a TrainingDatasetInfo,
+    backtest_report_id: BacktestReportId,
+    model_run_id: ModelRunId,
+    prepared: PreparedReplay,
     input: &'a BacktestInput,
 }
 
-/// Borrowed inputs shared by evaluation and calibration replay execution.
-struct ReplayCtx<'a> {
-    backtest_report_id: &'a BacktestReportId,
-    model_run_id: &'a ModelRunId,
-    version: &'a ModelVersionInfo,
-    dataset: &'a TrainingDatasetInfo,
+/// Verified inputs shared by evaluation and calibration replay execution.
+struct ReplayCtx {
+    backtest_report_id: BacktestReportId,
+    model_run_id: ModelRunId,
+    prepared: PreparedReplay,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
 }
 
@@ -668,7 +787,7 @@ struct RecordedRun {
 
 /// Owned inputs moved into the governed offline backtest replay.
 struct BacktestReplayInputs {
-    model: Box<dyn QuantModelRuntime>,
+    model: Arc<dyn QuantModelRuntime>,
     examples: Vec<TrainingExample>,
     caps: PortfolioCaps,
     request: BacktestRequest,

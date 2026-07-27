@@ -1581,7 +1581,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 - `GET /api/research/feature-integrity/summary` 的 `latch.open=false`；
 - `catalog_coverage_start` 已建立、`catalog_watermark` 持续前进，`parity_age_secs` 在运维时效内；
 - latest sampled/full parity 为 `passed`，无 mismatch，无超过 materialization deadline 的 pending；
-- latest model/factor publication 是预期版本；
+- latest published model 的 exact serving contract 与 immutable factor revisions 是预期版本；
 - 六类 active policy revision、bundle hash 与 decision snapshot 是预期值；
 - allowance 足够；
 - Polymarket status / RPC / bridge 无已知事故。
@@ -1684,7 +1684,8 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 
 1. revoke 异常 report；
 2. 对 `model_routing` 创建显式 rollback activation，回到不引用异常 artifact 的已验证 boot revision；不得加载 boot baseline 之前的旧 schema 或 pointer；
-3. rollback/retire model 或 factor publication；
+3. retire 异常 model；factor revision 是不可变内容寻址事实，不执行 publish/retire，而是通过已验证
+   model routing rollback 或重新训练切换到不引用异常 revision 的 exact serving contract；
 4. 重新跑 backtest / shadow report；
 5. 用小 budget 在 `semi_auto` 验证后再恢复 auto。
 

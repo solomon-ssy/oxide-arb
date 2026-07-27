@@ -2,21 +2,20 @@
 
 use chrono::Utc;
 use quant_pivot_models::{
-    domain::quant::{NewMarketSelection, NewModelRun, NewModelVersion, NewPortfolioPlan},
+    domain::quant::{NewMarketSelection, NewModelRun, NewPortfolioPlan},
     entities::quant_portfolio_plan::Entity,
     enums::{
         model::ModelFamily,
         quant::{
-            CorrelationSource, ModelRunKind, ModelRunStatus, OptimizerSolverStatus,
-            PortfolioSolveMode, PortfolioSolverKind, PublicationStatus,
+            CorrelationSource, ModelRunKind, OptimizerSolverStatus, PortfolioSolveMode,
+            PortfolioSolverKind,
         },
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, MarketSelectionId, ModelInputContract, ModelRunId,
         ModelSpecId, ModelTrainingContract, ModelVersionId, PortfolioConstraintsSnapshot,
         PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
-        SelectionExclusionSummary, Usd, model_metrics::ModelVersionMetrics,
-        model_training::ModelTrainingObjective,
+        SelectionExclusionSummary, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -32,7 +31,9 @@ use quant_pivot_repository::{
 use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
-        execution_pg_seed, model_spec_fixtures, policy_fixtures::bootstrap_default_policy_bundle,
+        model_serving_fixtures::{ModelVersionFixture, ModelVersionFixtureSeed},
+        model_spec_fixtures,
+        policy_fixtures::bootstrap_default_policy_bundle,
     },
 };
 use rust_decimal_macros::dec;
@@ -54,7 +55,7 @@ async fn seed_model_run(db: &DatabaseConnection, rc_id: &DecisionPolicySnapshotI
             model_spec_id,
             "portfolio-optimizer-meta-it",
             ModelFamily::WeightedFactor,
-            86_400,
+            model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
             ModelTrainingContract::settlement_default(),
         ))
@@ -62,49 +63,40 @@ async fn seed_model_run(db: &DatabaseConnection, rc_id: &DecisionPolicySnapshotI
         .expect("model spec");
 
     let model_version_id = ModelVersionId::from_v7();
-    registry
-        .create_model_version(NewModelVersion {
+    let version = ModelVersionFixture::prepare(
+        db,
+        ModelVersionFixtureSeed::training(
+            format!("portfolio-optimizer:{model_version_id}"),
             model_version_id,
             model_spec_id,
-            version: 1,
-            profile_ref: execution_pg_seed::fixture_profile_ref(),
-            artifact_hash: content_hash('a'),
-            category_scope: None,
-            training_dataset_id: None,
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
-            publish_path_set_id: None,
-            derivation: NewModelVersion::training_derivation(),
-            metrics: ModelVersionMetrics::not_measured("test fixture"),
-            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Candidate,
-            published_at: None,
-            retired_at: None,
-        })
+            content_hash('a'),
+        ),
+    )
+    .await
+    .expect("prepare exact model version");
+    registry
+        .create_model_version(version)
         .await
         .expect("model version");
 
     let model_run_id = ModelRunId::from_v7();
-    PgModelRunRepository::new(db.clone())
-        .create(NewModelRun {
-            model_run_id,
-            run_kind: ModelRunKind::LiveInference,
-            model_version_id: Some(model_version_id),
-            decision_policy_snapshot_id: *rc_id,
-            market_selection_id: None,
-            window_start: Utc::now(),
-            window_end: Utc::now(),
-            status: ModelRunStatus::Succeeded,
-            input_hash: content_hash('d'),
-            output_hash: None,
-            error_code: None,
-            error_message: None,
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
-        })
+    let runs = PgModelRunRepository::new(db.clone());
+    let window_at = Utc::now();
+    runs.create(NewModelRun {
+        model_run_id,
+        run_kind: ModelRunKind::LiveInference,
+        model_version_id: Some(model_version_id),
+        decision_policy_snapshot_id: *rc_id,
+        market_selection_id: None,
+        window_start: window_at,
+        window_end: window_at,
+        input_hash: content_hash('d'),
+    })
+    .await
+    .expect("create model run");
+    runs.succeed(&model_run_id, content_hash('e'), None)
         .await
-        .expect("model run");
+        .expect("finish model run");
     model_run_id
 }
 

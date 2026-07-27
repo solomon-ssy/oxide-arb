@@ -1,19 +1,26 @@
 //! Report-pipeline system contracts against disposable `PostgreSQL`.
 
 use chrono::{Duration, Utc};
-use quant_pivot_core::report::AdHocReportRequest;
 use quant_pivot_error::{QuantError, account::AccountError};
 use quant_pivot_models::{
     domain::{api::OperationLogQuery, quant::NewEquitySnapshot},
+    entities::{
+        quant_market_selection::Entity as MarketSelectionEntity,
+        quant_model_run::Entity as ModelRunEntity,
+    },
     enums::quant::{
         AccountSource, EmptyReportReason, RecommendationReportStatus, RecommendationStatus,
     },
     types::{EquitySnapshotId, ReportTriggerKey, Usd},
 };
 use quant_pivot_repository::{
-    postgres::{PgEquitySnapshotRepository, PgOperationLogRepository},
+    postgres::{
+        PgEquitySnapshotRepository, PgFactorRepository, PgMarketSelectionRepository,
+        PgModelRegistryRepository, PgOperationLogRepository,
+    },
     traits::{
-        EquitySnapshotRepository, OperationLogRepository, RecommendationRepository,
+        EquitySnapshotRepository, FactorRepository, MarketSelectionRepository,
+        ModelRegistryRepository, OperationLogRepository, RecommendationRepository,
         ReportRunRepository,
     },
 };
@@ -24,20 +31,20 @@ use quant_pivot_system_tests::{
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use sea_orm::{EntityTrait, PaginatorTrait};
 
 pub async fn ad_hoc_publishes_recommendations() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let harness = ReportPipelineHarness::bootstrap(&db, HarnessOptions::default()).await;
+    let harness = Box::pin(ReportPipelineHarness::bootstrap(
+        &db,
+        HarnessOptions::default(),
+    ))
+    .await;
 
     let request_id = "ad-hoc-publish-recs";
     let report = harness
-        .execute_ad_hoc(AdHocReportRequest {
-            request_id: request_id.to_owned(),
-            trigger_time: Utc::now(),
-            top_n: Some(5),
-            knowledge_lag_secs: Some(0),
-        })
+        .execute_ad_hoc(harness.ad_hoc_request(request_id))
         .await
         .expect("ad-hoc report");
 
@@ -48,7 +55,28 @@ pub async fn ad_hoc_publishes_recommendations() {
         report.status_reason,
         report.summary_json
     );
-    assert!(report.summary_json.published_recommendation_count >= 1);
+    let factors = if let Some(model_run_id) = report.model_run_id {
+        PgFactorRepository::new(db.clone())
+            .list_values_for_run(&model_run_id)
+            .await
+            .expect("load report factor values")
+    } else {
+        Vec::new()
+    };
+    let selection_members = PgMarketSelectionRepository::new(db.clone())
+        .list_members(&report.market_selection_id)
+        .await
+        .expect("load report market-selection members");
+    let selection = PgMarketSelectionRepository::new(db.clone())
+        .find_by_id(&report.market_selection_id)
+        .await
+        .expect("load report market-selection snapshot")
+        .expect("report market-selection snapshot");
+    assert!(
+        report.summary_json.published_recommendation_count >= 1,
+        "report published no recommendations: summary={:?}, selection={selection:?}, selection_members={selection_members:?}, factors={factors:?}",
+        report.summary_json,
+    );
 
     let operation_logs = PgOperationLogRepository::new(db.clone());
     let prepare_logs = operation_logs
@@ -89,17 +117,60 @@ pub async fn ad_hoc_publishes_recommendations() {
     assert_eq!(recs[0].market_id.as_str(), MARKET_ID);
 }
 
+pub async fn pinned_route_ignores_registry() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let harness = Box::pin(ReportPipelineHarness::bootstrap(
+        &db,
+        HarnessOptions::default(),
+    ))
+    .await;
+    let selection_count = MarketSelectionEntity::find()
+        .count(&db)
+        .await
+        .expect("count market selections before route rejection");
+    let model_run_count = ModelRunEntity::find()
+        .count(&db)
+        .await
+        .expect("count model runs before route rejection");
+
+    PgModelRegistryRepository::new(db.clone())
+        .retire_model_version(&harness.model_version_id)
+        .await
+        .expect("retire the generation-pinned Weather fixture");
+    let report = harness
+        .execute_ad_hoc(harness.ad_hoc_request("pinned-weather-route"))
+        .await
+        .expect("a complete published generation must not re-read mutable registry state");
+    assert_eq!(report.model_version_id, harness.model_version_id);
+    assert_eq!(
+        MarketSelectionEntity::find()
+            .count(&db)
+            .await
+            .expect("count market selections after pinned route"),
+        selection_count + 1,
+        "a pinned route must advance through market selection"
+    );
+    assert!(
+        ModelRunEntity::find()
+            .count(&db)
+            .await
+            .expect("count model runs after pinned route")
+            > model_run_count,
+        "the pinned generation must execute without a mutable registry re-read"
+    );
+}
+
 pub async fn ad_hoc_idempotent_key() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let harness = ReportPipelineHarness::bootstrap(&db, HarnessOptions::default()).await;
+    let harness = Box::pin(ReportPipelineHarness::bootstrap(
+        &db,
+        HarnessOptions::default(),
+    ))
+    .await;
 
-    let request = AdHocReportRequest {
-        request_id: "idempotent-ad-hoc".to_owned(),
-        trigger_time: Utc::now(),
-        top_n: Some(5),
-        knowledge_lag_secs: Some(0),
-    };
+    let request = harness.ad_hoc_request("idempotent-ad-hoc");
     let first = harness
         .execute_ad_hoc(request.clone())
         .await
@@ -128,15 +199,14 @@ pub async fn ad_hoc_idempotent_key() {
 pub async fn empty_selection_publishes_report() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let harness = ReportPipelineHarness::bootstrap(&db, HarnessOptions::empty_selection()).await;
+    let harness = Box::pin(ReportPipelineHarness::bootstrap(
+        &db,
+        HarnessOptions::empty_selection(),
+    ))
+    .await;
 
     let report = harness
-        .execute_ad_hoc(AdHocReportRequest {
-            request_id: "empty-selection".to_owned(),
-            trigger_time: Utc::now(),
-            top_n: Some(5),
-            knowledge_lag_secs: Some(0),
-        })
+        .execute_ad_hoc(harness.ad_hoc_request("empty-selection"))
         .await
         .expect("empty selection report");
 
@@ -158,16 +228,14 @@ pub async fn empty_selection_publishes_report() {
 pub async fn missing_non_empty_report() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let harness =
-        ReportPipelineHarness::bootstrap(&db, HarnessOptions::missing_trade_policy()).await;
+    let harness = Box::pin(ReportPipelineHarness::bootstrap(
+        &db,
+        HarnessOptions::missing_trade_policy(),
+    ))
+    .await;
 
     let report = harness
-        .execute_ad_hoc(AdHocReportRequest {
-            request_id: "missing-trade-policy".to_owned(),
-            trigger_time: Utc::now(),
-            top_n: Some(5),
-            knowledge_lag_secs: Some(0),
-        })
+        .execute_ad_hoc(harness.ad_hoc_request("missing-trade-policy"))
         .await
         .expect("missing policy must produce an auditable empty report");
 
@@ -190,17 +258,15 @@ pub async fn missing_non_empty_report() {
 pub async fn account_fails_without_row() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let harness =
-        ReportPipelineHarness::bootstrap(&db, HarnessOptions::unavailable_account()).await;
+    let harness = Box::pin(ReportPipelineHarness::bootstrap(
+        &db,
+        HarnessOptions::unavailable_account(),
+    ))
+    .await;
 
     let request_id = "account-unavailable";
     let error = harness
-        .execute_ad_hoc(AdHocReportRequest {
-            request_id: request_id.to_owned(),
-            trigger_time: Utc::now(),
-            top_n: Some(5),
-            knowledge_lag_secs: Some(0),
-        })
+        .execute_ad_hoc(harness.ad_hoc_request(request_id))
         .await
         .expect_err("account unavailable must fail closed");
 
@@ -225,15 +291,14 @@ pub async fn account_fails_without_row() {
 pub async fn revoke_after_publish() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let harness = ReportPipelineHarness::bootstrap(&db, HarnessOptions::default()).await;
+    let harness = Box::pin(ReportPipelineHarness::bootstrap(
+        &db,
+        HarnessOptions::default(),
+    ))
+    .await;
 
     let report = harness
-        .execute_ad_hoc(AdHocReportRequest {
-            request_id: "revoke-me".to_owned(),
-            trigger_time: Utc::now(),
-            top_n: Some(5),
-            knowledge_lag_secs: Some(0),
-        })
+        .execute_ad_hoc(harness.ad_hoc_request("revoke-me"))
         .await
         .expect("publish report");
 
@@ -285,15 +350,14 @@ pub async fn revoke_after_publish() {
 pub async fn evidence_refs_rank_populated() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let harness = ReportPipelineHarness::bootstrap(&db, HarnessOptions::default()).await;
+    let harness = Box::pin(ReportPipelineHarness::bootstrap(
+        &db,
+        HarnessOptions::default(),
+    ))
+    .await;
 
     let report = harness
-        .execute_ad_hoc(AdHocReportRequest {
-            request_id: "evidence-and-ranks".to_owned(),
-            trigger_time: Utc::now(),
-            top_n: Some(5),
-            knowledge_lag_secs: Some(0),
-        })
+        .execute_ad_hoc(harness.ad_hoc_request("evidence-and-ranks"))
         .await
         .expect("published report");
 
@@ -342,21 +406,16 @@ pub async fn evidence_refs_rank_populated() {
 async fn neutral_kelly_fraction(collateral: Usd) -> Decimal {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let harness = ReportPipelineHarness::bootstrap(
+    let harness = Box::pin(ReportPipelineHarness::bootstrap(
         &db,
         HarnessOptions {
             collateral,
             ..HarnessOptions::default()
         },
-    )
+    ))
     .await;
     let report = harness
-        .execute_ad_hoc(AdHocReportRequest {
-            request_id: "drawdown-neutral-baseline".to_owned(),
-            trigger_time: Utc::now(),
-            top_n: Some(5),
-            knowledge_lag_secs: Some(0),
-        })
+        .execute_ad_hoc(harness.ad_hoc_request("drawdown-neutral-baseline"))
         .await
         .expect("neutral drawdown baseline report");
     let recommendations = harness
@@ -402,22 +461,17 @@ pub async fn report_persists_real_history() {
         .await
         .expect("seed peak equity history");
 
-    let harness = ReportPipelineHarness::bootstrap(
+    let harness = Box::pin(ReportPipelineHarness::bootstrap(
         &db,
         HarnessOptions {
             collateral,
             ..HarnessOptions::default()
         },
-    )
+    ))
     .await;
 
     let report = harness
-        .execute_ad_hoc(AdHocReportRequest {
-            request_id: "drawdown-aware-sizing".to_owned(),
-            trigger_time: Utc::now(),
-            top_n: Some(5),
-            knowledge_lag_secs: Some(0),
-        })
+        .execute_ad_hoc(harness.ad_hoc_request("drawdown-aware-sizing"))
         .await
         .expect("drawdown-aware report");
 

@@ -98,17 +98,12 @@ pub trait PolicyRepository: Send + Sync {
         snapshot: NewDecisionPolicySnapshot,
     ) -> Result<PolicyActivationCommit, StorageError>;
 
-    /// Load the singleton generation and exact committed snapshot together.
-    async fn load_current_bundle(&self) -> Result<Option<ActivePolicyBundle>, StorageError> {
-        Ok(self.load_current().await?.map(|info| {
-            ActivePolicyBundle::from_parts(
-                info.bundle_generation,
-                info.decision_policy_snapshot_id,
-                info.snapshot_hash,
-                info.snapshot,
-            )
-        }))
-    }
+    /// Load the singleton activation generation and exact committed snapshot together.
+    ///
+    /// Snapshot artifacts are content-addressed and can be activated by more
+    /// than one generation, so implementations must resolve the generation
+    /// from the activation guard or ledger rather than from the artifact row.
+    async fn load_current_bundle(&self) -> Result<Option<ActivePolicyBundle>, StorageError>;
 
     async fn load_current_activation(
         &self,

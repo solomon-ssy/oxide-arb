@@ -59,7 +59,8 @@ pub enum NormalizationStats {
     },
 }
 
-/// The nearest-rank quantile of an ascending slice at percentile `p ∈ [0, 1]`.
+/// The linearly interpolated type-7 quantile of an ascending slice at
+/// percentile `p ∈ [0, 1]`.
 ///
 /// Exact `Decimal` index arithmetic (no float cast), so the winsorize bounds are
 /// deterministic. Empty input, an out-of-range percentile, or an index
@@ -78,15 +79,68 @@ pub(super) fn quantile_value(sorted: &[Decimal], p: Decimal) -> QuantResult<Deci
         }
         .into());
     }
-    let span = Decimal::from(n - 1);
-    let raw_index = (p * span).round();
-    let index = raw_index
+    let position = p * Decimal::from(n - 1);
+    let lower_decimal = position.floor();
+    let upper_decimal = position.ceil();
+    let lower = lower_decimal
         .to_usize()
         .ok_or_else(|| ResearchError::FactorComputation {
-            detail: format!("quantile index {raw_index} is not representable as usize"),
+            detail: format!("quantile index {lower_decimal} is not representable as usize"),
         })?
         .min(n - 1);
-    Ok(sorted[index])
+    let upper = upper_decimal
+        .to_usize()
+        .ok_or_else(|| ResearchError::FactorComputation {
+            detail: format!("quantile index {upper_decimal} is not representable as usize"),
+        })?
+        .min(n - 1);
+    let fraction = position - lower_decimal;
+    Ok(sorted[lower] + ((sorted[upper] - sorted[lower]) * fraction))
+}
+
+/// Piecewise-linear percentile rank against a sorted reference distribution.
+///
+/// Exact observations use their average rank across ties. Unseen observations
+/// interpolate between the average ranks of the adjacent distinct values. The
+/// caller owns the ascending-order invariant; fitting and artifact validation
+/// establish it once before this hot-path lookup.
+pub(in crate::factors) fn interpolated_percentile(
+    sorted: &[Decimal],
+    raw: Decimal,
+) -> QuantResult<Decimal> {
+    if sorted.len() < 2 {
+        return Err(ResearchError::FactorComputation {
+            detail: "rank interpolation requires at least two observations".to_owned(),
+        }
+        .into());
+    }
+    let span = Decimal::from(sorted.len() - 1);
+    if raw < sorted[0] {
+        return Ok(Decimal::ZERO);
+    }
+    if raw > sorted[sorted.len() - 1] {
+        return Ok(Decimal::ONE);
+    }
+
+    let first_equal = sorted.partition_point(|value| *value < raw);
+    let after_equal = sorted.partition_point(|value| *value <= raw);
+    let rank = if first_equal < after_equal {
+        Decimal::from(first_equal + after_equal - 1) / Decimal::from(2_u8)
+    } else {
+        let lower_value = sorted[first_equal - 1];
+        let upper_value = sorted[first_equal];
+        let lower_rank = average_rank(sorted, lower_value);
+        let upper_rank = average_rank(sorted, upper_value);
+        let fraction = (raw - lower_value) / (upper_value - lower_value);
+        lower_rank + ((upper_rank - lower_rank) * fraction)
+    };
+    Ok((rank / span).clamp(Decimal::ZERO, Decimal::ONE))
+}
+
+fn average_rank(sorted: &[Decimal], value: Decimal) -> Decimal {
+    let first = sorted.partition_point(|entry| *entry < value);
+    let after = sorted.partition_point(|entry| *entry <= value);
+    Decimal::from(first + after - 1) / Decimal::from(2_u8)
 }
 
 /// The arithmetic mean of a non-empty slice (exact `Decimal`).
@@ -133,4 +187,55 @@ pub(super) fn population_std(values: &[Decimal], mean: Decimal) -> QuantResult<O
         detail: format!("normalization standard deviation {std} is not representable as Decimal"),
     })?;
     Ok(Some(decimal.round_dp(NORM_SCALE)))
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal_macros::dec;
+
+    use super::{interpolated_percentile, quantile_value};
+
+    #[test]
+    fn quantile_uses_linear_interpolation() {
+        let sorted = [dec!(0), dec!(10), dec!(20), dec!(30)];
+        assert_eq!(
+            quantile_value(&sorted, dec!(0.25)).expect("lower quartile"),
+            dec!(7.5)
+        );
+        assert_eq!(
+            quantile_value(&sorted, dec!(0.5)).expect("median"),
+            dec!(15)
+        );
+    }
+
+    #[test]
+    fn percentile_interpolates_ties() {
+        let sorted = [dec!(1), dec!(2), dec!(2), dec!(4)];
+        assert_eq!(
+            interpolated_percentile(&sorted, dec!(2)).expect("exact tie"),
+            dec!(0.5)
+        );
+        assert_eq!(
+            interpolated_percentile(&sorted, dec!(3)).expect("unseen midpoint"),
+            dec!(0.75)
+        );
+        assert_eq!(
+            interpolated_percentile(&sorted, dec!(1.5)).expect("lower midpoint"),
+            dec!(0.25)
+        );
+    }
+
+    #[test]
+    fn endpoint_ties_average_rank() {
+        assert_eq!(
+            interpolated_percentile(&[dec!(1), dec!(1), dec!(2), dec!(3)], dec!(1))
+                .expect("minimum tie"),
+            dec!(1) / dec!(6)
+        );
+        assert_eq!(
+            interpolated_percentile(&[dec!(1), dec!(2), dec!(3), dec!(3)], dec!(3))
+                .expect("maximum tie"),
+            dec!(5) / dec!(6)
+        );
+    }
 }

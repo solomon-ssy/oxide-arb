@@ -21,16 +21,14 @@ use quant_pivot_repository::traits::{
     ModelRunRepository, PolicyRepository, RecommendationReportRepository, ReconciliationRepository,
     RuntimeControlRepository, ShadowComparisonRepository,
 };
-use quant_pivot_research::artifact::{ArtifactStore, build_artifact_store};
 use tokio::{task::JoinHandle, time::MissedTickBehavior};
 
 use super::{DataBundle, InfraBundle, PgRepositories};
 use crate::{
     execution::ExitMonitorHealthHandle,
     governance::{
-        BiasTableApplicator, CategoryPointerGuard, DefaultModePreflight, DefaultModeTransitionGate,
-        ModePreflightDeps, RuntimeControlsHandle, SystemCapabilityService, SystemStatusPublisher,
-        WeightOverlayApplicator,
+        BiasTableApplicator, DefaultModePreflight, DefaultModeTransitionGate, ModePreflightDeps,
+        RuntimeControlsHandle, SystemCapabilityService, SystemStatusPublisher,
         execution_recovery::{ExecutionRecoveryCoordinator, ExecutionRecoveryHandle},
         runtime_control::{QuantRuntimeControl, QuantRuntimeControlDeps},
     },
@@ -88,8 +86,6 @@ pub struct GovernanceBundle {
     pub capabilities: Arc<dyn SystemCapabilityPort>,
     /// Operational kill-switch control surface (governed read/write).
     pub kill_switch: Arc<dyn KillSwitchPort>,
-    /// Candidate / shadow factor-weight overlay snapshot, reloaded on activation.
-    pub weight_overlay: Arc<WeightOverlayApplicator>,
     /// Favorite-longshot bias-table snapshot bound to the factor plane,
     /// reloaded + content-hash verified on activation.
     pub bias_table: Arc<BiasTableApplicator>,
@@ -100,8 +96,9 @@ pub struct GovernanceBundle {
     pub execution_recovery: Arc<ExecutionRecoveryCoordinator>,
     /// Shared WS fan-out helper for mode / kill-switch and lifecycle broadcasts.
     pub status_publisher: Arc<SystemStatusPublisher>,
-    /// Durable DB → `ArcSwap` convergence loop for activations committed by any instance.
-    pub policy_bundle_reconciler: JoinHandle<()>,
+    /// Durable DB → `ArcSwap` convergence loop, started only after every
+    /// fallible serving-generation subscriber has bootstrapped and attached.
+    policy_bundle_reconciler: Option<JoinHandle<()>>,
 }
 
 impl GovernanceBundle {
@@ -123,28 +120,15 @@ impl GovernanceBundle {
         } = runtime;
 
         let status_publisher = SystemStatusPublisher::new(events);
-        let weight_overlay = seed_weight_overlay(&runtime_config);
         let bias_table = Arc::new(BiasTableApplicator::new(Arc::clone(
             &infra.repos.calibration_artifact,
         )
             as Arc<dyn CalibrationArtifactRepository>));
-        let artifact_store: Arc<dyn ArtifactStore> =
-            build_artifact_store(&deploy.research.artifact_store)?;
-        let category_pointer_guard = Arc::new(CategoryPointerGuard::new(
-            Arc::clone(&infra.repos.model_registry) as Arc<dyn ModelRegistryRepository>,
-            artifact_store,
-        ));
         let applicator = build_runtime_config_applicator(PolicySnapshotApplicatorDeps {
             runtime_config: &runtime_config,
-            weight_overlay: &weight_overlay,
             bias_table: &bias_table,
-            category_pointer_guard: &category_pointer_guard,
             data,
         });
-        let policy_bundle_reconciler = spawn_policy_bundle_reconciler(
-            Arc::clone(&infra.repos.runtime_config) as Arc<dyn PolicyRepository>,
-            Arc::clone(&applicator),
-        );
         let capabilities: Arc<dyn SystemCapabilityPort> = Arc::new(SystemCapabilityService::new(
             Arc::clone(&applicator) as Arc<dyn PolicySnapshotPort>,
             Arc::clone(&infra.repos.model_run) as Arc<dyn ModelRunRepository>,
@@ -183,13 +167,34 @@ impl GovernanceBundle {
             runtime_control,
             capabilities,
             kill_switch,
-            weight_overlay,
             bias_table,
             exit_monitor_health,
             execution_recovery,
             status_publisher,
-            policy_bundle_reconciler,
+            policy_bundle_reconciler: None,
         })
+    }
+
+    /// Start cross-instance policy convergence after the serving generation,
+    /// execution breaker, and other fallible subscribers are attached.
+    ///
+    /// # Errors
+    ///
+    /// Rejects duplicate starts so one process has exactly one reconciler.
+    pub fn start_policy_reconciler(
+        &mut self,
+        repository: Arc<dyn PolicyRepository>,
+    ) -> QuantResult<()> {
+        if self.policy_bundle_reconciler.is_some() {
+            return Err(QuantError::config(
+                "policy bundle reconciler is already running",
+            ));
+        }
+        self.policy_bundle_reconciler = Some(spawn_policy_bundle_reconciler(
+            repository,
+            Arc::clone(&self.applicator),
+        ));
+        Ok(())
     }
 
     /// Bootstrap the execution recovery summary from live reconciliation state.
@@ -270,28 +275,11 @@ fn spawn_policy_bundle_reconciler(
     })
 }
 
-fn seed_weight_overlay(runtime_config: &Arc<DecisionPolicyStore>) -> Arc<WeightOverlayApplicator> {
-    let weight_overlay = Arc::new(WeightOverlayApplicator::new());
-    // Seed the overlay from the active config so a non-published candidate /
-    // shadow runs under its configured weights before the first re-activation.
-    weight_overlay.reload(
-        &runtime_config
-            .current()
-            .profile_artifacts
-            .scoring
-            .definition,
-        &runtime_config.current().model_routing.model,
-    );
-    weight_overlay
-}
-
 /// Dependencies for [`build_runtime_config_applicator`].
 #[derive(Clone, Copy)]
 struct PolicySnapshotApplicatorDeps<'a> {
     runtime_config: &'a Arc<DecisionPolicyStore>,
-    weight_overlay: &'a Arc<WeightOverlayApplicator>,
     bias_table: &'a Arc<BiasTableApplicator>,
-    category_pointer_guard: &'a Arc<CategoryPointerGuard>,
     data: &'a DataBundle,
 }
 
@@ -300,9 +288,7 @@ fn build_runtime_config_applicator(
 ) -> Arc<PolicySnapshotApplicator> {
     let PolicySnapshotApplicatorDeps {
         runtime_config,
-        weight_overlay,
         bias_table,
-        category_pointer_guard,
         data,
     } = deps;
     Arc::new(PolicySnapshotApplicator::new(
@@ -311,9 +297,7 @@ fn build_runtime_config_applicator(
             market_filter: Arc::clone(&data.market_filter),
             market_cache: Arc::clone(&data.market_cache),
             data_quality: Arc::clone(&data.data_quality),
-            weight_overlay: Arc::clone(weight_overlay),
             bias_table: Arc::clone(bias_table),
-            category_pointer_guard: Arc::clone(category_pointer_guard),
         },
     ))
 }

@@ -6,7 +6,7 @@
 //! restoration, runtime-config pointer sync, and the `InsufficientLabels`
 //! promotion block.
 
-use std::{collections::BTreeMap, env, sync::Arc};
+use std::{collections::BTreeMap, env, future::Future, pin::Pin, sync::Arc};
 
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_core::{
@@ -15,45 +15,56 @@ use quant_pivot_core::{
     service::{
         feature_integrity::RepositoryFeatureParityGate,
         frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
+        model_serving_preimage::{ModelServingPreimageDeps, ModelServingPreimageService},
+        research_readiness::{EvidenceScopeIdentity, ResearchReadinessEvidenceService},
+        trade_policy_evidence::{TradePolicyEvidenceVerifier, TradePolicyEvidenceVerifierDeps},
+        trade_policy_preimage::{TradePolicyPreimageVerifier, TradePolicyPreimageVerifierDeps},
         training_dataset,
     },
 };
+use quant_pivot_error::{QuantError, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
+    config::{ArtifactStoreDeployConfig, ClickHouseConfig},
     domain::{
         api::BindCalibrationRequest,
         data_plane::DecisionClock,
         ports::{GovernanceActor, ModelGovernancePort, PublishModelCommand, RetireModelCommand},
         quant::{
-            ModelGovernanceAuditDetail, NewBacktestPathSet, NewBacktestReport, NewModelRun,
-            NewModelVersion, NewShadowComparison,
+            ModelGovernanceAuditDetail, NewBacktestPathSet, NewBacktestPathSetInput,
+            NewBacktestReport, NewModelRun, NewModelVersion, NewShadowComparison,
         },
     },
+    entities::quant_model_version::Entity as ModelVersionEntity,
     enums::{
         common::MarketCategory,
         factor::FactorFamily,
         model::ModelFamily,
         quant::{
             DataQualityStatus, DatasetPurpose, DownsideSource, FactorDirection, ModelRunKind,
-            ModelRunStatus, ModelWeightSource, PublicationStatus, TrainingDatasetStatus,
+            ModelWeightSource, PublicationStatus, TrainingDatasetStatus,
         },
     },
     hashing::CanonicalDigest,
-    runtime_config::{DecisionPolicySnapshot, FactorCrossSectionConfig, ModelVersionRef},
+    runtime_config::{DecisionPolicySnapshot, ModelVersionRef},
     types::{
         ArtifactUri, BacktestPathSetId, BacktestReportId, ContentHash, DatasetCoverage,
         DecisionPolicySnapshotId, EventId, FactorDefinitionId, MarketId, ModelInputContract,
-        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, Probability, SchemaVersion,
-        ShadowComparisonId, TokenId, TrainingDatasetId, TrainingExampleId, TrainingSampleSource,
-        TrainingSampleSources,
+        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, Probability,
+        ResearchEvaluationTrack, SchemaVersion, ShadowComparisonId, TokenId, TrainingDatasetId,
+        TrainingExampleId, TrainingSampleSource, TrainingSampleSources,
         backtest::{
-            BacktestPaths, CategoryMetrics, ExpectedVsRealized, PnlSimulation, SharpeDistribution,
+            BacktestPath, CategoryMetrics, CpcvFoldArtifact, CpcvFoldArtifacts,
+            CpcvFoldCalibrationPolicy, CpcvFoldRole, CpcvMethodologyBinding, CpcvPathSetSubject,
+            ExpectedVsRealized, PnlSimulation, SharpeDistribution,
         },
-        default_sample_sources,
-        factor::FactorExplanation,
-        model_metrics::ModelVersionMetrics,
+        factor::{FactorExplanation, FactorServingPlane},
+        model_lineage::ModelVersionDerivation,
+        model_metrics::{
+            GovernedSellEstimatorMetrics, ModelArtifactTrainingLineage, ModelVersionMetrics,
+        },
         model_quality::GateId,
-        model_training::ModelTrainingObjective,
+        model_training::{GovernedSellFitStatus, ModelTrainingObjective},
         shadow::{ShadowRankDelta, ShadowScoreDelta},
     },
 };
@@ -61,47 +72,55 @@ use quant_pivot_repository::{
     postgres::{
         PgBacktestPathSetRepository, PgBacktestReportRepository, PgCalibrationArtifactRepository,
         PgFeatureParityRepository, PgModelGovernanceAuditRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgPolicyRepository, PgShadowComparisonRepository,
+        PgModelRunRepository, PgPolicyRepository, PgResearchReadinessEvidenceRepository,
+        PgShadowComparisonRepository, PgSourceSliceRepository, PgTradePolicyRepository,
         PgTrainingDatasetRepository,
     },
     traits::{
         BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
         FeatureParityRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
-        ModelRunRepository, ShadowComparisonRepository, TrainingDatasetRepository,
+        ModelRunRepository, PolicyRepository, ShadowComparisonRepository, TradePolicyRepository,
+        TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
-    factors::{FactorValue, FrozenReferenceQuantiles, NormalizedFactor, names::LIQUIDITY_DEPTH},
-    features::FeatureVector,
+    factors::{
+        FactorEngine, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,
+        names::LIQUIDITY_DEPTH,
+    },
+    features::{FeatureSchema, FeatureVector},
     gates::{DefaultModelQualityGate, ModelQualityGate},
+    hashing::ResearchHasher,
     model::{
-        CalibratedReturnModel, CalibrationArtifactLoader, FactorWeight, LabelSelector,
-        ModelArtifact, ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec,
-        SellScorerArtifact, SellScorerOutputSpec, SubstitutionConfidenceRules,
-        WeightedFactorModelArtifact, model_input_contract_hash, weighted_training_input_hash,
+        CalibratedReturnModel, CalibrationArtifactLoader, LabelSelector, ModelArtifact,
+        ReturnModelSpec, artifact::ModelPayload, weighted_training_input_hash,
     },
     selection::SelectedMarket,
     training::{
         DatasetHashContract, DatasetParquetCodec, LabelName, TrainingDatasetArtifact,
-        TrainingExample, TrainingLabel, dataset_source_fingerprint,
+        TrainingExample, TrainingLabel, dataset_source_fingerprint, label_names_for_sources,
     },
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
-        execution_pg_seed::{fixture_profile_ref, seed_score_calibration},
+        execution_pg_seed::seed_score_calibration,
         fact_sink::DiscardFactWriter,
+        model_serving_fixtures::{
+            ModelArtifactFixtureSeed, ModelBindingFixture, ModelPayloadFixture, SealedModelFixture,
+        },
         model_spec_fixtures,
         policy_fixtures::{bootstrap_default_policy_bundle, bootstrap_policy_bundle},
         research_fixtures::{
-            DatasetLedgerFixture, DatasetLedgerSeed, DatasetSourceSeed, EvaluationDatasetSeed,
-            bind_fixture_decision_capture, seed_dataset_source, seed_evaluation_dataset,
+            DatasetLedgerFixture, DatasetLedgerSeed, EvaluationDatasetSeed,
+            ReplayableSourceSliceFixture, bind_fixture_decision_capture,
+            persist_replayable_source_slice, seed_evaluation_dataset, seed_source_manifest,
         },
     },
 };
 use rust_decimal_macros::dec;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
 
 /// Test harness wiring governance against a real store + config repo.
 struct GovernanceHarness {
@@ -116,8 +135,7 @@ fn content_hash(seed: u32) -> ContentHash {
     ContentHash::parse(&format!("blake3:{hex}")).expect("hash")
 }
 
-async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
-    let config = DecisionPolicySnapshot::default();
+async fn harness(db: &DatabaseConnection, config: DecisionPolicySnapshot) -> GovernanceHarness {
     let store = Arc::new(DecisionPolicyStore::new(config.clone()));
     bootstrap_policy_bundle(
         &PgPolicyRepository::new(db.clone()),
@@ -153,6 +171,46 @@ async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
         artifact_store: Arc::clone(&artifact_store),
         evidence_writer: Arc::new(DiscardFactWriter::<QuantFeatureParityEventRow>::new()),
     }));
+    let evidence_scope = EvidenceScopeIdentity::from_config(
+        &ClickHouseConfig::default(),
+        &ArtifactStoreDeployConfig::default(),
+    )
+    .expect("governance evidence scope");
+    let readiness = Arc::new(
+        ResearchReadinessEvidenceService::new(
+            Arc::new(PgResearchReadinessEvidenceRepository::new(db.clone())),
+            Arc::clone(&artifact_store),
+            None,
+            &evidence_scope,
+        )
+        .expect("governance readiness verifier"),
+    );
+    let trade_policy_repo: Arc<dyn TradePolicyRepository> =
+        Arc::new(PgTradePolicyRepository::new(db.clone()));
+    let trade_policy_evidence = Arc::new(TradePolicyEvidenceVerifier::new(
+        TradePolicyEvidenceVerifierDeps {
+            artifacts: Arc::clone(&artifact_store),
+            policies: Arc::clone(&trade_policy_repo),
+            readiness,
+        },
+    ));
+    let trade_policy_preimages = Arc::new(TradePolicyPreimageVerifier::new(
+        TradePolicyPreimageVerifierDeps {
+            trade_policy_repo,
+            dataset_repo: Arc::clone(&dataset_repo),
+            model_registry_repo: Arc::clone(&model_registry_repo),
+            evidence: trade_policy_evidence,
+        },
+    ));
+    let serving_preimages = Arc::new(ModelServingPreimageService::new(ModelServingPreimageDeps {
+        model_registry_repo: Arc::clone(&model_registry_repo),
+        dataset_repo: Arc::clone(&dataset_repo),
+        source_slice_repo: Arc::new(PgSourceSliceRepository::new(db.clone())),
+        policy_repo: Arc::new(PgPolicyRepository::new(db.clone())),
+        calibration_repo: Arc::clone(&calibration_repo),
+        trade_policy_preimages,
+        artifact_store: Arc::clone(&artifact_store),
+    }));
     let service = ModelGovernanceService::new(ModelGovernanceDeps {
         model_registry_repo,
         backtest_report_repo: Arc::new(PgBacktestReportRepository::new(db.clone())),
@@ -160,6 +218,7 @@ async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
         shadow_comparison_repo: Arc::new(PgShadowComparisonRepository::new(db.clone())),
         governance_audit_repo: Arc::new(PgModelGovernanceAuditRepository::new(db.clone())),
         dataset_repo,
+        serving_preimages,
         artifact_store: Arc::clone(&artifact_store),
         calibration_repo,
         calibration_loader,
@@ -186,7 +245,7 @@ async fn seed_spec(db: &DatabaseConnection) -> ModelSpecId {
             id,
             "governance-it",
             ModelFamily::WeightedFactor,
-            86_400,
+            model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
             ModelTrainingContract::settlement_default(),
         ))
@@ -224,6 +283,8 @@ fn healthy_sell_coverage() -> DatasetCoverage {
 }
 
 fn healthy_training_examples(as_of: DateTime<Utc>) -> Vec<TrainingExample> {
+    let as_of = DateTime::from_timestamp_millis(as_of.timestamp_millis())
+        .expect("governance fixture timestamp is millisecond-aligned");
     (0..500)
         .map(|index| {
             let score = if index % 2 == 0 {
@@ -232,13 +293,15 @@ fn healthy_training_examples(as_of: DateTime<Utc>) -> Vec<TrainingExample> {
                 dec!(0.75)
             };
             let market_id = MarketId::new(format!("0xhealthy{index}"));
-            let token_id = TokenId::new(format!("healthy-token-{index}"));
+            let token_id = TokenId::new((index * 2 + 1).to_string());
+            let secondary_token_id = TokenId::new((index * 2 + 2).to_string());
             let mut example = leaking_training_example();
             example.example_id = TrainingExampleId::from_v7();
             example.market_id = market_id.clone();
             example.token_id = token_id.clone();
             example.selected_market.market_id = market_id.clone();
             example.selected_market.primary_token_id = token_id.clone();
+            example.selected_market.secondary_token_id = Some(secondary_token_id);
             example.feature_vector.market_id = market_id;
             example.feature_vector.token_id = Some(token_id);
             example.feature_vector.decision_at = as_of;
@@ -268,8 +331,43 @@ fn healthy_training_examples(as_of: DateTime<Utc>) -> Vec<TrainingExample> {
         .collect()
 }
 
+fn bind_factor_plane(examples: &mut [TrainingExample], plane: &FactorServingPlane) {
+    for example in examples {
+        let strength = example
+            .factor_values
+            .first()
+            .and_then(|factor| factor.raw_value)
+            .or_else(|| example.labels.first().map(|label| label.value))
+            .unwrap_or(dec!(0.5));
+        example.factor_values = plane
+            .definitions()
+            .iter()
+            .map(|revision| {
+                let definition = revision.definition();
+                FactorValue {
+                    definition_id: revision.factor_definition_id(),
+                    name: definition.name.clone(),
+                    family: definition.family,
+                    raw_value: Some(strength),
+                    normalization: NormalizedFactor::cross_section(Probability::new(strength)),
+                    direction: definition
+                        .contribution_direction(strength)
+                        .expect("governance fixture strength projects a contribution direction"),
+                    confidence: Probability::ONE,
+                    explanation: FactorExplanation {
+                        headline: format!("{} governed fixture score", definition.name),
+                        drivers: Vec::new(),
+                    },
+                    input_feature_refs: definition.input_features.clone(),
+                }
+            })
+            .collect();
+    }
+}
+
 struct FrozenDatasetSeed {
     model_spec_id: ModelSpecId,
+    model_family: ModelFamily,
     model_spec_definition_hash: ContentHash,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     examples: Vec<TrainingExample>,
@@ -322,9 +420,10 @@ async fn build_frozen_dataset_fixture(
 ) -> FrozenDatasetFixture {
     let FrozenDatasetSeed {
         model_spec_id,
+        model_family,
         model_spec_definition_hash,
         decision_policy_snapshot_id,
-        examples,
+        mut examples,
         knowledge_lag_secs,
     } = seed;
     let id = TrainingDatasetId::from_v7();
@@ -340,40 +439,75 @@ async fn build_frozen_dataset_fixture(
         .max()
         .expect("dataset examples")
         + ChronoDuration::hours(1);
-    let feature_schema_hash = content_hash(u32::from('f'));
-    let factor_schema_hash = content_hash(u32::from('g'));
-    let label_schema_hash = content_hash(u32::from('l'));
+    let policy = PgPolicyRepository::new(db.clone())
+        .load_snapshot(&decision_policy_snapshot_id)
+        .await
+        .expect("dataset policy lookup")
+        .expect("dataset policy");
+    let features = &policy.snapshot.profile_artifacts.features.definition;
+    let scoring = &policy.snapshot.profile_artifacts.scoring.definition;
+    let domain = &policy.snapshot.profile_artifacts.domain.definition;
+    let feature_schema_hash = ResearchHasher::feature_schema(
+        &FeatureSchema::build(features).expect("governance feature schema"),
+    )
+    .expect("governance feature schema hash");
+    let factor_serving_plane = FactorEngine::for_model_scope(scoring, features, domain, None, None)
+        .serving_plane()
+        .expect("governance factor plane")
+        .clone();
+    bind_factor_plane(&mut examples, &factor_serving_plane);
+    let sample_sources = TrainingSampleSources::default();
+    let label_schema_hash =
+        ResearchHasher::label_schema(&label_names_for_sources(sample_sources.as_slice(), false))
+            .expect("governance label schema hash");
     let dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
         DatasetHashContract {
             model_spec_id: &model_spec_id,
+            model_family,
             window_start,
             window_end,
             purpose: DatasetPurpose::Training,
             feature_schema_hash: &feature_schema_hash,
-            factor_schema_hash: &factor_schema_hash,
+            factor_serving_plane: &factor_serving_plane,
             label_schema_hash: &label_schema_hash,
         },
         &examples,
     )
     .expect("semantic dataset hash");
-    let source_lineage = seed_dataset_source(
-        db,
-        DatasetSourceSeed {
-            scope: format!("governance-dataset-{id}"),
-            profile_ref: fixture_profile_ref(),
+    let profile_ref = model_spec_fixtures::pooled_profile_ref();
+    let runtime_config_hash = policy.snapshot_hash;
+    let research_program_hash = CanonicalDigest::content_hash_json(&(
+        "governance-dataset-program-v1",
+        model_spec_id,
+        model_spec_definition_hash,
+        factor_serving_plane.factor_schema_hash(),
+    ))
+    .expect("dataset research program hash");
+    let stored_source = persist_replayable_source_slice(
+        artifact_store,
+        &examples,
+        ReplayableSourceSliceFixture {
+            profile_ref,
+            evaluation_track: ResearchEvaluationTrack::ResearchOnly,
+            research_program_hash,
             decision_policy_snapshot_id,
+            runtime_config_hash,
             window_start,
-            window_end,
-            pit_cutoff: window_end + ChronoDuration::hours(1),
+            window_end: window_end + ChronoDuration::hours(1),
         },
     )
     .await
-    .expect("dataset source lineage");
+    .expect("persist replayable Source Slice");
+    let source_lineage = seed_source_manifest(db, &stored_source)
+        .await
+        .expect("dataset source lineage");
     let sample_count = u64::try_from(examples.len()).expect("sample count");
     let ledger = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
         training_dataset_id: id,
         model_spec_id,
+        model_family,
         model_spec_definition_hash,
+        factor_serving_plane,
         source_lineage,
         cohort_manifest: None,
         window_start,
@@ -381,11 +515,13 @@ async fn build_frozen_dataset_fixture(
         purpose: DatasetPurpose::Training,
         knowledge_lag_secs,
         sample_interval_secs: 3_600,
-        horizons_secs: vec![0],
-        feature_schema_version: Some(SchemaVersion::FIRST),
-        sample_sources: Some(TrainingSampleSources(default_sample_sources())),
+        horizons_secs: vec![
+            0,
+            u64::try_from(model_spec_fixtures::pooled_horizon_secs()).expect("pooled horizon"),
+        ],
+        feature_schema_version: SchemaVersion::FIRST,
+        sample_sources: Some(sample_sources),
         feature_schema_hash,
-        factor_schema_hash,
         label_schema_hash,
         semantic_dataset_hash: dataset_hash,
         source_fingerprint: dataset_source_fingerprint(&examples).expect("source fingerprint"),
@@ -421,20 +557,20 @@ async fn seed_dataset(
     rc_id: &DecisionPolicySnapshotId,
     coverage: DatasetCoverage,
 ) -> TrainingDatasetId {
-    let model_spec_definition_hash = PgModelRegistryRepository::new(db.clone())
+    let model_spec = PgModelRegistryRepository::new(db.clone())
         .find_model_spec(spec)
         .await
         .expect("model spec lookup")
-        .expect("model spec")
-        .definition_hash;
+        .expect("model spec");
     let fixture = build_frozen_dataset_fixture(
         db,
         artifact_store,
         FrozenDatasetSeed {
             model_spec_id: *spec,
-            model_spec_definition_hash,
+            model_family: model_spec.model_family,
+            model_spec_definition_hash: model_spec.definition_hash,
             decision_policy_snapshot_id: *rc_id,
-            examples: healthy_training_examples(Utc::now() - ChronoDuration::hours(1)),
+            examples: healthy_training_examples(Utc::now() - ChronoDuration::days(4)),
             knowledge_lag_secs: 10,
         },
     )
@@ -443,152 +579,257 @@ async fn seed_dataset(
     fixture.persist(&dataset_repo, coverage).await
 }
 
-async fn seed_version(
+fn seed_version<'a>(
+    db: &'a DatabaseConnection,
+    artifact_store: &'a Arc<dyn ArtifactStore>,
+    spec: &'a ModelSpecId,
+    version: i32,
+    dataset: TrainingDatasetId,
+    calibrated: bool,
+    dataset_projection: DatasetProjection,
+) -> Pin<Box<dyn Future<Output = ModelVersionId> + Send + 'a>> {
+    Box::pin(seed_version_inner(
+        db,
+        artifact_store,
+        spec,
+        version,
+        dataset,
+        calibrated,
+        dataset_projection,
+    ))
+}
+
+async fn seed_version_inner(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
     spec: &ModelSpecId,
-    seed: char,
     version: i32,
-    dataset: Option<TrainingDatasetId>,
+    dataset: TrainingDatasetId,
     calibrated: bool,
+    dataset_projection: DatasetProjection,
 ) -> ModelVersionId {
-    let id = ModelVersionId::from_v7();
-    let calibrator_ref = if calibrated {
-        Some(seed_score_calibration(db, &id).await)
-    } else {
-        None
-    };
-    let return_model =
-        calibrator_ref
-            .as_ref()
-            .map_or_else(ReturnModelSpec::heuristic_default, |calibrator| {
-                ReturnModelSpec::Calibrated(CalibratedReturnModel {
-                    calibrator_ref: *calibrator,
-                    downside_source: DownsideSource::MfeMae,
-                })
-            });
-    let (training_dataset_hash, training_input_hash) = match dataset.as_ref() {
-        Some(dataset_id) => {
-            let dataset_info = PgTrainingDatasetRepository::new(db.clone())
-                .find_by_id(dataset_id)
-                .await
-                .expect("dataset lookup")
-                .expect("dataset row");
-            let materialization = dataset_info
-                .materialization()
-                .expect("dataset materialization");
-            let bytes = artifact_store
-                .get(materialization.parquet_uri)
-                .await
-                .expect("dataset bytes");
-            let examples = training_dataset::verify_frozen_dataset_artifact(&dataset_info, &bytes)
-                .expect("frozen dataset integrity");
-            let cross_section = FactorCrossSectionConfig::default();
-            let references = FrozenReferenceQuantiles::empty();
-            let input_hash = weighted_training_input_hash(
-                &examples,
-                &LabelSelector {
-                    name: LabelName::new("token_payout_ratio"),
-                    horizon_secs: 0,
-                },
-                &[LIQUIDITY_DEPTH],
-                &references,
-                Some(&cross_section),
-            )
-            .expect("weighted training input hash");
-            (*materialization.dataset_hash, input_hash)
-        }
-        None => (content_hash(u32::from('d')), content_hash(u32::from('i'))),
-    };
-    let artifact_hash = store_weighted_artifact(
-        artifact_store,
-        &id,
-        &PgModelRegistryRepository::new(db.clone())
-            .find_model_spec(spec)
-            .await
-            .expect("model spec lookup")
-            .expect("model spec")
-            .definition_hash,
-        seed,
-        return_model,
-        training_dataset_hash,
-        training_input_hash,
-    )
-    .await;
-    PgModelRegistryRepository::new(db.clone())
-        .create_model_version(NewModelVersion {
-            model_version_id: id,
-            model_spec_id: *spec,
-            version,
-            artifact_hash,
-            category_scope: None,
-            profile_ref: fixture_profile_ref(),
-            training_dataset_id: dataset,
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
-            publish_path_set_id: None,
-            derivation: NewModelVersion::training_derivation(),
-            metrics: ModelVersionMetrics::not_measured("test fixture"),
-            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Candidate,
-            published_at: None,
-            retired_at: None,
-        })
+    let source_id = ModelVersionId::from_v7();
+    let dataset_info = PgTrainingDatasetRepository::new(db.clone())
+        .find_by_id(&dataset)
         .await
-        .expect("model version");
-    id
+        .expect("dataset lookup")
+        .expect("dataset row");
+    let materialization = dataset_info
+        .materialization()
+        .expect("dataset materialization");
+    let bytes = artifact_store
+        .get(materialization.parquet_uri)
+        .await
+        .expect("dataset bytes");
+    let examples = training_dataset::verify_frozen_dataset_artifact(&dataset_info, &bytes)
+        .expect("frozen dataset integrity");
+    let policy = PgPolicyRepository::new(db.clone())
+        .load_snapshot(&dataset_info.decision_policy_snapshot_id)
+        .await
+        .expect("policy lookup")
+        .expect("policy row");
+    let input_contract = PgModelRegistryRepository::new(db.clone())
+        .find_model_spec(spec)
+        .await
+        .expect("model spec lookup")
+        .expect("model spec")
+        .input_contract;
+    let scoring = &policy.snapshot.profile_artifacts.scoring.definition;
+    let factor_names = materialization
+        .factor_serving_plane
+        .definitions()
+        .iter()
+        .filter(|revision| !revision.definition().is_diagnostic())
+        .map(|revision| revision.factor_name().clone())
+        .collect::<Vec<_>>();
+    let training_input_hash = weighted_training_input_hash(
+        &examples,
+        &LabelSelector {
+            name: LabelName::new("token_payout_ratio"),
+            horizon_secs: 0,
+        },
+        &factor_names,
+        &FrozenReferenceQuantiles::empty(),
+        Some(&scoring.cross_section),
+    )
+    .expect("weighted training input hash");
+    let source_payload = ModelPayloadFixture::weighted(
+        materialization.factor_serving_plane,
+        &scoring.factor_head,
+        input_contract.clone(),
+        ReturnModelSpec::heuristic_default(),
+        scoring.cross_section.clone(),
+    )
+    .expect("weighted model payload");
+    let source_fixture = SealedModelFixture::seal(
+        db,
+        ModelArtifactFixtureSeed {
+            model_version_id: source_id,
+            training_dataset_id: dataset,
+            payload: source_payload,
+            training_input_hash,
+            category_scope: None,
+            calibration: None,
+            bias_table: None,
+        },
+    )
+    .await
+    .expect("seal weighted model fixture");
+    source_fixture
+        .store(artifact_store)
+        .await
+        .expect("store weighted model fixture");
+    let evidence = CandidateVersionInput {
+        metrics: ModelVersionMetrics::not_measured("test fixture"),
+        objective: ModelTrainingObjective::hand_authored("test fixture"),
+    };
+    let source_version = candidate_version(
+        &source_fixture,
+        *spec,
+        version,
+        CandidateVersionInput {
+            metrics: evidence.metrics.clone(),
+            objective: evidence.objective.clone(),
+        },
+    );
+    persist_dataset_projection(db, source_version, dataset_projection).await;
+    if !calibrated {
+        return source_id;
+    }
+
+    let calibrator_ref = Box::pin(seed_score_calibration(db, artifact_store, &source_id)).await;
+    let calibration_repo = PgCalibrationArtifactRepository::new(db.clone());
+    calibration_repo
+        .mark_active(&calibrator_ref)
+        .await
+        .expect("activate calibrated fixture");
+    let calibration = calibration_repo
+        .find_by_id(&calibrator_ref)
+        .await
+        .expect("calibration lookup")
+        .expect("calibration row");
+    let child_id = ModelVersionId::from_v7();
+    let child_payload = ModelPayloadFixture::weighted(
+        materialization.factor_serving_plane,
+        &scoring.factor_head,
+        input_contract,
+        ReturnModelSpec::Calibrated(CalibratedReturnModel {
+            calibrator_ref,
+            downside_source: DownsideSource::MfeMae,
+        }),
+        scoring.cross_section.clone(),
+    )
+    .expect("calibrated weighted model payload");
+    let child_fixture = SealedModelFixture::seal(
+        db,
+        ModelArtifactFixtureSeed {
+            model_version_id: child_id,
+            training_dataset_id: dataset,
+            payload: child_payload,
+            training_input_hash,
+            category_scope: None,
+            calibration: Some(ModelBindingFixture::score_calibration(
+                calibrator_ref,
+                calibration.content_hash,
+            )),
+            bias_table: None,
+        },
+    )
+    .await
+    .expect("seal calibrated model fixture");
+    child_fixture
+        .store(artifact_store)
+        .await
+        .expect("store calibrated model fixture");
+    let mut child_version = candidate_version(
+        &child_fixture,
+        *spec,
+        version.checked_add(1).expect("derived model version"),
+        evidence,
+    );
+    child_version.derivation = ModelVersionDerivation::ReturnCalibration {
+        parent_model_version_id: source_id,
+        calibration_artifact_id: calibrator_ref,
+    };
+    PgModelRegistryRepository::new(db.clone())
+        .create_model_version(child_version)
+        .await
+        .expect("calibrated model version");
+    child_id
 }
 
-async fn store_weighted_artifact(
-    store: &Arc<dyn ArtifactStore>,
-    model_version_id: &ModelVersionId,
-    model_spec_definition_hash: &ContentHash,
-    seed: char,
-    return_model: ReturnModelSpec,
-    training_dataset_hash: ContentHash,
-    training_input_hash: ContentHash,
-) -> ContentHash {
-    let input_contract = ModelInputContract::single_required("book.mid");
-    let input_contract_hash =
-        model_input_contract_hash(&input_contract).expect("input contract hash");
-    let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
-        header: ModelArtifactHeader {
-            model_version_id: *model_version_id,
-            model_spec_definition_hash: *model_spec_definition_hash,
-            profile_ref: fixture_profile_ref(),
-            model_family: ModelFamily::WeightedFactor,
-            feature_schema_hash: content_hash(u32::from('f')),
-            factor_schema_hash: content_hash(u32::from('g')),
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
-        },
-        training_dataset_hash,
-        training_input_hash,
-        input_contract,
-        input_contract_hash,
-        weights: vec![FactorWeight {
-            factor: LIQUIDITY_DEPTH,
-            weight: dec!(1),
-        }],
-        prediction_horizon_secs: 86_400,
-        multipliers: ScoreMultiplierSpec::conservative(),
-        substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-        return_model,
-        factor_cross_section: FactorCrossSectionConfig::default(),
-        frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
-        objective_report: None,
-        category_scope: None,
-    }));
-    artifact.validate().expect("artifact valid");
-    let artifact_hash = artifact.content_hash().expect("hash");
-    let key = ModelArtifact::artifact_key(&artifact_hash).expect("key");
-    store
-        .put(key, &artifact.to_bytes().expect("bytes"))
-        .await
-        .expect("store artifact");
-    let _ = seed;
-    artifact_hash
+async fn persist_dataset_projection(
+    db: &DatabaseConnection,
+    source_version: NewModelVersion,
+    projection: DatasetProjection,
+) {
+    match projection {
+        DatasetProjection::Exact => {
+            PgModelRegistryRepository::new(db.clone())
+                .create_model_version(source_version)
+                .await
+                .expect("model version");
+        }
+        DatasetProjection::Missing => {
+            let mut active = source_version
+                .try_into_active_model()
+                .expect("exact model version fixture");
+            active.training_dataset_id = Set(None);
+            active
+                .insert(db)
+                .await
+                .expect("insert deliberately incomplete dataset projection");
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DatasetProjection {
+    Exact,
+    Missing,
+}
+
+struct CandidateVersionInput {
+    metrics: ModelVersionMetrics,
+    objective: ModelTrainingObjective,
+}
+
+fn candidate_version(
+    fixture: &SealedModelFixture,
+    model_spec_id: ModelSpecId,
+    version: i32,
+    input: CandidateVersionInput,
+) -> NewModelVersion {
+    let serving_contract = fixture.serving_contract().clone();
+    let bindings = serving_contract.bindings();
+    let model_version_id = bindings.model.model_version_id;
+    let category_scope = bindings.model.category_scope;
+    let profile_ref = bindings.model.profile_ref.clone();
+    let training_dataset_id = bindings.dataset.manifest.training_dataset_id;
+    let trade_policy = bindings
+        .trade_policy
+        .as_ref()
+        .map(|binding| (binding.artifact_id, binding.content_hash));
+    NewModelVersion {
+        model_version_id,
+        model_spec_id,
+        version,
+        artifact_hash: fixture.artifact_hash(),
+        serving_contract,
+        category_scope,
+        profile_ref,
+        training_dataset_id: Some(training_dataset_id),
+        trade_policy_artifact_id: trade_policy.map(|binding| binding.0),
+        trade_policy_hash: trade_policy.map(|binding| binding.1),
+        publish_path_set_id: None,
+        derivation: NewModelVersion::training_derivation(),
+        metrics: input.metrics,
+        training_objective: input.objective,
+        quality_gate_report: None,
+        publication_status: PublicationStatus::Candidate,
+        published_at: None,
+        retired_at: None,
+    }
 }
 
 /// A `HoldVsExitWeighted` model spec for sell-side governance tests.
@@ -599,7 +840,7 @@ async fn seed_sell_spec(db: &DatabaseConnection) -> ModelSpecId {
             id,
             "governance-it-sell",
             ModelFamily::HoldVsExitWeighted,
-            86_400,
+            model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
             ModelTrainingContract::settlement_default(),
         ))
@@ -608,108 +849,115 @@ async fn seed_sell_spec(db: &DatabaseConnection) -> ModelSpecId {
     id
 }
 
-/// A `HoldVsExitWeighted` candidate version with a validated
-/// [`SellScorerArtifact`]. Sell scorers never carry a return
-/// model, so unlike [`seed_version`] there is no calibrator parameter.
+/// A `HoldVsExitWeighted` candidate version with a validated sealed Sell
+/// payload. Sell scorers never carry a return model, so unlike
+/// [`seed_version`] there is no calibrator parameter.
 async fn seed_sell_version(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
     spec: &ModelSpecId,
     version: i32,
-    dataset: Option<TrainingDatasetId>,
+    dataset: TrainingDatasetId,
 ) -> ModelVersionId {
     let id = ModelVersionId::from_v7();
-    let (training_dataset_hash, training_input_hash) = match dataset.as_ref() {
-        Some(dataset_id) => {
-            let dataset_info = PgTrainingDatasetRepository::new(db.clone())
-                .find_by_id(dataset_id)
-                .await
-                .expect("dataset lookup")
-                .expect("dataset row");
-            let materialization = dataset_info
-                .materialization()
-                .expect("dataset materialization");
-            let bytes = artifact_store
-                .get(materialization.parquet_uri)
-                .await
-                .expect("dataset bytes");
-            let examples = training_dataset::verify_frozen_dataset_artifact(&dataset_info, &bytes)
-                .expect("frozen dataset integrity");
-            let input_hash = weighted_training_input_hash(
-                &examples,
-                &LabelSelector {
-                    name: LabelName::new("token_payout_ratio"),
-                    horizon_secs: 0,
-                },
-                &[LIQUIDITY_DEPTH],
-                &FrozenReferenceQuantiles::empty(),
-                None,
-            )
-            .expect("sell training input hash");
-            (*materialization.dataset_hash, input_hash)
-        }
-        None => (content_hash(u32::from('d')), content_hash(u32::from('i'))),
-    };
-    let input_contract = ModelInputContract::single_required("book.mid");
-    let input_contract_hash =
-        model_input_contract_hash(&input_contract).expect("input contract hash");
-    let model_spec_definition_hash = PgModelRegistryRepository::new(db.clone())
+    let dataset_info = PgTrainingDatasetRepository::new(db.clone())
+        .find_by_id(&dataset)
+        .await
+        .expect("dataset lookup")
+        .expect("dataset row");
+    let materialization = dataset_info
+        .materialization()
+        .expect("dataset materialization");
+    let bytes = artifact_store
+        .get(materialization.parquet_uri)
+        .await
+        .expect("dataset bytes");
+    let examples = training_dataset::verify_frozen_dataset_artifact(&dataset_info, &bytes)
+        .expect("frozen dataset integrity");
+    let policy = PgPolicyRepository::new(db.clone())
+        .load_snapshot(&dataset_info.decision_policy_snapshot_id)
+        .await
+        .expect("policy lookup")
+        .expect("policy row");
+    let input_contract = PgModelRegistryRepository::new(db.clone())
         .find_model_spec(spec)
         .await
         .expect("sell model spec lookup")
         .expect("sell model spec")
-        .definition_hash;
-    let artifact = ModelArtifact::SellScorer(Box::new(SellScorerArtifact {
-        header: ModelArtifactHeader {
-            model_version_id: id,
-            model_spec_definition_hash,
-            profile_ref: fixture_profile_ref(),
-            model_family: ModelFamily::HoldVsExitWeighted,
-            feature_schema_hash: content_hash(u32::from('f')),
-            factor_schema_hash: content_hash(u32::from('g')),
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
+        .input_contract;
+    let scoring = &policy.snapshot.profile_artifacts.scoring.definition;
+    let factor_inputs = materialization
+        .factor_serving_plane
+        .definitions()
+        .iter()
+        .filter(|revision| !revision.definition().is_diagnostic())
+        .map(|revision| revision.factor_name().clone())
+        .collect::<Vec<_>>();
+    let training_input_hash = weighted_training_input_hash(
+        &examples,
+        &LabelSelector {
+            name: LabelName::new("token_payout_ratio"),
+            horizon_secs: 0,
         },
-        weights: vec![FactorWeight {
-            factor: LIQUIDITY_DEPTH,
-            weight: dec!(1),
-        }],
-        prediction_horizon_secs: 86_400,
-        output_spec: SellScorerOutputSpec::conservative(),
-        label_schema_hash: content_hash(u32::from('l')),
-        training_dataset_hash,
-        training_input_hash,
+        &factor_inputs,
+        &FrozenReferenceQuantiles::empty(),
+        Some(&scoring.cross_section),
+    )
+    .expect("sell training input hash");
+    let payload = ModelPayloadFixture::sell(
+        materialization.factor_serving_plane,
+        &scoring.factor_head,
+        &scoring.sell_scorer,
         input_contract,
-        input_contract_hash,
-        objective_report: None,
-    }));
-    artifact.validate().expect("sell artifact valid");
-    let artifact_hash = artifact.content_hash().expect("hash");
-    let key = ModelArtifact::artifact_key(&artifact_hash).expect("key");
-    artifact_store
-        .put(key, &artifact.to_bytes().expect("bytes"))
-        .await
-        .expect("store sell artifact");
-    PgModelRegistryRepository::new(db.clone())
-        .create_model_version(NewModelVersion {
+        scoring.cross_section.clone(),
+    )
+    .expect("sell model payload");
+    let fixture = SealedModelFixture::seal(
+        db,
+        ModelArtifactFixtureSeed {
             model_version_id: id,
-            model_spec_id: *spec,
-            version,
-            artifact_hash,
-            category_scope: None,
-            profile_ref: fixture_profile_ref(),
             training_dataset_id: dataset,
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
-            publish_path_set_id: None,
-            derivation: NewModelVersion::training_derivation(),
-            metrics: ModelVersionMetrics::not_measured("test fixture"),
-            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Candidate,
-            published_at: None,
-            retired_at: None,
-        })
+            payload,
+            training_input_hash,
+            category_scope: None,
+            calibration: None,
+            bias_table: None,
+        },
+    )
+    .await
+    .expect("seal sell model fixture");
+    fixture
+        .store(artifact_store)
+        .await
+        .expect("store sell model fixture");
+    let bindings = fixture.serving_contract().bindings();
+    let artifact_lineage = ModelArtifactTrainingLineage::FactorNative {
+        training_dataset_hash: bindings.transform.training_dataset_hash,
+        training_input_hash: bindings.transform.training_input_hash,
+        input_contract_hash: bindings.transform.input_contract_hash,
+        input_transform_hash: bindings.transform.input_transform_hash,
+        factor_inputs,
+    };
+    let fit_status = GovernedSellFitStatus::OofPredictionsRequired;
+    PgModelRegistryRepository::new(db.clone())
+        .create_model_version(candidate_version(
+            &fixture,
+            *spec,
+            version,
+            CandidateVersionInput {
+                metrics: ModelVersionMetrics::governed_sell(
+                    GovernedSellEstimatorMetrics {
+                        resolved_label_rows: u64::try_from(examples.len())
+                            .expect("sell label rows"),
+                        position_state_rows: u64::try_from(examples.len())
+                            .expect("sell state rows"),
+                        fit_status,
+                    },
+                    artifact_lineage,
+                ),
+                objective: ModelTrainingObjective::governed_sell(fit_status),
+            },
+        ))
         .await
         .expect("sell model version");
     id
@@ -739,6 +987,9 @@ async fn seed_backtest(
         db,
         EvaluationDatasetSeed {
             scope: format!("governance-backtest-{version}-{hash_seed}"),
+            source_training_dataset_id: version_info
+                .training_dataset_id
+                .expect("governance model version training Dataset"),
             model_spec_id: version_info.model_spec_id,
             model_spec_definition_hash: model_spec.definition_hash,
             profile_ref: version_info.profile_ref,
@@ -750,6 +1001,15 @@ async fn seed_backtest(
     )
     .await
     .expect("evaluation dataset");
+    let evaluation_dataset = PgTrainingDatasetRepository::new(db.clone())
+        .find_by_id(&evaluation_dataset_id)
+        .await
+        .expect("evaluation dataset lookup")
+        .expect("evaluation dataset row");
+    let evaluation_hash = *evaluation_dataset
+        .materialization()
+        .expect("evaluation dataset materialization")
+        .dataset_hash;
     let model_run_repo = PgModelRunRepository::new(db.clone());
     model_run_repo
         .create(NewModelRun {
@@ -760,13 +1020,7 @@ async fn seed_backtest(
             market_selection_id: None,
             window_start,
             window_end,
-            status: ModelRunStatus::Running,
-            input_hash: content_hash(u32::from(hash_seed)),
-            output_hash: None,
-            error_code: None,
-            error_message: None,
-            started_at: window_start,
-            finished_at: None,
+            input_hash: evaluation_hash,
         })
         .await
         .expect("model run");
@@ -784,36 +1038,40 @@ async fn seed_backtest(
         pnl_curve: Vec::new(),
     };
 
-    let report_hash = content_hash(u32::from(hash_seed) + 2);
+    let mut report = NewBacktestReport {
+        backtest_report_id: BacktestReportId::from_v7(),
+        model_version_id: *version,
+        evaluation_dataset_id,
+        model_run_id,
+        decision_policy_snapshot_id: *rc_id,
+        window_start,
+        window_end,
+        coverage: dec!(0.99),
+        sample_count: 1_000,
+        missing_feature_count: 0,
+        rank_ic: dec!(0.15),
+        sharpe: dec!(1.1),
+        hit_rate: Probability::new(dec!(0.62)),
+        expected_vs_realized,
+        max_drawdown: dec!(0.10),
+        turnover: dec!(0.2),
+        liquidity_feasibility: Probability::new(dec!(0.95)),
+        category_breakdown: CategoryMetrics::default(),
+        tail_loss: dec!(-50),
+        report_pnl_simulation: pnl_simulation,
+        report_hash: content_hash(u32::from(hash_seed) + 2),
+        parquet_uri: None,
+    };
+    report.report_hash = report
+        .recomputed_hash()
+        .expect("canonical governance backtest report hash");
+    let report_hash = report.report_hash;
     PgBacktestReportRepository::new(db.clone())
-        .create(NewBacktestReport {
-            backtest_report_id: BacktestReportId::from_v7(),
-            model_version_id: *version,
-            evaluation_dataset_id,
-            model_run_id,
-            decision_policy_snapshot_id: *rc_id,
-            window_start,
-            window_end,
-            coverage: dec!(0.99),
-            sample_count: 1_000,
-            missing_feature_count: 0,
-            rank_ic: dec!(0.15),
-            sharpe: dec!(1.1),
-            hit_rate: Probability::new(dec!(0.62)),
-            expected_vs_realized,
-            max_drawdown: dec!(0.10),
-            turnover: dec!(0.2),
-            liquidity_feasibility: Probability::new(dec!(0.95)),
-            category_breakdown: CategoryMetrics::default(),
-            tail_loss: dec!(-50),
-            report_pnl_simulation: pnl_simulation,
-            report_hash,
-            parquet_uri: None,
-        })
+        .create(report)
         .await
         .expect("backtest report");
     model_run_repo
-        .succeed(&model_run_id, report_hash, Utc::now(), Some(*version))
+        .succeed(&model_run_id, report_hash, Some(*version))
         .await
         .expect("finalize backtest model run");
 }
@@ -860,7 +1118,7 @@ pub async fn publish_requires_quality_pass() {
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
     // Frozen dataset present so leakage rescan can run; no backtest → gate
     // evaluates and fails (BacktestRequired / risk gates), then persists evidence.
     let dataset = seed_dataset(
@@ -875,10 +1133,10 @@ pub async fn publish_requires_quality_pass() {
         &db,
         &harness.artifact_store,
         &spec,
-        'a',
         1,
-        Some(dataset),
+        dataset,
         false,
+        DatasetProjection::Exact,
     )
     .await;
 
@@ -917,12 +1175,31 @@ pub async fn publish_requires_quality_pass() {
 pub async fn publish_without_training_transition() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let _rc_id = seed_runtime_config(&db).await;
+    let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
-    // Missing training_dataset_id fails closed before gate evaluation — no
-    // durable gate report is written (distinct from QualityGateFailed).
-    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, None, false).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
+    let dataset = seed_dataset(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        &rc_id,
+        healthy_coverage(),
+    )
+    .await;
+    // Bypass the typed insert only to persist a deliberately incomplete scalar
+    // projection. The sealed contract and artifact remain exact; the
+    // repository read boundary must reject the corrupt row before governance
+    // gate evaluation.
+    let candidate = seed_version(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        1,
+        dataset,
+        false,
+        DatasetProjection::Missing,
+    )
+    .await;
 
     let result = harness
         .service
@@ -935,23 +1212,26 @@ pub async fn publish_without_training_transition() {
         )
         .await;
     let err = result.expect_err("publish must refuse versions without a training dataset");
-    let err_text = err.to_string();
     assert!(
-        err_text.contains("illegal governance transition")
-            && err_text.contains("training_dataset_id"),
-        "expected IllegalTransition naming the missing training_dataset_id, got: {err_text}"
+        matches!(
+            err,
+            QuantError::Storage(StorageError::InvariantViolation {
+                entity: Some("quant_model_version"),
+                ref detail,
+            }) if detail.contains("training_dataset_id")
+        ),
+        "expected a model-version invariant violation naming the missing training_dataset_id"
     );
 
-    let registry = PgModelRegistryRepository::new(db.clone());
-    let row = registry
-        .find_model_version(&candidate)
+    let row = ModelVersionEntity::find_by_id(candidate)
+        .one(&db)
         .await
         .expect("find")
         .expect("row");
     assert_eq!(row.publication_status, PublicationStatus::Candidate);
     assert!(
         row.quality_gate_report.is_none(),
-        "pre-gate IllegalTransition must not invent a quality_gate_report"
+        "pre-gate repository rejection must not invent a quality_gate_report"
     );
 }
 
@@ -960,7 +1240,7 @@ pub async fn publish_requires_backtest_report() {
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
     let dataset = seed_dataset(
         &db,
         &harness.artifact_store,
@@ -973,10 +1253,10 @@ pub async fn publish_requires_backtest_report() {
         &db,
         &harness.artifact_store,
         &spec,
-        'a',
         1,
-        Some(dataset),
+        dataset,
         false,
+        DatasetProjection::Exact,
     )
     .await;
     seed_shadow_window(&db, &candidate, &candidate, 'p').await;
@@ -1008,7 +1288,7 @@ pub async fn publish_requires_shadow_stability() {
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
     let dataset = seed_dataset(
         &db,
         &harness.artifact_store,
@@ -1021,13 +1301,13 @@ pub async fn publish_requires_shadow_stability() {
         &db,
         &harness.artifact_store,
         &spec,
-        'a',
         1,
-        Some(dataset),
+        dataset,
         false,
+        DatasetProjection::Exact,
     )
     .await;
-    seed_backtest(&db, &candidate, &rc_id, '1').await;
+    Box::pin(seed_backtest(&db, &candidate, &rc_id, '1')).await;
     // No shadow comparisons → shadow stability not established.
 
     let result = harness
@@ -1051,7 +1331,7 @@ pub async fn publish_succeeds_without_immutable() {
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
     let dataset = seed_dataset(
         &db,
         &harness.artifact_store,
@@ -1064,13 +1344,13 @@ pub async fn publish_succeeds_without_immutable() {
         &db,
         &harness.artifact_store,
         &spec,
-        'a',
         1,
-        Some(dataset),
+        dataset,
         true,
+        DatasetProjection::Exact,
     )
     .await;
-    seed_backtest(&db, &candidate, &rc_id, '1').await;
+    Box::pin(seed_backtest(&db, &candidate, &rc_id, '1')).await;
     seed_path_set(&db, &candidate, &rc_id, '1').await;
     seed_shadow_window(&db, &candidate, &candidate, 'p').await;
 
@@ -1147,12 +1427,12 @@ struct PublishReadyParams<'a> {
 
 /// Publish a fully gated candidate (backtest + CPCV path set + shadow + publish).
 async fn publish_ready_version(params: PublishReadyParams<'_>) {
-    seed_backtest(
+    Box::pin(seed_backtest(
         params.db,
         params.version,
         params.rc_id,
         params.backtest_seed,
-    )
+    ))
     .await;
     seed_path_set(
         params.db,
@@ -1190,25 +1470,6 @@ async fn seed_path_set(
 ) {
     let model_run_id = ModelRunId::from_v7();
     let window_start = Utc::now() - ChronoDuration::hours(2);
-    PgModelRunRepository::new(db.clone())
-        .create(NewModelRun {
-            model_run_id,
-            run_kind: ModelRunKind::Cpcv,
-            model_version_id: Some(*version),
-            decision_policy_snapshot_id: *rc_id,
-            market_selection_id: None,
-            window_start,
-            window_end: window_start + ChronoDuration::hours(1),
-            status: ModelRunStatus::Succeeded,
-            input_hash: content_hash(u32::from(hash_seed) + 10),
-            output_hash: Some(content_hash(u32::from(hash_seed) + 11)),
-            error_code: None,
-            error_message: None,
-            started_at: window_start,
-            finished_at: Some(Utc::now()),
-        })
-        .await
-        .expect("cpcv model run");
 
     // Dataset id is required by the ledger FK; reuse any Ready dataset linked
     // to this version when present, otherwise mint a synthetic id that the
@@ -1221,43 +1482,101 @@ async fn seed_path_set(
         .unwrap_or_else(TrainingDatasetId::from_v7);
 
     let path_set_id = BacktestPathSetId::from_v7();
-    PgBacktestPathSetRepository::new(db.clone())
-        .create(NewBacktestPathSet {
-            path_set_id,
-            model_version_id: *version,
-            model_run_id,
-            training_dataset_id,
-            decision_policy_snapshot_id: *rc_id,
-            window_start,
-            window_end: window_start + ChronoDuration::hours(1),
-            path_count: 7,
-            combination_count: 28,
-            median_rank_ic: dec!(0.15),
-            sharpe_distribution: SharpeDistribution {
-                min: dec!(0.5),
-                p25: dec!(0.8),
-                median: dec!(1.0),
-                p75: dec!(1.2),
-                max: dec!(1.5),
-                median_max_drawdown: Some(dec!(0.10)),
-                median_tail_loss: Some(dec!(-0.005)),
-                baseline_uplift: Some(dec!(0.001)),
+    let new_path_set = NewBacktestPathSet::try_seal(NewBacktestPathSetInput {
+        path_set_id,
+        model_version_id: *version,
+        model_run_id,
+        training_dataset_id,
+        decision_policy_snapshot_id: *rc_id,
+        window_start,
+        window_end: window_start + ChronoDuration::hours(1),
+        subject: CpcvPathSetSubject::new(
+            content_hash(u32::from(hash_seed) + 20),
+            content_hash(u32::from(hash_seed) + 21),
+            content_hash(u32::from(hash_seed) + 22),
+            content_hash(u32::from(hash_seed) + 23),
+            content_hash(u32::from(hash_seed) + 24),
+            content_hash(u32::from(hash_seed) + 25),
+        ),
+        methodology: CpcvMethodologyBinding::new(
+            content_hash(u32::from(hash_seed) + 26),
+            content_hash(u32::from(hash_seed) + 27),
+            content_hash(u32::from(hash_seed) + 28),
+            CpcvFoldCalibrationPolicy::SubjectHeuristic {
+                return_model_hash: content_hash(u32::from(hash_seed) + 29),
             },
-            paths: BacktestPaths::default(),
-            deflated_sharpe: dec!(0.97),
-            dsr_benchmark_sharpe: dec!(0.5),
-            pbo: dec!(0.20),
-            min_track_record_length_secs: Some(86_400),
-            trial_count: 10,
-            trial_grid_count: 10,
-            coord_search_effective_n: 2,
-            path_set_hash: ContentHash::parse(
-                "blake3:0000000000000000000000000000000000000000000000000000000000000001",
-            )
-            .expect("hash"),
-        })
+        ),
+        fold_artifacts: CpcvFoldArtifacts::try_new(vec![
+            CpcvFoldArtifact {
+                role: CpcvFoldRole::Validation,
+                training_groups_hash: content_hash(u32::from(hash_seed) + 30),
+                training_group_count: 2,
+                model_artifact_hash: content_hash(u32::from(hash_seed) + 31),
+                serving_contract_hash: content_hash(u32::from(hash_seed) + 32),
+                model_payload_hash: content_hash(u32::from(hash_seed) + 33),
+            },
+            CpcvFoldArtifact {
+                role: CpcvFoldRole::Trial { trial_id: 0 },
+                training_groups_hash: content_hash(u32::from(hash_seed) + 34),
+                training_group_count: 3,
+                model_artifact_hash: content_hash(u32::from(hash_seed) + 35),
+                serving_contract_hash: content_hash(u32::from(hash_seed) + 36),
+                model_payload_hash: content_hash(u32::from(hash_seed) + 37),
+            },
+        ])
+        .expect("fold artifacts"),
+        path_count: 1,
+        combination_count: 1,
+        median_rank_ic: dec!(0.15),
+        sharpe_distribution: SharpeDistribution {
+            min: dec!(0.5),
+            p25: dec!(0.8),
+            median: dec!(1.0),
+            p75: dec!(1.2),
+            max: dec!(1.5),
+            median_max_drawdown: Some(dec!(0.10)),
+            median_tail_loss: Some(dec!(-0.005)),
+            baseline_uplift: Some(dec!(0.001)),
+        },
+        paths: vec![BacktestPath {
+            path_index: 0,
+            group_returns: vec![dec!(0.01), dec!(0.02)],
+            sharpe: dec!(1.0),
+            rank_ic: dec!(0.15),
+            max_drawdown: dec!(0.10),
+            tail_loss: dec!(-0.005),
+        }]
+        .into(),
+        deflated_sharpe: dec!(0.97),
+        dsr_benchmark_sharpe: dec!(0.5),
+        pbo: dec!(0.20),
+        min_track_record_length_secs: Some(86_400),
+        trial_count: 1,
+        trial_grid_count: 1,
+        coord_search_effective_n: 2,
+    })
+    .expect("seal path set");
+    let runs = PgModelRunRepository::new(db.clone());
+    runs.create(NewModelRun {
+        model_run_id,
+        run_kind: ModelRunKind::Cpcv,
+        model_version_id: Some(*version),
+        decision_policy_snapshot_id: *rc_id,
+        market_selection_id: None,
+        window_start,
+        window_end: window_start + ChronoDuration::hours(1),
+        input_hash: content_hash(u32::from(hash_seed) + 10),
+    })
+    .await
+    .expect("create cpcv model run");
+    let path_set_hash = new_path_set.path_set_hash();
+    PgBacktestPathSetRepository::new(db.clone())
+        .create(new_path_set)
         .await
         .expect("path set");
+    runs.succeed(&model_run_id, path_set_hash, None)
+        .await
+        .expect("finish cpcv model run");
     // Publish gates require an explicit bind — never implicit "latest".
     PgModelRegistryRepository::new(db.clone())
         .set_publish_path(version, Some(path_set_id))
@@ -1270,7 +1589,7 @@ pub async fn retire_unrouted_without_routing() {
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
 
     let dataset = seed_dataset(
         &db,
@@ -1284,13 +1603,13 @@ pub async fn retire_unrouted_without_routing() {
         &db,
         &harness.artifact_store,
         &spec,
-        'a',
         1,
-        Some(dataset),
+        dataset,
         true,
+        DatasetProjection::Exact,
     )
     .await;
-    publish_ready_version(PublishReadyParams {
+    Box::pin(publish_ready_version(PublishReadyParams {
         governance: &harness.service,
         db: &db,
         rc_id: &rc_id,
@@ -1299,7 +1618,7 @@ pub async fn retire_unrouted_without_routing() {
         backtest_seed: '1',
         shadow_seed: 'a',
         reason: "publish for retire",
-    })
+    }))
     .await;
 
     let retired = harness
@@ -1340,7 +1659,7 @@ pub async fn rejects_routed_model_retirement() {
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
 
     let dataset = seed_dataset(
         &db,
@@ -1354,13 +1673,13 @@ pub async fn rejects_routed_model_retirement() {
         &db,
         &harness.artifact_store,
         &spec,
-        'a',
         1,
-        Some(dataset),
+        dataset,
         true,
+        DatasetProjection::Exact,
     )
     .await;
-    publish_ready_version(PublishReadyParams {
+    Box::pin(publish_ready_version(PublishReadyParams {
         governance: &harness.service,
         db: &db,
         rc_id: &rc_id,
@@ -1369,7 +1688,7 @@ pub async fn rejects_routed_model_retirement() {
         backtest_seed: '1',
         shadow_seed: 'a',
         reason: "publish for category-pointer retire",
-    })
+    }))
     .await;
 
     // Simulate an operator having pinned this same version to a category
@@ -1380,9 +1699,9 @@ pub async fn rejects_routed_model_retirement() {
         .model
         .category_model_pointers
         .insert(MarketCategory::Crypto, ModelVersionRef::new(version));
-    harness.store.replace(config);
+    let routed_harness = self::harness(&db, config).await;
     assert!(
-        harness
+        routed_harness
             .store
             .current()
             .model_routing
@@ -1392,7 +1711,7 @@ pub async fn rejects_routed_model_retirement() {
         "precondition: category pointer is armed before retire"
     );
 
-    let error = harness
+    let error = routed_harness
         .service
         .retire(
             RetireModelCommand {
@@ -1410,7 +1729,7 @@ pub async fn rejects_routed_model_retirement() {
     );
 
     assert!(
-        harness
+        routed_harness
             .store
             .current()
             .model_routing
@@ -1420,7 +1739,7 @@ pub async fn rejects_routed_model_retirement() {
         "failed retirement must not invent a generic route"
     );
     assert!(
-        harness
+        routed_harness
             .store
             .current()
             .model_routing
@@ -1442,7 +1761,7 @@ pub async fn uncalibrated_return_cannot_publish() {
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
     let dataset = seed_dataset(
         &db,
         &harness.artifact_store,
@@ -1455,13 +1774,13 @@ pub async fn uncalibrated_return_cannot_publish() {
         &db,
         &harness.artifact_store,
         &spec,
-        'a',
         1,
-        Some(dataset),
+        dataset,
         false,
+        DatasetProjection::Exact,
     )
     .await;
-    seed_backtest(&db, &candidate, &rc_id, '1').await;
+    Box::pin(seed_backtest(&db, &candidate, &rc_id, '1')).await;
     seed_path_set(&db, &candidate, &rc_id, '1').await;
     seed_shadow_window(&db, &candidate, &candidate, 'p').await;
 
@@ -1499,7 +1818,7 @@ pub async fn bind_calibration_creates_model() {
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
     let dataset = seed_dataset(
         &db,
         &harness.artifact_store,
@@ -1512,13 +1831,18 @@ pub async fn bind_calibration_creates_model() {
         &db,
         &harness.artifact_store,
         &spec,
-        'a',
         1,
-        Some(dataset),
+        dataset,
         false,
+        DatasetProjection::Exact,
     )
     .await;
-    let calibrator = seed_score_calibration(&db, &candidate).await;
+    let calibrator = Box::pin(seed_score_calibration(
+        &db,
+        &harness.artifact_store,
+        &candidate,
+    ))
+    .await;
 
     let bound = harness
         .service
@@ -1542,10 +1866,10 @@ pub async fn bind_calibration_creates_model() {
         .await
         .expect("artifact bytes");
     let artifact = ModelArtifact::from_bytes(&bytes).expect("decode");
-    let ModelArtifact::WeightedFactor(weighted) = artifact else {
+    let ModelPayload::WeightedFactor(weighted) = artifact.payload() else {
         panic!("expected weighted factor artifact");
     };
-    let ReturnModelSpec::Calibrated(calibrated) = weighted.return_model else {
+    let ReturnModelSpec::Calibrated(calibrated) = &weighted.return_model else {
         panic!("bound version must carry Calibrated return model");
     };
     assert_eq!(calibrated.calibrator_ref, calibrator);
@@ -1556,20 +1880,20 @@ pub async fn publish_rescans_not_findings() {
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
 
     let dataset_id = seed_leaking_dataset(&db, &harness.artifact_store, &spec, &rc_id).await;
     let candidate = seed_version(
         &db,
         &harness.artifact_store,
         &spec,
-        'L',
         1,
-        Some(dataset_id),
+        dataset_id,
         true,
+        DatasetProjection::Exact,
     )
     .await;
-    seed_backtest(&db, &candidate, &rc_id, '1').await;
+    Box::pin(seed_backtest(&db, &candidate, &rc_id, '1')).await;
     seed_path_set(&db, &candidate, &rc_id, '1').await;
     seed_shadow_window(&db, &candidate, &candidate, 'p').await;
 
@@ -1614,13 +1938,13 @@ fn leaking_training_example() -> TrainingExample {
     let mut example = TrainingExample {
         example_id: TrainingExampleId::from_v7(),
         market_id: MarketId::new("0xleak"),
-        token_id: TokenId::new("yes"),
+        token_id: TokenId::new("1"),
         selected_market: SelectedMarket {
             market_id: MarketId::new("0xleak"),
             event_id: EventId::new("event:leak"),
             category: MarketCategory::Sports,
-            primary_token_id: TokenId::new("yes"),
-            secondary_token_id: None,
+            primary_token_id: TokenId::new("1"),
+            secondary_token_id: Some(TokenId::new("2")),
             liquidity_usd: None,
             volume_24h_usd: None,
             source_refs: Vec::new(),
@@ -1629,7 +1953,7 @@ fn leaking_training_example() -> TrainingExample {
         sample_source: TrainingSampleSource::HistoricalPit,
         feature_vector: FeatureVector {
             market_id: MarketId::new("0xleak"),
-            token_id: Some(TokenId::new("yes")),
+            token_id: Some(TokenId::new("1")),
             decision_at: as_of,
             generic_schema_version: SchemaVersion::FIRST,
             generic: BTreeMap::new(),
@@ -1661,20 +1985,21 @@ async fn seed_leaking_dataset(
     spec: &ModelSpecId,
     rc_id: &DecisionPolicySnapshotId,
 ) -> TrainingDatasetId {
-    let model_spec_definition_hash = PgModelRegistryRepository::new(db.clone())
+    let model_spec = PgModelRegistryRepository::new(db.clone())
         .find_model_spec(spec)
         .await
         .expect("model spec lookup")
-        .expect("model spec")
-        .definition_hash;
+        .expect("model spec");
     let examples = (0..500)
         .map(|index| {
             let mut example = leaking_training_example();
             example.example_id = TrainingExampleId::from_v7();
             example.market_id = MarketId::new(format!("0xleak{index}"));
-            example.token_id = TokenId::new(format!("leak-token-{index}"));
+            example.token_id = TokenId::new((10_000 + index * 2).to_string());
             example.selected_market.market_id = example.market_id.clone();
             example.selected_market.primary_token_id = example.token_id.clone();
+            example.selected_market.secondary_token_id =
+                Some(TokenId::new((10_001 + index * 2).to_string()));
             example.feature_vector.market_id = example.market_id.clone();
             example.feature_vector.token_id = Some(example.token_id.clone());
             bind_fixture_decision_capture(&mut example);
@@ -1686,7 +2011,8 @@ async fn seed_leaking_dataset(
         artifact_store,
         FrozenDatasetSeed {
             model_spec_id: *spec,
-            model_spec_definition_hash,
+            model_family: model_spec.model_family,
+            model_spec_definition_hash: model_spec.definition_hash,
             decision_policy_snapshot_id: *rc_id,
             examples,
             knowledge_lag_secs: 0,
@@ -1697,15 +2023,14 @@ async fn seed_leaking_dataset(
     fixture.persist(&dataset_repo, healthy_coverage()).await
 }
 
-/// Sell (`HoldVsExitWeighted`) publish requires a bound CPCV
-/// path set exactly like Buy — `bound_path_set` is family-agnostic, and
-/// `evaluate_gate` no longer excludes exit scorers from it.
-pub async fn sell_publish_requires_set() {
+/// A prepared Sell payload cannot publish until leakage-safe OOF estimator
+/// evidence exists, even before the CPCV path-set gate is considered.
+pub async fn sell_publish_requires_oof() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_sell_spec(&db).await;
-    let harness = harness(&db).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
     let dataset = seed_dataset(
         &db,
         &harness.artifact_store,
@@ -1714,10 +2039,8 @@ pub async fn sell_publish_requires_set() {
         healthy_sell_coverage(),
     )
     .await;
-    let candidate = seed_sell_version(&db, &harness.artifact_store, &spec, 1, Some(dataset)).await;
+    let candidate = seed_sell_version(&db, &harness.artifact_store, &spec, 1, dataset).await;
     seed_shadow_window(&db, &candidate, &candidate, 'p').await;
-    // Deliberately no bound CPCV path set.
-
     let result = harness
         .service
         .publish(
@@ -1728,14 +2051,13 @@ pub async fn sell_publish_requires_set() {
             GovernanceActor::system(),
         )
         .await;
-    assert!(
-        result.is_err(),
-        "sell publish must fail without a bound CPCV path set"
-    );
     let err = result.expect_err("publish error");
     assert!(
-        err.to_string().contains("CpcvRequired") || err.to_string().contains("cpcv"),
-        "expected CpcvRequired failure, got: {err}"
+        matches!(
+            err,
+            QuantError::Research(ResearchError::SellOofEstimatorRequired)
+        ),
+        "Sell preparation without OOF predictions must return the typed OOF error"
     );
 
     let row = PgModelRegistryRepository::new(db.clone())
@@ -1750,16 +2072,14 @@ pub async fn sell_publish_requires_set() {
     );
 }
 
-/// Once a lot-level CPCV path set clearing the alpha-
-/// significance hard gates is explicitly bound, Sell publish succeeds
-/// through the same governance closure Buy uses (no calibrator needed —
-/// `CalibrationRequired` is `NotApplicable` for exit scorers).
-pub async fn sell_publish_succeeds_set() {
+/// A bound CPCV path set cannot bypass the earlier Sell OOF-estimator
+/// precondition.
+pub async fn sell_cpcv_requires_oof() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_sell_spec(&db).await;
-    let harness = harness(&db).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
     let dataset = seed_dataset(
         &db,
         &harness.artifact_store,
@@ -1768,7 +2088,7 @@ pub async fn sell_publish_succeeds_set() {
         healthy_sell_coverage(),
     )
     .await;
-    let candidate = seed_sell_version(&db, &harness.artifact_store, &spec, 1, Some(dataset)).await;
+    let candidate = seed_sell_version(&db, &harness.artifact_store, &spec, 1, dataset).await;
     // `seed_path_set` clears the alpha-significance hard gates
     // (median_rank_ic=0.15 >= 0.02, deflated_sharpe=0.97 >= 1-0.05, pbo=0.20
     // <= 0.5) with the exact same defaults for Buy and Sell; the Sell settings
@@ -1776,7 +2096,7 @@ pub async fn sell_publish_succeeds_set() {
     seed_path_set(&db, &candidate, &rc_id, '1').await;
     seed_shadow_window(&db, &candidate, &candidate, 'p').await;
 
-    harness
+    let error = harness
         .service
         .publish(
             PublishModelCommand {
@@ -1786,15 +2106,19 @@ pub async fn sell_publish_succeeds_set() {
             GovernanceActor::system(),
         )
         .await
-        .expect("sell publish with bound path set should succeed");
+        .expect_err("CPCV evidence cannot replace Sell OOF predictions");
+    assert!(matches!(
+        error,
+        QuantError::Research(ResearchError::SellOofEstimatorRequired)
+    ));
 
     let row = PgModelRegistryRepository::new(db.clone())
         .find_model_version(&candidate)
         .await
         .expect("find")
         .expect("row");
-    assert_eq!(row.publication_status, PublicationStatus::Published);
-    assert!(row.published_at.is_some());
+    assert_eq!(row.publication_status, PublicationStatus::Candidate);
+    assert!(row.published_at.is_none());
     assert!(
         row.publish_path_set_id.is_some(),
         "the bound path set stays recorded on the published version"

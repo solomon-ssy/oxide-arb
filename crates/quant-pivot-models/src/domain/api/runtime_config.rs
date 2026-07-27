@@ -366,7 +366,6 @@ pub struct PolicyActivationResultView {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DecisionPolicySnapshotOptionView {
-    pub bundle_generation: PolicyBundleGeneration,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub snapshot_hash: ContentHash,
     pub revision_vector: PolicyRevisionBundle,
@@ -377,7 +376,6 @@ pub struct DecisionPolicySnapshotOptionView {
 impl From<DecisionPolicySnapshotOptionInfo> for DecisionPolicySnapshotOptionView {
     fn from(info: DecisionPolicySnapshotOptionInfo) -> Self {
         Self {
-            bundle_generation: info.bundle_generation,
             decision_policy_snapshot_id: info.decision_policy_snapshot_id,
             snapshot_hash: info.snapshot_hash,
             revision_vector: PolicyRevisionBundle {

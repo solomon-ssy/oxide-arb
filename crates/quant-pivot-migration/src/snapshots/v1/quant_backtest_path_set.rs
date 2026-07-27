@@ -14,6 +14,12 @@ pub struct Model {
     pub decision_policy_snapshot_id: Uuid,
     pub window_start: DateTimeWithTimeZone,
     pub window_end: DateTimeWithTimeZone,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub subject: Json,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub methodology: Json,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub fold_artifacts: Json,
     pub path_count: i64,
     pub combination_count: i64,
     pub median_rank_ic: Decimal,

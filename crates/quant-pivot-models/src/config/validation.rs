@@ -137,6 +137,7 @@ impl DeployConfig {
 
         validate_databases(self, &mut report);
         validate_cache_redis(self, &mut report);
+        validate_model_serving_registry(self, &mut report);
         validate_web(self, &mut report);
 
         if self.market_data.websocket.max_subscriptions_per_connection == 0
@@ -183,6 +184,36 @@ fn validate_polygon_rpc(deploy: &DeployConfig, report: &mut ConfigValidationRepo
             field: "polymarket.onchain.rpc_timeout_ms",
             detail: "must be > 0 so Polygon reads and transactions cannot hang indefinitely"
                 .to_owned(),
+        });
+    }
+}
+
+fn validate_model_serving_registry(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
+    let registry = deploy.research.model_serving_registry;
+    if !(1..=1_024).contains(&registry.max_cached_contracts) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.model_serving_registry.max_cached_contracts",
+            detail: "must be between 1 and 1024 inclusive".to_owned(),
+        });
+    }
+    if !(1..=64).contains(&registry.max_concurrent_loads) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.model_serving_registry.max_concurrent_loads",
+            detail: "must be between 1 and 64 inclusive".to_owned(),
+        });
+    }
+    if registry.max_pending_loads < registry.max_concurrent_loads
+        || registry.max_pending_loads > 4_096
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.model_serving_registry.max_pending_loads",
+            detail: "must be >= max_concurrent_loads and <= 4096".to_owned(),
+        });
+    }
+    if !(1_000..=300_000).contains(&registry.load_timeout_ms) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.model_serving_registry.load_timeout_ms",
+            detail: "must be between 1000 and 300000 ms inclusive".to_owned(),
         });
     }
 }
@@ -799,12 +830,62 @@ fn validate_web_quant_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ModelServingRegistryConfig;
 
     #[test]
     fn common_validation_passes_defaults() {
         let deploy = DeployConfig::default();
         let report = deploy.validate_deploy_common();
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
+    }
+
+    #[test]
+    fn model_registry_budgets_bounded() {
+        let defaults = ModelServingRegistryConfig::default();
+        let invalid = [
+            (
+                ModelServingRegistryConfig {
+                    max_cached_contracts: 0,
+                    ..defaults
+                },
+                "max_cached_contracts",
+            ),
+            (
+                ModelServingRegistryConfig {
+                    max_concurrent_loads: 65,
+                    max_pending_loads: 65,
+                    ..defaults
+                },
+                "max_concurrent_loads",
+            ),
+            (
+                ModelServingRegistryConfig {
+                    max_pending_loads: defaults.max_concurrent_loads - 1,
+                    ..defaults
+                },
+                "max_pending_loads",
+            ),
+            (
+                ModelServingRegistryConfig {
+                    load_timeout_ms: 999,
+                    ..defaults
+                },
+                "load_timeout_ms",
+            ),
+        ];
+        for (registry, field) in invalid {
+            let mut deploy = DeployConfig::default();
+            deploy.research.model_serving_registry = registry;
+            let report = deploy.validate_deploy_common();
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .any(|error| error.to_string().contains(field)),
+                "invalid registry field {field} was accepted: {:?}",
+                report.errors
+            );
+        }
     }
 
     #[test]

@@ -8,9 +8,10 @@
 //!
 //! Canonical hashing is byte-exact over the serialized form, so **set-like
 //! inputs must be order-normalized before hashing**. Prefer the typed helpers
-//! ([`ResearchHasher::factor_schema`], [`ResearchHasher::model_feature_requirements`],
-//! [`ResearchHasher::feature_names`]) over raw [`ResearchHasher::ordered`] at
-//! call sites. Map-keyed compute types (e.g. [`crate::features::FeatureVector::generic`]
+//! ([`ResearchHasher::model_feature_requirements`], [`ResearchHasher::feature_names`])
+//! over raw [`ResearchHasher::ordered`] at call sites. Factor revisions use the
+//! sealed [`quant_pivot_models::types::factor::FactorServingPlane`] owner.
+//! Map-keyed compute types (e.g. [`crate::features::FeatureVector::generic`]
 //! / [`quant_pivot_models::types::DomainFeatureSlice::values`], both `BTreeMap`s)
 //! are already canonical by construction.
 
@@ -25,7 +26,6 @@ use quant_pivot_models::{
 use serde::Serialize;
 
 use crate::{
-    factors::FactorSet,
     features::{
         FeatureCell, FeatureName, FeatureSchema, FeatureSpec, FeatureStaleness, FeatureValue,
         FeatureVector,
@@ -35,7 +35,7 @@ use crate::{
         artifact::{MODEL_ARTIFACT_FORMAT_VERSION, StoredModelArtifactRef},
     },
     selection::ModelFeatureRequirements,
-    training::LabelName,
+    training::{LabelName, label_definitions},
 };
 
 /// Canonical JSON shape for [`ResearchHasher::feature_schema`].
@@ -188,16 +188,6 @@ impl ResearchHasher {
         })
     }
 
-    /// Order-independent hash of a governed factor set (`factor_schema_hash`).
-    ///
-    /// Definitions are sorted by stable `FactorDefinitionDocument::name` before
-    /// serialization so registry insertion order never perturbs the digest.
-    pub fn factor_schema(set: &FactorSet) -> QuantResult<ContentHash> {
-        let mut definitions = set.definitions.clone();
-        definitions.sort_by(|left, right| left.name.cmp(&right.name));
-        Self::canonical(&definitions)
-    }
-
     /// Composite content hash of an in-memory two-layer feature vector.
     ///
     /// `feature_hash = H(generic_schema_version, H(generic), domain_family |
@@ -243,12 +233,13 @@ impl ResearchHasher {
         })
     }
 
-    /// Order-independent hash of a dataset's label schema (`label_schema_hash`).
+    /// Order-independent hash of a dataset's executable label schema.
     ///
-    /// The label-name set defines the supervised target columns; sorting makes
-    /// the digest independent of labeler registration order.
+    /// Every target name is resolved to a versioned semantic contract before
+    /// hashing, so changing a label formula rekeys all dependent datasets even
+    /// when the persisted column name stays unchanged.
     pub fn label_schema(names: &[LabelName]) -> QuantResult<ContentHash> {
-        Self::ordered(names)
+        Self::canonical(&label_definitions(names)?)
     }
 }
 
@@ -259,11 +250,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         enums::{
-            common::MarketCategory,
-            domain::DomainFamily,
-            factor::{FactorFamily, FactorNormalization},
-            feature::EvidenceSourceKind,
-            quant::{DataQualityStatus, FactorDirection},
+            common::MarketCategory, domain::DomainFamily, feature::EvidenceSourceKind,
+            quant::DataQualityStatus,
         },
         runtime_config::FeatureFamily,
         types::{MarketId, Probability, SchemaVersion, TokenId},
@@ -272,7 +260,6 @@ mod tests {
 
     use super::ResearchHasher;
     use crate::{
-        factors::{FactorDefinitionDocument, FactorName, FactorOutputKind, FactorSet},
         features::{
             DomainFeatureSlice, EvidenceSourceRef, FeatureCell, FeatureName, FeatureSchema,
             FeatureSpec, FeatureStaleness, FeatureUnit, FeatureValue, FeatureValueKind,
@@ -280,19 +267,6 @@ mod tests {
         },
         selection::ModelFeatureRequirements,
     };
-
-    fn sample_factor(name: &'static str) -> FactorDefinitionDocument {
-        FactorDefinitionDocument {
-            name: FactorName::from_static(name),
-            family: FactorFamily::Liquidity,
-            input_features: Vec::new(),
-            output_kind: FactorOutputKind::NormalizedScore,
-            default_direction: FactorDirection::Positive,
-            normalization: FactorNormalization::Rank,
-            owner: "test".to_owned(),
-            quality_gates: Vec::new(),
-        }
-    }
 
     #[test]
     fn ordered_independent_input_order() {
@@ -380,37 +354,6 @@ mod tests {
         assert_ne!(
             ResearchHasher::feature_schema(&v1).expect("hash"),
             ResearchHasher::feature_schema(&v2).expect("hash"),
-        );
-    }
-
-    #[test]
-    fn factor_schema_order_independent() {
-        let forward = FactorSet {
-            definitions: vec![sample_factor("alpha"), sample_factor("beta")],
-        };
-        let shuffled = FactorSet {
-            definitions: vec![sample_factor("beta"), sample_factor("alpha")],
-        };
-        let forward_hash = ResearchHasher::factor_schema(&forward).expect("hash");
-        let shuffled_hash = ResearchHasher::factor_schema(&shuffled).expect("hash");
-        assert_eq!(forward_hash, shuffled_hash);
-    }
-
-    #[test]
-    fn factor_schema_distinguishes_sets() {
-        let two = FactorSet {
-            definitions: vec![sample_factor("alpha"), sample_factor("beta")],
-        };
-        let three = FactorSet {
-            definitions: vec![
-                sample_factor("alpha"),
-                sample_factor("beta"),
-                sample_factor("gamma"),
-            ],
-        };
-        assert_ne!(
-            ResearchHasher::factor_schema(&two).expect("hash"),
-            ResearchHasher::factor_schema(&three).expect("hash"),
         );
     }
 

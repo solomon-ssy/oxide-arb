@@ -29,7 +29,7 @@ pub struct AuthzOutcome {
 }
 
 /// The authorization rule attached to a protected route.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rule {
     /// Any authenticated actor is admitted (authn already proved identity).
     /// Used for self-service endpoints such as `logout`, `me`, and the

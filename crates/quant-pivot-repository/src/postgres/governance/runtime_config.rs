@@ -100,15 +100,9 @@ impl PgPolicyRepository {
                     "idempotent activation references a missing snapshot",
                 )
             })?;
-        if existing.bundle_generation != committed_snapshot.bundle_generation {
-            return Err(StorageError::invariant_violation(
-                Some("policy_activation"),
-                "idempotent activation generation differs from its snapshot",
-            ));
-        }
         let committed_info = Self::resolve_snapshot_model(db, committed_snapshot).await?;
         let bundle = ActivePolicyBundle::from_parts(
-            committed_info.bundle_generation,
+            existing.bundle_generation,
             committed_info.decision_policy_snapshot_id,
             committed_info.snapshot_hash,
             committed_info.snapshot,
@@ -179,6 +173,57 @@ fn verify_profile_artifact_row(row: &ProfileArtifactModel) -> Result<(), Storage
     Ok(())
 }
 
+fn verify_snapshot_model(model: &SnapshotModel) -> Result<(), StorageError> {
+    let actual_hash = CanonicalDigest::content_hash_json(&model.snapshot).map_err(|error| {
+        StorageError::invariant_violation(
+            Some("decision_policy_snapshot"),
+            format!("failed to hash persisted decision snapshot: {error}"),
+        )
+    })?;
+    let expected_id = DecisionPolicySnapshotId::from_content_hash(&actual_hash);
+    let projected_revisions = [
+        (
+            ConfigResourceKind::RecommendationPolicy,
+            model.recommendation_policy_revision_id,
+        ),
+        (
+            ConfigResourceKind::ExecutionRiskPolicy,
+            model.execution_risk_policy_revision_id,
+        ),
+        (
+            ConfigResourceKind::ModelRouting,
+            model.model_routing_revision_id,
+        ),
+        (
+            ConfigResourceKind::ReportSchedule,
+            model.report_schedule_revision_id,
+        ),
+        (
+            ConfigResourceKind::OperationalControl,
+            model.operational_control_revision_id,
+        ),
+        (
+            ConfigResourceKind::ExecutionAuthorization,
+            model.execution_authorization_revision_id,
+        ),
+    ];
+    if actual_hash != model.snapshot_hash
+        || expected_id != model.decision_policy_snapshot_id
+        || projected_revisions.iter().any(|(kind, revision_id)| {
+            model.snapshot.resource_revision_id(*kind) != Some(revision_id)
+        })
+    {
+        return Err(StorageError::invariant_violation(
+            Some("decision_policy_snapshot"),
+            format!(
+                "snapshot {} has inconsistent content hash, content-addressed id, or revision projection",
+                model.decision_policy_snapshot_id
+            ),
+        ));
+    }
+    Ok(())
+}
+
 impl PgPolicyRepository {
     async fn load_profile_documents(
         db: &impl ConnectionTrait,
@@ -218,6 +263,7 @@ impl PgPolicyRepository {
         db: &impl ConnectionTrait,
         model: SnapshotModel,
     ) -> Result<DecisionPolicySnapshotInfo, StorageError> {
+        verify_snapshot_model(&model)?;
         let documents =
             Self::load_profile_documents(db, &model.snapshot.profile_artifact_refs).await?;
         let snapshot = model
@@ -226,7 +272,6 @@ impl PgPolicyRepository {
             .resolve(documents)
             .map_err(|error| profile_error(&error))?;
         Ok(DecisionPolicySnapshotInfo {
-            bundle_generation: model.bundle_generation,
             decision_policy_snapshot_id: model.decision_policy_snapshot_id,
             snapshot_hash: model.snapshot_hash,
             snapshot,
@@ -275,13 +320,13 @@ impl PgPolicyRepository {
         models
             .into_iter()
             .map(|model| {
+                verify_snapshot_model(&model)?;
                 let snapshot = model
                     .snapshot
                     .clone()
                     .resolve(documents.clone())
                     .map_err(|error| profile_error(&error))?;
                 Ok(DecisionPolicySnapshotInfo {
-                    bundle_generation: model.bundle_generation,
                     decision_policy_snapshot_id: model.decision_policy_snapshot_id,
                     snapshot_hash: model.snapshot_hash,
                     snapshot,
@@ -420,11 +465,10 @@ fn verify_guard_snapshot(
 ) -> Result<(), StorageError> {
     if guard.current_snapshot_id.as_ref() != Some(&snapshot.decision_policy_snapshot_id)
         || guard.current_snapshot_hash.as_ref() != Some(&snapshot.snapshot_hash)
-        || guard.generation != snapshot.bundle_generation
     {
         return Err(StorageError::invariant_violation(
             Some("policy_activation_guard"),
-            "guard generation/id/hash does not match its current decision snapshot",
+            "guard id/hash does not match its current decision snapshot",
         ));
     }
     Ok(())
@@ -436,9 +480,7 @@ impl PgPolicyRepository {
         snapshot: NewDecisionPolicySnapshot,
     ) -> Result<(), StorageError> {
         let snapshot_id = snapshot.decision_policy_snapshot_id;
-        let expected_hash = snapshot.snapshot_hash;
-        let expected_snapshot = snapshot.snapshot.clone();
-        let outcome = SnapshotEntity::insert(snapshot.into_active_model())
+        let outcome = SnapshotEntity::insert(snapshot.clone().into_active_model())
             .on_conflict_do_nothing_on([SnapshotColumn::DecisionPolicySnapshotId])
             .exec_without_returning(db)
             .await
@@ -456,12 +498,24 @@ impl PgPolicyRepository {
                             "conflicting snapshot disappeared before verification",
                         )
                     })?;
-                if existing.snapshot_hash != expected_hash || existing.snapshot != expected_snapshot
+                verify_snapshot_model(&existing)?;
+                if existing.snapshot_hash != snapshot.snapshot_hash
+                    || existing.snapshot != snapshot.snapshot
+                    || existing.recommendation_policy_revision_id
+                        != snapshot.recommendation_policy_revision_id
+                    || existing.execution_risk_policy_revision_id
+                        != snapshot.execution_risk_policy_revision_id
+                    || existing.model_routing_revision_id != snapshot.model_routing_revision_id
+                    || existing.report_schedule_revision_id != snapshot.report_schedule_revision_id
+                    || existing.operational_control_revision_id
+                        != snapshot.operational_control_revision_id
+                    || existing.execution_authorization_revision_id
+                        != snapshot.execution_authorization_revision_id
                 {
                     return Err(StorageError::state_conflict(
                         "decision_policy_snapshot",
                         Some(&snapshot_id),
-                        "snapshot id already exists with different content",
+                        "snapshot id already exists with different immutable content or revision projection",
                     ));
                 }
                 Ok(())
@@ -604,6 +658,8 @@ fn verify_activation_subject(
             )
         })?;
     if computed_hash != snapshot.snapshot_hash
+        || DecisionPolicySnapshotId::from_content_hash(&computed_hash)
+            != snapshot.decision_policy_snapshot_id
         || subject.candidate_bundle_hash != snapshot.snapshot_hash
     {
         return Err(StorageError::state_conflict(
@@ -1002,7 +1058,7 @@ impl PolicyRepository for PgPolicyRepository {
                 let bundle_generation = bundle.generation;
                 bundle.decision_policy_snapshot_id == snapshot.decision_policy_snapshot_id
                     && bundle.snapshot_hash == snapshot.snapshot_hash
-                    && bundle_generation == snapshot.bundle_generation
+                    && bundle_generation == activation.bundle_generation
             })
             && Self::load_current_activation_from(&transaction, Some(activation.resource_kind))
                 .await?
@@ -1016,12 +1072,11 @@ impl PolicyRepository for PgPolicyRepository {
             next_generation
         };
         if activation.bundle_generation != committed_generation
-            || snapshot.bundle_generation != committed_generation
             || activation.decision_policy_snapshot_id != snapshot.decision_policy_snapshot_id
         {
             return Err(StorageError::invariant_violation(
                 Some("policy_activation"),
-                "activation and snapshot must bind the exact next bundle generation and snapshot id",
+                "activation must bind the exact next bundle generation and snapshot id",
             ));
         }
         let revision = Self::validate_activation_evidence(&transaction, &activation).await?;
@@ -1070,7 +1125,7 @@ impl PolicyRepository for PgPolicyRepository {
             })?;
         let committed_info = Self::resolve_snapshot_model(&transaction, snapshot_model).await?;
         let bundle = ActivePolicyBundle::from_parts(
-            committed_info.bundle_generation,
+            inserted.bundle_generation,
             committed_info.decision_policy_snapshot_id,
             committed_info.snapshot_hash,
             committed_info.snapshot,
@@ -1241,7 +1296,7 @@ impl PolicyRepository for PgPolicyRepository {
         limit: u64,
     ) -> Result<Vec<DecisionPolicySnapshotOptionInfo>, StorageError> {
         SnapshotEntity::find()
-            .order_by_desc(SnapshotColumn::BundleGeneration)
+            .order_by_desc(SnapshotColumn::CreatedAt)
             .limit(limit)
             .into_partial_model::<DecisionPolicySnapshotOptionInfo>()
             .all(&self.db)

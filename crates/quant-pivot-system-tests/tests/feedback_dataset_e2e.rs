@@ -4,6 +4,7 @@ use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
+    result::Result as StdResult,
     sync::Arc,
 };
 
@@ -45,24 +46,18 @@ use quant_pivot_models::{
     },
     enums::{
         catalog::CatalogTimestampQuality,
-        common::MarketCategory,
-        factor::FactorFamily,
         feature::EvidenceSourceKind,
         market::MarketStatus,
         quant::{DataQualityStatus, DatasetPurpose},
     },
     hashing::CanonicalDigest,
-    runtime_config::{
-        DataQualityConfig, DomainConfig, FactorsConfig, FeatureFamily, FeaturesConfig,
-        SelectionConfig, TrainingConfig,
-    },
     types::{
         CatalogDecisionRef, CatalogEventChangeId, CatalogMarketChangeId, CatalogSyncBatchId,
-        ContentHash, DatasetSourceLineage, DecisionCaptureEvidence, DecisionSnapshotEvidence,
-        DomainInstrumentKey, DomainSourceId, EvidenceSourceRef, EvmAddress, EvmBlockHash,
-        EvmTransactionHash, FeatureCell, FeatureStaleness, FeatureValue, MarketId, PayoutRatio,
-        Probability, RecommendationFactorBreakdown, SchemaVersion, TrainingDatasetId,
-        TrainingExampleId, TrainingSampleSource,
+        ContentHash, DatasetSourceLineage, DecisionCaptureEvidence, DecisionPolicySnapshotId,
+        DecisionSnapshotEvidence, DomainInstrumentKey, DomainSourceId, EvidenceSourceRef,
+        EvmAddress, EvmBlockHash, EvmTransactionHash, FeatureCell, FeatureStaleness, FeatureValue,
+        MarketId, PayoutRatio, Probability, ResearchEvaluationTrack, SchemaVersion,
+        TrainingDatasetId, TrainingExampleId, TrainingSampleSource,
     },
 };
 use quant_pivot_repository::{
@@ -71,19 +66,21 @@ use quant_pivot_repository::{
         PgCalibrationArtifactRepository, PgCatalogLedgerRepository, PgClobMarketInfoRepository,
         PgDomainSourceCursorRepository, PgFactorRepository, PgFeatureRepository,
         PgFeedbackCohortRepository, PgMarketLinkageRepository, PgMarketRepository,
-        PgModelRegistryRepository, PgPositionRepository,
+        PgModelRegistryRepository, PgPolicyRepository, PgPositionRepository,
         PgRecommendationExecutionOutcomeRepository, PgRecommendationReportRepository,
         PgRecommendationRepository, PgRecommendationResolutionOutcomeRepository,
         PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
-        DomainSourceCursorRepository, FactWriter, FeatureRepository, MarketRepository,
-        ModelRegistryRepository, RecommendationReportRepository, RecommendationRepository,
+        DomainSourceCursorRepository, FactWriter, FactorRepository, FeatureRepository,
+        MarketRepository, ModelRegistryRepository, PolicyRepository,
+        RecommendationReportRepository, RecommendationRepository,
         RecommendationResolutionOutcomeRepository,
     },
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
+    factors::{FactorValue, FactorValueInsertContext},
     features::{FeatureVector, names::book::MID},
     selection::SelectedMarket,
     training::{
@@ -96,6 +93,7 @@ use quant_pivot_system_tests::{
     postgres::PostgresClock,
     stack::SystemStack,
     support::{
+        artifact_store::VersionedArtifactStoreFixture,
         execution_pg_seed::{
             ExecutionTxnIds, FEEDBACK_SCALE_REPORT_COUNT, FEEDBACK_SCALE_TOTAL, ReportBuildOptions,
             ReportSeedConfig, SharedDemoInfra, build_custom_report_transaction,
@@ -131,8 +129,9 @@ async fn outcome_dataset_production_stack() {
 
 async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
     let db = stack.postgres.connection().clone();
-    let store: Arc<dyn ArtifactStore> =
+    let inner: Arc<dyn ArtifactStore> =
         Arc::new(LocalArtifactStore::new(artifact_root.to_path_buf()));
+    let store: Arc<dyn ArtifactStore> = Arc::new(VersionedArtifactStoreFixture::new(inner));
     let ch = Arc::new(
         ClickHousePool::connect(&stack.clickhouse_config)
             .await
@@ -156,7 +155,13 @@ async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
     let reconciliation =
         reconcile_outcomes(&db, Arc::clone(&ch), Arc::clone(&facts), &reports).await?;
 
-    let dataset_service = feedback_service(&db, Arc::clone(&store), facts);
+    let dataset_service = feedback_service(
+        &db,
+        Arc::clone(&store),
+        facts,
+        infra.decision_policy_snapshot_id,
+    )
+    .await?;
     let old_source = source_lineage(
         &db,
         &store,
@@ -323,6 +328,7 @@ async fn reconcile_outcomes(
 struct ServingSeed {
     selected_market: SelectedMarket,
     feature_vector: FeatureVector,
+    factor_values: Vec<FactorValue>,
     capture: DecisionCaptureEvidence,
 }
 
@@ -340,18 +346,33 @@ async fn seed_feedback_report(
         trigger_key: format!("feedback-dataset:{ordinal}"),
     };
     let ids = prepare_report_on_infra(db, infra, &config).await;
-    let mut options = ReportBuildOptions::published_single(&ids);
+    let options = ReportBuildOptions::published_single(&ids);
     let recommendation = options
         .recommendations
-        .first_mut()
+        .first()
         .context("prepared feedback recommendation")?;
-    recommendation.factor_breakdown = RecommendationFactorBreakdown(Vec::new());
     let serving = serving_evidence(&ids, recommendation)?;
     let mut feature = serving
         .feature_vector
         .try_to_new(&serving.capture.snapshot.boundary, &serving.capture)?;
     feature.feature_vector_id = recommendation.evidence_refs.feature_vector_id;
     PgFeatureRepository::new(db.clone()).create(feature).await?;
+    let factor_values = ids.factor_values();
+    let factor_context = FactorValueInsertContext {
+        model_run_id: &ids.model_run,
+        feature_vector_id: &recommendation.evidence_refs.feature_vector_id,
+        market_id: &recommendation.market_id,
+        decision_at: ids.decision_at,
+    };
+    PgFactorRepository::new(db.clone())
+        .create_values(
+            factor_values
+                .iter()
+                .map(|factor| factor.try_to_new(&factor_context))
+                .collect::<StdResult<Vec<_>, _>>()?,
+        )
+        .await?;
+    ids.complete_model_run(db).await;
     persist_and_publish_report(
         db,
         build_custom_report_transaction(&ids, options),
@@ -364,6 +385,7 @@ async fn seed_feedback_report(
         ServingSeed {
             selected_market: serving.selected_market,
             feature_vector: serving.feature_vector,
+            factor_values,
             capture: serving.capture,
         },
     ))
@@ -501,7 +523,7 @@ fn source_example(seed: &ServingSeed, resolved_at: DateTime<Utc>) -> TrainingExa
         decision_boundary: seed.capture.snapshot.boundary.clone(),
         sample_source: TrainingSampleSource::RecommendationFeedback,
         feature_vector: seed.feature_vector.clone(),
-        factor_values: Vec::new(),
+        factor_values: seed.factor_values.clone(),
         labels: vec![TrainingLabel {
             label_name: TOKEN_PAYOUT_RATIO,
             horizon_secs: 0,
@@ -531,9 +553,14 @@ async fn source_lineage(
         examples,
         ReplayableSourceSliceFixture {
             profile_ref: fixture_profile_ref(),
+            evaluation_track: ResearchEvaluationTrack::ResearchOnly,
             research_program_hash: CanonicalDigest::content_hash_json(&(scope, "program"))?,
             decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
-            runtime_config_hash: CanonicalDigest::content_hash_json(&(scope, "runtime"))?,
+            runtime_config_hash: PgPolicyRepository::new(db.clone())
+                .load_snapshot(&infra.decision_policy_snapshot_id)
+                .await?
+                .context("feedback Source Slice runtime policy")?
+                .snapshot_hash,
             window_start,
             window_end: cutoff,
         },
@@ -542,11 +569,17 @@ async fn source_lineage(
     seed_source_manifest(db, &stored).await.map_err(Into::into)
 }
 
-fn feedback_service(
+async fn feedback_service(
     db: &DatabaseConnection,
     store: Arc<dyn ArtifactStore>,
     fact_read: Arc<ChQuantFactReadRepository>,
-) -> FeedbackDatasetService {
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+) -> Result<FeedbackDatasetService> {
+    let runtime = PgPolicyRepository::new(db.clone())
+        .load_snapshot(&decision_policy_snapshot_id)
+        .await?
+        .context("feedback training runtime policy")?
+        .snapshot;
     let training = TrainingDatasetService::new(
         TrainingDatasetServiceDeps {
             compute: Arc::new(ComputeExecutor::new().expect("feedback compute executor")),
@@ -563,37 +596,24 @@ fn feedback_service(
             calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
         },
         TrainingDatasetBuildConfig {
-            features: FeaturesConfig {
-                enabled_feature_families: vec![
-                    FeatureFamily::PriceBook,
-                    FeatureFamily::MarketMetadata,
-                ],
-                ..FeaturesConfig::default()
-            },
-            factors: FactorsConfig {
-                enabled_factor_families: vec![FactorFamily::DataQuality],
-                ..FactorsConfig::default()
-            },
-            domain: DomainConfig::default(),
-            data_quality: DataQualityConfig::default(),
-            training: TrainingConfig::default(),
-            selection: SelectionConfig {
-                enabled_categories: vec![MarketCategory::Politics],
-                ..SelectionConfig::default()
-            },
+            features: runtime.profile_artifacts.features.definition,
+            factors: runtime.profile_artifacts.scoring.definition,
+            domain: runtime.profile_artifacts.domain.definition,
+            data_quality: runtime.recommendation.data_quality,
+            training: runtime.profile_artifacts.research_method.training,
+            selection: runtime.recommendation.selection,
             labelers: default_labelers(),
             bias_table: None,
         },
         20_000,
-    )
-    .expect("feedback training service");
-    FeedbackDatasetService::new(FeedbackDatasetServiceDeps {
+    )?;
+    Ok(FeedbackDatasetService::new(FeedbackDatasetServiceDeps {
         cohort_repository: Arc::new(PgFeedbackCohortRepository::new(db.clone())),
         feature_repository: Arc::new(PgFeatureRepository::new(db.clone())),
         factor_repository: Arc::new(PgFactorRepository::new(db.clone())),
         artifact_store: store,
         dataset_service: Arc::new(training),
-    })
+    }))
 }
 
 fn reconciliation_service(
@@ -777,7 +797,8 @@ async fn assert_storage_idempotency(
         .await?;
     ensure!(
         dataset_count == 2 && outcome_count == 2 && ch_count == 2,
-        "rerun created duplicate Dataset/outcome/fact rows"
+        "rerun storage cardinality drifted: feedback_datasets={dataset_count}, \
+         resolution_outcomes={outcome_count}, resolution_facts={ch_count}"
     );
     let outcomes = PgRecommendationResolutionOutcomeRepository::new(db.clone());
     for ids in reports.iter().take(2) {
@@ -861,7 +882,11 @@ fn print_evidence(
 
 async fn pg_count(db: &DatabaseConnection, table: &str) -> Result<u64> {
     let sql = match table {
-        "quant_training_dataset" => "SELECT COUNT(*) AS row_count FROM quant_training_dataset",
+        "quant_training_dataset" => {
+            "SELECT COUNT(*) AS row_count
+             FROM quant_training_dataset
+             WHERE feedback_cohort = 'model_learning'"
+        }
         "quant_recommendation_resolution_outcome" => {
             "SELECT COUNT(*) AS row_count FROM quant_recommendation_resolution_outcome"
         }

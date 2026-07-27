@@ -54,7 +54,7 @@ use quant_pivot_models::{
 };
 use quant_pivot_research::{
     execution_semantics::{BookWalkOutcome, LiquidityRole, PitFeeSchedule},
-    model::{ActiveSchemaBinding, ModelRuntimeFactoryBuilder, SignalCandidate},
+    model::{QuantModelRuntime, SignalCandidate},
     pit::BookSnapshotAt,
     policy_evidence::PolicyEvidenceRecord,
     policy_replay::{
@@ -118,20 +118,27 @@ impl FrozenPolicySignals {
 }
 
 /// Re-infer every frozen cross-section once. The runtime is hash/schema
-/// verified by the standard factory and consumes Dataset bytes verbatim.
+/// was built from the complete verified model preimage and consumes Dataset
+/// bytes verbatim.
 pub(super) async fn reinfer_frozen_policy_signals(
-    factory_builder: &dyn ModelRuntimeFactoryBuilder,
+    runtime: &dyn QuantModelRuntime,
     model_version: &ModelVersionInfo,
     feature_schema_hash: &ContentHash,
     factor_schema_hash: &ContentHash,
     examples: &[TrainingExample],
 ) -> QuantResult<FrozenPolicySignals> {
-    let factory = factory_builder.build(ActiveSchemaBinding {
-        feature_schema_hash: *feature_schema_hash,
-        factor_schema_hash: *factor_schema_hash,
-        bias_table_hash: None,
-    });
-    let runtime = factory.load(model_version, None).await?;
+    let contract = model_version
+        .verified_serving_contract()
+        .map_err(|error| methodology(format!("invalid persisted serving contract: {error}")))?;
+    let bindings = contract.bindings();
+    if bindings.schemas.feature_schema_hash != *feature_schema_hash
+        || bindings.factors.plane.factor_schema_hash() != *factor_schema_hash
+    {
+        return Err(methodology(format!(
+            "model {} serving schema/factor plane differs from frozen policy Dataset",
+            model_version.model_version_id
+        )));
+    }
     let mut groups = BTreeMap::<DateTime<Utc>, Vec<&TrainingExample>>::new();
     for example in examples {
         groups
@@ -142,7 +149,7 @@ pub(super) async fn reinfer_frozen_policy_signals(
     let mut by_market = HashMap::<MarketId, Vec<TimedSignal>>::new();
     for (decision_at, mut group) in groups {
         group.sort_by(|left, right| left.market_id.cmp(&right.market_id));
-        let input = build_frozen_runtime_input(runtime.as_ref(), &ModelRunId::from_v7(), &group)?;
+        let input = build_frozen_runtime_input(runtime, &ModelRunId::from_v7(), &group)?;
         let output = runtime.infer_batch(input).await?;
         let mut emitted = HashMap::<MarketId, SignalCandidate>::new();
         for candidate in output.candidates {

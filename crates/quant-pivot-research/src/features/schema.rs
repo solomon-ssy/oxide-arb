@@ -98,9 +98,12 @@ pub enum SourceRequirement {
     TradeTapeWindow,
     /// One resolved revision from the append-only market-linkage ledger.
     ResolvedLinkage,
-    /// A resolved market linkage plus a PIT window of external domain
-    /// observations (`quant_domain_observation`) for the linked instrument.
-    DomainObservationWindow,
+    /// A resolved crypto-market linkage plus a PIT window of crypto-domain
+    /// observations for the linked instrument.
+    DomainCryptoObservationWindow,
+    /// A resolved weather-market linkage plus a PIT window of weather-domain
+    /// observations for the linked station and contract.
+    DomainWeatherObservationWindow,
 }
 
 impl SourceRequirement {
@@ -117,7 +120,8 @@ impl SourceRequirement {
             Self::MicrostructureWindow => EvidenceSourceKind::ClickHouseFact,
             Self::TradeTapeWindow => EvidenceSourceKind::TradeTape,
             Self::ResolvedLinkage => EvidenceSourceKind::Linkage,
-            Self::DomainObservationWindow => EvidenceSourceKind::DomainExternal,
+            Self::DomainCryptoObservationWindow => EvidenceSourceKind::DomainCrypto,
+            Self::DomainWeatherObservationWindow => EvidenceSourceKind::DomainWeather,
         }
     }
 }
@@ -415,7 +419,9 @@ impl FeatureSchema {
         self.specs.iter().any(|spec| {
             matches!(
                 spec.source_requirement,
-                SourceRequirement::DomainObservationWindow | SourceRequirement::ResolvedLinkage
+                SourceRequirement::DomainCryptoObservationWindow
+                    | SourceRequirement::DomainWeatherObservationWindow
+                    | SourceRequirement::ResolvedLinkage
             )
         })
     }
@@ -971,7 +977,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
             DISTANCE_TO_STRIKE,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
-            SourceRequirement::DomainObservationWindow,
+            SourceRequirement::DomainCryptoObservationWindow,
             PitRule::FactAtOrBeforeSourceCutoff,
             StalenessRule::MaxDomainObservationAge,
         )
@@ -984,7 +990,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
             UNDERLYING_MOMENTUM,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
-            SourceRequirement::DomainObservationWindow,
+            SourceRequirement::DomainCryptoObservationWindow,
             PitRule::FactAtOrBeforeSourceCutoff,
             StalenessRule::MaxDomainObservationAge,
         )
@@ -997,7 +1003,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
             UNDERLYING_REALIZED_VOL,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
-            SourceRequirement::DomainObservationWindow,
+            SourceRequirement::DomainCryptoObservationWindow,
             PitRule::FactAtOrBeforeSourceCutoff,
             StalenessRule::MaxDomainObservationAge,
         )
@@ -1026,7 +1032,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
             BASIS_VS_RESOLUTION_SOURCE,
             FeatureFamily::Domain,
             FeatureValueKind::Bps,
-            SourceRequirement::DomainObservationWindow,
+            SourceRequirement::DomainCryptoObservationWindow,
             PitRule::FactAtOrBeforeSourceCutoff,
             StalenessRule::MaxDomainObservationAge,
         )
@@ -1042,7 +1048,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
             ENSEMBLE_BIN_PROBABILITY,
             FeatureFamily::Domain,
             FeatureValueKind::Probability,
-            SourceRequirement::DomainObservationWindow,
+            SourceRequirement::DomainWeatherObservationWindow,
             PitRule::FactAtOrBeforeSourceCutoff,
             StalenessRule::MaxDomainObservationAge,
         )
@@ -1056,7 +1062,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
             ENSEMBLE_SPREAD,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
-            SourceRequirement::DomainObservationWindow,
+            SourceRequirement::DomainWeatherObservationWindow,
             PitRule::FactAtOrBeforeSourceCutoff,
             StalenessRule::MaxDomainObservationAge,
         )
@@ -1069,7 +1075,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
             OBSERVED_EXTREME_HEADROOM,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
-            SourceRequirement::DomainObservationWindow,
+            SourceRequirement::DomainWeatherObservationWindow,
             PitRule::FactAtOrBeforeSourceCutoff,
             StalenessRule::MaxDomainObservationAge,
         )
@@ -1081,7 +1087,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
             NOAA_RESOLUTION_BASIS_RISK,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
-            SourceRequirement::DomainObservationWindow,
+            SourceRequirement::DomainWeatherObservationWindow,
             PitRule::FactAtOrBeforeSourceCutoff,
             StalenessRule::MaxDomainObservationAge,
         )

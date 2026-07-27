@@ -108,7 +108,7 @@ fn oracle_stale(
 /// Evidence ref anchored on one domain observation.
 fn evidence(window: &DomainObservationWindow, metric: DomainMetric) -> Option<EvidenceSourceRef> {
     window.latest(metric).map(|observation| EvidenceSourceRef {
-        source_kind: EvidenceSourceKind::DomainExternal,
+        source_kind: EvidenceSourceKind::DomainCrypto,
         reference: format!(
             "{}:{}@{}",
             observation.instrument_key,
@@ -123,7 +123,7 @@ fn evidence(window: &DomainObservationWindow, metric: DomainMetric) -> Option<Ev
 impl CryptoPriceReportWindow {
     fn oracle_evidence(&self) -> Option<EvidenceSourceRef> {
         self.latest().map(|report| EvidenceSourceRef {
-            source_kind: EvidenceSourceKind::DomainExternal,
+            source_kind: EvidenceSourceKind::DomainCrypto,
             reference: format!(
                 "{}:price@{}#{}",
                 report.instrument_key,

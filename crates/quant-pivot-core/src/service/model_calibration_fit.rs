@@ -21,38 +21,41 @@ use quant_pivot_models::{
             ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
         },
         quant::{
-            CalibrationArtifactInfo, CalibrationArtifactPayload, JobProgressSink,
+            CalibrationArtifactPayload, JobProgressSink, ModelScoreCalibrationCommit,
             NewCalibrationArtifact,
         },
         query::TimeWindow,
     },
-    enums::quant::{CalibrationKind, CalibrationMethod, DatasetPurpose, TrainingDatasetStatus},
+    enums::quant::{
+        CalibrationKind, CalibrationMethod, DatasetPurpose, ModelRunErrorCode, ModelRunKind,
+        ModelRunStatus, TrainingDatasetStatus,
+    },
     types::{
         CalibrationArtifactId, DecisionPolicySnapshotId, ModelVersionId, PayoutRatio,
-        TrainingDatasetId, calibration::ModelScoreCalibrationPayload,
+        TrainingDatasetId,
+        calibration::{MODEL_SCORE_CALIBRATION_FORMAT_VERSION, ModelScoreCalibrationPayload},
+        model_serving::ModelServingPolicySnapshotBinding,
     },
 };
 use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, ModelRegistryRepository, PolicyRepository,
+    CalibrationArtifactRepository, ModelRegistryRepository, ModelRunRepository, PolicyRepository,
     TrainingDatasetRepository,
 };
-use quant_pivot_research::{
-    backtest::SampleOutcome,
-    model::{
-        IsotonicCalibrator, PlattCalibrator, ProbabilityCalibrator, ReliabilitySample,
-        compute_reliability,
-    },
+use quant_pivot_research::model::{
+    IsotonicCalibrator, PlattCalibrator, ProbabilityCalibrator, ReliabilitySample,
+    compute_reliability,
 };
 use rust_decimal::Decimal;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     app::ports::backtest::CoreBacktestPort,
-    governance::model_score_content_hash,
+    governance::{model_score_content_hash, policy_snapshot::VerifiedPolicySnapshotBinding},
     service::{
-        backtest::CalibrationReplayInput,
+        backtest::{CalibrationReplayEvidence, CalibrationReplayInput},
         calibration_shared::{
-            assert_dataset_disjoint, assert_embargoed_after, calibration_split_hash,
+            CalibrationSampleKey, assert_dataset_disjoint, assert_embargoed_after,
+            calibration_split_hash,
         },
     },
 };
@@ -76,6 +79,7 @@ pub struct ModelCalibrationFitService {
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
     training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
     calibration_repo: Arc<dyn CalibrationArtifactRepository>,
+    model_run_repo: Arc<dyn ModelRunRepository>,
     runtime_config_repo: Arc<dyn PolicyRepository>,
 }
 
@@ -86,6 +90,7 @@ impl ModelCalibrationFitService {
         model_registry_repo: Arc<dyn ModelRegistryRepository>,
         training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
         calibration_repo: Arc<dyn CalibrationArtifactRepository>,
+        model_run_repo: Arc<dyn ModelRunRepository>,
         runtime_config_repo: Arc<dyn PolicyRepository>,
     ) -> Self {
         Self {
@@ -93,6 +98,7 @@ impl ModelCalibrationFitService {
             model_registry_repo,
             training_dataset_repo,
             calibration_repo,
+            model_run_repo,
             runtime_config_repo,
         }
     }
@@ -113,6 +119,19 @@ impl ModelCalibrationFitService {
                     detail: "runtime config version for model calibration fit not found".to_owned(),
                 })
             })?;
+        let policy_binding = ModelServingPolicySnapshotBinding::from(
+            VerifiedPolicySnapshotBinding::try_from(&version)?,
+        );
+        if policy_binding.decision_policy_snapshot_id != *decision_policy_snapshot_id {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "loaded calibration policy snapshot {} differs from requested snapshot \
+                     {decision_policy_snapshot_id}",
+                    policy_binding.decision_policy_snapshot_id
+                ),
+            }
+            .into());
+        }
         let config = version.snapshot;
         let calibration = config.model_routing.model.calibration;
         let ci_confidence = calibration.ci_confidence.value;
@@ -151,6 +170,9 @@ impl ModelCalibrationFitService {
                     detail: "no current runtime config version".to_owned(),
                 })
             })?;
+        let _policy_binding = ModelServingPolicySnapshotBinding::from(
+            VerifiedPolicySnapshotBinding::try_from(&version)?,
+        );
         let config = version.snapshot;
         i64::try_from(config.model_routing.model.calibration.embargo_secs).map_err(|error| {
             ResearchError::DatasetBuild {
@@ -167,19 +189,12 @@ impl ModelCalibrationFitService {
     /// dataset using the `WalkForwardSplit`-with-embargo purge primitive.
     /// Fail closed on any mismatch.
     ///
-    /// Returns the **catalog** calibration window (`calibration_dataset.window_start/end`) —
-    /// the exact window this function verified disjoint + embargoed. `fit`
-    /// persists this same window as `fit_window`, never a window re-derived
-    /// from which samples happened to materialize (that could be a strict
-    /// subset of the verified window, e.g. under sparse market activity,
-    /// silently decoupling the persisted provenance from what was actually
-    /// checked).
     async fn validate_split(
         &self,
         model_version_id: &ModelVersionId,
         request: &FitModelCalibratorRequest,
         policy: &CalibrationFitPolicy,
-    ) -> QuantResult<TimeWindow> {
+    ) -> QuantResult<()> {
         let version = self
             .model_registry_repo
             .find_model_version(model_version_id)
@@ -265,7 +280,7 @@ impl ModelCalibrationFitService {
                 "model calibration fit",
             )?;
         }
-        Ok(calibration_window)
+        Ok(())
     }
 }
 
@@ -282,19 +297,30 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
             decision_policy_snapshot_id,
         } = params;
         let policy = self.frozen_policy(&decision_policy_snapshot_id).await?;
-        let fit_window = self
-            .validate_split(&request.model_version_id, &request, &policy)
+        self.validate_split(&request.model_version_id, &request, &policy)
             .await?;
-        let samples = self
-            .harvest_calibration_samples(
-                &request,
-                &decision_policy_snapshot_id,
-                Arc::clone(&progress),
-                cancel,
-            )
-            .await?;
-        self.fit_and_persist(&request, &policy, &fit_window, &samples)
-            .await
+        let evidence = Box::pin(self.harvest_calibration_samples(
+            &request,
+            &decision_policy_snapshot_id,
+            Arc::clone(&progress),
+            cancel,
+        ))
+        .await?;
+        let persisted = Box::pin(self.fit_and_persist(&request, &policy, &evidence)).await;
+        match persisted {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                let _ = self
+                    .model_run_repo
+                    .fail(
+                        &evidence.model_run_id,
+                        ModelRunErrorCode::CalibrationFailed,
+                        error.to_string(),
+                    )
+                    .await;
+                Err(error)
+            }
+        }
     }
 
     async fn preflight(
@@ -409,7 +435,7 @@ impl ModelCalibrationFitService {
         decision_policy_snapshot_id: &DecisionPolicySnapshotId,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
-    ) -> QuantResult<Vec<SampleOutcome>> {
+    ) -> QuantResult<CalibrationReplayEvidence> {
         // Reuse the PIT backtest replay engine to harvest (score, outcome, MAE)
         // triples — the same computation graph the live plane scores, never a
         // bespoke re-derivation.
@@ -417,27 +443,26 @@ impl ModelCalibrationFitService {
             .backtest_port
             .backtest_service_for(decision_policy_snapshot_id)
             .await?;
-        let samples = backtest
-            .run_for_calibration(
-                CalibrationReplayInput {
-                    model_version_id: request.model_version_id,
-                    calibration_dataset_id: request.calibration_dataset_id,
-                    decision_policy_snapshot_id: *decision_policy_snapshot_id,
-                },
-                progress,
-                cancel,
-            )
-            .await?;
-        Ok(samples)
+        let evidence = Box::pin(backtest.run_for_calibration(
+            CalibrationReplayInput {
+                source_model: request.model_version_id,
+                calibration_dataset: request.calibration_dataset_id,
+                policy_snapshot: *decision_policy_snapshot_id,
+            },
+            progress,
+            cancel,
+        ))
+        .await?;
+        Ok(evidence)
     }
 
     async fn fit_and_persist(
         &self,
         request: &FitModelCalibratorRequest,
         policy: &CalibrationFitPolicy,
-        fit_window: &TimeWindow,
-        samples: &[SampleOutcome],
+        evidence: &CalibrationReplayEvidence,
     ) -> QuantResult<ModelCalibrationFitOutcome> {
+        let samples = &evidence.samples;
         let binary_samples = samples
             .iter()
             .filter(|sample| {
@@ -491,23 +516,22 @@ impl ModelCalibrationFitService {
             compute_reliability(&mapping, &reliability_samples, policy.ci_confidence)?;
 
         let split_hash = calibration_split_hash(
-            fit_window,
-            binary_samples
-                .iter()
-                .map(|s| (s.market_id.to_string(), s.decision_at)),
+            &evidence.fit_window,
+            binary_samples.iter().map(|sample| {
+                CalibrationSampleKey::for_instrument(
+                    sample.market_id.clone(),
+                    sample.token_id.clone(),
+                    sample.decision_at,
+                )
+            }),
         )?;
 
         let payload = ModelScoreCalibrationPayload {
-            model_version_id: request.model_version_id,
-            calibration_dataset_id: request.calibration_dataset_id,
+            format_version: MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
+            fit_contract: evidence.fit_contract.clone(),
             mapping,
             reliability,
         };
-        // Self-contained hash (fit_window + split_hash + the full,
-        // provenance-carrying payload) — recomputable by the loader from the
-        // persisted row alone, symmetric with `market_price_bias`.
-        let content_hash = model_score_content_hash(fit_window, &split_hash, &payload)?;
-
         let sample_count =
             i64::try_from(binary_samples.len()).map_err(|error| ResearchError::DatasetBuild {
                 detail: format!("calibration sample count exceeds Postgres bigint: {error}"),
@@ -516,26 +540,78 @@ impl ModelCalibrationFitService {
             u64::try_from(binary_samples.len()).map_err(|error| ResearchError::DatasetBuild {
                 detail: format!("calibration sample count exceeds u64: {error}"),
             })?;
+        payload.validate(outcome_sample_count).map_err(|detail| {
+            ResearchError::InvalidModelArtifact {
+                detail: format!("model-score calibration payload is invalid: {detail}"),
+            }
+        })?;
+        // Self-contained hash (fit_window + split_hash + the full,
+        // provenance-carrying payload) — recomputable by the repository and
+        // loader from the persisted row alone.
+        let content_hash = model_score_content_hash(&evidence.fit_window, &split_hash, &payload)?;
+
         let artifact_id = CalibrationArtifactId::from_v7();
-        let created = self
+        let artifact_payload = CalibrationArtifactPayload::ModelScore(Box::new(payload));
+        let committed = self
             .calibration_repo
-            .create(NewCalibrationArtifact {
-                artifact_id,
-                kind: CalibrationKind::ModelScore,
-                content_hash,
-                calibration_split_hash: split_hash,
-                fit_window_start: fit_window.from,
-                fit_window_end: fit_window.to,
-                sample_count,
-                payload: CalibrationArtifactPayload::ModelScore(payload),
-                active: false,
+            .commit_model_score(ModelScoreCalibrationCommit {
+                model_run_id: evidence.model_run_id,
+                artifact: NewCalibrationArtifact {
+                    artifact_id,
+                    kind: CalibrationKind::ModelScore,
+                    content_hash,
+                    calibration_split_hash: split_hash,
+                    fit_window_start: evidence.fit_window.from,
+                    fit_window_end: evidence.fit_window.to,
+                    sample_count,
+                    payload: artifact_payload.clone(),
+                    active: false,
+                },
             })
             .await
             .map_err(QuantError::from)?;
+        let created = committed.artifact();
+        let terminal = committed.model_run();
 
-        let _: CalibrationArtifactInfo = created;
+        let identity_matches = created.kind == CalibrationKind::ModelScore
+            && created.content_hash == content_hash
+            && !created.active;
+        let evidence_matches = created.calibration_split_hash == split_hash
+            && created.fit_window_start == evidence.fit_window.from
+            && created.fit_window_end == evidence.fit_window.to
+            && created.sample_count == sample_count
+            && created.payload == artifact_payload;
+        let terminal_matches = terminal.model_run_id == evidence.model_run_id
+            && terminal.run_kind == ModelRunKind::Calibration
+            && terminal.model_version_id == Some(request.model_version_id)
+            && terminal.decision_policy_snapshot_id
+                == evidence
+                    .fit_contract
+                    .policy_snapshot
+                    .decision_policy_snapshot_id
+            && terminal.market_selection_id.is_none()
+            && terminal.window_start == evidence.fit_window.from
+            && terminal.window_end == evidence.fit_window.to
+            && terminal.status == ModelRunStatus::Succeeded
+            && terminal.input_hash == evidence.fit_contract.calibration_dataset.dataset_hash
+            && terminal.output_hash == Some(content_hash)
+            && terminal.error_code.is_none()
+            && terminal.error_message.is_none()
+            && terminal
+                .finished_at
+                .is_some_and(|finished_at| finished_at >= terminal.started_at);
+        if !identity_matches || !evidence_matches || !terminal_matches {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "persisted model-score calibration artifact {} or terminal run {} differs \
+                     from its exact producer preimage",
+                    created.artifact_id, terminal.model_run_id
+                ),
+            }
+            .into());
+        }
         Ok(ModelCalibrationFitOutcome {
-            artifact_id: Some(artifact_id),
+            artifact_id: Some(created.artifact_id),
             sample_count: outcome_sample_count,
         })
     }

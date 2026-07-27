@@ -10,7 +10,10 @@ use super::{
 use crate::types::{
     BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
     TrainingDatasetId,
-    backtest::{BacktestPaths, SharpeDistribution},
+    backtest::{
+        BacktestPaths, CpcvFoldArtifacts, CpcvMethodologyBinding, CpcvPathSetSubject,
+        SharpeDistribution,
+    },
 };
 
 #[sea_orm::model]
@@ -25,6 +28,12 @@ pub struct Model {
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub subject: CpcvPathSetSubject,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub methodology: CpcvMethodologyBinding,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub fold_artifacts: CpcvFoldArtifacts,
     pub path_count: i64,
     pub combination_count: i64,
     pub median_rank_ic: Decimal,

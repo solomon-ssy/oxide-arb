@@ -8,7 +8,7 @@ use std::{
     },
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use quant_pivot_migration::apply as apply_postgres_migrations;
 use quant_pivot_models::{config::PostgresConfig, security::hash_password};
@@ -148,6 +148,30 @@ where
 {
     let suite = Arc::new(PostgresSuite::start().await?);
     Ok(ACTIVE_SUITE.scope(suite, future).await)
+}
+
+/// Run one sequential repository scenario in its own Tokio task while
+/// preserving the active suite task-local.
+///
+/// The aggregate repository runner contains hundreds of independently boxed
+/// scenarios. Starting each scenario at a task root prevents their deep
+/// database/contract futures from inheriting the aggregate runner's poll stack;
+/// the suite mutex still serializes database checkout exactly as before.
+pub async fn run_suite_task<F>(future: F) -> Result<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let suite = ACTIVE_SUITE
+        .try_with(Arc::clone)
+        .context("repository scenario task requires an active PostgreSQL suite")?;
+    match tokio::spawn(ACTIVE_SUITE.scope(suite, future)).await {
+        Ok(output) => Ok(output),
+        Err(error) if error.is_panic() => Err(anyhow!(
+            "isolated repository scenario task panicked: {error}"
+        )),
+        Err(error) => Err(error).context("join isolated repository scenario task"),
+    }
 }
 
 /// Reset and connect the database for one sequential repository scenario.

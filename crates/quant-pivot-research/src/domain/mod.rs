@@ -60,12 +60,18 @@ pub struct WeatherFactWindow {
 }
 
 impl WeatherFactWindow {
+    /// Freshest source-effective observation/run time.
+    ///
+    /// A GEFS `valid_time` is the future interval being forecast, not an
+    /// observation clock. Freshness and PIT checks therefore use the model-run
+    /// `reference_time`; publication and ingestion remain independently
+    /// bounded by `published_at` / `available_at` when the slice is assembled.
     #[must_use]
     pub fn freshest_time(&self) -> Option<DateTime<Utc>> {
         self.observations
             .iter()
             .map(|fact| fact.observed_at)
-            .chain(self.forecasts.iter().map(|fact| fact.valid_time))
+            .chain(self.forecasts.iter().map(|fact| fact.reference_time))
             .max()
     }
 }
@@ -126,5 +132,57 @@ impl DomainObservationWindow {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.observations.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::data_plane::WeatherForecastPoint,
+        types::{
+            ContentHash, DomainInstrumentKey, DomainMeasurementUnit, DomainSourceId, IcaoStation,
+            WeatherVariable,
+        },
+    };
+    use rust_decimal_macros::dec;
+
+    use super::WeatherFactWindow;
+
+    #[test]
+    fn forecast_freshness_uses_reference() {
+        let station = IcaoStation::parse("KLGA").expect("station");
+        let reference_time = Utc
+            .with_ymd_and_hms(2026, 7, 26, 0, 0, 0)
+            .single()
+            .expect("reference time");
+        let hash = ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("hash");
+        let forecast = WeatherForecastPoint {
+            source_id: DomainSourceId::gefs(),
+            instrument_key: DomainInstrumentKey::gefs(&station),
+            subject_key: station.to_string(),
+            variable: WeatherVariable::TemperatureMaximum,
+            value: dec!(24),
+            unit: DomainMeasurementUnit::Celsius,
+            precision: dec!(0.1),
+            reference_time,
+            valid_time: reference_time + Duration::days(2),
+            published_at: reference_time + Duration::minutes(30),
+            available_at: reference_time + Duration::minutes(31),
+            lead_hours: 48,
+            member: Some(0),
+            revision: 1,
+            grid_binding_hash: hash,
+            run_manifest_hash: hash,
+            report_hash: hash,
+        };
+        let window = WeatherFactWindow {
+            decision_at: reference_time + Duration::hours(1),
+            observations: Vec::new(),
+            forecasts: vec![forecast],
+            calibration: None,
+        };
+
+        assert_eq!(window.freshest_time(), Some(reference_time));
     }
 }

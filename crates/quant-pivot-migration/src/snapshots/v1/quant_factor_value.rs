@@ -19,11 +19,14 @@ pub struct Model {
     pub market_id: String,
     pub decision_at: DateTimeWithTimeZone,
     pub value_state: QpFactorValueState,
+    #[sea_orm(column_type = "Decimal(Some((28, 12)))")]
     pub raw_value: Option<Decimal>,
+    #[sea_orm(column_type = "Decimal(Some((20, 18)))")]
     pub normalized_score: Option<Decimal>,
     pub normalization_source: Option<QpNormalizationSource>,
     pub indeterminate_reason: Option<QpFactorIndeterminateReason>,
     pub direction: QpFactorDirection,
+    #[sea_orm(column_type = "Decimal(Some((20, 18)))")]
     pub confidence: Decimal,
     #[sea_orm(column_type = "JsonBinary")]
     pub explanation: Json,

@@ -23,7 +23,7 @@ use quant_pivot_models::{
         quant::{
             FactorValueInfo, FeatureParityRunInfo, FeatureVectorInfo, FrozenFeatureParitySubject,
             FrozenFeatureParitySubjectId, MarketSelectionInfo, MarketSelectionMemberInfo,
-            ModelRunInfo, ModelRunParityEvidence, RecommendationReportInfo,
+            ModelRunInfo, ModelRunParityEvidence, ModelVersionInfo, RecommendationReportInfo,
             ReportDataQualitySnapshotInfo, ReportRunInfo, parity_candidate_membership_hash,
             parity_selection_hash, report_parity_evidence_hash, report_parity_generation_hash,
         },
@@ -40,15 +40,15 @@ use quant_pivot_models::{
     types::{
         ContentHash, DecisionCaptureEvidence, DecisionPolicySnapshotId, FeatureParityDetailSource,
         FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
-        RecommendationReportId, SelectionExclusionSummary, stable_name::FeatureName,
+        RecommendationReportId, SelectionExclusionSummary, factor::FactorServingPlane,
+        stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
     FactorRepository, FeatureParityRepository, FeatureRepository, MarketLinkageRepository,
-    MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository, PolicyRepository,
-    QuantFactReadRepository, RecommendationReportRepository, ReportRunRepository,
-    ServingEvidenceRepository,
+    MarketSelectionRepository, ModelRunRepository, PolicyRepository, QuantFactReadRepository,
+    RecommendationReportRepository, ReportRunRepository, ServingEvidenceRepository,
 };
 use quant_pivot_research::{
     factors::{FactorEngine, FactorValue, MarketFactorOutcome},
@@ -58,8 +58,8 @@ use quant_pivot_research::{
     },
     hashing::ResearchHasher,
     model::{
-        ActiveSchemaBinding, ModelInputAuditRow, ModelRuntimeFactoryBuilder, ModelRuntimeMetrics,
-        ModelRuntimeOutput, SignalCandidate, canonical_business_prediction_hash,
+        ModelInputAuditRow, ModelRuntimeMetrics, ModelRuntimeOutput, SignalCandidate,
+        canonical_business_prediction_hash,
     },
     selection::{
         ConfiguredMarketSelector, MarketSelectionBuildRequest, MarketSelectionSnapshot,
@@ -84,16 +84,20 @@ use crate::{
             PendingFeatureParityComparison,
         },
         historical_replay::{
-            CrossSectionRequest, ReplayConfig, ReplayCrossSection, materialize_cross_section,
+            CrossSectionRequest, ReplayCaptureKey, ReplayConfig, ReplayCrossSection,
+            ReplayFactorMode, materialize_cross_section,
         },
         model_runner::{AlignedFeatureCrossSection, project_model_input_rows},
+        model_serving_generation::{
+            ModelServingGenerationRequest, ModelServingGenerationStore, ModelServingRouteSnapshot,
+        },
     },
 };
 /// Process-lifetime dependencies of the production parity source.
 pub struct DurableFeatureParityDeps {
     pub parity: Arc<dyn FeatureParityRepository>,
     pub model_runs: Arc<dyn ModelRunRepository>,
-    pub model_registry: Arc<dyn ModelRegistryRepository>,
+    pub serving_generations: Arc<ModelServingGenerationStore>,
     pub runtime_configs: Arc<dyn PolicyRepository>,
     pub selections: Arc<dyn MarketSelectionRepository>,
     pub feature_vectors: Arc<dyn FeatureRepository>,
@@ -106,7 +110,6 @@ pub struct DurableFeatureParityDeps {
     pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     pub linkages: Arc<dyn MarketLinkageRepository>,
     pub calibration_artifacts: Arc<dyn CalibrationArtifactRepository>,
-    pub runtime_factory: Arc<dyn ModelRuntimeFactoryBuilder>,
 }
 
 /// Replays successful serving runs from durable PIT data and frozen artifacts.
@@ -124,6 +127,7 @@ struct DurableReplayEvidence {
 struct ReplayRunContext {
     model_version_id: ModelVersionId,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    snapshot_hash: ContentHash,
     config: DecisionPolicySnapshot,
     boundary: DecisionBoundary,
     report_id: Option<RecommendationReportId>,
@@ -134,16 +138,20 @@ struct ReplayRunContext {
 struct MaterializedRunReplay {
     builder: ConfiguredFeatureBuilder,
     factor_engine: FactorEngine,
+    bias_table_hash: Option<ContentHash>,
     selection: MarketSelectionSnapshot,
     cross_section: ReplayCrossSection,
+    serving: ModelServingRouteSnapshot,
 }
 
 struct MaterializedSelectionReplay {
     builder: ConfiguredFeatureBuilder,
     factor_engine: FactorEngine,
+    bias_table_hash: Option<ContentHash>,
     selection: MarketSelectionSnapshot,
     snapshot_source: Arc<DecisionSnapshotSource>,
     replay_config: ReplayConfig,
+    serving: ModelServingRouteSnapshot,
 }
 
 struct ModelRouteReplayRequest<'a> {
@@ -155,6 +163,8 @@ struct ModelRouteReplayRequest<'a> {
     vectors: &'a [FeatureVector],
     vector_binding: &'a HashMap<MarketId, FeatureVectorId>,
     factor_engine: &'a FactorEngine,
+    bias_table_hash: Option<ContentHash>,
+    serving: &'a ModelServingRouteSnapshot,
 }
 
 struct ModelRouteInputs {
@@ -174,7 +184,7 @@ struct FeatureComparisonInputs<'a> {
     online_features: &'a HashMap<FeatureVectorId, Vec<QuantFeatureEventRow>>,
     feature_infos: &'a HashMap<FeatureVectorId, FeatureVectorInfo>,
     replay_by_market: &'a HashMap<MarketId, FeatureVector>,
-    replay_captures: &'a HashMap<MarketId, MarketDecisionCapture>,
+    replay_captures: &'a HashMap<ReplayCaptureKey, MarketDecisionCapture>,
     vector_binding: &'a HashMap<MarketId, FeatureVectorId>,
     boundary: &'a DecisionBoundary,
     decision_policy_snapshot_id: &'a DecisionPolicySnapshotId,
@@ -898,6 +908,7 @@ impl DurableFeatureParitySource {
                     report.decision_policy_snapshot_id,
                 )
             })?;
+        let snapshot_hash = config_info.snapshot_hash;
         let config = config_info.snapshot;
         let expected_boundary = report_decision_boundary(&report, &report_run, &config)?;
         validate_report_selection_binding(&report, &selection)?;
@@ -917,6 +928,7 @@ impl DurableFeatureParitySource {
                 context: ReplayRunContext {
                     model_version_id: report.model_version_id,
                     decision_policy_snapshot_id: report.decision_policy_snapshot_id,
+                    snapshot_hash,
                     config,
                     boundary: online.boundary.clone(),
                     report_id: Some(*report_id),
@@ -1115,6 +1127,7 @@ impl DurableFeatureParitySource {
             .ok_or_else(|| {
                 StorageError::not_found("decision_policy_snapshot", run.decision_policy_snapshot_id)
             })?;
+        let snapshot_hash = config_info.snapshot_hash;
         let config = config_info.snapshot;
         let boundary = boundary_from_online(online_inputs, online_features)?;
         if boundary.decision_at() != candidate.decision_at {
@@ -1156,6 +1169,7 @@ impl DurableFeatureParitySource {
         Ok(ReplayRunContext {
             model_version_id,
             decision_policy_snapshot_id: run.decision_policy_snapshot_id,
+            snapshot_hash,
             config,
             boundary,
             report_id,
@@ -1224,13 +1238,16 @@ impl DurableFeatureParitySource {
             .await?;
         let cross = materialize_cross_section(
             &selection_replay.builder,
-            &selection_replay.factor_engine,
+            ReplayFactorMode::FactorNative {
+                engine: &selection_replay.factor_engine,
+            },
             &selection_replay.replay_config,
             &CrossSectionRequest {
                 pit: selection_replay.snapshot_source.as_ref(),
                 prefetched: &window.prefetched,
                 decision_at: boundary.decision_at(),
                 group: &samples,
+                category_scope: None,
                 knowledge_lag: boundary.knowledge_lag(),
                 lookback,
             },
@@ -1244,8 +1261,10 @@ impl DurableFeatureParitySource {
         Ok(MaterializedRunReplay {
             builder: selection_replay.builder,
             factor_engine: selection_replay.factor_engine,
+            bias_table_hash: selection_replay.bias_table_hash,
             selection: selection_replay.selection,
             cross_section: cross,
+            serving: selection_replay.serving,
         })
     }
 
@@ -1277,13 +1296,9 @@ impl DurableFeatureParitySource {
             &config.profile_artifacts.domain.definition,
             bias_table.clone(),
         );
-        let model_requirements = self
-            .replay_model_requirements(
-                context,
-                &builder,
-                &factor_engine,
-                bias_table.as_ref().map(|table| table.content_hash),
-            )
+        let bias_table_hash = bias_table.as_ref().map(|table| table.content_hash);
+        let (model_requirements, serving) = self
+            .replay_model_requirements(context, &builder, &factor_engine, bias_table_hash)
             .await?;
         let durable_pit = Arc::new(DurablePitSource::new(
             Arc::clone(&self.deps.fact_read),
@@ -1315,9 +1330,11 @@ impl DurableFeatureParitySource {
         Ok(MaterializedSelectionReplay {
             builder,
             factor_engine,
+            bias_table_hash,
             selection,
             snapshot_source: candidate_batch.snapshot_source,
             replay_config,
+            serving,
         })
     }
 
@@ -1327,61 +1344,32 @@ impl DurableFeatureParitySource {
         builder: &ConfiguredFeatureBuilder,
         factor_engine: &FactorEngine,
         bias_table_hash: Option<ContentHash>,
-    ) -> QuantResult<ModelFeatureRequirements> {
-        let configured_generic = context
-            .config
-            .model_routing
-            .model
-            .active_model_version_id
-            .as_ref()
-            .ok_or_else(|| determinism("frozen config has no active model pointer".to_owned()))
-            .map(|reference| reference.id)?;
-        if configured_generic != context.model_version_id {
-            return Err(determinism(format!(
-                "frozen config generic model {configured_generic} differs from serving run model {}",
-                context.model_version_id
-            )));
-        }
-        let factory = self.deps.runtime_factory.build(ActiveSchemaBinding {
-            feature_schema_hash: ResearchHasher::feature_schema(builder.schema())?,
-            factor_schema_hash: factor_engine.factor_schema_hash()?,
-            bias_table_hash,
-        });
-        let generic_version = self
+    ) -> QuantResult<(ModelFeatureRequirements, ModelServingRouteSnapshot)> {
+        let serving = self
             .deps
-            .model_registry
-            .find_model_version(&configured_generic)
-            .await?
-            .ok_or_else(|| StorageError::not_found("quant_model_version", configured_generic))?;
-        let generic = factory.load(&generic_version, None).await?;
-        if generic.category_scope().is_some() {
+            .serving_generations
+            .resolve_route(ModelServingGenerationRequest {
+                decision_policy_snapshot_id: context.decision_policy_snapshot_id,
+                snapshot_hash: context.snapshot_hash,
+                snapshot: &context.config,
+            })
+            .await?;
+        if serving.active_model_version_id() != context.model_version_id {
             return Err(determinism(format!(
-                "generic serving model {configured_generic} declares category scope {:?}",
-                generic.category_scope()
+                "frozen exact route model {} differs from serving subject model {}",
+                serving.active_model_version_id(),
+                context.model_version_id,
             )));
         }
-        let mut by_category = BTreeMap::new();
-        for (category, reference) in &context.config.model_routing.model.category_model_pointers {
-            let version_id = reference.id;
-            let version = self
-                .deps
-                .model_registry
-                .find_model_version(&version_id)
-                .await?
-                .ok_or_else(|| StorageError::not_found("quant_model_version", version_id))?;
-            let runtime = factory.load(&version, None).await?;
-            if runtime.category_scope() != Some(*category) {
-                return Err(determinism(format!(
-                    "category route {category} model {version_id} declares scope {:?}",
-                    runtime.category_scope()
-                )));
-            }
-            by_category.insert(*category, runtime.required_features());
-        }
-        Ok(ModelFeatureRequirements {
-            generic: generic.required_features(),
-            by_category,
-        })
+        let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
+        let factor_plane = factor_engine.serving_plane()?;
+        verify_replay_contract(
+            serving.active_version(),
+            feature_schema_hash,
+            factor_plane,
+            bias_table_hash,
+        )?;
+        Ok((serving.model_requirements(), serving))
     }
 
     async fn replay_run(
@@ -1460,6 +1448,8 @@ impl DurableFeatureParitySource {
                 vectors: &replay.cross_section.vectors,
                 vector_binding: &model_vector_binding,
                 factor_engine: &replay.factor_engine,
+                bias_table_hash: replay.bias_table_hash,
+                serving: &replay.serving,
             })
             .await?;
         comparisons.extend(model_input_comparisons(
@@ -1496,12 +1486,7 @@ impl DurableFeatureParitySource {
         let feature_schema_hash = ResearchHasher::feature_schema(&FeatureSchema::build(
             &request.config.profile_artifacts.features.definition,
         )?)?;
-        let factor_schema_hash = request.factor_engine.factor_schema_hash()?;
-        let factory = self.deps.runtime_factory.build(ActiveSchemaBinding {
-            feature_schema_hash,
-            factor_schema_hash,
-            bias_table_hash: None,
-        });
+        let factor_plane = request.factor_engine.serving_plane()?;
         let market_by_id = request
             .markets
             .iter()
@@ -1512,75 +1497,72 @@ impl DurableFeatureParitySource {
             .iter()
             .map(|vector| (vector.market_id.clone(), vector))
             .collect::<HashMap<_, _>>();
-        let mut markets_by_version: HashMap<ModelVersionId, BTreeSet<MarketId>> = HashMap::new();
+        let version_id = request.serving.active_model_version_id();
+        let mut market_ids = BTreeSet::new();
         for row in request.online_inputs {
-            markets_by_version
-                .entry(row.model_version_id)
-                .or_default()
-                .insert(row.market_id.clone());
-        }
-
-        let mut all_candidates = Vec::new();
-        let mut all_audit = Vec::new();
-        let mut all_factor_outcomes = Vec::new();
-        let mut ordered_routes = markets_by_version.into_iter().collect::<Vec<_>>();
-        ordered_routes.sort_by_key(|(version_id, _)| version_id.to_string());
-        for (version_id, market_ids) in ordered_routes {
-            let version = self
-                .deps
-                .model_registry
-                .find_model_version(&version_id)
-                .await?
-                .ok_or_else(|| StorageError::not_found("quant_model_version", version_id))?;
-            let runtime = factory.load(&version, None).await?;
-            let route = resolve_route_inputs(
-                market_ids,
-                &market_by_id,
-                &vector_by_id,
-                request.vector_binding,
-            )?;
-            let outcomes = if runtime.model_family() == ModelFamily::WeightedFactor {
-                let mut factor_config = request.config.profile_artifacts.scoring.definition.clone();
-                factor_config.cross_section =
-                    runtime.factor_cross_section().cloned().ok_or_else(|| {
-                        determinism(format!(
-                            "weighted runtime {version_id} lacks cross-section policy"
-                        ))
-                    })?;
-                let references = runtime.frozen_reference_quantiles().ok_or_else(|| {
-                    determinism(format!(
-                        "weighted runtime {version_id} lacks reference CDFs"
-                    ))
-                })?;
-                request.factor_engine.compute_batch_with_refs(
-                    &route.vectors,
-                    &factor_config,
-                    references,
-                )?
-            } else {
-                Vec::new()
-            };
-            let input = build_runtime_input(
-                runtime.as_ref(),
-                &request.run.model_run_id,
-                request.boundary.decision_at(),
-                &route.markets,
-                &route.vectors,
-                &outcomes,
-            );
-            let output = runtime.infer_batch(input).await?;
-            all_candidates.extend(output.candidates.clone());
-            all_audit.extend(output.input_audit.clone());
-            all_factor_outcomes.extend(outcomes);
-
-            if output.input_audit.is_empty() {
+            if row.model_version_id != version_id {
                 return Err(determinism(format!(
-                    "runtime {version_id} emitted no model-input audit rows"
+                    "online input model {} differs from pinned exact route model {version_id}",
+                    row.model_version_id
                 )));
             }
+            market_ids.insert(row.market_id.clone());
         }
-
-        finish_replayed_model_output(&request, all_candidates, all_audit, all_factor_outcomes)
+        if market_ids.is_empty() {
+            return Err(determinism(format!(
+                "serving run {} has no online model-input markets",
+                request.run.model_run_id
+            )));
+        }
+        verify_replay_contract(
+            request.serving.active_version(),
+            feature_schema_hash,
+            factor_plane,
+            request.bias_table_hash,
+        )?;
+        let runtime = request.serving.active_runtime().runtime();
+        let route = resolve_route_inputs(
+            market_ids,
+            &market_by_id,
+            &vector_by_id,
+            request.vector_binding,
+        )?;
+        let outcomes = if runtime.model_family() == ModelFamily::WeightedFactor {
+            let mut factor_config = request.config.profile_artifacts.scoring.definition.clone();
+            factor_config.cross_section =
+                runtime.factor_cross_section().cloned().ok_or_else(|| {
+                    determinism(format!(
+                        "weighted runtime {version_id} lacks cross-section policy"
+                    ))
+                })?;
+            let references = runtime.frozen_reference_quantiles().ok_or_else(|| {
+                determinism(format!(
+                    "weighted runtime {version_id} lacks reference CDFs"
+                ))
+            })?;
+            request.factor_engine.compute_batch_with_refs(
+                &route.vectors,
+                &factor_config,
+                references,
+            )?
+        } else {
+            Vec::new()
+        };
+        let input = build_runtime_input(
+            runtime.as_ref(),
+            &request.run.model_run_id,
+            request.boundary.decision_at(),
+            &route.markets,
+            &route.vectors,
+            &outcomes,
+        );
+        let output = runtime.infer_batch(input).await?;
+        if output.input_audit.is_empty() {
+            return Err(determinism(format!(
+                "runtime {version_id} emitted no model-input audit rows"
+            )));
+        }
+        finish_replayed_model_output(&request, output.candidates, output.input_audit, outcomes)
     }
 
     async fn factor_comparisons(
@@ -2045,12 +2027,21 @@ fn snapshot_and_feature_comparisons(
             .replay_by_market
             .get(market_id)
             .ok_or_else(|| determinism(format!("replay dropped serving market {market_id}")))?;
-        let online_capture = persisted_capture(online_info, online_rows, inputs.boundary)?;
-        let replay_capture = inputs.replay_captures.get(market_id).ok_or_else(|| {
+        let replay_token_id = replay_vector.token_id.as_ref().ok_or_else(|| {
             determinism(format!(
-                "replay dropped decision capture for market {market_id}"
+                "replay feature vector for market {market_id} has no token binding"
             ))
         })?;
+        let online_capture = persisted_capture(online_info, online_rows, inputs.boundary)?;
+        let replay_capture = inputs
+            .replay_captures
+            .get(&ReplayCaptureKey::new(market_id, replay_token_id))
+            .ok_or_else(|| {
+                determinism(format!(
+                    "replay dropped decision capture for market/token \
+                     {market_id}/{replay_token_id}"
+                ))
+            })?;
         let replay_capture_evidence = replay_capture.evidence();
         let replay_capture_hash = replay_capture.evidence_hash()?;
         let replay_info = replay_feature_info(
@@ -3138,6 +3129,35 @@ fn required_millis(value: i64, field: &str) -> QuantResult<DateTime<Utc>> {
 
 fn optional_millis(value: Option<i64>, field: &str) -> QuantResult<Option<DateTime<Utc>>> {
     value.map(|value| required_millis(value, field)).transpose()
+}
+
+fn verify_replay_contract(
+    version: &ModelVersionInfo,
+    feature_schema_hash: ContentHash,
+    factor_plane: &FactorServingPlane,
+    bias_table_hash: Option<ContentHash>,
+) -> QuantResult<()> {
+    let contract = version.verified_serving_contract().map_err(|error| {
+        determinism(format!(
+            "model {} has an invalid persisted serving contract: {error}",
+            version.model_version_id
+        ))
+    })?;
+    let bindings = contract.bindings();
+    let bound_bias_hash = bindings
+        .factors
+        .bias_table
+        .as_ref()
+        .map(|binding| binding.content_hash);
+    let factor_plane_matches = version.model_family.is_classical()
+        || (&bindings.factors.plane == factor_plane && bound_bias_hash == bias_table_hash);
+    if bindings.schemas.feature_schema_hash != feature_schema_hash || !factor_plane_matches {
+        return Err(determinism(format!(
+            "model {} serving contract differs from the exact replay feature/factor/bias plane",
+            version.model_version_id
+        )));
+    }
+    Ok(())
 }
 
 fn determinism(detail: String) -> QuantError {

@@ -35,7 +35,10 @@ use testcontainers::{
     runners::AsyncRunner,
 };
 use testcontainers_modules::postgres::Postgres;
-use tokio::process::Command;
+use tokio::{
+    process::Command,
+    time::{Instant, sleep},
+};
 use uuid::Uuid;
 
 const POSTGRES_PASSWORD: &str = "w9-postgres-test-secret";
@@ -194,8 +197,8 @@ async fn clean_recovers_restores_backups() {
     assert_clean_recovery_state(&deploy).await;
 
     seed_partial_reset_markers(&deploy).await;
-    let clickhouse_failed_operation = plan_reset(workspace.path(), &journal_file).await;
     set_clickhouse_drop_limit(&deploy, 1).await;
+    let clickhouse_failed_operation = plan_reset(workspace.path(), &journal_file).await;
     let clickhouse_failed_output =
         apply_planned_reset(workspace.path(), &journal_file, &bootstrap_password_file).await;
     set_clickhouse_drop_limit(&deploy, 0).await;
@@ -518,6 +521,21 @@ async fn set_clickhouse_drop_limit(deploy: &DeployConfig, bytes: u64) {
         .execute()
         .await
         .expect("set disposable ClickHouse drop-size limit");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let active_queries = active_preproduction_query_count(&deploy.db.clickhouse)
+            .await
+            .expect("inspect ClickHouse after drop-size limit update");
+        if active_queries == 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ClickHouse drop-size limit update did not reach a quiescent inventory: \
+             active_queries={active_queries}"
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
 }
 
 async fn create_disposable_clickhouse_user(port: u16) {

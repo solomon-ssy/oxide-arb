@@ -16,25 +16,18 @@
 mod collinearity;
 mod computer;
 mod domain;
-mod frozen;
 mod generic;
-mod identity;
 pub mod names;
 mod normalize;
 pub mod persistence;
 mod reference;
 mod registry;
+mod semantics;
 mod structural;
-mod value;
+pub mod value;
 mod writer;
 
-#[cfg(test)]
-pub(crate) use quant_pivot_models::types::factor::{
-    FactorExplanation, FactorOutputKind, FactorQualityGate,
-};
-pub(crate) use quant_pivot_models::types::{
-    factor::FactorDefinitionDocument, stable_name::FactorName,
-};
+pub(crate) use quant_pivot_models::types::stable_name::FactorName;
 
 #[cfg(test)]
 mod acceptance;
@@ -45,9 +38,7 @@ pub use collinearity::{
 };
 pub use computer::{FactorComputer, FactorEngine};
 pub use domain::{DomainFactorRegistry, crypto_domain_factors, weather_domain_factors};
-pub use frozen::frozen_factor_outcome;
 pub use generic::generic_factors;
-pub use identity::{FactorDefinitionIdentity, factor_definition_identity};
 pub use normalize::{
     CrossSectionalNormalizer, MinMaxNormalizer, NormalizationClampAudit, NormalizationStats,
     NormalizedFactor, RankNormalizer, RawFactorColumn, WinsorizedZScoreNormalizer,
@@ -58,7 +49,7 @@ pub use reference::{FrozenReferenceCdf, FrozenReferenceQuantiles};
 pub use registry::FactorRegistry;
 pub use structural::structural_factors;
 pub use value::{
-    FactorEligibility, FactorSet, FactorValue, MarketFactorOutcome, RawFactor,
-    RawFactorEligibility, ScoredFactor,
+    FactorEligibility, FactorValue, MarketFactorOutcome, RawFactor, RawFactorEligibility,
+    ScoredFactor,
 };
 pub use writer::factor_events;

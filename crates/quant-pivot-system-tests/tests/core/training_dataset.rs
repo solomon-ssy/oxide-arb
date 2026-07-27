@@ -35,9 +35,8 @@ use quant_pivot_models::{
         },
         quant::{
             CryptoSubject, GroundingProof, JobProgressSink, LinkageOutcome,
-            MarketLinkageDerivation, MarketSubject, NewMarketLinkage, NewModelVersion,
-            NoopProgressSink, PriceComparator, ResolutionOracle, ResolvedBinding,
-            ResolvedSourceBinding,
+            MarketLinkageDerivation, MarketSubject, NewMarketLinkage, NoopProgressSink,
+            PriceComparator, ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
         },
     },
     entities::{
@@ -58,7 +57,7 @@ use quant_pivot_models::{
         feature::EvidenceSourceKind,
         market::{EventStatus, MarketStatus},
         model::ModelFamily,
-        quant::{DatasetPurpose, PublicationStatus, TrainingDatasetStatus},
+        quant::{DatasetPurpose, TrainingDatasetStatus},
     },
     hashing::CanonicalDigest,
     runtime_config::{
@@ -70,10 +69,9 @@ use quant_pivot_models::{
         CatalogMarketChangeId, CatalogMarketObjectId, CatalogSyncBatchId, ContentHash, CryptoAsset,
         CryptoQuote, DatasetCoverage, DecisionPolicySnapshotId, DomainInstrumentKey,
         DomainSourceId, EventId, EvmBlockHash, EvmTransactionHash, MarketId, ModelInputContract,
-        ModelSpecId, ModelTrainingContract, ModelVersionId, PayoutRatio, Price, Probability,
+        ModelSpecId, ModelTrainingContract, PayoutRatio, Price, Probability, ResearchProfileRef,
         ResolverVersion, SchemaVersion, Shares, TokenId, TrainingDatasetId, TrainingSampleSource,
-        TrainingSampleSources, Usd, default_sample_sources, model_metrics::ModelVersionMetrics,
-        model_training::ModelTrainingObjective, stable_name::FeatureName,
+        TrainingSampleSources, Usd, stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::{
@@ -101,12 +99,13 @@ use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
         catalog_fixtures::{make_event, make_market},
-        execution_pg_seed::fixture_profile_ref,
+        execution_pg_seed::seed_shared_demo_infra,
         model_spec_fixtures,
         policy_fixtures::bootstrap_default_policy_bundle,
         report_pipeline_harness::EmptyLinkageRepo,
         research_fixtures::{
-            DatasetLedgerFixture, DatasetLedgerSeed, DatasetSourceSeed, seed_dataset_source,
+            DatasetLedgerFixture, DatasetLedgerSeed, DatasetSourceSeed, fixture_factor_plane,
+            seed_dataset_source,
         },
     },
 };
@@ -171,30 +170,89 @@ const fn sample_as_of(window_start: DateTime<Utc>) -> DateTime<Utc> {
     window_start
 }
 
+#[derive(Clone)]
+struct SeededModelSpec {
+    id: ModelSpecId,
+    profile_ref: ResearchProfileRef,
+    prediction_horizon_secs: u64,
+}
+
+struct ModelSpecSeed {
+    input_contract: ModelInputContract,
+    profile_ref: ResearchProfileRef,
+}
+
+impl ModelSpecSeed {
+    fn pooled() -> Self {
+        Self {
+            input_contract: ModelInputContract::single_required("book.mid"),
+            profile_ref: model_spec_fixtures::pooled_profile_ref(),
+        }
+    }
+
+    fn crypto(input_contract: ModelInputContract) -> Self {
+        Self {
+            input_contract,
+            profile_ref: model_spec_fixtures::crypto_profile_ref(),
+        }
+    }
+
+    async fn persist(self, db: &DatabaseConnection) -> SeededModelSpec {
+        let profile = self
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .expect("canonical model-spec ResearchProfile");
+        let prediction_horizon_secs = profile.spec.target_horizon_secs;
+        let persisted_horizon =
+            i64::try_from(prediction_horizon_secs).expect("profile horizon fits i64");
+        let model_spec_id = ModelSpecId::from_v7();
+        PgModelRegistryRepository::new(db.clone())
+            .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
+                model_spec_id,
+                "dataset-e2e",
+                ModelFamily::WeightedFactor,
+                persisted_horizon,
+                self.input_contract,
+                ModelTrainingContract::settlement_default(),
+            ))
+            .await
+            .expect("create spec");
+        SeededModelSpec {
+            id: model_spec_id,
+            profile_ref: profile.profile_ref,
+            prediction_horizon_secs,
+        }
+    }
+}
+
 struct DatasetRequestSeed {
     model_spec_id: ModelSpecId,
+    profile_ref: ResearchProfileRef,
+    prediction_horizon_secs: u64,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
     knowledge_lag_secs: u64,
-    sample_sources: Vec<TrainingSampleSource>,
+    sample_sources: TrainingSampleSources,
     purpose: DatasetPurpose,
 }
 
 impl DatasetRequestSeed {
     fn training(
-        model_spec_id: ModelSpecId,
+        model_spec: &SeededModelSpec,
         decision_policy_snapshot_id: DecisionPolicySnapshotId,
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
     ) -> Self {
         Self {
-            model_spec_id,
+            model_spec_id: model_spec.id,
+            profile_ref: model_spec.profile_ref.clone(),
+            prediction_horizon_secs: model_spec.prediction_horizon_secs,
             decision_policy_snapshot_id,
             window_start,
             window_end,
             knowledge_lag_secs: 10,
-            sample_sources: default_sample_sources(),
+            sample_sources: TrainingSampleSources::default(),
             purpose: DatasetPurpose::Training,
         }
     }
@@ -207,7 +265,8 @@ impl DatasetRequestSeed {
 
     #[must_use]
     fn with_sources(mut self, sample_sources: Vec<TrainingSampleSource>) -> Self {
-        self.sample_sources = sample_sources;
+        self.sample_sources = TrainingSampleSources::try_from(sample_sources)
+            .expect("dataset request fixture sample sources are canonical");
         self
     }
 
@@ -229,7 +288,7 @@ impl DatasetRequestSeed {
             db,
             DatasetSourceSeed {
                 scope,
-                profile_ref: fixture_profile_ref(),
+                profile_ref: self.profile_ref,
                 decision_policy_snapshot_id: self.decision_policy_snapshot_id,
                 window_start: self.window_start,
                 window_end: self.window_end,
@@ -245,7 +304,7 @@ impl DatasetRequestSeed {
             window_start: self.window_start,
             window_end: self.window_end,
             sample_interval_secs: 60,
-            horizons_secs: vec![60],
+            horizons_secs: vec![self.prediction_horizon_secs],
             knowledge_lag_secs: self.knowledge_lag_secs,
             feature_schema_version: SchemaVersion::FIRST,
             sample_sources: self.sample_sources,
@@ -256,7 +315,7 @@ impl DatasetRequestSeed {
 }
 
 struct ReadyDatasetSeed {
-    model_spec_id: ModelSpecId,
+    model_spec: SeededModelSpec,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
@@ -267,7 +326,7 @@ struct ReadyDatasetSeed {
 impl ReadyDatasetSeed {
     async fn persist(self, db: &DatabaseConnection) -> TrainingDatasetId {
         let Self {
-            model_spec_id,
+            model_spec,
             decision_policy_snapshot_id,
             window_start,
             window_end,
@@ -275,11 +334,12 @@ impl ReadyDatasetSeed {
             sample_count,
         } = self;
         let training_dataset_id = TrainingDatasetId::from_v7();
+        let model_spec_id = model_spec.id;
         let source_lineage = seed_dataset_source(
             db,
             DatasetSourceSeed {
                 scope: format!("ready-training-dataset-{training_dataset_id}"),
-                profile_ref: fixture_profile_ref(),
+                profile_ref: model_spec.profile_ref,
                 decision_policy_snapshot_id,
                 window_start,
                 window_end,
@@ -291,7 +351,10 @@ impl ReadyDatasetSeed {
         let fixture = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
             training_dataset_id,
             model_spec_id,
+            model_family: ModelFamily::WeightedFactor,
             model_spec_definition_hash: model_spec_definition_hash(db, &model_spec_id).await,
+            factor_serving_plane: fixture_factor_plane(hash, SchemaVersion::FIRST)
+                .expect("fixture factor plane"),
             source_lineage,
             cohort_manifest: None,
             window_start,
@@ -299,11 +362,10 @@ impl ReadyDatasetSeed {
             purpose: DatasetPurpose::Training,
             knowledge_lag_secs: 10,
             sample_interval_secs: 3_600,
-            horizons_secs: vec![3_600],
-            feature_schema_version: Some(SchemaVersion::FIRST),
-            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
+            horizons_secs: vec![model_spec.prediction_horizon_secs],
+            feature_schema_version: SchemaVersion::FIRST,
+            sample_sources: Some(TrainingSampleSources::default()),
             feature_schema_hash: hash,
-            factor_schema_hash: hash,
             label_schema_hash: hash,
             semantic_dataset_hash: hash,
             source_fingerprint: hash,
@@ -1059,29 +1121,6 @@ async fn seed_catalog_with_category(
         .expect("backdate market created_at");
 }
 
-async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
-    seed_model_spec_contract(db, ModelInputContract::single_required("book.mid")).await
-}
-
-async fn seed_model_spec_contract(
-    db: &DatabaseConnection,
-    input_contract: ModelInputContract,
-) -> ModelSpecId {
-    let model_spec_id = ModelSpecId::from_v7();
-    PgModelRegistryRepository::new(db.clone())
-        .create_model_spec(model_spec_fixtures::new_model_spec_fixture(
-            model_spec_id,
-            "dataset-e2e",
-            ModelFamily::WeightedFactor,
-            86_400,
-            input_contract,
-            ModelTrainingContract::settlement_default(),
-        ))
-        .await
-        .expect("create spec");
-    model_spec_id
-}
-
 async fn model_spec_definition_hash(
     db: &DatabaseConnection,
     model_spec_id: &ModelSpecId,
@@ -1192,13 +1231,13 @@ fn temp_artifact_store() -> Arc<dyn ArtifactStore> {
 async fn plan_request(
     db: &DatabaseConnection,
     service: &TrainingDatasetService,
-    model_spec_id: ModelSpecId,
+    model_spec: &SeededModelSpec,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
 ) -> DatasetPlan {
     let request = DatasetRequestSeed::training(
-        model_spec_id,
+        model_spec,
         decision_policy_snapshot_id,
         window_start,
         window_end,
@@ -1228,9 +1267,12 @@ fn assert_no_feature_leakage(artifact: &TrainingDatasetArtifact, knowledge_lag_s
                 EvidenceSourceKind::TradeTape => example
                     .decision_boundary
                     .cutoff_for(DecisionSource::TradeTape),
-                EvidenceSourceKind::DomainExternal => example
+                EvidenceSourceKind::DomainCrypto => example
                     .decision_boundary
                     .cutoff_for(DecisionSource::DomainCrypto),
+                EvidenceSourceKind::DomainWeather => example
+                    .decision_boundary
+                    .cutoff_for(DecisionSource::DomainWeather),
                 EvidenceSourceKind::Linkage => example
                     .decision_boundary
                     .cutoff_for(DecisionSource::Linkage),
@@ -1253,7 +1295,7 @@ pub async fn historical_pit_no_build() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
     let as_of = sample_as_of(window_start);
     let as_of_ms = as_of.timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
@@ -1264,7 +1306,7 @@ pub async fn historical_pit_no_build() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(!artifact.examples.is_empty(), "expected built examples");
     assert_no_feature_leakage(&artifact, 10);
@@ -1292,11 +1334,11 @@ pub async fn calibration_dataset_rejects_overlap() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
 
     let hash = ContentHash::parse(&format!("blake3:{}", "a".repeat(64))).expect("hash");
     let _training_dataset_id = ReadyDatasetSeed {
-        model_spec_id,
+        model_spec: model_spec.clone(),
         decision_policy_snapshot_id: rc_id,
         window_start,
         window_end,
@@ -1316,7 +1358,7 @@ pub async fn calibration_dataset_rejects_overlap() {
     );
 
     let calibration_request =
-        DatasetRequestSeed::training(model_spec_id, rc_id, window_start, window_end)
+        DatasetRequestSeed::training(&model_spec, rc_id, window_start, window_end)
             .with_purpose(DatasetPurpose::Calibration)
             .build(&db)
             .await;
@@ -1343,7 +1385,7 @@ pub async fn build_before_no_row() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
 
     let as_of_ms = sample_as_of(window_start).timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
@@ -1354,7 +1396,7 @@ pub async fn build_before_no_row() {
         Arc::new(ControllableFactRead::new(scenario)),
     );
 
-    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     let dataset_id = plan.training_dataset_id;
 
     // A cancel observed at the first cross-section boundary unwinds the build
@@ -1390,7 +1432,7 @@ pub async fn pit_selection_excludes_market() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
 
     let as_of = sample_as_of(window_start);
     let as_of_ms = as_of.timestamp_millis();
@@ -1410,7 +1452,7 @@ pub async fn pit_selection_excludes_market() {
         },
     );
 
-    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(
         artifact.coverage.pit_selection_candidates > 0,
@@ -1440,10 +1482,10 @@ pub async fn pit_excludes_requires_feature() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog_with_category(&db, window_start, MarketCategory::Crypto).await;
-    let model_spec_id = seed_model_spec_contract(
-        &db,
-        ModelInputContract::single_required("domain.crypto.distance_to_strike"),
-    )
+    let model_spec = ModelSpecSeed::crypto(ModelInputContract::single_required(
+        "domain.crypto.distance_to_strike",
+    ))
+    .persist(&db)
     .await;
 
     let as_of = sample_as_of(window_start);
@@ -1465,7 +1507,7 @@ pub async fn pit_excludes_requires_feature() {
         },
     );
 
-    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(
         artifact.coverage.pit_selection_candidates > 0,
@@ -1562,10 +1604,10 @@ async fn build_crypto_pit_linkage() -> TrainingDatasetArtifact {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog_with_category(&db, window_start, MarketCategory::Crypto).await;
-    let model_spec_id = seed_model_spec_contract(
-        &db,
-        ModelInputContract::single_required("domain.crypto.distance_to_strike"),
-    )
+    let model_spec = ModelSpecSeed::crypto(ModelInputContract::single_required(
+        "domain.crypto.distance_to_strike",
+    ))
+    .persist(&db)
     .await;
 
     let as_of = sample_as_of(window_start);
@@ -1614,7 +1656,7 @@ async fn build_crypto_pit_linkage() -> TrainingDatasetArtifact {
         },
     );
 
-    let request = DatasetRequestSeed::training(model_spec_id, rc_id, window_start, window_end)
+    let request = DatasetRequestSeed::training(&model_spec, rc_id, window_start, window_end)
         .with_knowledge_lag(domain_config.crypto.availability_lag_secs)
         .build(&db)
         .await;
@@ -1671,7 +1713,7 @@ pub async fn plan_estimates_keep_rate() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
 
     let as_of_ms = sample_as_of(window_start).timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
@@ -1682,7 +1724,7 @@ pub async fn plan_estimates_keep_rate() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let request = DatasetRequestSeed::training(model_spec_id, rc_id, window_start, window_end)
+    let request = DatasetRequestSeed::training(&model_spec, rc_id, window_start, window_end)
         .with_sources(vec![TrainingSampleSource::HistoricalPit])
         .build(&db)
         .await;
@@ -1707,7 +1749,7 @@ pub async fn dataset_builder_rejects_features() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
 
     let as_of = sample_as_of(window_start);
     let as_of_ms = as_of.timestamp_millis();
@@ -1719,7 +1761,7 @@ pub async fn dataset_builder_rejects_features() {
         Arc::clone(&store),
         Arc::clone(&fact_read) as Arc<dyn QuantFactReadRepository>,
     );
-    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     let dataset_id = plan.training_dataset_id;
 
     let leaky = LeakyPitEngine {
@@ -1763,7 +1805,7 @@ pub async fn settlement_not_before_resolution() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
 
     let as_of_ms = sample_as_of(window_start).timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
@@ -1774,7 +1816,7 @@ pub async fn settlement_not_before_resolution() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(artifact.coverage.labels_not_mature > 0);
     for example in &artifact.examples {
@@ -1794,7 +1836,7 @@ pub async fn settlement_label_after_resolution() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
 
     let as_of = sample_as_of(window_start);
     let as_of_ms = as_of.timestamp_millis();
@@ -1819,7 +1861,7 @@ pub async fn settlement_label_after_resolution() {
         Arc::new(ControllableFactRead::new(scenario)),
     );
 
-    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(
         artifact.examples.iter().any(|example| {
@@ -1837,7 +1879,7 @@ pub async fn plan_build_reuses_id() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
 
     let as_of_ms = sample_as_of(window_start).timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
@@ -1848,8 +1890,8 @@ pub async fn plan_build_reuses_id() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let plan_a = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
-    let plan_b = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan_a = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
+    let plan_b = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     assert_ne!(
         plan_a.training_dataset_id, plan_b.training_dataset_id,
         "each plan call mints a fresh id"
@@ -1862,6 +1904,9 @@ pub async fn plan_build_reuses_id() {
             request: build_request,
             training_dataset_id: plan_a.training_dataset_id,
             model_spec_definition_hash: plan_a.model_spec_definition_hash,
+            model_family: plan_a.model_family,
+            feature_schema_hash: plan_a.feature_schema_hash,
+            factor_serving_plane: plan_a.factor_serving_plane.clone(),
             samples: plan_a.samples.clone(),
             lot_samples: plan_a.lot_samples.clone(),
             exit_training_lots: plan_a.exit_training_lots.clone(),
@@ -1884,7 +1929,7 @@ pub async fn build_status_no_mature() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
     let as_of_ms = sample_as_of(window_start).timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
     let store = temp_artifact_store();
@@ -1894,7 +1939,7 @@ pub async fn build_status_no_mature() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let mut plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let mut plan = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     plan.request.horizons_secs = vec![86_400];
     let artifact = svc.build(plan).await.expect("build");
     assert!(artifact.coverage.built_examples > 0);
@@ -1914,7 +1959,7 @@ pub async fn build_failed_zero_examples() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
 
     let as_of_ms = sample_as_of(window_start).timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
@@ -1925,7 +1970,7 @@ pub async fn build_failed_zero_examples() {
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
     );
 
-    let mut plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let mut plan = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     plan.samples.clear();
     let artifact = svc.build(plan).await.expect("build");
     assert_eq!(artifact.coverage.built_examples, 0);
@@ -1944,7 +1989,7 @@ pub async fn build_book_decode_failures() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
 
     let as_of_ms = sample_as_of(window_start).timestamp_millis();
     let mut fact = pit_scenario(as_of_ms);
@@ -1964,7 +2009,7 @@ pub async fn build_book_decode_failures() {
         Arc::new(ControllableFactRead::new(scenario)),
     );
 
-    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(
         artifact.coverage.book_decode_failures > 0,
@@ -1978,7 +2023,7 @@ pub async fn settlement_label_without_resolution() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
 
     let as_of = sample_as_of(window_start);
     let as_of_ms = as_of.timestamp_millis();
@@ -2011,7 +2056,7 @@ pub async fn settlement_label_without_resolution() {
         Arc::new(ControllableFactRead::new(scenario)),
     );
 
-    let plan = plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let plan = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     let artifact = svc.build(plan).await.expect("build");
     assert!(
         artifact.examples.iter().any(|example| {
@@ -2027,51 +2072,32 @@ pub async fn settlement_label_without_resolution() {
 pub async fn model_version_training_typed() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let rc_id = seed_runtime_config(&db).await;
-    let model_spec_id = seed_model_spec(&db).await;
-    let (window_start, window_end) = dataset_window();
-    let hash = ContentHash::parse(&format!("blake3:{}", "b".repeat(64))).expect("hash");
-    let dataset_id = ReadyDatasetSeed {
-        model_spec_id,
-        decision_policy_snapshot_id: rc_id,
-        window_start,
-        window_end,
-        hash,
-        sample_count: 10,
-    }
-    .persist(&db)
-    .await;
-
-    let version_id = ModelVersionId::from_v7();
-    PgModelRegistryRepository::new(db.clone())
-        .create_model_version(NewModelVersion {
-            model_version_id: version_id,
-            model_spec_id,
-            version: 2,
-            artifact_hash: hash,
-            category_scope: None,
-            profile_ref: fixture_profile_ref(),
-            training_dataset_id: Some(dataset_id),
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
-            publish_path_set_id: None,
-            derivation: NewModelVersion::training_derivation(),
-            metrics: ModelVersionMetrics::not_measured("test fixture"),
-            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Candidate,
-            published_at: None,
-            retired_at: None,
-        })
-        .await
-        .expect("typed FK insert");
-
-    let loaded = PgModelRegistryRepository::new(db)
-        .find_model_version(&version_id)
+    let infra = seed_shared_demo_infra(&db).await;
+    let loaded = PgModelRegistryRepository::new(db.clone())
+        .find_model_version(&infra.model_version_id)
         .await
         .expect("load")
         .expect("version");
-    assert_eq!(loaded.training_dataset_id, Some(dataset_id));
+    let dataset_id = loaded
+        .training_dataset_id
+        .expect("canonical model version must bind its training dataset");
+    let dataset = PgTrainingDatasetRepository::new(db)
+        .find_by_id(&dataset_id)
+        .await
+        .expect("load typed training dataset FK")
+        .expect("bound training dataset");
+
+    assert_eq!(dataset.training_dataset_id, dataset_id);
+    assert_eq!(
+        loaded
+            .serving_contract
+            .bindings()
+            .dataset
+            .manifest
+            .training_dataset_id,
+        dataset_id,
+        "typed model-version FK and the sealed serving contract must bind the same Dataset v3 row"
+    );
 }
 
 pub async fn plan_count_respects_sources() {
@@ -2080,7 +2106,7 @@ pub async fn plan_count_respects_sources() {
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog(&db, window_start).await;
-    let model_spec_id = seed_model_spec(&db).await;
+    let model_spec = ModelSpecSeed::pooled().persist(&db).await;
 
     let as_of = sample_as_of(window_start);
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of.timestamp_millis())));
@@ -2091,10 +2117,9 @@ pub async fn plan_count_respects_sources() {
         Arc::new(ControllableFactRead::new(scenario)),
     );
 
-    let default_plan =
-        plan_request(&db, &svc, model_spec_id, rc_id, window_start, window_end).await;
+    let default_plan = plan_request(&db, &svc, &model_spec, rc_id, window_start, window_end).await;
     let historical_request =
-        DatasetRequestSeed::training(model_spec_id, rc_id, window_start, window_end)
+        DatasetRequestSeed::training(&model_spec, rc_id, window_start, window_end)
             .with_sources(vec![TrainingSampleSource::HistoricalPit])
             .build(&db)
             .await;

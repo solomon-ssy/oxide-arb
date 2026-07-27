@@ -20,10 +20,10 @@ use quant_pivot_models::{
             CapitalSettlement, ExecutionIdentityEnrichment, ExecutionIdentityRefs,
             ExecutionTradeObservation, ExitLedgerWrite, NewAccountSnapshot, NewCapitalAllocation,
             NewEntryConditionInstance, NewEquitySnapshot, NewExecutionOrder, NewFeatureParityState,
-            NewMarketSelection, NewModelRun, NewModelVersion, NewOrderIntent, NewPortfolioPlan,
-            NewRecommendation, NewRecommendationReport, NewReconciliation,
-            NewReportDataQualitySnapshot, NewReportTransaction, PositionExit, PositionFill,
-            ReconciliationLedgerWrite, ReportRunClaim, SubmissionLedgerWrite,
+            NewMarketSelection, NewModelRun, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
+            NewRecommendationReport, NewReconciliation, NewReportDataQualitySnapshot,
+            NewReportTransaction, PositionExit, PositionFill, ReconciliationLedgerWrite,
+            ReportRunClaim, SubmissionLedgerWrite,
         },
     },
     entities::{
@@ -49,10 +49,10 @@ use quant_pivot_models::{
         quant::{
             AccountSource, ApprovalStatus, BindingConstraint, EntryConditionState,
             ExecutionOrderState, ExitSettlementMode, FactorDirection, FeatureParityLatchState,
-            FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OrderIntentStatus,
-            OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationReportStatus,
-            RecommendationStatus, RedeemPolicy, ReportFactDeliveryStatus, ReportKind,
-            ReportRunStatus, ReportRunTerminalReason, ReportTriggerKind, SizingModelKind,
+            FeatureParityStateTransition, ModelRunKind, OrderIntentStatus, OutcomeSide,
+            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
+            ReportFactDeliveryStatus, ReportKind, ReportRunStatus, ReportRunTerminalReason,
+            ReportTriggerKind, SizingModelKind,
         },
         rbac::ResourceType,
     },
@@ -75,8 +75,7 @@ use quant_pivot_models::{
         RoleCode, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan,
         ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId, TradePolicyCohortDimension,
         TradePolicyCohortKey, TradePolicyCohortProvenance, Usd, UserId, VenueOrderAmount,
-        VenueTradeId, WorkerId, builtin_research_profiles, model_metrics::ModelVersionMetrics,
-        model_training::ModelTrainingObjective,
+        VenueTradeId, WorkerId, builtin_research_profiles,
     },
 };
 use quant_pivot_repository::{
@@ -105,6 +104,7 @@ use quant_pivot_system_tests::{
             entry_claim_for_test, fixture_profile_ref, prepared_order, seed_price_report,
             seed_shared_demo_infra,
         },
+        model_serving_fixtures::{ModelVersionFixture, ModelVersionFixtureSeed},
         model_spec_fixtures,
         policy_fixtures::bootstrap_default_policy_bundle,
         report_fixtures,
@@ -2701,55 +2701,45 @@ async fn seed_model_version(
             model_spec_id,
             "pg-exec-it",
             ModelFamily::WeightedFactor,
-            86_400,
+            model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
             ModelTrainingContract::settlement_default(),
         ))
         .await
         .expect("model spec");
     let model_version_id = ModelVersionId::from_v7();
-    registry
-        .create_model_version(NewModelVersion {
+    let version = ModelVersionFixture::prepare(
+        db,
+        ModelVersionFixtureSeed::training(
+            format!("execution-submission:{model_version_id}"),
             model_version_id,
             model_spec_id,
-            version: 1,
-            profile_ref: execution_pg_seed::fixture_profile_ref(),
-            artifact_hash: content_hash('a'),
-            category_scope: None,
-            training_dataset_id: None,
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
-            publish_path_set_id: None,
-            derivation: NewModelVersion::training_derivation(),
-            metrics: ModelVersionMetrics::not_measured("test fixture"),
-            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Published,
-            published_at: Some(Utc::now()),
-            retired_at: None,
-        })
+            content_hash('a'),
+        ),
+    )
+    .await
+    .expect("prepare exact model version");
+    ModelVersionFixture::persist_published(db, version)
         .await
-        .expect("model version");
+        .expect("publish model version through exact parity proof");
     let model_run_id = ModelRunId::from_v7();
-    PgModelRunRepository::new(db.clone())
-        .create(NewModelRun {
-            model_run_id,
-            run_kind: ModelRunKind::LiveInference,
-            model_version_id: Some(model_version_id),
-            decision_policy_snapshot_id: *rc_id,
-            market_selection_id: None,
-            window_start: Utc::now(),
-            window_end: Utc::now(),
-            status: ModelRunStatus::Succeeded,
-            input_hash: content_hash('d'),
-            output_hash: None,
-            error_code: None,
-            error_message: None,
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
-        })
+    let runs = PgModelRunRepository::new(db.clone());
+    let window_at = Utc::now();
+    runs.create(NewModelRun {
+        model_run_id,
+        run_kind: ModelRunKind::LiveInference,
+        model_version_id: Some(model_version_id),
+        decision_policy_snapshot_id: *rc_id,
+        market_selection_id: None,
+        window_start: window_at,
+        window_end: window_at,
+        input_hash: content_hash('d'),
+    })
+    .await
+    .expect("create model run");
+    runs.succeed(&model_run_id, content_hash('e'), None)
         .await
-        .expect("model run");
+        .expect("finish model run");
     (model_version_id, model_run_id)
 }
 

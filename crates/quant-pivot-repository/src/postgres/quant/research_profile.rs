@@ -101,6 +101,15 @@ impl PgModelRegistryRepository {
     }
 
     fn validate_profile_row(row: &Model) -> Result<ResearchProfileRef, StorageError> {
+        row.spec.validate().map_err(|detail| {
+            StorageError::invariant_violation(
+                Some("research_profile_artifact"),
+                format!(
+                    "research profile artifact {} has an invalid immutable spec: {detail}",
+                    row.research_profile_artifact_id
+                ),
+            )
+        })?;
         let version = u32::try_from(row.version).map_err(|error| {
             StorageError::invariant_violation(
                 Some("research_profile_artifact"),

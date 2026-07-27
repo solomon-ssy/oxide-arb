@@ -16,6 +16,7 @@ use quant_pivot_models::{
         ports::{PolicySnapshotPort, SystemCapabilityPort},
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode, system::CapabilityReason},
+    runtime_config::BuyModelRoute,
 };
 use quant_pivot_repository::traits::{ModelRunRepository, RecommendationReportRepository};
 use tokio::sync::watch::{self, Receiver, Sender};
@@ -75,16 +76,17 @@ impl SystemCapabilityService {
             &mut report_reasons,
         );
         let runtime_config = self.runtime_config.current();
-        let has_active_model_pointer = runtime_config
-            .model_routing
-            .model
-            .active_model_version_id
-            .is_some()
-            || !runtime_config
-                .model_routing
-                .model
-                .category_model_pointers
-                .is_empty();
+        let has_active_model_pointer =
+            BuyModelRoute::try_from(&runtime_config.recommendation.selection)
+                .ok()
+                .and_then(|route| {
+                    runtime_config
+                        .model_routing
+                        .model
+                        .active_pointer(route)
+                        .ok()
+                })
+                .is_some();
         require(
             has_active_model_pointer,
             CapabilityReason::NoServingEvidence,

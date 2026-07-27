@@ -2,7 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{QpFactorDefinitionScope, QpFactorFamily, QpPublicationStatus};
+use super::sea_orm_active_enums::{QpFactorDefinitionScope, QpFactorFamily};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -22,10 +22,7 @@ pub struct Model {
     pub output_schema_version: i32,
     #[sea_orm(column_type = "JsonBinary")]
     pub definition: Json,
-    pub status: QpPublicationStatus,
-    pub created_by: Option<Uuid>,
     pub created_at: DateTimeWithTimeZone,
-    pub updated_at: DateTimeWithTimeZone,
     #[sea_orm(has_many)]
     pub quant_factor_values: HasMany<super::quant_factor_value::Entity>,
 }

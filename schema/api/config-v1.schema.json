@@ -590,11 +590,6 @@
     "DecisionPolicySnapshotOptionView": {
       "type": "object",
       "properties": {
-        "bundle_generation": {
-          "type": "integer",
-          "format": "int64",
-          "minimum": 1
-        },
         "created_at": {
           "type": "string",
           "format": "date-time"
@@ -615,7 +610,6 @@
         }
       },
       "required": [
-        "bundle_generation",
         "decision_policy_snapshot_id",
         "snapshot_hash",
         "revision_vector",
@@ -1234,7 +1228,7 @@
           "default": null
         },
         "active_model_version_id": {
-          "description": "Active published model version id.",
+          "description": "Active published model for the explicit pooled Buy route.\n\nThis route may score only non-Crypto/non-Weather report scopes. It is\nnot a fallback for a missing vertical route.",
           "anyOf": [
             {
               "$ref": "#/$defs/ModelVersionRef"
@@ -1261,7 +1255,7 @@
           "default": "0.00"
         },
         "category_model_pointers": {
-          "description": "Category-specific Buy-side model pointers (`ModelRouting`).\n\nA market whose category has a pointer here scores through that artifact\n(which may consume the category's domain slice); only categories without\na pointer use the generic `active_model_version_id`. A configured route\nthat cannot load, validate its exact scope, or infer fails the entire\nreport round. Governed exactly like the active/shadow pointers.",
+          "description": "Category-specific Buy-side model pointers (`ModelRouting`).\n\nOnly Crypto and Weather may appear here. An enabled vertical must be the\nsole category in its report and must have its exact pointer; missing,\nunloadable, unpublished, or mis-scoped routes fail before selection.\nNon-vertical categories use the explicit pooled\n`active_model_version_id`. Governed exactly like the pooled/shadow\npointers.",
           "type": "object",
           "properties": {
             "crypto": {

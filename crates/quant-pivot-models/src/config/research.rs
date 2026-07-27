@@ -50,6 +50,32 @@ impl Default for ArtifactStoreDeployConfig {
 pub struct ResearchDeployConfig {
     pub artifact_store: ArtifactStoreDeployConfig,
     pub evidence_attestation: EvidenceAttestationConfig,
+    pub model_serving_registry: ModelServingRegistryConfig,
+}
+
+/// Restart-to-apply budgets for immutable model-serving runtime loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelServingRegistryConfig {
+    /// Maximum successfully validated contracts retained in process.
+    pub max_cached_contracts: u64,
+    /// Maximum cache-miss callers admitted across active and queued loads.
+    pub max_pending_loads: usize,
+    /// Maximum distinct cold loads performing repository/object-store I/O.
+    pub max_concurrent_loads: usize,
+    /// End-to-end deadline for one cold contract load.
+    pub load_timeout_ms: u64,
+}
+
+impl Default for ModelServingRegistryConfig {
+    fn default() -> Self {
+        Self {
+            max_cached_contracts: 32,
+            max_pending_loads: 64,
+            max_concurrent_loads: 4,
+            load_timeout_ms: 60_000,
+        }
+    }
 }
 
 /// Dedicated keyed-BLAKE3 attestation identity for operational evidence.

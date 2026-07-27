@@ -525,18 +525,19 @@ buy-weighted-intraday     prediction_horizon_secs=3600   label_horizon=3600
 ### 7A.1 运行时行为
 
 - `RuntimeConfig.model.category_model_pointers.{category}` — 指向一个 **Published** Buy 侧 `ModelVersionId`。
-- `ModelRunner::infer_routed_cross_section` — 按 `market.category` 选 specialist；pointer 为空才使用 generic。pointer 已配置但 load/scope/inference 失败时整轮失败，禁止静默回落。
-- `CategoryPointerGuard` — `ModelRouting` **preflight/activation** 拒绝 `category_scope` 与 route key 不一致的 artifact；`ModelRunner` 在 load 时再次 fail-closed。
-- `WeightedFactorModelArtifact.category_scope: Option<MarketCategory>` — 训练产物声明适用范围；`None` = generic cross-category scorer。
+- `BuyModelRoute` 由 frozen selection policy 唯一确定；`ModelRunner` 从对应 immutable
+  serving generation pin 一个 owned route snapshot，selection→inference 不再逐市场重路由。
+- serving-generation prepare 在激活前同时验证所有 pooled/Crypto/Weather active 与
+  shadow 的 Published lifecycle、exact scope、完整 contract/preimage/runtime；任一失败保留
+  旧 generation，禁止 partial publish 或 fallback。
+- `ModelArtifact.category_scope: Option<MarketCategory>` 由 ResearchProfile 冻结；
+  `None` 只表示 pooled scorer，不表示 enabled vertical 的 fallback。
 
-### 7A.2 训练产物 `category_scope` 推断顺序
+### 7A.2 训练产物 `category_scope` 唯一来源
 
-训练服务按以下 precedence 冻结 `category_scope`（可被显式 override）：
-
-1. `TrainModelInput.category_scope` 显式传参（内部 / CLI）。
-2. Runtime selection `enabled_categories` **仅有 1 个 entry** → 该 category。
-3. 物化样本的 `market.category` **unanimous** → 该 category（Crypto-only dataset build 自动命中）。
-4. 否则 `None`（generic scorer）。
+`ResearchProfileArtifact.spec.category` 是唯一 owner。Dataset PIT selection、factor plane、
+model spec、trainer artifact/header 与 serving contract 必须全部投影同一值；caller、
+RuntimeConfig 和样本分布都不能 override 或事后推断 category。
 
 Publish 时对 `category_scope = Crypto` 的 weighted artifact 额外校验：至少一个非零 `domain_crypto_strike_pressure` 或 `domain_crypto_beta_regime` 权重。
 
@@ -544,10 +545,10 @@ Publish 时对 `category_scope = Crypto` 的 weighted artifact 额外校验：�
 
 | | 落地前（Phase 3） | 现在（11.2.2+） |
 |---|--------------|----------------|
-| Buy active 插槽 | 1 global | 1 global default + **可选** per-category pointer |
+| Buy active 插槽 | 1 global | 1 pooled + enabled vertical 的 exact pointer |
 | spec 是否按 category 复制 | **否** | **仅 specialist vertical 增 1 个**（如 `buy-weighted-crypto`） |
-| Crypto 无 domain 数据 | selector 过滤 | Oracle fail-closed + 回落 generic |
-| 训练 | 1 个 global dataset | category-filtered dataset **可选**；`category_scope` 自动推断 |
+| Crypto 无 domain 数据 | selector 过滤 | Oracle/selection fail-closed；无 fallback |
+| 训练 | 1 个 global dataset | profile-specific PIT Dataset；`category_scope` 同源冻结 |
 
 ### 7A.4 Crypto specialist spec 模板
 
@@ -659,15 +660,25 @@ pub enum ModelRouting {
 
 ### 8.4 配置 Crypto category pointer（11.2.2 runbook）
 
-**前置**：generic Buy 模型已 publish（`active_model_version_id` 非空）；Crypto domain 因子已 publish；可选 specialist spec 已 train + publish 且 artifact `category_scope = crypto`。
+**前置**：pooled Buy 模型已 publish（`active_model_version_id` 非空）；Crypto domain
+因子已注册；Crypto specialist spec 已 train + publish 且 artifact
+`category_scope = crypto`。启用 Crypto selection 时，Crypto pointer 是必需项，不存在
+generic fallback。
 
 1. **创建 specialist spec**（若尚未有）— UI：研究 → 模型规格 → 新建；按 §7A.4 配置独立 `input_contract`；schema version 由 active feature-contract 自动绑定。
 2. **构建 Crypto-only 训练集** — selection `enabled_categories` 含 `crypto`；build dataset → train → backtest → publish specialist version。
 3. **配置 pointer** — 运行配置 → `model.category_model_pointers.crypto` → 选择刚 publish 的 version（picker 仅展示 `category_scope ∈ {None, Crypto}` 的 Published Buy 版本）。
-4. **激活 `ModelRouting` revision** — `CategoryPointerGuard` 在 prepare 时校验 scope；通过后下一 model-evaluation claim 对 Crypto 市场路由 specialist，其余 category 仍走 generic。
-5. **验证** — 报告 pipeline 日志中可见 `resolve_model_route`；若 pointer 版本 retired，retire-sync 会自动清除 dangling pointer。
+4. **激活 `ModelRouting` revision** — serving-generation prepare 同时解析 pooled、
+   Crypto、Weather active pointers 与 shadow，校验 exact scope/contract/preimage/runtime；
+   全部成功后才以一次 `ArcSwap` 发布，任一失败保留旧 generation。
+5. **验证** — 报告使用 frozen policy 对应的 exact `BuyModelRoute`，requirements 到
+   inference 始终 pin 同一个 owned route snapshot。被任何 active/shadow/category route
+   引用的版本禁止 retire；必须先激活一版不再引用该版本的 `ModelRouting`，系统不会自动
+   清除 dangling pointer。
 
-**路由行为**：pointer 留空 → Crypto 市场使用 generic active；pointer 一旦配置，retired / scope 不匹配 / load 失败都会令整轮报告失败，不会 silent 用错模型。
+**路由行为**：启用 Crypto 时 pointer 留空即拒绝 policy activation/report；retired /
+scope 不匹配 / contract/preimage/runtime load 失败都会令整个 candidate generation
+失败，不会 partial publish 或 silent fallback。
 
 **勿做**：为每个 category 复制 spec 却不 train/publish specialist — pointer 只能指向真实 Published artifact。
 

@@ -30,6 +30,7 @@ use quant_pivot_models::{
         },
         feature::EvidenceSourceKind,
         market::MarketStatus,
+        model::ModelFamily,
         quant::{DataQualityStatus, DatasetPurpose},
     },
     hashing::CanonicalDigest,
@@ -40,7 +41,7 @@ use quant_pivot_models::{
         DomainFeatureSlice, DomainInstrumentKey, DomainSourceId, EventId, EvidenceSourceRef,
         FeatureCell, FeatureStaleness, FeatureValue, MarketId, MarketLinkageId, ModelSpecId, Price,
         Probability, ResolverVersion, SchemaVersion, Shares, TokenId, TrainingExampleId,
-        TrainingSampleSource, Usd, stable_name::FactorName,
+        TrainingSampleSource, Usd, factor::FactorServingPlane, stable_name::FactorName,
     },
 };
 use quant_pivot_research::{
@@ -513,11 +514,12 @@ fn domain_factor_registered_category() {
 fn dataset_hash_changes_added() {
     let spec = ModelSpecId::from_v7();
     let as_of = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
-    let (feature, factor, label) = (
+    let (feature, label) = (
         CanonicalDigest::content_hash_json("feature").expect("h"),
-        CanonicalDigest::content_hash_json("factor").expect("h"),
         CanonicalDigest::content_hash_json("label").expect("h"),
     );
+    let factor_serving_plane =
+        FactorServingPlane::try_empty().expect("canonical factor-free plane");
 
     let make = |domain: Option<DomainFeatureSlice>| {
         let mut feature_vector = vector(MarketCategory::Crypto, domain);
@@ -560,11 +562,12 @@ fn dataset_hash_changes_added() {
     let h0 = TrainingDatasetArtifact::compute_dataset_hash(
         DatasetHashContract {
             model_spec_id: &spec,
+            model_family: ModelFamily::ClassicalRandomForest,
             window_start: as_of,
             window_end: as_of,
             purpose: DatasetPurpose::Training,
             feature_schema_hash: &feature,
-            factor_schema_hash: &factor,
+            factor_serving_plane: &factor_serving_plane,
             label_schema_hash: &label,
         },
         &without,
@@ -573,11 +576,12 @@ fn dataset_hash_changes_added() {
     let h1 = TrainingDatasetArtifact::compute_dataset_hash(
         DatasetHashContract {
             model_spec_id: &spec,
+            model_family: ModelFamily::ClassicalRandomForest,
             window_start: as_of,
             window_end: as_of,
             purpose: DatasetPurpose::Training,
             feature_schema_hash: &feature,
-            factor_schema_hash: &factor,
+            factor_serving_plane: &factor_serving_plane,
             label_schema_hash: &label,
         },
         &with,
@@ -612,7 +616,7 @@ fn dataset_builder_no_leakage() {
         factor_values: Vec::new(),
         labels: Vec::new(),
         source_refs: vec![EvidenceSourceRef {
-            source_kind: EvidenceSourceKind::DomainExternal,
+            source_kind: EvidenceSourceKind::DomainCrypto,
             reference: "binance:BTCUSDT:1m".to_owned(),
             effective_at: cutoff,
             available_at: Some(cutoff),
@@ -626,7 +630,7 @@ fn dataset_builder_no_leakage() {
 
     let bad = TrainingExample {
         source_refs: vec![EvidenceSourceRef {
-            source_kind: EvidenceSourceKind::DomainExternal,
+            source_kind: EvidenceSourceKind::DomainCrypto,
             reference: "binance:BTCUSDT:1m".to_owned(),
             effective_at: as_of,
             available_at: Some(as_of),

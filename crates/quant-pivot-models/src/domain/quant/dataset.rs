@@ -6,12 +6,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     entities::quant_training_dataset,
-    enums::quant::{DatasetPurpose, FeedbackCohort, TrainingDatasetStatus},
+    enums::{
+        model::ModelFamily,
+        quant::{DatasetPurpose, FeedbackCohort, TrainingDatasetStatus},
+    },
     types::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCohortManifest,
         DatasetCoverage, DatasetManifest, DatasetManifestContractError, DatasetSourceLineage,
         DecisionPolicySnapshotId, ModelSpecId, ResearchProfileArtifactId, SchemaVersion,
         SourceSliceId, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSources,
+        factor::FactorServingPlane,
     },
 };
 
@@ -21,7 +25,9 @@ use crate::{
 pub struct TrainingDatasetInfo {
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
+    pub model_family: ModelFamily,
     pub model_spec_definition_hash: ContentHash,
+    pub factor_serving_plane: FactorServingPlane,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub source_slice_id: SourceSliceId,
     pub pit_cutoff: DateTime<Utc>,
@@ -36,14 +42,13 @@ pub struct TrainingDatasetInfo {
     /// held-out split a `ProbabilityCalibrator` fits on — must be disjoint +
     /// embargoed from the model's own `Training` dataset).
     pub purpose: DatasetPurpose,
-    pub feature_schema_hash: Option<ContentHash>,
-    pub factor_schema_hash: Option<ContentHash>,
+    pub feature_schema_hash: ContentHash,
+    pub factor_schema_hash: ContentHash,
     pub label_schema_hash: Option<ContentHash>,
     pub dataset_hash: Option<ContentHash>,
     /// Canonical hash of the manifest embedded in the Parquet envelope.
     pub manifest_hash: Option<ContentHash>,
-    /// Exact structured manifest embedded in the Parquet envelope. Legacy
-    /// retired audit rows may be `None`; no API layer reconstructs it.
+    /// Exact structured manifest embedded in the Parquet envelope.
     pub manifest: Option<DatasetManifest>,
     /// Exact hash of the persisted Parquet bytes.
     pub artifact_bytes_hash: Option<ContentHash>,
@@ -56,7 +61,7 @@ pub struct TrainingDatasetInfo {
     pub sample_interval_secs: i64,
     /// Forward label horizons (seconds) the build materialized.
     pub horizons_secs: TrainingHorizonsSecs,
-    pub feature_schema_version: Option<SchemaVersion>,
+    pub feature_schema_version: SchemaVersion,
     pub sample_sources: Option<TrainingSampleSources>,
     pub coverage: Option<DatasetCoverage>,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
@@ -71,7 +76,9 @@ info_from_model!(
     {
         training_dataset_id,
         model_spec_id,
+        model_family,
         model_spec_definition_hash,
+        factor_serving_plane,
         research_profile_artifact_id,
         source_slice_id,
         pit_cutoff,
@@ -110,7 +117,11 @@ info_from_model!(
 pub struct NewTrainingDatasetPlan {
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
+    pub model_family: ModelFamily,
     pub model_spec_definition_hash: ContentHash,
+    pub factor_serving_plane: FactorServingPlane,
+    pub feature_schema_hash: ContentHash,
+    pub factor_schema_hash: ContentHash,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub source_slice_id: SourceSliceId,
     pub pit_cutoff: DateTime<Utc>,
@@ -123,13 +134,45 @@ pub struct NewTrainingDatasetPlan {
     pub knowledge_lag_secs: i64,
     pub sample_interval_secs: i64,
     pub horizons_secs: TrainingHorizonsSecs,
-    pub feature_schema_version: Option<SchemaVersion>,
+    pub feature_schema_version: SchemaVersion,
     pub sample_sources: Option<TrainingSampleSources>,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
 }
 
 impl NewTrainingDatasetPlan {
     pub fn validate(&self) -> Result<(), DatasetManifestContractError> {
+        self.factor_serving_plane.validate().map_err(|error| {
+            DatasetManifestContractError::InvalidFactorPlane {
+                detail: error.to_string(),
+            }
+        })?;
+        if self.model_family.is_classical() != self.factor_serving_plane.definitions().is_empty() {
+            return Err(DatasetManifestContractError::FactorPlaneFamilyMismatch);
+        }
+        if self.feature_schema_version.get() < 1 {
+            return Err(DatasetManifestContractError::FactorPlaneSchemaMismatch);
+        }
+        if self
+            .factor_serving_plane
+            .definitions()
+            .iter()
+            .any(|definition| definition.feature_contract_hash() != self.feature_schema_hash)
+        {
+            return Err(DatasetManifestContractError::FactorPlaneFeatureMismatch);
+        }
+        if self
+            .factor_serving_plane
+            .definitions()
+            .iter()
+            .any(|definition| definition.input_schema_version() != self.feature_schema_version)
+        {
+            return Err(DatasetManifestContractError::FactorPlaneSchemaMismatch);
+        }
+        if self.factor_schema_hash != self.factor_serving_plane.factor_schema_hash() {
+            return Err(DatasetManifestContractError::InvalidFactorPlane {
+                detail: "factor schema hash is not the plane's derived projection".to_owned(),
+            });
+        }
         self.source_lineage.validate()?;
         if self.research_profile_artifact_id != self.source_lineage.research_profile_artifact_id
             || self.source_slice_id != self.source_lineage.source_slice_id
@@ -256,8 +299,8 @@ impl CompleteTrainingDatasetBuild {
     }
 
     #[must_use]
-    pub const fn factor_schema_hash(&self) -> &ContentHash {
-        &self.manifest.factor_schema_hash
+    pub const fn factor_schema_hash(&self) -> ContentHash {
+        self.manifest.factor_schema_hash()
     }
 
     #[must_use]
@@ -304,7 +347,7 @@ impl CompleteTrainingDatasetBuild {
 /// Fully materialized artifact fields borrowed from a lifecycle row.
 pub struct TrainingDatasetMaterialization<'a> {
     pub feature_schema_hash: &'a ContentHash,
-    pub factor_schema_hash: &'a ContentHash,
+    pub factor_serving_plane: &'a FactorServingPlane,
     pub label_schema_hash: &'a ContentHash,
     pub dataset_hash: &'a ContentHash,
     pub manifest_hash: &'a ContentHash,
@@ -315,18 +358,37 @@ pub struct TrainingDatasetMaterialization<'a> {
     pub coverage: &'a DatasetCoverage,
 }
 
+impl TrainingDatasetMaterialization<'_> {
+    /// Strict scalar projection of the complete plan-time factor plane.
+    #[must_use]
+    pub const fn factor_schema_hash(&self) -> ContentHash {
+        self.factor_serving_plane.factor_schema_hash()
+    }
+}
+
 impl TrainingDatasetInfo {
     /// Return the complete artifact binding only when every materialized field
     /// is present. Callers must still enforce the lifecycle status they accept.
     #[must_use]
     pub fn materialization(&self) -> Option<TrainingDatasetMaterialization<'_>> {
+        let persisted_factor_hash = self.factor_schema_hash;
+        let manifest = self.manifest.as_ref()?;
+        if manifest.validate().is_err()
+            || persisted_factor_hash != self.factor_serving_plane.factor_schema_hash()
+            || self.model_family != manifest.model_family
+            || self.factor_serving_plane != manifest.factor_serving_plane
+            || self.feature_schema_version != manifest.feature_schema_version
+            || self.feature_schema_hash != manifest.feature_schema_hash
+        {
+            return None;
+        }
         Some(TrainingDatasetMaterialization {
-            feature_schema_hash: self.feature_schema_hash.as_ref()?,
-            factor_schema_hash: self.factor_schema_hash.as_ref()?,
+            feature_schema_hash: &self.feature_schema_hash,
+            factor_serving_plane: &self.factor_serving_plane,
             label_schema_hash: self.label_schema_hash.as_ref()?,
             dataset_hash: self.dataset_hash.as_ref()?,
             manifest_hash: self.manifest_hash.as_ref()?,
-            manifest: self.manifest.as_ref()?,
+            manifest,
             artifact_bytes_hash: self.artifact_bytes_hash.as_ref()?,
             parquet_uri: self.parquet_uri.as_ref()?,
             sample_count: self.sample_count?,
@@ -342,9 +404,12 @@ mod tests {
     use super::CompleteTrainingDatasetBuild;
     use crate::{
         domain::quant::FeedbackCohortWindow,
-        enums::quant::{
-            CohortCensorReason, CohortExclusionReason, DatasetPurpose, FeedbackCohort,
-            TrainingDatasetStatus,
+        enums::{
+            model::ModelFamily,
+            quant::{
+                CohortCensorReason, CohortExclusionReason, DatasetPurpose, FeedbackCohort,
+                TrainingDatasetStatus,
+            },
         },
         types::{
             ArtifactUri, CapabilityRegistryHashes, CohortCensorCount, CohortExclusionCount,
@@ -353,7 +418,8 @@ mod tests {
             DatasetCohortManifest, DatasetCoverage, DatasetManifest, DatasetSourceLineage,
             DecisionPolicySnapshotId, ModelSpecId, ReaderContractVersion,
             ResearchProfileArtifactId, ResearchProfileId, ResearchProfileRef,
-            SchemaContractVersion, SourceSliceId, SourceSliceManifestRef, TrainingDatasetId,
+            SchemaContractVersion, SchemaVersion, SourceSliceId, SourceSliceManifestRef,
+            TrainingDatasetId, factor::FactorServingPlane,
         },
     };
 
@@ -429,12 +495,15 @@ mod tests {
                 counts,
                 capability_registry_hashes: capabilities,
             };
+            let factor_serving_plane =
+                FactorServingPlane::try_empty().expect("canonical factor-free plane");
             Self {
                 format_version: DATASET_ARTIFACT_FORMAT_VERSION,
                 training_dataset_id: TrainingDatasetId::from_v7(),
                 source_lineage,
                 cohort_manifest: Some(cohort_manifest),
                 model_spec_id: ModelSpecId::from_v7(),
+                model_family: ModelFamily::ClassicalRandomForest,
                 model_spec_definition_hash: hash('b'),
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,
@@ -444,8 +513,9 @@ mod tests {
                 knowledge_lag_secs: 1,
                 sample_interval_secs: 60,
                 horizons_secs: vec![3_600],
+                feature_schema_version: SchemaVersion::FIRST,
                 feature_schema_hash: hash('c'),
-                factor_schema_hash: hash('d'),
+                factor_serving_plane,
                 label_schema_hash: hash('e'),
                 semantic_dataset_hash: hash('f'),
                 source_fingerprint: hash('0'),
@@ -489,6 +559,14 @@ mod tests {
             let mut unknown_cohort = serde_json::to_value(&manifest).expect("encode manifest");
             unknown_cohort["cohort_manifest"]["unexpected"] = serde_json::json!(true);
             assert!(serde_json::from_value::<DatasetManifest>(unknown_cohort).is_err());
+
+            let mut old_wire = serde_json::to_value(&manifest).expect("encode manifest");
+            old_wire["format_version"] = serde_json::json!(2);
+            assert!(serde_json::from_value::<DatasetManifest>(old_wire).is_err());
+
+            let mut wrong_family = serde_json::to_value(&manifest).expect("encode manifest");
+            wrong_family["model_family"] = serde_json::json!("weighted_factor");
+            assert!(serde_json::from_value::<DatasetManifest>(wrong_family).is_err());
 
             let mut wrong_purpose = manifest;
             wrong_purpose.purpose = DatasetPurpose::PolicyFit;

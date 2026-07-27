@@ -109,7 +109,8 @@ flowchart TD
    （deploy 配置 root path），S3/MinIO 后续无缝替换；Postgres 只存 metadata /
    hash / URI。
 3. **ML 范围**：weighted-factor 主路径 + smartcore classical ML（shadow 候选），
-   统一 `QuantModelRuntime` / `ModelRuntimeFactory` 隔离 concrete crate type。
+   统一 `QuantModelRuntime` 隔离调用方；完整 verified serving preimage 唯一构造
+   concrete runtime。
 4. **Backtest 组合层**：Phase 03 用最小 deterministic greedy allocator 产出
    portfolio 级指标；完整受治理 `PortfolioPlanner` 留 Phase 04 复用同一 trait。
 5. **零兼容、零 re-export**；`f64` 仅允许出现在训练矩阵边界，禁止泄漏到 money domain。

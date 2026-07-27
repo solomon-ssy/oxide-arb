@@ -890,7 +890,6 @@ async fn transition_revision(
         &candidate,
         actor,
         &request.reason,
-        next_generation,
         match activation_kind {
             PolicyActivationKind::Rollback => DecisionPolicySnapshotSource::Rollback,
             PolicyActivationKind::Initial | PolicyActivationKind::Promote => {
@@ -1180,7 +1179,6 @@ fn new_snapshot(
     snapshot: &DecisionPolicySnapshot,
     actor: &AuthedActor,
     reason: &str,
-    bundle_generation: PolicyBundleGeneration,
     source: DecisionPolicySnapshotSource,
 ) -> Result<NewDecisionPolicySnapshot, WebError> {
     let revisions = &snapshot.revisions;
@@ -1192,11 +1190,11 @@ fn new_snapshot(
     let snapshot_document = snapshot
         .persistence_document()
         .map_err(|error| WebError::Internal(error.to_string()))?;
+    let snapshot_hash = CanonicalDigest::content_hash_json(&snapshot_document)
+        .map_err(|error| WebError::Internal(error.to_string()))?;
     Ok(NewDecisionPolicySnapshot {
-        bundle_generation,
-        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-        snapshot_hash: CanonicalDigest::content_hash_json(&snapshot_document)
-            .map_err(|error| WebError::Internal(error.to_string()))?,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_content_hash(&snapshot_hash),
+        snapshot_hash,
         recommendation_policy_revision_id: revisions.recommendation_policy.ok_or_else(missing)?,
         execution_risk_policy_revision_id: revisions.execution_risk_policy.ok_or_else(missing)?,
         model_routing_revision_id: revisions.model_routing.ok_or_else(missing)?,

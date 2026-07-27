@@ -65,6 +65,7 @@ use quant_pivot_models::{
         market::MarketRegistryInfo,
         quant::{DomainAvailability, MarketCandidate, MarketDataHealth},
     },
+    enums::common::MarketCategory,
     runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
     types::{DecisionPolicySnapshotId, MarketId},
 };
@@ -104,10 +105,15 @@ impl OfflinePitSelector {
         decision_policy_snapshot_id: DecisionPolicySnapshotId,
         knowledge_lag_secs: u64,
         model_requirements: ModelFeatureRequirements,
+        category_scope: Option<MarketCategory>,
     ) -> Self {
+        let mut selection = selection.clone();
+        if let Some(category) = category_scope {
+            selection.enabled_categories = vec![category];
+        }
         Self {
             selector: ConfiguredMarketSelector::new(),
-            selection: selection.clone(),
+            selection,
             data_quality: data_quality.clone(),
             features: features.clone(),
             decision_policy_snapshot_id,
@@ -670,6 +676,7 @@ mod tests {
             DecisionPolicySnapshotId::from_v7(),
             domain_config.crypto.availability_lag_secs,
             crypto_model_requirements(),
+            Some(MarketCategory::Crypto),
         );
         let boundary = DecisionClock::new(domain_config.crypto.availability_lag_secs)
             .boundary(as_of)
@@ -724,6 +731,7 @@ mod tests {
             DecisionPolicySnapshotId::from_v7(),
             domain_config.crypto.availability_lag_secs,
             crypto_model_requirements(),
+            Some(MarketCategory::Crypto),
         );
         let boundary = DecisionClock::new(domain_config.crypto.availability_lag_secs)
             .boundary(as_of)

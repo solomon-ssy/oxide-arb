@@ -152,8 +152,6 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::OrderIntent, Operation::Reject),
         (ResourceType::OrderIntent, Operation::Cancel),
         (ResourceType::Reconciliation, Operation::Resolve),
-        (ResourceType::FactorDefinition, Operation::Publish),
-        (ResourceType::FactorDefinition, Operation::Retire),
     ]);
     policies
 }
@@ -172,10 +170,6 @@ fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::Publication, Operation::Publish),
         (ResourceType::Publication, Operation::Rollback),
         (ResourceType::Publication, Operation::Retire),
-        // Register the enabled factor set (bootstrap) alongside publish/retire.
-        (ResourceType::FactorDefinition, Operation::Create),
-        (ResourceType::FactorDefinition, Operation::Publish),
-        (ResourceType::FactorDefinition, Operation::Retire),
         // Risk owners revoke published reports (money-risk authority).
         (ResourceType::QuantReport, Operation::Revoke),
         (ResourceType::OrderIntent, Operation::Reject),
@@ -336,6 +330,21 @@ mod tests {
             assert!(
                 resource.allows(Operation::Read),
                 "{resource:?} is in READ_RESOURCES but has no Read operation"
+            );
+        }
+    }
+
+    #[test]
+    fn factor_permissions_read_only() {
+        for (role_code, permissions) in builtin_role_policies() {
+            let factor_permissions = permissions
+                .into_iter()
+                .filter(|(resource, _)| *resource == ResourceType::FactorDefinition)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                factor_permissions,
+                [(ResourceType::FactorDefinition, Operation::Read)],
+                "role `{role_code}` must not receive factor-catalog mutation authority"
             );
         }
     }

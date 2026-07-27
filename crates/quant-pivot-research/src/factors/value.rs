@@ -9,11 +9,12 @@
 //! [`FactorEngine`](crate::factors::FactorEngine) applies the (possibly
 //! cross-sectional) normalization to yield the final [`FactorValue`].
 //!
-//! The normalization **method** ([`FactorNormalization`]) is the factor's
-//! semantic contract (bound into `factor_schema_hash`); the distributional
-//! *parameters* are resolved from runtime config — never hardcoded here.
+//! The normalization **method** ([`FactorNormalization`]) and executable
+//! computation contract are sealed into the serving-plane hash. Distributional
+//! parameter values remain owned by the immutable scoring profile.
 
 use chrono::{DateTime, Utc};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 pub(super) use quant_pivot_models::{
     enums::{
         factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
@@ -22,8 +23,9 @@ pub(super) use quant_pivot_models::{
     types::{
         FactorDefinitionId, MarketId, Probability,
         factor::{
-            FactorDefinitionDocument, FactorDriver, FactorExplanation, FactorOutputKind,
-            FactorQualityGate,
+            FactorAlphaOrientation, FactorContextEffect, FactorDefinitionDocument,
+            FactorDefinitionRef, FactorDriver, FactorExplanation, FactorOutputSemantics,
+            FactorRawValue,
         },
         stable_name::{FactorName, FeatureName},
     },
@@ -63,7 +65,137 @@ pub struct FactorValue {
     pub input_feature_refs: Vec<FeatureName>,
 }
 
+/// Canonical typed projection consumed by every trainer/runtime scoring head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactorScoringProjection {
+    /// Signed alpha in the definition's declared reference orientation.
+    OutcomeAlpha {
+        orientation: FactorAlphaOrientation,
+        /// Signed normalized strength before reliability/confidence weighting.
+        strength: Decimal,
+        confidence: Probability,
+    },
+    /// Side-neutral opportunity adequacy. This may scale magnitude/confidence
+    /// but can never select or reverse an outcome side.
+    Context {
+        adequacy: Probability,
+        confidence: Probability,
+    },
+    /// Auditable non-estimator output. Callers must preserve it in lineage but
+    /// must not coerce it into either scoring head.
+    Diagnostic {
+        score: Probability,
+        confidence: Probability,
+    },
+}
+
 impl FactorValue {
+    /// Validate one value against its exact sealed definition revision.
+    pub fn validate_against(&self, revision: &FactorDefinitionRef) -> QuantResult<()> {
+        revision
+            .validate()
+            .map_err(|error| ResearchError::Serialization {
+                detail: format!(
+                    "factor revision {} is invalid while validating value: {error}",
+                    revision.factor_definition_id()
+                ),
+            })?;
+        let definition = revision.definition();
+        let drivers_are_canonical = self
+            .explanation
+            .drivers
+            .windows(2)
+            .all(|pair| pair[0].feature_name < pair[1].feature_name)
+            && self
+                .explanation
+                .drivers
+                .iter()
+                .all(|driver| definition.input_features.contains(&driver.feature_name));
+        let confidence = self.confidence.inner();
+        let normalized_in_range = self
+            .normalized_score()
+            .is_none_or(|score| (Decimal::ZERO..=Decimal::ONE).contains(&score.inner()));
+        let expected_direction = self
+            .raw_value
+            .and_then(|raw| definition.contribution_direction(raw))
+            .unwrap_or(FactorDirection::Neutral);
+        let raw_is_valid = self.raw_value.is_none_or(|raw| {
+            FactorRawValue::try_from(raw).is_ok() && definition.normalization_input(raw).is_some()
+        });
+        let tuple_is_valid = match (&self.normalization, self.raw_value) {
+            (NormalizedFactor::Scored { score, .. }, Some(raw)) => {
+                (Decimal::ZERO..=Decimal::ONE).contains(&score.inner())
+                    && (!definition.is_outcome_alpha() || !raw.is_zero() || score.inner().is_zero())
+                    && (!definition.is_outcome_alpha() || !raw.is_zero() || confidence.is_zero())
+            }
+            (NormalizedFactor::MissingInput | NormalizedFactor::NotApplicable, None) => {
+                confidence.is_zero()
+            }
+            (NormalizedFactor::Indeterminate { .. }, _) => confidence.is_zero(),
+            _ => false,
+        };
+        let exact = self.definition_id == revision.factor_definition_id()
+            && self.name == definition.name
+            && self.family == definition.family
+            && self.input_feature_refs == definition.input_features
+            && self.direction == expected_direction
+            && (Decimal::ZERO..=Decimal::ONE).contains(&confidence)
+            && normalized_in_range
+            && raw_is_valid
+            && tuple_is_valid
+            && drivers_are_canonical;
+        if !exact {
+            return Err(ResearchError::Serialization {
+                detail: format!(
+                    "factor value `{}` does not exactly project sealed revision {}",
+                    self.name,
+                    revision.factor_definition_id()
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Project a validated scored value into exactly one model head.
+    pub fn scoring_projection(
+        &self,
+        revision: &FactorDefinitionRef,
+    ) -> QuantResult<Option<FactorScoringProjection>> {
+        self.validate_against(revision)?;
+        let Some(score) = self.normalized_score() else {
+            return Ok(None);
+        };
+        let definition = revision.definition();
+        Ok(match definition.output {
+            FactorOutputSemantics::OutcomeAlpha { orientation } => {
+                Some(FactorScoringProjection::OutcomeAlpha {
+                    orientation,
+                    strength: Decimal::from(self.direction.as_i8()) * score.inner(),
+                    confidence: self.confidence,
+                })
+            }
+            FactorOutputSemantics::Context { .. } => {
+                let adequacy = definition.context_adequacy(score).ok_or_else(|| {
+                    ResearchError::Serialization {
+                        detail: format!(
+                            "context factor `{}` has no governed adequacy projection",
+                            self.name
+                        ),
+                    }
+                })?;
+                Some(FactorScoringProjection::Context {
+                    adequacy,
+                    confidence: self.confidence,
+                })
+            }
+            FactorOutputSemantics::Diagnostic => Some(FactorScoringProjection::Diagnostic {
+                score,
+                confidence: self.confidence,
+            }),
+        })
+    }
+
     /// The normalized `[0, 1]` score when the factor was scored, else `None`.
     #[must_use]
     pub const fn normalized_score(&self) -> Option<Probability> {
@@ -173,6 +305,78 @@ pub struct RawFactor {
     pub input_feature_refs: Vec<FeatureName>,
 }
 
+impl RawFactor {
+    /// Quantize the raw value and canonicalize derived fields before hashing.
+    pub(super) fn canonicalize_against(
+        &mut self,
+        revision: &FactorDefinitionRef,
+    ) -> QuantResult<()> {
+        self.drivers
+            .sort_unstable_by(|left, right| left.feature_name.cmp(&right.feature_name));
+        if let Some(raw) = self.raw_value {
+            self.raw_value = Some(
+                FactorRawValue::quantize(raw)
+                    .map_err(|error| ResearchError::FactorComputation {
+                        detail: format!(
+                            "factor `{}` raw output is not representable: {error}",
+                            self.name
+                        ),
+                    })?
+                    .inner(),
+            );
+        }
+        self.direction = self
+            .raw_value
+            .and_then(|raw| revision.definition().contribution_direction(raw))
+            .unwrap_or(FactorDirection::Neutral);
+        self.validate_against(revision)
+    }
+
+    /// Verify that a computer output belongs to the exact sealed revision.
+    ///
+    /// Identity and lineage are owned by the serving plane. Computers may emit
+    /// inputs in computation order, but the set must exactly equal the declared
+    /// canonical inputs; the final persisted value is projected from the sealed
+    /// definition, never from this transient copy.
+    pub fn validate_against(&self, revision: &FactorDefinitionRef) -> QuantResult<()> {
+        let definition = revision.definition();
+        let mut inputs = self.input_feature_refs.clone();
+        inputs.sort_unstable();
+        let original_len = inputs.len();
+        inputs.dedup();
+        let canonical_drivers = self
+            .drivers
+            .windows(2)
+            .all(|pair| pair[0].feature_name < pair[1].feature_name)
+            && self
+                .drivers
+                .iter()
+                .all(|driver| definition.input_features.contains(&driver.feature_name));
+        let expected_direction = self
+            .raw_value
+            .and_then(|raw| definition.contribution_direction(raw))
+            .unwrap_or(FactorDirection::Neutral);
+        let exact = self.definition_id == revision.factor_definition_id()
+            && self.name == definition.name
+            && self.family == definition.family
+            && self.direction == expected_direction
+            && inputs.len() == original_len
+            && inputs == definition.input_features
+            && canonical_drivers;
+        if !exact {
+            return Err(ResearchError::FactorComputation {
+                detail: format!(
+                    "raw factor `{}` does not exactly project sealed revision {}",
+                    self.name,
+                    revision.factor_definition_id()
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+}
+
 /// A factor value paired with its **transient** scoring eligibility.
 ///
 /// `contributes` / `below_confidence_floor` are scoring decisions derived from
@@ -233,15 +437,4 @@ pub struct MarketFactorOutcome {
     pub eligibility: FactorEligibility,
     /// Every enabled factor for this market, with transient scoring flags.
     pub factors: Vec<ScoredFactor>,
-}
-
-/// An ordered set of governed factor definitions whose change perturbs the
-/// `factor_schema_hash` bound to models and datasets.
-///
-/// Hash via [`crate::hashing::ResearchHasher::factor_schema`] so definition
-/// insertion order does not affect the digest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FactorSet {
-    /// The factor definitions in this set.
-    pub definitions: Vec<FactorDefinitionDocument>,
 }

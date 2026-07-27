@@ -603,7 +603,7 @@ impl MenuTree {
         });
         build_research_jobs(self, &research);
         build_research_feature_integrity(self, &research);
-        let factors = self.page(PageSpec {
+        self.page(PageSpec {
             parent: &research,
             name: "research-factors",
             title: "page.menu.researchFactors",
@@ -612,18 +612,6 @@ impl MenuTree {
             permission_code: Some(perm(ResourceType::FactorDefinition, Operation::Read)),
             icon: "lucide:sigma",
         });
-        self.button(
-            &factors,
-            "factor_definition:publish",
-            "Publish Factor",
-            perm(ResourceType::FactorDefinition, Operation::Publish),
-        );
-        self.button(
-            &factors,
-            "factor_definition:retire",
-            "Retire Factor",
-            perm(ResourceType::FactorDefinition, Operation::Retire),
-        );
         build_research_calibration_artifacts(self, &research);
         build_research_domain_governance(self, &research);
         // Pairwise comparison report — deep-linkable from a backtest, hidden from

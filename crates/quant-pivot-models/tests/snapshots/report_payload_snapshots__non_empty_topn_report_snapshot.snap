@@ -1,6 +1,6 @@
 ---
 source: crates/quant-pivot-models/tests/report_payload_snapshots.rs
-expression: non_empty_topn_report()
+expression: "TopNReportSnapshot::non_empty()"
 ---
 {
   "report": {
@@ -8,8 +8,8 @@ expression: non_empty_topn_report()
     "profile_id": "weather_forecast_24h",
     "profile_ref": {
       "id": "weather_forecast_24h",
-      "version": 2,
-      "content_hash": "blake3:664a9d825f72b61f2e2a22ff97aea9604f6bc5841ee88e233f64c851eb3abc04"
+      "version": 3,
+      "content_hash": "blake3:baf12884866475dd0e422f2adb8cf6c03563e601930fd098cc5d0b0a15be244c"
     },
     "report_kind": "top_n",
     "decision_at": "2023-11-14T22:11:20Z",
@@ -118,8 +118,8 @@ expression: non_empty_topn_report()
           "cohort_key": {
             "profile_ref": {
               "id": "pooled_1h_control",
-              "version": 2,
-              "content_hash": "blake3:d3c71a5ac39fb3047559218c1ca8ea5e2d62e092a3eed98eb8ce9154e7cc4543"
+              "version": 3,
+              "content_hash": "blake3:84c34e2ad55d79bb67db2804a4371b105cc430890282381c1e9f25f623aad564"
             },
             "category": "politics",
             "horizon_secs": 86400,
@@ -301,8 +301,8 @@ expression: non_empty_topn_report()
           "cohort_key": {
             "profile_ref": {
               "id": "pooled_1h_control",
-              "version": 2,
-              "content_hash": "blake3:d3c71a5ac39fb3047559218c1ca8ea5e2d62e092a3eed98eb8ce9154e7cc4543"
+              "version": 3,
+              "content_hash": "blake3:84c34e2ad55d79bb67db2804a4371b105cc430890282381c1e9f25f623aad564"
             },
             "category": "politics",
             "horizon_secs": 86400,

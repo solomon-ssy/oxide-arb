@@ -473,16 +473,14 @@ pg_enum! {
 
 pg_enum! {
     type_name = "qp_publication_status",
-    /// Publication lifecycle for model specs, model versions, and factor definitions.
+    /// Publication lifecycle for immutable model versions.
     @derive(Default)
     pub enum PublicationStatus {
         #[default]
-        Draft => "draft",
         Candidate => "candidate",
         Shadow => "shadow",
         Published => "published",
         Retired => "retired",
-        Rejected => "rejected",
     }
 }
 
@@ -543,8 +541,6 @@ impl PublicationStatus {
             }
             Self::Published => matches!(next, Self::Published | Self::Retired),
             Self::Retired => matches!(next, Self::Published),
-            Self::Draft => matches!(next, Self::Candidate | Self::Published),
-            Self::Rejected => false,
         }
     }
 }
@@ -602,6 +598,16 @@ impl FactorDirection {
             Self::Positive => 1,
             Self::Negative => -1,
             Self::Neutral => 0,
+        }
+    }
+
+    /// Reverse a directional factor's economic orientation.
+    #[must_use]
+    pub const fn reversed(self) -> Self {
+        match self {
+            Self::Positive => Self::Negative,
+            Self::Negative => Self::Positive,
+            Self::Neutral => Self::Neutral,
         }
     }
 }
@@ -1014,6 +1020,150 @@ pg_enum! {
     }
 }
 
+pg_enum! {
+    type_name = "qp_feedback_cycle_status",
+    /// Durable orchestration lifecycle. Business decisions are stored
+    /// separately and exist only for a successful terminal cycle.
+    @derive(Default)
+    pub enum FeedbackCycleStatus {
+        #[default]
+        Queued => "queued",
+        Running => "running",
+        Succeeded => "succeeded",
+        Failed => "failed",
+        Cancelled => "cancelled",
+    }
+}
+
+impl FeedbackCycleStatus {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+
+    #[must_use]
+    pub const fn allows_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Queued, Self::Running | Self::Cancelled)
+                | (
+                    Self::Running,
+                    Self::Running | Self::Succeeded | Self::Failed | Self::Cancelled
+                )
+        )
+    }
+}
+
+pg_enum! {
+    type_name = "qp_feedback_decision",
+    /// Business outcome produced only after a cycle succeeds.
+    pub enum FeedbackDecision {
+        NoAction => "no_action",
+        ChallengerRejected => "challenger_rejected",
+        CandidateReady => "candidate_ready",
+        Promoted => "promoted",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_feedback_trigger_family",
+    /// Trigger family participates in cycle idempotency. Actor and reason are
+    /// append-only timeline evidence and deliberately do not fork identity.
+    pub enum FeedbackTriggerFamily {
+        Scheduled => "scheduled",
+        Manual => "manual",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_feedback_stage",
+    /// Closed feedback DAG stage vocabulary.
+    pub enum FeedbackStage {
+        Trigger => "trigger",
+        Coverage => "coverage",
+        Drift => "drift",
+        DatasetSeal => "dataset_seal",
+        Training => "training",
+        Calibration => "calibration",
+        Cpcv => "cpcv",
+        Comparison => "comparison",
+        ShadowReplay => "shadow_replay",
+        Decision => "decision",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_feedback_stage_event_kind",
+    /// Append-only timeline event vocabulary.
+    pub enum FeedbackStageEventKind {
+        Triggered => "triggered",
+        JobLinked => "job_linked",
+        Started => "started",
+        Succeeded => "succeeded",
+        Failed => "failed",
+        CancellationRequested => "cancellation_requested",
+        Cancelled => "cancelled",
+        LeaseRecovered => "lease_recovered",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_feedback_drift_kind",
+    /// Mutually exclusive drift families.
+    pub enum FeedbackDriftKind {
+        Data => "data",
+        Concept => "concept",
+        Label => "label",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_feedback_drift_metric",
+    /// Profile-governed metrics supported by the feedback methodology.
+    pub enum FeedbackDriftMetric {
+        PopulationStabilityIndex => "population_stability_index",
+        KolmogorovSmirnovPValue => "kolmogorov_smirnov_p_value",
+        RankIcDrop => "rank_ic_drop",
+        JensenShannonDivergence => "jensen_shannon_divergence",
+    }
+}
+
+impl FeedbackDriftMetric {
+    #[must_use]
+    pub const fn kind(self) -> FeedbackDriftKind {
+        match self {
+            Self::PopulationStabilityIndex | Self::KolmogorovSmirnovPValue => {
+                FeedbackDriftKind::Data
+            }
+            Self::RankIcDrop => FeedbackDriftKind::Concept,
+            Self::JensenShannonDivergence => FeedbackDriftKind::Label,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_unit_interval(self) -> bool {
+        !matches!(self, Self::PopulationStabilityIndex)
+    }
+}
+
+pg_enum! {
+    type_name = "qp_feedback_drift_assessment",
+    /// Typed interpretation of one drift metric.
+    pub enum FeedbackDriftAssessment {
+        WithinThreshold => "within_threshold",
+        ThresholdExceeded => "threshold_exceeded",
+        InsufficientEvidence => "insufficient_evidence",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_feedback_evaluation_purpose",
+    /// Statistical purpose that irreversibly consumes an unseen holdout.
+    pub enum FeedbackEvaluationPurpose {
+        PromotionComparison => "promotion_comparison",
+    }
+}
+
 wire_enum! {
     /// Stable reason a recommendation can never belong to a requested frozen cohort.
     pub enum CohortExclusionReason {
@@ -1392,9 +1542,32 @@ mod tests {
 
     use super::{
         CohortCensorReason, CohortExclusionReason, FeatureParityStage, FeedbackCohort,
-        OrderIntentStatus, RecommendationExecutionTerminalState, RecommendationResolutionKind,
-        RecommendationStatus,
+        OrderIntentStatus, PublicationStatus, RecommendationExecutionTerminalState,
+        RecommendationResolutionKind, RecommendationStatus,
     };
+
+    #[test]
+    fn model_publication_fsm_closed() {
+        assert_eq!(PublicationStatus::default(), PublicationStatus::Candidate);
+        for (status, wire) in [
+            (PublicationStatus::Candidate, "candidate"),
+            (PublicationStatus::Shadow, "shadow"),
+            (PublicationStatus::Published, "published"),
+            (PublicationStatus::Retired, "retired"),
+        ] {
+            assert_eq!(PublicationStatus::from_str(wire), Ok(status));
+        }
+        for removed in ["draft", "rejected"] {
+            assert!(
+                PublicationStatus::from_str(removed).is_err(),
+                "removed factor-era publication state `{removed}` must fail closed"
+            );
+        }
+        assert!(PublicationStatus::Candidate.allows_transition_to(PublicationStatus::Shadow));
+        assert!(PublicationStatus::Shadow.allows_transition_to(PublicationStatus::Published));
+        assert!(PublicationStatus::Published.allows_transition_to(PublicationStatus::Retired));
+        assert!(!PublicationStatus::Candidate.allows_transition_to(PublicationStatus::Retired));
+    }
 
     #[test]
     fn feedback_outcome_enums_stable() {

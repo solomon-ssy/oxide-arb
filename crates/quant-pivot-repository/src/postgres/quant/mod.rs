@@ -21,6 +21,7 @@ mod feature;
 mod feature_parity;
 mod feedback_cohort;
 mod governance_audit;
+mod integrity;
 mod market_linkage;
 mod market_selection;
 mod model_registry;

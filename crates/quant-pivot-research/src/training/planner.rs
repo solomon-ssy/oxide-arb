@@ -111,6 +111,7 @@ pub fn plan_lot_timeline_samples(
                 position_id: lot.position_id,
                 market_id: lot.market_id.clone(),
                 token_id: lot.token_id.clone(),
+                outcome_side: lot.outcome_side,
                 decision_at: as_of,
                 opened_at: lot.opened_at,
                 closed_at: lot.closed_at,
@@ -143,10 +144,10 @@ fn checked_next_sample(at: DateTime<Utc>, step: Duration) -> QuantResult<DateTim
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        enums::quant::DatasetPurpose,
+        enums::quant::{DatasetPurpose, OutcomeSide},
         types::{
             MarketId, ModelSpecId, OrderIntentId, PositionId, Price, SchemaVersion, Shares,
-            TokenId, Usd, default_sample_sources,
+            TokenId, TrainingSampleSources, Usd,
         },
     };
     use rust_decimal::Decimal;
@@ -166,7 +167,7 @@ mod tests {
             horizons_secs: vec![60],
             knowledge_lag_secs: 10,
             feature_schema_version: SchemaVersion::FIRST,
-            sample_sources: default_sample_sources(),
+            sample_sources: TrainingSampleSources::default(),
             training_dataset_id: None,
             purpose: DatasetPurpose::default(),
         }
@@ -207,6 +208,7 @@ mod tests {
             position_id: PositionId::from_v7(),
             market_id: MarketId::new("0xmkt"),
             token_id: TokenId::new("token-1"),
+            outcome_side: OutcomeSide::Yes,
             opened_at: start + Duration::seconds(opened_offset),
             closed_at: start + Duration::seconds(closed_offset),
             entry_shares: Shares::new(Decimal::from(100)),

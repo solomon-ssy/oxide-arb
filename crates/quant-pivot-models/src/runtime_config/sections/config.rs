@@ -14,7 +14,7 @@ use crate::{
     },
     runtime_config::wire::{
         CapitalPolicy, CorrelationConfig, DecimalValue, EntryOrderPolicy, ExecutionBreakerConfig,
-        ExitMonitorPolicy, FactorWeights, FeatureFamily, FeatureStalenessPolicy, KillSwitchPolicy,
+        ExitMonitorPolicy, FeatureFamily, FeatureStalenessPolicy, KillSwitchPolicy,
         MissingFactorPolicy, ModelVersionRef, NeutralizeDimension, PortfolioOptimizerConfig,
         RankLossKind, ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence,
         SizingModelConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
@@ -289,18 +289,25 @@ pub struct FactorNormalizationConfig {
 
 impl Default for FactorNormalizationConfig {
     fn default() -> Self {
-        // data_quality is already a semantic [0, 1] score → MinMax identity.
         let mut per_factor = BTreeMap::new();
-        per_factor.insert(
-            "data_quality".to_owned(),
-            PerFactorNormalization {
-                method: FactorNormalization::MinMax,
-                winsor_p: None,
-                clamp_sigma: None,
-                min: Some(DecimalValue::new(rust_decimal_macros::dec!(0))),
-                max: Some(DecimalValue::new(rust_decimal_macros::dec!(1))),
-            },
-        );
+        for factor_name in [
+            // Data quality is already a semantic [0, 1] score.
+            "data_quality",
+            // Weather probability is centered to signed alpha before the
+            // normalization boundary; its magnitude therefore remains [0, 1].
+            "domain.weather.ensemble_bin_probability",
+        ] {
+            per_factor.insert(
+                factor_name.to_owned(),
+                PerFactorNormalization {
+                    method: FactorNormalization::MinMax,
+                    winsor_p: None,
+                    clamp_sigma: None,
+                    min: Some(DecimalValue::new(rust_decimal_macros::dec!(0))),
+                    max: Some(DecimalValue::new(rust_decimal_macros::dec!(1))),
+                },
+            );
+        }
         Self {
             default_winsor_p: DecimalValue::new(rust_decimal_macros::dec!(0.01)),
             default_clamp_sigma: DecimalValue::new(rust_decimal_macros::dec!(3)),
@@ -371,7 +378,8 @@ impl Default for ReversalAfterShockConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct NegRiskStructuralConfig {
     /// Minimum resolved YES legs for a neg-risk structural factor to compute
-    /// (below this the factor is `Indeterminate`, never a silent value).
+    /// (below this the factor is structurally `NotApplicable`, never a silent
+    /// value; missing a required leg book remains `Indeterminate`).
     pub min_legs: u32,
 }
 
@@ -486,7 +494,75 @@ impl Default for ParticipantConcentrationConfig {
     }
 }
 
-/// Factor selection and weighted-scorer configuration.
+/// Governed seed for the revision-bound `OutcomeAlpha` and `Context` heads.
+///
+/// Empty maps mean "expand canonically over the exact sealed serving plane";
+/// non-empty maps must exactly cover the matching semantic head. These values
+/// are training inputs only. Serving always consumes the immutable
+/// [`crate::types::factor::FactorServingPlane`] and
+/// artifact-frozen head produced from this seed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct FactorHeadConfig {
+    /// Initial simplex over every `OutcomeAlpha` factor in the sealed plane.
+    pub alpha_seed_weights: BTreeMap<String, DecimalValue>,
+    /// Reliability-coverage simplex over every `Context` factor in the plane.
+    pub context_coverage_weights: BTreeMap<String, DecimalValue>,
+    /// Independent `[0, 1]` opportunity penalty for every `Context` factor.
+    pub context_penalty_strengths: BTreeMap<String, DecimalValue>,
+    /// Penalty expanded for every `Context` factor when the explicit map is empty.
+    pub default_context_penalty_strength: DecimalValue,
+    /// Absolute canonical-YES alpha at or below this value emits no side.
+    pub alpha_deadband: DecimalValue,
+}
+
+impl Default for FactorHeadConfig {
+    fn default() -> Self {
+        Self {
+            alpha_seed_weights: BTreeMap::new(),
+            context_coverage_weights: BTreeMap::new(),
+            context_penalty_strengths: BTreeMap::new(),
+            default_context_penalty_strength: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
+            alpha_deadband: DecimalValue::new(rust_decimal_macros::dec!(0.05)),
+        }
+    }
+}
+
+/// Governed Hold-vs-Exit estimator and post-estimator projection.
+///
+/// The five estimator weights form one simplex. Position-state inputs are
+/// model-intrinsic contract bindings, never globally published factors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SellScorerConfig {
+    pub market_head_weight: DecimalValue,
+    pub position_take_profit_weight: DecimalValue,
+    pub position_stop_loss_weight: DecimalValue,
+    pub position_time_in_trade_weight: DecimalValue,
+    pub position_peak_drawdown_weight: DecimalValue,
+    pub max_exit_alpha_bps: DecimalValue,
+    pub p_exit_gain: DecimalValue,
+    pub exit_deadband: DecimalValue,
+    pub default_sell_pct: DecimalValue,
+}
+
+impl Default for SellScorerConfig {
+    fn default() -> Self {
+        Self {
+            market_head_weight: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
+            position_take_profit_weight: DecimalValue::new(rust_decimal_macros::dec!(0.125)),
+            position_stop_loss_weight: DecimalValue::new(rust_decimal_macros::dec!(0.125)),
+            position_time_in_trade_weight: DecimalValue::new(rust_decimal_macros::dec!(0.125)),
+            position_peak_drawdown_weight: DecimalValue::new(rust_decimal_macros::dec!(0.125)),
+            max_exit_alpha_bps: DecimalValue::new(rust_decimal_macros::dec!(300)),
+            p_exit_gain: DecimalValue::new(rust_decimal_macros::dec!(4)),
+            exit_deadband: DecimalValue::new(rust_decimal_macros::dec!(0.05)),
+            default_sell_pct: DecimalValue::new(rust_decimal_macros::dec!(1)),
+        }
+    }
+}
+
+/// Factor selection and immutable estimator-head seed configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct FactorsConfig {
@@ -496,8 +572,10 @@ pub struct FactorsConfig {
     /// Vertical/domain factor families are routed by market category and must
     /// not appear here.
     pub enabled_factor_families: Vec<FactorFamily>,
-    /// Factor weights keyed by factor name.
-    pub factor_weights: FactorWeights,
+    /// Revision-bound OutcomeAlpha/Context head seed.
+    pub factor_head: FactorHeadConfig,
+    /// Hold-vs-Exit estimator and output projection.
+    pub sell_scorer: SellScorerConfig,
     /// Minimum confidence for a factor to contribute to scoring.
     pub min_factor_confidence: DecimalValue,
     /// Missing factor handling policy.
@@ -521,7 +599,8 @@ impl Default for FactorsConfig {
         enabled_factor_families.push(FactorFamily::Structural);
         Self {
             enabled_factor_families,
-            factor_weights: FactorWeights::default(),
+            factor_head: FactorHeadConfig::default(),
+            sell_scorer: SellScorerConfig::default(),
             min_factor_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
             missing_factor_policy: MissingFactorPolicy::ZeroWeight,
             normalization: FactorNormalizationConfig::default(),
@@ -714,7 +793,10 @@ impl Default for ModelCalibrationConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
-    /// Active published model version id.
+    /// Active published model for the explicit pooled Buy route.
+    ///
+    /// This route may score only non-Crypto/non-Weather report scopes. It is
+    /// not a fallback for a missing vertical route.
     pub active_model_version_id: Option<ModelVersionRef>,
     /// Shadow model version id.
     pub shadow_model_version_id: Option<ModelVersionRef>,
@@ -724,11 +806,12 @@ pub struct ModelConfig {
     pub active_exit_model_version_id: Option<ModelVersionRef>,
     /// Category-specific Buy-side model pointers (`ModelRouting`).
     ///
-    /// A market whose category has a pointer here scores through that artifact
-    /// (which may consume the category's domain slice); only categories without
-    /// a pointer use the generic `active_model_version_id`. A configured route
-    /// that cannot load, validate its exact scope, or infer fails the entire
-    /// report round. Governed exactly like the active/shadow pointers.
+    /// Only Crypto and Weather may appear here. An enabled vertical must be the
+    /// sole category in its report and must have its exact pointer; missing,
+    /// unloadable, unpublished, or mis-scoped routes fail before selection.
+    /// Non-vertical categories use the explicit pooled
+    /// `active_model_version_id`. Governed exactly like the pooled/shadow
+    /// pointers.
     pub category_model_pointers: BTreeMap<MarketCategory, ModelVersionRef>,
     /// Minimum model confidence.
     pub min_model_confidence: DecimalValue,

@@ -6,6 +6,249 @@ use super::{
 };
 
 pub const SOURCE: &[u8] = include_bytes!("relational_invariants.rs");
+const MODEL_TRAINING_OBJECTIVE_CHECK: &str = r"CHECK (
+    jsonb_typeof(training_objective) = 'object'
+    AND training_objective ?& ARRAY['format_version', 'definition']
+    AND training_objective - ARRAY['format_version', 'definition'] = '{}'::jsonb
+    AND (training_objective ->> 'format_version')::integer = 2
+    AND jsonb_typeof(training_objective -> 'definition') = 'object'
+    AND (
+        (
+            training_objective -> 'definition' ->> 'kind' = 'learning_to_rank'
+            AND (training_objective -> 'definition') ?& ARRAY['kind', 'spec']
+            AND (training_objective -> 'definition') - ARRAY['kind', 'spec'] = '{}'::jsonb
+            AND jsonb_typeof(training_objective -> 'definition' -> 'spec') = 'object'
+            AND (training_objective -> 'definition' -> 'spec')
+                ?& ARRAY[
+                    'rank_loss',
+                    'optimizer',
+                    'lambda_tail',
+                    'tail_fraction',
+                    'lambda_turnover',
+                    'lambda_l2',
+                    'ndcg_k',
+                    'pseudo_top_n'
+                ]
+            AND (training_objective -> 'definition' -> 'spec')
+                - ARRAY[
+                    'rank_loss',
+                    'optimizer',
+                    'lambda_tail',
+                    'tail_fraction',
+                    'lambda_turnover',
+                    'lambda_l2',
+                    'ndcg_k',
+                    'pseudo_top_n'
+                ] = '{}'::jsonb
+        )
+        OR (
+            training_objective -> 'definition' ->> 'kind' = 'classical_pointwise'
+            AND (training_objective -> 'definition')
+                ?& ARRAY['kind', 'model_kind', 'validation_metric']
+            AND (training_objective -> 'definition')
+                - ARRAY['kind', 'model_kind', 'validation_metric'] = '{}'::jsonb
+            AND jsonb_typeof(training_objective -> 'definition' -> 'model_kind') = 'string'
+            AND training_objective -> 'definition' ->> 'validation_metric'
+                = 'mean_rolling_fold_rank_ic'
+        )
+        OR (
+            training_objective -> 'definition' ->> 'kind' = 'governed_sell_estimator'
+            AND (training_objective -> 'definition') ?& ARRAY['kind', 'fit_status']
+            AND (training_objective -> 'definition') - ARRAY['kind', 'fit_status'] = '{}'::jsonb
+            AND training_objective -> 'definition' ->> 'fit_status'
+                = 'oof_predictions_required'
+        )
+        OR (
+            training_objective -> 'definition' ->> 'kind' = 'hand_authored'
+            AND (training_objective -> 'definition') ?& ARRAY['kind', 'rationale']
+            AND (training_objective -> 'definition') - ARRAY['kind', 'rationale'] = '{}'::jsonb
+            AND jsonb_typeof(training_objective -> 'definition' -> 'rationale') = 'string'
+            AND char_length(btrim(training_objective -> 'definition' ->> 'rationale'))
+                BETWEEN 1 AND 2048
+        )
+    )
+)";
+const MODEL_VERSION_METRICS_CHECK: &str = r"CHECK (
+    jsonb_typeof(metrics) = 'object'
+    AND metrics ?& ARRAY['format_version', 'definition']
+    AND metrics - ARRAY['format_version', 'definition'] = '{}'::jsonb
+    AND (metrics ->> 'format_version')::integer = 2
+    AND jsonb_typeof(metrics -> 'definition') = 'object'
+    AND (
+        (
+            metrics -> 'definition' ->> 'kind' = 'learning_to_rank'
+            AND training_objective -> 'definition' ->> 'kind' = 'learning_to_rank'
+            AND (metrics -> 'definition')
+                ?& ARRAY['kind', 'in_sample', 'validation', 'artifact_lineage']
+            AND (metrics -> 'definition')
+                - ARRAY['kind', 'in_sample', 'validation', 'artifact_lineage'] = '{}'::jsonb
+            AND jsonb_typeof(metrics -> 'definition' -> 'in_sample') = 'object'
+            AND jsonb_typeof(metrics -> 'definition' -> 'validation') = 'object'
+            AND jsonb_typeof(metrics -> 'definition' -> 'artifact_lineage') = 'object'
+            AND metrics -> 'definition' -> 'artifact_lineage' ->> 'kind' = 'factor_native'
+        )
+        OR (
+            metrics -> 'definition' ->> 'kind' = 'classical_pointwise'
+            AND training_objective -> 'definition' ->> 'kind' = 'classical_pointwise'
+            AND (metrics -> 'definition')
+                ?& ARRAY[
+                    'kind',
+                    'model_kind',
+                    'in_sample',
+                    'validation',
+                    'feature_importances',
+                    'artifact_lineage'
+                ]
+            AND (metrics -> 'definition')
+                - ARRAY[
+                    'kind',
+                    'model_kind',
+                    'in_sample',
+                    'validation',
+                    'feature_importances',
+                    'artifact_lineage'
+                ] = '{}'::jsonb
+            AND metrics -> 'definition' ->> 'model_kind'
+                = training_objective -> 'definition' ->> 'model_kind'
+            AND jsonb_typeof(metrics -> 'definition' -> 'in_sample') = 'object'
+            AND jsonb_typeof(metrics -> 'definition' -> 'validation') = 'object'
+            AND jsonb_typeof(metrics -> 'definition' -> 'feature_importances') = 'array'
+            AND jsonb_typeof(metrics -> 'definition' -> 'artifact_lineage') = 'object'
+            AND metrics -> 'definition' -> 'artifact_lineage' ->> 'kind'
+                = 'fitted_feature_matrix'
+        )
+        OR (
+            metrics -> 'definition' ->> 'kind' = 'governed_sell_estimator'
+            AND training_objective -> 'definition' ->> 'kind' = 'governed_sell_estimator'
+            AND (metrics -> 'definition')
+                ?& ARRAY['kind', 'preparation', 'artifact_lineage']
+            AND (metrics -> 'definition')
+                - ARRAY['kind', 'preparation', 'artifact_lineage'] = '{}'::jsonb
+            AND jsonb_typeof(metrics -> 'definition' -> 'preparation') = 'object'
+            AND (metrics -> 'definition' -> 'preparation')
+                ?& ARRAY['resolved_label_rows', 'position_state_rows', 'fit_status']
+            AND (metrics -> 'definition' -> 'preparation')
+                - ARRAY['resolved_label_rows', 'position_state_rows', 'fit_status'] = '{}'::jsonb
+            AND (metrics -> 'definition' -> 'preparation' ->> 'resolved_label_rows')::numeric >= 0
+            AND (metrics -> 'definition' -> 'preparation' ->> 'position_state_rows')::numeric >= 0
+            AND metrics -> 'definition' -> 'preparation' ->> 'fit_status'
+                = training_objective -> 'definition' ->> 'fit_status'
+            AND metrics -> 'definition' -> 'preparation' ->> 'fit_status'
+                = 'oof_predictions_required'
+            AND jsonb_typeof(metrics -> 'definition' -> 'artifact_lineage') = 'object'
+            AND metrics -> 'definition' -> 'artifact_lineage' ->> 'kind' = 'factor_native'
+        )
+        OR (
+            metrics -> 'definition' ->> 'kind' = 'not_measured'
+            AND training_objective -> 'definition' ->> 'kind' = 'hand_authored'
+            AND (metrics -> 'definition') ?& ARRAY['kind', 'rationale']
+            AND (metrics -> 'definition') - ARRAY['kind', 'rationale'] = '{}'::jsonb
+            AND jsonb_typeof(metrics -> 'definition' -> 'rationale') = 'string'
+            AND char_length(btrim(metrics -> 'definition' ->> 'rationale'))
+                BETWEEN 1 AND 2048
+        )
+    )
+)";
+const DRIFT_REPORT_CHECK: &str = r"CHECK (
+    (
+        (
+            kind = 'data'::qp_feedback_drift_kind
+            AND metric = ANY (
+                ARRAY[
+                    'population_stability_index'::qp_feedback_drift_metric,
+                    'kolmogorov_smirnov_p_value'::qp_feedback_drift_metric
+                ]
+            )
+        )
+        OR (
+            kind = 'concept'::qp_feedback_drift_kind
+            AND metric = 'rank_ic_drop'::qp_feedback_drift_metric
+        )
+        OR (
+            kind = 'label'::qp_feedback_drift_kind
+            AND metric = 'jensen_shannon_divergence'::qp_feedback_drift_metric
+        )
+    )
+    AND baseline_window_start < baseline_window_end
+    AND baseline_window_end <= evaluation_window_start
+    AND evaluation_window_start < evaluation_window_end
+    AND evaluation_window_end <= label_cutoff
+    AND label_cutoff <= observed_at
+    AND observed_at <= created_at
+    AND sample_count >= 0
+    AND threshold NOT IN (
+        'NaN'::numeric,
+        'Infinity'::numeric,
+        '-Infinity'::numeric
+    )
+    AND threshold > 0::numeric
+    AND (
+        metric = 'population_stability_index'::qp_feedback_drift_metric
+        OR threshold <= 1::numeric
+    )
+    AND (
+        observed_value IS NULL
+        OR (
+            observed_value NOT IN (
+                'NaN'::numeric,
+                'Infinity'::numeric,
+                '-Infinity'::numeric
+            )
+            AND observed_value >= 0::numeric
+            AND (
+                metric = 'population_stability_index'::qp_feedback_drift_metric
+                OR observed_value <= 1::numeric
+            )
+        )
+    )
+    AND (
+        (
+            assessment = 'insufficient_evidence'::qp_feedback_drift_assessment
+            AND observed_value IS NULL
+        )
+        OR (
+            assessment <> 'insufficient_evidence'::qp_feedback_drift_assessment
+            AND observed_value IS NOT NULL
+            AND sample_count > 0
+            AND (
+                (
+                    metric = 'kolmogorov_smirnov_p_value'::qp_feedback_drift_metric
+                    AND (
+                        (
+                            assessment =
+                                'threshold_exceeded'::qp_feedback_drift_assessment
+                            AND observed_value <= threshold
+                        )
+                        OR (
+                            assessment =
+                                'within_threshold'::qp_feedback_drift_assessment
+                            AND observed_value > threshold
+                        )
+                    )
+                )
+                OR (
+                    metric <> 'kolmogorov_smirnov_p_value'::qp_feedback_drift_metric
+                    AND (
+                        (
+                            assessment =
+                                'threshold_exceeded'::qp_feedback_drift_assessment
+                            AND observed_value >= threshold
+                        )
+                        OR (
+                            assessment =
+                                'within_threshold'::qp_feedback_drift_assessment
+                            AND observed_value < threshold
+                        )
+                    )
+                )
+            )
+        )
+    )
+    AND octet_length(detail_uri) BETWEEN 1 AND 4096
+    AND detail_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text
+    AND detail_hash ~ '^blake3:[0-9a-f]{64}$'::text
+    AND report_hash ~ '^blake3:[0-9a-f]{64}$'::text
+)";
 const CONSTRAINTS: &[ConstraintSpec] = &[
     ConstraintSpec {
         name: "catalog_event_object_schema_version_check",
@@ -59,13 +302,127 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "ck_quant_factor_definition_document",
         table: "quant_factor_definition",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((jsonb_typeof(definition) = 'object'::text) AND ((definition ->> 'name'::text) = name) AND ((definition ->> 'family'::text) = (factor_family)::text) AND (jsonb_typeof((definition -> 'input_features'::text)) = 'array'::text) AND (jsonb_typeof((definition -> 'quality_gates'::text)) = 'array'::text) AND (jsonb_typeof((definition -> 'owner'::text)) = 'string'::text) AND (char_length(btrim((definition ->> 'owner'::text))) >= 1)))",
+        definition: "CHECK ((public.validate_factor_definition_document(definition) AND ((definition ->> 'name'::text) = name) AND ((definition ->> 'family'::text) = (factor_family)::text) AND (scope = CASE WHEN factor_family = 'structural'::qp_factor_family THEN 'structural'::qp_factor_definition_scope WHEN factor_family = 'domain_crypto'::qp_factor_family THEN 'domain_crypto'::qp_factor_definition_scope WHEN factor_family = 'domain_weather'::qp_factor_family THEN 'domain_weather'::qp_factor_definition_scope ELSE 'generic'::qp_factor_definition_scope END) AND (input_schema_version >= 1) AND (output_schema_version >= 1)))",
     },
     ConstraintSpec {
         name: "ck_quant_factor_value_explanation",
         table: "quant_factor_value",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((jsonb_typeof(explanation) = 'object'::text) AND (jsonb_typeof((explanation -> 'headline'::text)) = 'string'::text) AND (char_length(btrim((explanation ->> 'headline'::text))) >= 1) AND (jsonb_typeof((explanation -> 'drivers'::text)) = 'array'::text)))",
+        definition: "CHECK (public.validate_factor_explanation(explanation))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_factor_value_state_tuple",
+        table: "quant_factor_value",
+        kind: ConstraintKind::Check,
+        definition: "CHECK (((confidence <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND (confidence BETWEEN 0 AND 1) AND ((raw_value IS NULL) OR (raw_value <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric]))) AND ((normalized_score IS NULL) OR ((normalized_score <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND (normalized_score BETWEEN 0 AND 1))) AND (((value_state = 'scored'::qp_factor_value_state) AND (raw_value IS NOT NULL) AND (normalized_score IS NOT NULL) AND (normalization_source IS NOT NULL) AND (indeterminate_reason IS NULL)) OR ((value_state = ANY (ARRAY['missing_input'::qp_factor_value_state, 'not_applicable'::qp_factor_value_state])) AND (raw_value IS NULL) AND (normalized_score IS NULL) AND (normalization_source IS NULL) AND (indeterminate_reason IS NULL) AND (confidence = 0)) OR ((value_state = 'indeterminate'::qp_factor_value_state) AND (normalized_score IS NULL) AND (normalization_source IS NULL) AND (indeterminate_reason IS NOT NULL) AND (confidence = 0)))))",
+    },
+    ConstraintSpec {
+        name: "uq_quant_factor_value_run_vector_definition",
+        table: "quant_factor_value",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (model_run_id, feature_vector_id, factor_definition_id)",
+    },
+    ConstraintSpec {
+        name: "ck_quant_feedback_cycle_identity",
+        table: "quant_feedback_cycle",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((jsonb_typeof(idempotency_key) = 'object'::text AND idempotency_key ?& ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family_hash'::text] AND (idempotency_key - ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family_hash'::text]) = '{}'::jsonb AND (idempotency_key ->> 'format_version'::text)::integer = 1 AND idempotency_key ->> 'trigger_family'::text = trigger_family::text AND idempotency_key -> 'profile_ref'::text = profile_ref AND idempotency_key ->> 'feedback_policy_hash'::text = feedback_policy_hash AND (idempotency_key ->> 'label_cutoff'::text)::timestamp with time zone = label_cutoff AND idempotency_key -> 'capability_registry_hashes'::text = capability_registry_hashes AND (idempotency_key ->> 'champion_model_version_id'::text)::uuid = champion_model_version_id AND idempotency_key ->> 'champion_serving_contract_hash'::text = champion_serving_contract_hash AND idempotency_key ->> 'candidate_family_hash'::text = candidate_family_hash AND jsonb_typeof(profile_ref) = 'object'::text AND profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text] AND (profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb AND profile_ref ->> 'id'::text ~ '^[a-z0-9_]+$'::text AND (profile_ref ->> 'version'::text)::bigint > 0 AND profile_ref ->> 'content_hash'::text = profile_hash AND research_profile_artifact_id = (((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || profile_hash AND public.validate_content_hash_array(capability_registry_hashes) AND idempotency_hash ~ '^blake3:[0-9a-f]{64}$'::text AND profile_hash ~ '^blake3:[0-9a-f]{64}$'::text AND feedback_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text AND champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text AND candidate_family_hash ~ '^blake3:[0-9a-f]{64}$'::text AND label_cutoff <= created_at AND updated_at >= created_at AND generation >= 0))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_feedback_cycle_state",
+        table: "quant_feedback_cycle",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((((lease_owner IS NULL) = (lease_expires_at IS NULL)) AND ((started_at IS NULL) OR (started_at >= created_at)) AND ((lease_expires_at IS NULL) OR (started_at IS NOT NULL AND lease_expires_at > started_at)) AND ((cancel_requested_at IS NULL) OR (cancel_requested_at >= created_at AND (completed_at IS NULL OR cancel_requested_at <= completed_at))) AND ((completed_at IS NULL) OR (completed_at >= created_at AND completed_at <= updated_at AND (started_at IS NULL OR completed_at >= started_at))) AND ((terminal_reason_code IS NULL) OR (terminal_reason_code ~ '^[a-z][a-z0-9_.]{0,127}$'::text)) AND (((status = 'queued'::qp_feedback_cycle_status) AND decision IS NULL AND terminal_reason_code IS NULL AND started_at IS NULL AND completed_at IS NULL AND lease_owner IS NULL) OR ((status = 'running'::qp_feedback_cycle_status) AND decision IS NULL AND terminal_reason_code IS NULL AND started_at IS NOT NULL AND completed_at IS NULL AND lease_owner IS NOT NULL) OR ((status = 'succeeded'::qp_feedback_cycle_status) AND decision IS NOT NULL AND terminal_reason_code IS NOT NULL AND started_at IS NOT NULL AND completed_at IS NOT NULL AND lease_owner IS NULL) OR ((status = 'failed'::qp_feedback_cycle_status) AND decision IS NULL AND terminal_reason_code IS NOT NULL AND started_at IS NOT NULL AND completed_at IS NOT NULL AND lease_owner IS NULL) OR ((status = 'cancelled'::qp_feedback_cycle_status) AND decision IS NULL AND terminal_reason_code IS NOT NULL AND completed_at IS NOT NULL AND lease_owner IS NULL))))",
+    },
+    ConstraintSpec {
+        name: "uq_quant_feedback_cycle_cutoff",
+        table: "quant_feedback_cycle",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (feedback_cycle_id, label_cutoff)",
+    },
+    ConstraintSpec {
+        name: "uq_quant_feedback_cycle_evaluation_lineage",
+        table: "quant_feedback_cycle",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (feedback_cycle_id, research_profile_artifact_id, label_cutoff, champion_model_version_id, champion_serving_contract_hash, candidate_family_hash)",
+    },
+    ConstraintSpec {
+        name: "uq_quant_training_dataset_evaluation_identity",
+        table: "quant_training_dataset",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (training_dataset_id, purpose, dataset_hash, artifact_bytes_hash)",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_cycle_profile",
+        table: "quant_feedback_cycle",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (research_profile_artifact_id) REFERENCES public.research_profile_artifact(research_profile_artifact_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_cycle_champion",
+        table: "quant_feedback_cycle",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (champion_model_version_id) REFERENCES public.quant_model_version(model_version_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "ck_quant_feedback_stage_event",
+        table: "quant_feedback_stage_event",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((event_sequence > 0 AND occurred_at <= created_at AND event_hash ~ '^blake3:[0-9a-f]{64}$'::text AND ((evidence_uri IS NULL AND evidence_hash IS NULL) OR (evidence_uri IS NOT NULL AND evidence_hash IS NOT NULL AND octet_length(evidence_uri) >= 1 AND octet_length(evidence_uri) <= 4096 AND evidence_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text AND evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((actor IS NULL) OR (octet_length(actor) >= 1 AND octet_length(actor) <= 256 AND actor = btrim(actor) AND actor !~ '[[:cntrl:]]'::text)) AND ((reason_code IS NULL) OR (reason_code ~ '^[a-z][a-z0-9_.]{0,127}$'::text)) AND (((event_kind = 'triggered'::qp_feedback_stage_event_kind) AND stage = 'trigger'::qp_feedback_stage AND research_job_id IS NULL AND actor IS NOT NULL AND reason_code IS NOT NULL) OR ((event_kind = 'cancellation_requested'::qp_feedback_stage_event_kind) AND stage <> 'trigger'::qp_feedback_stage AND actor IS NOT NULL AND reason_code IS NOT NULL) OR ((event_kind = ANY (ARRAY['job_linked'::qp_feedback_stage_event_kind, 'started'::qp_feedback_stage_event_kind])) AND stage <> 'trigger'::qp_feedback_stage AND research_job_id IS NOT NULL AND actor IS NULL AND reason_code IS NULL) OR ((event_kind = 'succeeded'::qp_feedback_stage_event_kind) AND stage <> 'trigger'::qp_feedback_stage AND research_job_id IS NOT NULL AND actor IS NULL AND reason_code IS NULL AND evidence_uri IS NOT NULL) OR ((event_kind = ANY (ARRAY['failed'::qp_feedback_stage_event_kind, 'cancelled'::qp_feedback_stage_event_kind, 'lease_recovered'::qp_feedback_stage_event_kind])) AND stage <> 'trigger'::qp_feedback_stage AND research_job_id IS NOT NULL AND actor IS NULL AND reason_code IS NOT NULL))))",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_stage_cycle",
+        table: "quant_feedback_stage_event",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (feedback_cycle_id) REFERENCES public.quant_feedback_cycle(feedback_cycle_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_stage_job",
+        table: "quant_feedback_stage_event",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (research_job_id) REFERENCES public.quant_research_job(job_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "ck_quant_drift_report",
+        table: "quant_drift_report",
+        kind: ConstraintKind::Check,
+        definition: DRIFT_REPORT_CHECK,
+    },
+    ConstraintSpec {
+        name: "fk_quant_drift_report_cycle",
+        table: "quant_drift_report",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (feedback_cycle_id, label_cutoff) REFERENCES public.quant_feedback_cycle(feedback_cycle_id, label_cutoff) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "ck_quant_feedback_evaluation_use",
+        table: "quant_feedback_evaluation_use",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((purpose = 'promotion_comparison'::qp_feedback_evaluation_purpose AND dataset_purpose = 'evaluation'::qp_dataset_purpose AND jsonb_typeof(profile_ref) = 'object'::text AND profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text] AND (profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb AND profile_ref ->> 'id'::text ~ '^[a-z0-9_]+$'::text AND (profile_ref ->> 'version'::text)::bigint > 0 AND research_profile_artifact_id = (((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || (profile_ref ->> 'content_hash'::text) AND evaluation_window_start < evaluation_window_end AND evaluation_window_end <= label_cutoff AND label_cutoff <= used_at AND used_at <= created_at AND evaluation_dataset_hash ~ '^blake3:[0-9a-f]{64}$'::text AND evaluation_artifact_bytes_hash ~ '^blake3:[0-9a-f]{64}$'::text AND cohort_manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text AND champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text AND candidate_family_hash ~ '^blake3:[0-9a-f]{64}$'::text AND comparison_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text AND semantic_use_hash ~ '^blake3:[0-9a-f]{64}$'::text AND octet_length(result_artifact_uri) BETWEEN 1 AND 4096 AND result_artifact_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text AND result_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text AND evaluation_use_hash ~ '^blake3:[0-9a-f]{64}$'::text))",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_evaluation_cycle",
+        table: "quant_feedback_evaluation_use",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (feedback_cycle_id, research_profile_artifact_id, label_cutoff, champion_model_version_id, champion_serving_contract_hash, candidate_family_hash) REFERENCES public.quant_feedback_cycle(feedback_cycle_id, research_profile_artifact_id, label_cutoff, champion_model_version_id, champion_serving_contract_hash, candidate_family_hash) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_evaluation_profile",
+        table: "quant_feedback_evaluation_use",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (research_profile_artifact_id) REFERENCES public.research_profile_artifact(research_profile_artifact_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_evaluation_dataset",
+        table: "quant_feedback_evaluation_use",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (evaluation_dataset_id, dataset_purpose, evaluation_dataset_hash, evaluation_artifact_bytes_hash) REFERENCES public.quant_training_dataset(training_dataset_id, purpose, dataset_hash, artifact_bytes_hash) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_evaluation_champion",
+        table: "quant_feedback_evaluation_use",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (champion_model_version_id) REFERENCES public.quant_model_version(model_version_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
         name: "ck_quant_feature_parity_candidate_ordinal",
@@ -128,6 +485,12 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "CHECK (((jsonb_typeof(detail) = 'object'::text) AND ((detail ->> 'action'::text) = (action)::text)))",
     },
     ConstraintSpec {
+        name: "ck_quant_model_run_terminal",
+        table: "quant_model_run",
+        kind: ConstraintKind::Check,
+        definition: "CHECK (((window_start <= window_end) AND (window_end <= (started_at + '00:00:02'::interval)) AND (started_at IS NOT NULL) AND (input_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((status = 'running'::qp_model_run_status) AND (output_hash IS NULL) AND (error_code IS NULL) AND (error_message IS NULL) AND (finished_at IS NULL)) OR ((status = 'succeeded'::qp_model_run_status) AND (output_hash IS NOT NULL) AND (output_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (error_code IS NULL) AND (error_message IS NULL) AND (finished_at IS NOT NULL) AND (finished_at >= started_at)) OR ((status = 'failed'::qp_model_run_status) AND (output_hash IS NULL) AND (error_code IS NOT NULL) AND (error_code <> 'cancelled_by_operator'::qp_model_run_error_code) AND (error_message IS NOT NULL) AND (char_length(btrim(error_message)) BETWEEN 1 AND 4096) AND (finished_at IS NOT NULL) AND (finished_at >= started_at)) OR ((status = 'cancelled'::qp_model_run_status) AND (output_hash IS NULL) AND (error_code = 'cancelled_by_operator'::qp_model_run_error_code) AND (error_message IS NOT NULL) AND (char_length(btrim(error_message)) BETWEEN 1 AND 4096) AND (finished_at IS NOT NULL) AND (finished_at >= started_at)))))",
+    },
+    ConstraintSpec {
         name: "quant_model_spec_check",
         table: "quant_model_spec",
         kind: ConstraintKind::Check,
@@ -152,16 +515,22 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "CHECK (((quality_gate_report IS NULL) OR ((jsonb_typeof(quality_gate_report) = 'object'::text) AND (((quality_gate_report ->> 'format_version'::text))::integer = 1) AND ((quality_gate_report -> 'subject'::text) ->> 'kind'::text) = 'model_version'::text AND ((((quality_gate_report -> 'subject'::text) ->> 'id'::text))::uuid = model_version_id) AND (jsonb_typeof((quality_gate_report -> 'gates'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'hard_failures'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'soft_warnings'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'passed'::text)) = 'boolean'::text) AND ((quality_gate_report ->> 'report_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text))))",
     },
     ConstraintSpec {
+        name: "ck_quant_model_version_serving_contract",
+        table: "quant_model_version",
+        kind: ConstraintKind::Check,
+        definition: "CHECK (((jsonb_typeof(serving_contract) = 'object'::text) AND (serving_contract ?& ARRAY['contract_version'::text, 'contract_hash'::text, 'bindings'::text]) AND ((serving_contract - ARRAY['contract_version'::text, 'contract_hash'::text, 'bindings'::text]) = '{}'::jsonb) AND (jsonb_typeof((serving_contract -> 'contract_version'::text)) = 'number'::text) AND (((serving_contract ->> 'contract_version'::text))::numeric = 2::numeric) AND (jsonb_typeof((serving_contract -> 'contract_hash'::text)) = 'string'::text) AND (jsonb_typeof((serving_contract -> 'bindings'::text)) = 'object'::text) AND (octet_length(serving_contract_hash) = 32) AND ((serving_contract ->> 'contract_hash'::text) = ('blake3:'::text || encode(serving_contract_hash, 'hex'::text)))))",
+    },
+    ConstraintSpec {
         name: "ck_quant_model_version_training_objective",
         table: "quant_model_version",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((jsonb_typeof(training_objective) = 'object'::text) AND (((training_objective ->> 'format_version'::text))::integer = 1) AND (jsonb_typeof((training_objective -> 'definition'::text)) = 'object'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = ANY (ARRAY['learning_to_rank'::text, 'classical_pointwise'::text, 'hand_authored'::text]))))",
+        definition: MODEL_TRAINING_OBJECTIVE_CHECK,
     },
     ConstraintSpec {
         name: "ck_quant_model_version_metrics",
         table: "quant_model_version",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((jsonb_typeof(metrics) = 'object'::text) AND ((metrics ->> 'format_version'::text) = '1'::text) AND (jsonb_typeof((metrics -> 'definition'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text AND ((training_objective -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'in_sample'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'validation'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = ANY (ARRAY['factor_native'::text, 'fitted_feature_matrix'::text]))) OR (((metrics -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text AND ((training_objective -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'in_sample'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'validation'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'feature_importances'::text)) = 'array'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = 'fitted_feature_matrix'::text)) OR (((metrics -> 'definition'::text) ->> 'kind'::text) = 'not_measured'::text AND ((training_objective -> 'definition'::text) ->> 'kind'::text) = 'hand_authored'::text AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'rationale'::text)) = 'string'::text) AND (char_length(btrim(((metrics -> 'definition'::text) ->> 'rationale'::text))) BETWEEN 1 AND 2048)))))",
+        definition: MODEL_VERSION_METRICS_CHECK,
     },
     ConstraintSpec {
         name: "ck_quant_model_version_derivation",
@@ -635,7 +1004,7 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "ck_quant_source_slice_manifest",
         table: "quant_source_slice",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'profile_ref'::text, 'evaluation_track'::text, 'research_program_hash'::text, 'window_start'::text, 'window_end'::text, 'pit_cutoff'::text, 'reader_contract_version'::text, 'schema_contract_version'::text, 'decision_policy_snapshot_id'::text, 'runtime_config_hash'::text, 'dataset_format_version'::text, 'capability_registry_hashes'::text, 'objects'::text]) AND (((manifest ->> 'format_version'::text))::integer = 3) AND ((manifest -> 'profile_ref'::text) = profile_ref) AND ((manifest ->> 'evaluation_track'::text) = (evaluation_track)::text) AND ((manifest ->> 'research_program_hash'::text) = research_program_hash) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND (((manifest ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND ((manifest ->> 'reader_contract_version'::text) = (reader_contract_version)::text) AND ((manifest ->> 'schema_contract_version'::text) = (schema_contract_version)::text) AND (((manifest ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND ((manifest ->> 'runtime_config_hash'::text) = runtime_config_hash) AND (((manifest ->> 'dataset_format_version'::text))::integer = 2) AND (jsonb_typeof((manifest -> 'capability_registry_hashes'::text)) = 'array'::text) AND (jsonb_typeof((manifest -> 'objects'::text)) = 'array'::text) AND (jsonb_array_length((manifest -> 'objects'::text)) > 0))))",
+        definition: "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'profile_ref'::text, 'evaluation_track'::text, 'research_program_hash'::text, 'window_start'::text, 'window_end'::text, 'pit_cutoff'::text, 'reader_contract_version'::text, 'schema_contract_version'::text, 'decision_policy_snapshot_id'::text, 'runtime_config_hash'::text, 'dataset_format_version'::text, 'capability_registry_hashes'::text, 'objects'::text]) AND (((manifest ->> 'format_version'::text))::integer = 3) AND ((manifest -> 'profile_ref'::text) = profile_ref) AND ((manifest ->> 'evaluation_track'::text) = (evaluation_track)::text) AND ((manifest ->> 'research_program_hash'::text) = research_program_hash) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND (((manifest ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND ((manifest ->> 'reader_contract_version'::text) = (reader_contract_version)::text) AND ((manifest ->> 'schema_contract_version'::text) = (schema_contract_version)::text) AND (((manifest ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND ((manifest ->> 'runtime_config_hash'::text) = runtime_config_hash) AND (((manifest ->> 'dataset_format_version'::text))::integer = 3) AND (jsonb_typeof((manifest -> 'capability_registry_hashes'::text)) = 'array'::text) AND (jsonb_typeof((manifest -> 'objects'::text)) = 'array'::text) AND (jsonb_array_length((manifest -> 'objects'::text)) > 0))))",
     },
     ConstraintSpec {
         name: "ck_quant_execution_account_identity",
@@ -839,13 +1208,19 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "quant_training_dataset_check",
         table: "quant_training_dataset",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((((status = ANY (ARRAY['planned'::qp_training_dataset_status, 'building'::qp_training_dataset_status])) AND (feature_schema_hash IS NULL) AND (factor_schema_hash IS NULL) AND (label_schema_hash IS NULL) AND (dataset_hash IS NULL) AND (manifest_hash IS NULL) AND (manifest IS NULL) AND (artifact_bytes_hash IS NULL) AND (parquet_uri IS NULL) AND (sample_count IS NULL) AND (coverage IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = ANY (ARRAY['ready'::qp_training_dataset_status, 'expired'::qp_training_dataset_status])) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'insufficient_labels'::qp_training_dataset_status) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL) AND (failure_detail IS NOT NULL) AND (char_length(btrim(failure_detail)) BETWEEN 1 AND 4096) AND (completed_at IS NOT NULL)) OR ((status = 'failed'::qp_training_dataset_status) AND (failure_detail IS NOT NULL) AND (char_length(btrim(failure_detail)) BETWEEN 1 AND 4096) AND (completed_at IS NOT NULL) AND (((feature_schema_hash IS NULL) AND (factor_schema_hash IS NULL) AND (label_schema_hash IS NULL) AND (dataset_hash IS NULL) AND (manifest_hash IS NULL) AND (manifest IS NULL) AND (artifact_bytes_hash IS NULL) AND (parquet_uri IS NULL) AND (sample_count IS NULL) AND (coverage IS NULL)) OR ((feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL))))))",
+        definition: "CHECK ((((status = ANY (ARRAY['planned'::qp_training_dataset_status, 'building'::qp_training_dataset_status])) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NULL) AND (dataset_hash IS NULL) AND (manifest_hash IS NULL) AND (manifest IS NULL) AND (artifact_bytes_hash IS NULL) AND (parquet_uri IS NULL) AND (sample_count IS NULL) AND (coverage IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = ANY (ARRAY['ready'::qp_training_dataset_status, 'expired'::qp_training_dataset_status])) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'insufficient_labels'::qp_training_dataset_status) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL) AND (failure_detail IS NOT NULL) AND (char_length(btrim(failure_detail)) BETWEEN 1 AND 4096) AND (completed_at IS NOT NULL)) OR ((status = 'failed'::qp_training_dataset_status) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (failure_detail IS NOT NULL) AND (char_length(btrim(failure_detail)) BETWEEN 1 AND 4096) AND (completed_at IS NOT NULL) AND (((label_schema_hash IS NULL) AND (dataset_hash IS NULL) AND (manifest_hash IS NULL) AND (manifest IS NULL) AND (artifact_bytes_hash IS NULL) AND (parquet_uri IS NULL) AND (sample_count IS NULL) AND (coverage IS NULL)) OR ((label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL))))))",
     },
     ConstraintSpec {
         name: "ck_quant_training_dataset_lineage",
         table: "quant_training_dataset",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND (knowledge_lag_secs >= 0) AND ((sample_interval_secs > 0) OR ((sample_interval_secs = 0) AND (cohort_manifest IS NOT NULL))) AND (jsonb_typeof(horizons_secs) = 'array'::text) AND (jsonb_array_length(horizons_secs) > 0) AND (jsonb_typeof(source_lineage) = 'object'::text) AND (source_lineage ?& ARRAY['format_version'::text, 'source_slice_id'::text, 'research_profile_artifact_id'::text, 'source_window_start'::text, 'source_window_end'::text, 'pit_cutoff'::text, 'decision_policy_snapshot_id'::text, 'capability_registry_hashes'::text]) AND (((source_lineage ->> 'format_version'::text))::integer = 1) AND (((source_lineage ->> 'source_slice_id'::text))::uuid = source_slice_id) AND ((source_lineage ->> 'research_profile_artifact_id'::text) = research_profile_artifact_id) AND (((source_lineage ->> 'source_window_start'::text))::timestamp with time zone <= window_start) AND (((source_lineage ->> 'source_window_end'::text))::timestamp with time zone >= window_end) AND (((source_lineage ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND (((source_lineage ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND (jsonb_typeof((source_lineage -> 'capability_registry_hashes'::text)) = 'array'::text)))",
+        definition: "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND (knowledge_lag_secs >= 0) AND (feature_schema_version >= 1) AND ((sample_interval_secs > 0) OR ((sample_interval_secs = 0) AND (cohort_manifest IS NOT NULL))) AND (jsonb_typeof(horizons_secs) = 'array'::text) AND (jsonb_array_length(horizons_secs) > 0) AND (jsonb_typeof(source_lineage) = 'object'::text) AND (source_lineage ?& ARRAY['format_version'::text, 'source_slice_id'::text, 'research_profile_artifact_id'::text, 'source_window_start'::text, 'source_window_end'::text, 'pit_cutoff'::text, 'decision_policy_snapshot_id'::text, 'capability_registry_hashes'::text]) AND (((source_lineage ->> 'format_version'::text))::integer = 1) AND (((source_lineage ->> 'source_slice_id'::text))::uuid = source_slice_id) AND ((source_lineage ->> 'research_profile_artifact_id'::text) = research_profile_artifact_id) AND (((source_lineage ->> 'source_window_start'::text))::timestamp with time zone <= window_start) AND (((source_lineage ->> 'source_window_end'::text))::timestamp with time zone >= window_end) AND (((source_lineage ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND (((source_lineage ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND (jsonb_typeof((source_lineage -> 'capability_registry_hashes'::text)) = 'array'::text)))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_training_dataset_factor_plane",
+        table: "quant_training_dataset",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((public.validate_factor_serving_plane(factor_serving_plane, feature_schema_hash, feature_schema_version, (model_family)::text) AND ((factor_serving_plane ->> 'factor_schema_hash'::text) = factor_schema_hash)))",
     },
     ConstraintSpec {
         name: "ck_quant_training_dataset_cohort",
@@ -857,7 +1232,7 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "ck_quant_training_dataset_manifest",
         table: "quant_training_dataset",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'training_dataset_id'::text, 'source_lineage'::text, 'cohort_manifest'::text, 'model_spec_id'::text, 'model_spec_definition_hash'::text, 'window_start'::text, 'window_end'::text, 'purpose'::text, 'knowledge_lag_secs'::text, 'sample_interval_secs'::text, 'horizons_secs'::text, 'feature_schema_hash'::text, 'factor_schema_hash'::text, 'label_schema_hash'::text, 'semantic_dataset_hash'::text, 'sample_count'::text]) AND (((manifest ->> 'format_version'::text))::integer = 2) AND (((manifest ->> 'training_dataset_id'::text))::uuid = training_dataset_id) AND ((manifest -> 'source_lineage'::text) = source_lineage) AND (((cohort_manifest IS NULL) AND ((manifest -> 'cohort_manifest'::text) = 'null'::jsonb)) OR ((cohort_manifest IS NOT NULL) AND ((manifest -> 'cohort_manifest'::text) = cohort_manifest))) AND (((manifest ->> 'model_spec_id'::text))::uuid = model_spec_id) AND ((manifest ->> 'model_spec_definition_hash'::text) = model_spec_definition_hash) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND ((manifest ->> 'purpose'::text) = (purpose)::text) AND (((manifest ->> 'knowledge_lag_secs'::text))::bigint = knowledge_lag_secs) AND (((manifest ->> 'sample_interval_secs'::text))::bigint = sample_interval_secs) AND ((manifest -> 'horizons_secs'::text) = horizons_secs) AND ((manifest ->> 'feature_schema_hash'::text) = feature_schema_hash) AND ((manifest ->> 'factor_schema_hash'::text) = factor_schema_hash) AND ((manifest ->> 'label_schema_hash'::text) = label_schema_hash) AND ((manifest ->> 'semantic_dataset_hash'::text) = dataset_hash) AND (((manifest ->> 'sample_count'::text))::bigint = sample_count))))",
+        definition: "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'training_dataset_id'::text, 'source_lineage'::text, 'cohort_manifest'::text, 'model_spec_id'::text, 'model_family'::text, 'model_spec_definition_hash'::text, 'trade_policy_artifact_id'::text, 'trade_policy_hash'::text, 'window_start'::text, 'window_end'::text, 'purpose'::text, 'knowledge_lag_secs'::text, 'sample_interval_secs'::text, 'horizons_secs'::text, 'feature_schema_version'::text, 'feature_schema_hash'::text, 'factor_serving_plane'::text, 'label_schema_hash'::text, 'semantic_dataset_hash'::text, 'source_fingerprint'::text, 'sample_count'::text]) AND ((manifest - ARRAY['format_version'::text, 'training_dataset_id'::text, 'source_lineage'::text, 'cohort_manifest'::text, 'model_spec_id'::text, 'model_family'::text, 'model_spec_definition_hash'::text, 'trade_policy_artifact_id'::text, 'trade_policy_hash'::text, 'window_start'::text, 'window_end'::text, 'purpose'::text, 'knowledge_lag_secs'::text, 'sample_interval_secs'::text, 'horizons_secs'::text, 'feature_schema_version'::text, 'feature_schema_hash'::text, 'factor_serving_plane'::text, 'label_schema_hash'::text, 'semantic_dataset_hash'::text, 'source_fingerprint'::text, 'sample_count'::text]) = '{}'::jsonb) AND (((manifest ->> 'format_version'::text))::integer = 3) AND (((manifest ->> 'training_dataset_id'::text))::uuid = training_dataset_id) AND ((manifest -> 'source_lineage'::text) = source_lineage) AND (((cohort_manifest IS NULL) AND ((manifest -> 'cohort_manifest'::text) = 'null'::jsonb)) OR ((cohort_manifest IS NOT NULL) AND ((manifest -> 'cohort_manifest'::text) = cohort_manifest))) AND (((manifest ->> 'model_spec_id'::text))::uuid = model_spec_id) AND ((manifest ->> 'model_family'::text) = (model_family)::text) AND ((manifest ->> 'model_spec_definition_hash'::text) = model_spec_definition_hash) AND ((((manifest -> 'trade_policy_artifact_id'::text) = 'null'::jsonb) AND ((manifest -> 'trade_policy_hash'::text) = 'null'::jsonb)) OR ((jsonb_typeof((manifest -> 'trade_policy_artifact_id'::text)) = 'string'::text) AND (((manifest ->> 'trade_policy_artifact_id'::text))::uuid IS NOT NULL) AND (jsonb_typeof((manifest -> 'trade_policy_hash'::text)) = 'string'::text) AND ((manifest ->> 'trade_policy_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text))) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND ((manifest ->> 'purpose'::text) = (purpose)::text) AND (((manifest ->> 'knowledge_lag_secs'::text))::bigint = knowledge_lag_secs) AND (((manifest ->> 'sample_interval_secs'::text))::bigint = sample_interval_secs) AND ((manifest -> 'horizons_secs'::text) = horizons_secs) AND (((manifest ->> 'feature_schema_version'::text))::integer = feature_schema_version) AND ((manifest ->> 'feature_schema_hash'::text) = feature_schema_hash) AND ((manifest -> 'factor_serving_plane'::text) = factor_serving_plane) AND ((factor_serving_plane ->> 'factor_schema_hash'::text) = factor_schema_hash) AND ((manifest ->> 'label_schema_hash'::text) = label_schema_hash) AND ((manifest ->> 'semantic_dataset_hash'::text) = dataset_hash) AND ((manifest ->> 'source_fingerprint'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (((manifest ->> 'sample_count'::text))::bigint = sample_count))))",
     },
     ConstraintSpec {
         name: "ck_quant_training_dataset_coverage",
@@ -869,7 +1244,7 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "ck_quant_training_dataset_hashes",
         table: "quant_training_dataset",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((model_spec_definition_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((feature_schema_hash IS NULL) OR (feature_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((factor_schema_hash IS NULL) OR (factor_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((label_schema_hash IS NULL) OR (label_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((dataset_hash IS NULL) OR (dataset_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((manifest_hash IS NULL) OR (manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((artifact_bytes_hash IS NULL) OR (artifact_bytes_hash ~ '^blake3:[0-9a-f]{64}$'::text))))",
+        definition: "CHECK (((model_spec_definition_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (feature_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (factor_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((label_schema_hash IS NULL) OR (label_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((dataset_hash IS NULL) OR (dataset_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((manifest_hash IS NULL) OR (manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((artifact_bytes_hash IS NULL) OR (artifact_bytes_hash ~ '^blake3:[0-9a-f]{64}$'::text))))",
     },
     ConstraintSpec {
         name: "ck_quant_backtest_report_evaluation",
@@ -964,6 +1339,7 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
 ];
 
 pub async fn apply(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    v1::create_validation_programs(manager).await?;
     for spec in CONSTRAINTS {
         v1::create_constraint(manager, *spec)
             .await
@@ -975,4 +1351,287 @@ pub async fn apply(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
             })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CONSTRAINTS, ConstraintKind, ConstraintSpec};
+
+    fn constraint(name: &str) -> &'static ConstraintSpec {
+        let Some(spec) = CONSTRAINTS.iter().find(|spec| spec.name == name) else {
+            panic!("missing relational constraint {name}");
+        };
+        spec
+    }
+
+    #[test]
+    fn check_sql_balances() {
+        for spec in CONSTRAINTS
+            .iter()
+            .filter(|spec| spec.kind == ConstraintKind::Check)
+        {
+            let bytes = spec.definition.as_bytes();
+            let mut index = 0;
+            let mut in_quote = false;
+            let mut depth = 0_i32;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                if byte == b'\'' {
+                    if in_quote && bytes.get(index + 1) == Some(&b'\'') {
+                        index += 2;
+                        continue;
+                    }
+                    in_quote = !in_quote;
+                    index += 1;
+                    continue;
+                }
+                if !in_quote {
+                    match byte {
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth -= 1;
+                            assert!(
+                                depth >= 0,
+                                "constraint {} closes an unopened parenthesis",
+                                spec.name
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                index += 1;
+            }
+            assert!(!in_quote, "constraint {} has an open SQL quote", spec.name);
+            assert_eq!(
+                depth, 0,
+                "constraint {} has unbalanced parentheses",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn dataset_v3_is_relational() {
+        let source = constraint("ck_quant_source_slice_manifest").definition;
+        assert!(source.contains("dataset_format_version'::text))::integer = 3"));
+        assert!(!source.contains("dataset_format_version'::text))::integer = 2"));
+
+        let dataset = constraint("ck_quant_training_dataset_manifest").definition;
+        for binding in [
+            "format_version'::text))::integer = 3",
+            "model_family",
+            "feature_schema_version",
+            "factor_serving_plane",
+            "manifest - ARRAY['format_version'",
+            "source_fingerprint",
+            "trade_policy_artifact_id",
+        ] {
+            assert!(
+                dataset.contains(binding),
+                "missing Dataset v3 binding {binding}"
+            );
+        }
+
+        let plane = constraint("ck_quant_training_dataset_factor_plane").definition;
+        assert!(plane.contains("validate_factor_serving_plane"));
+        assert!(plane.contains("factor_schema_hash'::text) = factor_schema_hash"));
+    }
+
+    #[test]
+    fn factor_revision_is_relational() {
+        let definition = constraint("ck_quant_factor_definition_document").definition;
+        for binding in [
+            "validate_factor_definition_document",
+            "definition ->> 'name'",
+            "definition ->> 'family'",
+            "scope = CASE",
+            "input_schema_version >= 1",
+            "output_schema_version >= 1",
+        ] {
+            assert!(
+                definition.contains(binding),
+                "missing factor-revision JSONB binding {binding}"
+            );
+        }
+    }
+
+    #[test]
+    fn factor_values_are_relational() {
+        assert_eq!(
+            constraint("ck_quant_factor_value_explanation").definition,
+            "CHECK (public.validate_factor_explanation(explanation))"
+        );
+        assert_eq!(
+            constraint("uq_quant_factor_value_run_vector_definition").definition,
+            "UNIQUE (model_run_id, feature_vector_id, factor_definition_id)"
+        );
+        let definition = constraint("ck_quant_factor_value_state_tuple").definition;
+        assert!(
+            !definition.contains("status = 'scored'"),
+            "factor-value tuple must bind the authoritative value_state column"
+        );
+        for binding in [
+            "value_state = 'scored'",
+            "value_state = ANY",
+            "'missing_input'",
+            "'not_applicable'",
+            "value_state = 'indeterminate'",
+            "normalized_score BETWEEN 0 AND 1",
+            "confidence BETWEEN 0 AND 1",
+            "confidence = 0",
+        ] {
+            assert!(
+                definition.contains(binding),
+                "missing factor-value tuple binding {binding}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_run_terminals_relational() {
+        let definition = constraint("ck_quant_model_run_terminal").definition;
+        for binding in [
+            "status = 'running'",
+            "status = 'succeeded'",
+            "status = 'failed'",
+            "status = 'cancelled'",
+            "error_code = 'cancelled_by_operator'",
+            "error_code <> 'cancelled_by_operator'",
+            "window_end <= (started_at + '00:00:02'::interval)",
+            "finished_at >= started_at",
+        ] {
+            assert!(
+                definition.contains(binding),
+                "missing model-run terminal binding {binding}"
+            );
+        }
+    }
+
+    #[test]
+    fn serving_hash_is_normalized() {
+        let definition = constraint("ck_quant_model_version_serving_contract").definition;
+        for binding in [
+            "jsonb_typeof(serving_contract) = 'object'",
+            "contract_version",
+            "contract_hash",
+            "bindings",
+            "octet_length(serving_contract_hash) = 32",
+            "encode(serving_contract_hash, 'hex'",
+            "serving_contract - ARRAY",
+        ] {
+            assert!(
+                definition.contains(binding),
+                "missing model-serving persistence binding {binding}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_documents_are_closed() {
+        let objective = constraint("ck_quant_model_version_training_objective").definition;
+        for binding in [
+            "format_version')::integer = 2",
+            "learning_to_rank",
+            "classical_pointwise",
+            "governed_sell_estimator",
+            "oof_predictions_required",
+            "hand_authored",
+            "training_objective - ARRAY",
+        ] {
+            assert!(
+                objective.contains(binding),
+                "missing training-objective persistence binding {binding}"
+            );
+        }
+
+        let metrics = constraint("ck_quant_model_version_metrics").definition;
+        for binding in [
+            "format_version')::integer = 2",
+            "governed_sell_estimator",
+            "resolved_label_rows",
+            "position_state_rows",
+            "oof_predictions_required",
+            "fitted_feature_matrix",
+            "metrics - ARRAY",
+        ] {
+            assert!(
+                metrics.contains(binding),
+                "missing model-metrics persistence binding {binding}"
+            );
+        }
+    }
+
+    #[test]
+    fn feedback_schema_is_relational() {
+        let cycle = constraint("ck_quant_feedback_cycle_identity").definition;
+        for binding in [
+            "public.validate_content_hash_array(capability_registry_hashes)",
+            "champion_serving_contract_hash",
+            "candidate_family_hash",
+            "idempotency_hash",
+            "research_profile_artifact_id",
+        ] {
+            assert!(cycle.contains(binding), "missing cycle binding {binding}");
+        }
+        let state = constraint("ck_quant_feedback_cycle_state").definition;
+        for binding in [
+            "status = 'queued'",
+            "status = 'running'",
+            "status = 'succeeded'",
+            "status = 'failed'",
+            "status = 'cancelled'",
+            "decision IS NOT NULL",
+            "lease_owner IS NOT NULL",
+        ] {
+            assert!(state.contains(binding), "missing cycle state {binding}");
+        }
+
+        let drift = constraint("ck_quant_drift_report").definition;
+        for binding in [
+            "kind = 'data'",
+            "kind = 'concept'",
+            "kind = 'label'",
+            "baseline_window_end <= evaluation_window_start",
+            "threshold NOT IN",
+            "observed_value NOT IN",
+            "kolmogorov_smirnov_p_value",
+            "insufficient_evidence",
+            "sample_count > 0",
+        ] {
+            assert!(drift.contains(binding), "missing drift binding {binding}");
+        }
+
+        let evaluation = constraint("ck_quant_feedback_evaluation_use").definition;
+        for binding in [
+            "purpose = 'promotion_comparison'",
+            "dataset_purpose = 'evaluation'",
+            "cohort_manifest_hash",
+            "comparison_contract_hash",
+            "semantic_use_hash",
+            "evaluation_use_hash",
+        ] {
+            assert!(
+                evaluation.contains(binding),
+                "missing evaluation-use binding {binding}"
+            );
+        }
+        let dataset_fk = constraint("fk_quant_feedback_evaluation_dataset").definition;
+        assert!(dataset_fk.contains("evaluation_dataset_hash"));
+        assert!(dataset_fk.contains("evaluation_artifact_bytes_hash"));
+
+        for name in [
+            "fk_quant_feedback_stage_cycle",
+            "fk_quant_feedback_stage_job",
+            "fk_quant_drift_report_cycle",
+            "fk_quant_feedback_evaluation_cycle",
+            "fk_quant_feedback_evaluation_profile",
+            "fk_quant_feedback_evaluation_dataset",
+            "fk_quant_feedback_evaluation_champion",
+        ] {
+            let definition = constraint(name).definition;
+            assert!(definition.contains("ON UPDATE NO ACTION"));
+            assert!(definition.contains("ON DELETE NO ACTION"));
+            assert!(!definition.contains("CASCADE"));
+        }
+    }
 }

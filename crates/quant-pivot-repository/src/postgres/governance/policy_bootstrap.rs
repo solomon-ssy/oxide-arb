@@ -234,7 +234,6 @@ pub async fn ensure_default_policy_bundle(
         })?;
     let snapshot_id = DecisionPolicySnapshotId::from_content_hash(&candidate_hash);
     let persisted_snapshot = NewDecisionPolicySnapshot {
-        bundle_generation: generation,
         decision_policy_snapshot_id: snapshot_id,
         snapshot_hash: candidate_hash,
         snapshot: snapshot_document,

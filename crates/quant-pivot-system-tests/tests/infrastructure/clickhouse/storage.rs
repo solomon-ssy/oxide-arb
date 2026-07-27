@@ -35,8 +35,12 @@ use quant_pivot_storage::{
 };
 use quant_pivot_system_tests::resources::fresh_clickhouse_config;
 use rust_decimal_macros::dec;
+use tokio::time::{Instant, sleep};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+const QUERY_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
+const QUERY_LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 fn maintenance_config(config: &ClickHouseConfig) -> ClickHouseConfig {
     ClickHouseConfig {
@@ -187,19 +191,21 @@ pub async fn preproduction_rejects_without_dropping() {
             .await
     });
 
-    let mut observed = false;
-    for _ in 0..100 {
-        if active_preproduction_query_count(&config)
+    let observation_deadline = Instant::now() + QUERY_LIFECYCLE_TIMEOUT;
+    loop {
+        let active_queries = active_preproduction_query_count(&config)
             .await
-            .expect("inspect active ClickHouse queries")
-            != 0
-        {
-            observed = true;
+            .expect("inspect active ClickHouse queries");
+        if active_queries != 0 {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            Instant::now() < observation_deadline,
+            "the active target query did not become observable within {} seconds",
+            QUERY_LIFECYCLE_TIMEOUT.as_secs()
+        );
+        sleep(QUERY_LIFECYCLE_POLL_INTERVAL).await;
     }
-    assert!(observed, "the active target query must become observable");
 
     let error = reset_preproduction_database(&config)
         .await
@@ -219,6 +225,23 @@ pub async fn preproduction_rejects_without_dropping() {
         .await
         .expect("join active query")
         .expect("active query completes");
+
+    let quiescence_deadline = Instant::now() + QUERY_LIFECYCLE_TIMEOUT;
+    loop {
+        let active_queries = active_preproduction_query_count(&config)
+            .await
+            .expect("inspect stopped ClickHouse query");
+        if active_queries == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < quiescence_deadline,
+            "{active_queries} ClickHouse queries remained observable {} seconds after the owner \
+             task completed",
+            QUERY_LIFECYCLE_TIMEOUT.as_secs()
+        );
+        sleep(QUERY_LIFECYCLE_POLL_INTERVAL).await;
+    }
 
     reset_preproduction_database(&config)
         .await

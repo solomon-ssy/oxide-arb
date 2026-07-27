@@ -1060,20 +1060,14 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_factor_definition_family_status",
+        name: "idx_quant_factor_definition_family",
         table: "quant_factor_definition",
         method: IndexMethod::BTree,
         unique: false,
-        columns: &[
-            IndexColumnSpec {
-                name: "factor_family",
-                direction: IndexDirection::Asc,
-            },
-            IndexColumnSpec {
-                name: "status",
-                direction: IndexDirection::Asc,
-            },
-        ],
+        columns: &[IndexColumnSpec {
+            name: "factor_family",
+            direction: IndexDirection::Asc,
+        }],
         predicate: None,
     },
     IndexSpec {
@@ -1086,17 +1080,6 @@ const INDEXES: &[IndexSpec] = &[
             direction: IndexDirection::Asc,
         }],
         predicate: None,
-    },
-    IndexSpec {
-        name: "uq_quant_factor_definition_published_name",
-        table: "quant_factor_definition",
-        method: IndexMethod::BTree,
-        unique: true,
-        columns: &[IndexColumnSpec {
-            name: "name",
-            direction: IndexDirection::Asc,
-        }],
-        predicate: Some("(status = 'published'::qp_publication_status)"),
     },
     IndexSpec {
         name: "idx_quant_factor_value_definition_decision_at",
@@ -1144,6 +1127,210 @@ const INDEXES: &[IndexSpec] = &[
             },
             IndexColumnSpec {
                 name: "decision_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_feedback_cycle_idempotency",
+        table: "quant_feedback_cycle",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "idempotency_hash",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_feedback_cycle_profile_status",
+        table: "quant_feedback_cycle",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "research_profile_artifact_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "status",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "label_cutoff",
+                direction: IndexDirection::Desc,
+            },
+            IndexColumnSpec {
+                name: "feedback_cycle_id",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_feedback_cycle_claim",
+        table: "quant_feedback_cycle",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "status",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "lease_expires_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some("(status IN ('queued', 'running'))"),
+    },
+    IndexSpec {
+        name: "uq_quant_feedback_stage_sequence",
+        table: "quant_feedback_stage_event",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "feedback_cycle_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "event_sequence",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_feedback_stage_timeline",
+        table: "quant_feedback_stage_event",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "feedback_cycle_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "occurred_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "feedback_stage_event_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_feedback_stage_job",
+        table: "quant_feedback_stage_event",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[IndexColumnSpec {
+            name: "research_job_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some("(research_job_id IS NOT NULL)"),
+    },
+    IndexSpec {
+        name: "uq_quant_drift_report_cycle_metric",
+        table: "quant_drift_report",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "feedback_cycle_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "metric",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_drift_report_latest",
+        table: "quant_drift_report",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "kind",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "observed_at",
+                direction: IndexDirection::Desc,
+            },
+            IndexColumnSpec {
+                name: "drift_report_id",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_feedback_evaluation_dataset",
+        table: "quant_feedback_evaluation_use",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "evaluation_dataset_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_feedback_evaluation_semantics",
+        table: "quant_feedback_evaluation_use",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "evaluation_dataset_hash",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "evaluation_artifact_bytes_hash",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "cohort_manifest_hash",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_feedback_evaluation_use_hash",
+        table: "quant_feedback_evaluation_use",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "semantic_use_hash",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_feedback_evaluation_cycle",
+        table: "quant_feedback_evaluation_use",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "feedback_cycle_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "used_at",
                 direction: IndexDirection::Desc,
             },
         ],
@@ -2997,4 +3184,30 @@ pub async fn apply(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
         manager.create_index(statement.clone()).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{INDEXES, IndexSpec};
+
+    fn index(name: &str) -> &'static IndexSpec {
+        let Some(index) = INDEXES.iter().find(|index| index.name == name) else {
+            panic!("missing query index {name}");
+        };
+        index
+    }
+
+    #[test]
+    fn feedback_indexes_are_semantic() {
+        assert!(index("uq_quant_feedback_cycle_idempotency").unique);
+        assert!(index("uq_quant_feedback_stage_sequence").unique);
+        assert!(index("uq_quant_feedback_evaluation_dataset").unique);
+        let semantics = index("uq_quant_feedback_evaluation_semantics");
+        assert!(semantics.unique);
+        assert_eq!(semantics.columns.len(), 3);
+        assert_eq!(semantics.columns[0].name, "evaluation_dataset_hash");
+        assert_eq!(semantics.columns[1].name, "evaluation_artifact_bytes_hash");
+        assert_eq!(semantics.columns[2].name, "cohort_manifest_hash");
+        assert!(index("uq_quant_feedback_evaluation_use_hash").unique);
+    }
 }

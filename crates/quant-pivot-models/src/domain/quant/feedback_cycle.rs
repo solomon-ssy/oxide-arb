@@ -1,0 +1,1445 @@
+//! Durable feedback-cycle and immutable evidence persistence contracts.
+
+use chrono::{DateTime, Utc};
+use quant_pivot_error::feedback::FeedbackError;
+use rust_decimal::Decimal;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    entities::{
+        quant_drift_report, quant_feedback_cycle, quant_feedback_evaluation_use,
+        quant_feedback_stage_event,
+    },
+    enums::quant::{
+        DatasetPurpose, FeedbackCycleStatus, FeedbackDecision, FeedbackDriftAssessment,
+        FeedbackDriftKind, FeedbackDriftMetric, FeedbackEvaluationPurpose, FeedbackStage,
+        FeedbackStageEventKind, FeedbackTriggerFamily,
+    },
+    hashing::CanonicalDigest,
+    types::{
+        ArtifactUri, CapabilityRegistryHashes, ContentHash, DriftReportId, FeedbackCycleId,
+        FeedbackEvaluationUseId, FeedbackStageEventId, ModelVersionId, ResearchJobId,
+        ResearchProfileArtifactId, ResearchProfileRef, TrainingDatasetId, WorkerId,
+    },
+};
+
+const FEEDBACK_CYCLE_KEY_VERSION: u32 = 1;
+const FEEDBACK_CYCLE_KEY_DOMAIN: &str = "quant-pivot/feedback-cycle-idempotency";
+const FEEDBACK_STAGE_EVENT_VERSION: u32 = 1;
+const FEEDBACK_STAGE_EVENT_DOMAIN: &str = "quant-pivot/feedback-stage-event";
+const DRIFT_REPORT_VERSION: u32 = 1;
+const DRIFT_REPORT_DOMAIN: &str = "quant-pivot/drift-report";
+const EVALUATION_USE_VERSION: u32 = 1;
+const EVALUATION_SEMANTIC_DOMAIN: &str = "quant-pivot/feedback-evaluation-semantic-use";
+const EVALUATION_USE_DOMAIN: &str = "quant-pivot/feedback-evaluation-use";
+const MAX_ARTIFACT_URI_BYTES: usize = 4_096;
+const MAX_ACTOR_BYTES: usize = 256;
+const MAX_REASON_BYTES: usize = 128;
+
+/// Complete immutable preimage of one cycle's typed idempotency hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields, try_from = "FeedbackCycleKeyDocument")]
+pub struct FeedbackCycleKey {
+    format_version: u32,
+    trigger_family: FeedbackTriggerFamily,
+    profile_ref: ResearchProfileRef,
+    feedback_policy_hash: ContentHash,
+    label_cutoff: DateTime<Utc>,
+    capability_registry_hashes: CapabilityRegistryHashes,
+    champion_model_version_id: ModelVersionId,
+    champion_serving_contract_hash: ContentHash,
+    candidate_family_hash: ContentHash,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FeedbackCycleKeyDocument {
+    format_version: u32,
+    trigger_family: FeedbackTriggerFamily,
+    profile_ref: ResearchProfileRef,
+    feedback_policy_hash: ContentHash,
+    label_cutoff: DateTime<Utc>,
+    capability_registry_hashes: CapabilityRegistryHashes,
+    champion_model_version_id: ModelVersionId,
+    champion_serving_contract_hash: ContentHash,
+    candidate_family_hash: ContentHash,
+}
+
+/// Inputs frozen by the server before a cycle row is claimed.
+#[derive(Debug, Clone)]
+pub struct FeedbackCycleKeyInput {
+    pub trigger_family: FeedbackTriggerFamily,
+    pub profile_ref: ResearchProfileRef,
+    pub feedback_policy_hash: ContentHash,
+    pub label_cutoff: DateTime<Utc>,
+    pub capability_registry_hashes: CapabilityRegistryHashes,
+    pub champion_model_version_id: ModelVersionId,
+    pub champion_serving_contract_hash: ContentHash,
+    pub candidate_family_hash: ContentHash,
+}
+
+impl FeedbackCycleKey {
+    /// Validate and freeze every semantic input used for cycle deduplication.
+    pub fn try_new(input: FeedbackCycleKeyInput) -> Result<Self, FeedbackError> {
+        let key = Self {
+            format_version: FEEDBACK_CYCLE_KEY_VERSION,
+            trigger_family: input.trigger_family,
+            profile_ref: input.profile_ref,
+            feedback_policy_hash: input.feedback_policy_hash,
+            label_cutoff: input.label_cutoff,
+            capability_registry_hashes: input.capability_registry_hashes,
+            champion_model_version_id: input.champion_model_version_id,
+            champion_serving_contract_hash: input.champion_serving_contract_hash,
+            candidate_family_hash: input.candidate_family_hash,
+        };
+        key.validate()?;
+        Ok(key)
+    }
+
+    pub fn validate(&self) -> Result<(), FeedbackError> {
+        if self.format_version != FEEDBACK_CYCLE_KEY_VERSION {
+            return Err(FeedbackError::InvalidCycleIdentity {
+                detail: format!(
+                    "unsupported idempotency-key version {}; expected {}",
+                    self.format_version, FEEDBACK_CYCLE_KEY_VERSION
+                ),
+            });
+        }
+        self.profile_ref
+            .validate()
+            .map_err(|error| FeedbackError::InvalidCycleIdentity {
+                detail: format!("research profile reference is invalid: {error}"),
+            })?;
+        CapabilityRegistryHashes::try_new(self.capability_registry_hashes.as_slice().to_vec())
+            .map_err(|error| FeedbackError::InvalidCycleIdentity {
+                detail: format!("capability registry hashes are not canonical: {error}"),
+            })?;
+        Ok(())
+    }
+
+    pub fn idempotency_hash(&self) -> Result<ContentHash, FeedbackError> {
+        self.validate()?;
+        CanonicalDigest::content_hash_typed(
+            FEEDBACK_CYCLE_KEY_DOMAIN,
+            FEEDBACK_CYCLE_KEY_VERSION,
+            self,
+        )
+        .map_err(Into::into)
+    }
+
+    #[must_use]
+    pub const fn trigger_family(&self) -> FeedbackTriggerFamily {
+        self.trigger_family
+    }
+
+    #[must_use]
+    pub const fn profile_ref(&self) -> &ResearchProfileRef {
+        &self.profile_ref
+    }
+
+    #[must_use]
+    pub const fn feedback_policy_hash(&self) -> ContentHash {
+        self.feedback_policy_hash
+    }
+
+    #[must_use]
+    pub const fn label_cutoff(&self) -> DateTime<Utc> {
+        self.label_cutoff
+    }
+
+    #[must_use]
+    pub const fn capability_registry_hashes(&self) -> &CapabilityRegistryHashes {
+        &self.capability_registry_hashes
+    }
+
+    #[must_use]
+    pub const fn champion_model_version_id(&self) -> ModelVersionId {
+        self.champion_model_version_id
+    }
+
+    #[must_use]
+    pub const fn champion_serving_contract_hash(&self) -> ContentHash {
+        self.champion_serving_contract_hash
+    }
+
+    #[must_use]
+    pub const fn candidate_family_hash(&self) -> ContentHash {
+        self.candidate_family_hash
+    }
+}
+
+impl TryFrom<FeedbackCycleKeyDocument> for FeedbackCycleKey {
+    type Error = FeedbackError;
+
+    fn try_from(document: FeedbackCycleKeyDocument) -> Result<Self, Self::Error> {
+        let key = Self {
+            format_version: document.format_version,
+            trigger_family: document.trigger_family,
+            profile_ref: document.profile_ref,
+            feedback_policy_hash: document.feedback_policy_hash,
+            label_cutoff: document.label_cutoff,
+            capability_registry_hashes: document.capability_registry_hashes,
+            champion_model_version_id: document.champion_model_version_id,
+            champion_serving_contract_hash: document.champion_serving_contract_hash,
+            candidate_family_hash: document.candidate_family_hash,
+        };
+        key.validate()?;
+        Ok(key)
+    }
+}
+
+/// Insert payload for one deduplicated feedback-cycle claim.
+#[derive(Debug, Clone, Serialize, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::quant_feedback_cycle::ActiveModel")]
+pub struct NewFeedbackCycle {
+    feedback_cycle_id: FeedbackCycleId,
+    idempotency_hash: ContentHash,
+    #[sea_orm(column_type = "JsonBinary")]
+    idempotency_key: FeedbackCycleKey,
+    trigger_family: FeedbackTriggerFamily,
+    #[sea_orm(column_type = "JsonBinary")]
+    profile_ref: ResearchProfileRef,
+    research_profile_artifact_id: ResearchProfileArtifactId,
+    profile_hash: ContentHash,
+    feedback_policy_hash: ContentHash,
+    label_cutoff: DateTime<Utc>,
+    #[sea_orm(column_type = "JsonBinary")]
+    capability_registry_hashes: CapabilityRegistryHashes,
+    champion_model_version_id: ModelVersionId,
+    champion_serving_contract_hash: ContentHash,
+    candidate_family_hash: ContentHash,
+}
+
+impl NewFeedbackCycle {
+    pub fn try_seal(idempotency_key: FeedbackCycleKey) -> Result<Self, FeedbackError> {
+        let idempotency_hash = idempotency_key.idempotency_hash()?;
+        let profile_ref = idempotency_key.profile_ref().clone();
+        let trigger_family = idempotency_key.trigger_family();
+        let feedback_policy_hash = idempotency_key.feedback_policy_hash();
+        let label_cutoff = idempotency_key.label_cutoff();
+        let capability_registry_hashes = idempotency_key.capability_registry_hashes().clone();
+        let champion_model_version_id = idempotency_key.champion_model_version_id();
+        let champion_serving_contract_hash = idempotency_key.champion_serving_contract_hash();
+        let candidate_family_hash = idempotency_key.candidate_family_hash();
+        Ok(Self {
+            feedback_cycle_id: FeedbackCycleId::from_idempotency_hash(&idempotency_hash),
+            idempotency_hash,
+            idempotency_key,
+            trigger_family,
+            research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile_ref),
+            profile_hash: profile_ref.content_hash,
+            profile_ref,
+            feedback_policy_hash,
+            label_cutoff,
+            capability_registry_hashes,
+            champion_model_version_id,
+            champion_serving_contract_hash,
+            candidate_family_hash,
+        })
+    }
+
+    #[must_use]
+    pub const fn feedback_cycle_id(&self) -> FeedbackCycleId {
+        self.feedback_cycle_id
+    }
+
+    #[must_use]
+    pub const fn idempotency_hash(&self) -> ContentHash {
+        self.idempotency_hash
+    }
+}
+
+/// Full durable projection of a feedback-cycle FSM row.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::quant_feedback_cycle::Entity")]
+pub struct FeedbackCycleInfo {
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub idempotency_hash: ContentHash,
+    pub idempotency_key: FeedbackCycleKey,
+    pub trigger_family: FeedbackTriggerFamily,
+    pub profile_ref: ResearchProfileRef,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    pub profile_hash: ContentHash,
+    pub feedback_policy_hash: ContentHash,
+    pub label_cutoff: DateTime<Utc>,
+    pub capability_registry_hashes: CapabilityRegistryHashes,
+    pub champion_model_version_id: ModelVersionId,
+    pub champion_serving_contract_hash: ContentHash,
+    pub candidate_family_hash: ContentHash,
+    pub status: FeedbackCycleStatus,
+    pub decision: Option<FeedbackDecision>,
+    pub terminal_reason_code: Option<String>,
+    pub generation: i64,
+    pub lease_owner: Option<WorkerId>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub cancel_requested_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    FeedbackCycleInfo,
+    quant_feedback_cycle::Model,
+    {
+        feedback_cycle_id,
+        idempotency_hash,
+        idempotency_key,
+        trigger_family,
+        profile_ref,
+        research_profile_artifact_id,
+        profile_hash,
+        feedback_policy_hash,
+        label_cutoff,
+        capability_registry_hashes,
+        champion_model_version_id,
+        champion_serving_contract_hash,
+        candidate_family_hash,
+        status,
+        decision,
+        terminal_reason_code,
+        generation,
+        lease_owner,
+        lease_expires_at,
+        cancel_requested_at,
+        started_at,
+        completed_at,
+        created_at,
+        updated_at,
+    }
+);
+
+impl FeedbackCycleInfo {
+    /// Revalidate every immutable projection plus the lifecycle/decision shape.
+    pub fn validate(&self) -> Result<(), FeedbackError> {
+        self.idempotency_key.validate()?;
+        let expected_hash = self.idempotency_key.idempotency_hash()?;
+        let expected_profile_id =
+            ResearchProfileArtifactId::from_profile_ref(self.idempotency_key.profile_ref());
+        if self.idempotency_hash != expected_hash
+            || self.feedback_cycle_id != FeedbackCycleId::from_idempotency_hash(&expected_hash)
+            || self.trigger_family != self.idempotency_key.trigger_family()
+            || self.profile_ref != *self.idempotency_key.profile_ref()
+            || self.research_profile_artifact_id != expected_profile_id
+            || self.profile_hash != self.profile_ref.content_hash
+            || self.feedback_policy_hash != self.idempotency_key.feedback_policy_hash()
+            || self.label_cutoff != self.idempotency_key.label_cutoff()
+            || self.capability_registry_hashes != *self.idempotency_key.capability_registry_hashes()
+            || self.champion_model_version_id != self.idempotency_key.champion_model_version_id()
+            || self.champion_serving_contract_hash
+                != self.idempotency_key.champion_serving_contract_hash()
+            || self.candidate_family_hash != self.idempotency_key.candidate_family_hash()
+        {
+            return Err(FeedbackError::InvalidCycleIdentity {
+                detail: "persisted frozen projections do not match the typed key".to_owned(),
+            });
+        }
+        self.validate_state()
+    }
+
+    fn validate_state(&self) -> Result<(), FeedbackError> {
+        if self.generation < 0
+            || self.label_cutoff > self.created_at
+            || self.updated_at < self.created_at
+            || self
+                .cancel_requested_at
+                .is_some_and(|requested_at| requested_at < self.created_at)
+            || self
+                .completed_at
+                .is_some_and(|completed_at| completed_at < self.created_at)
+            || self
+                .started_at
+                .zip(self.completed_at)
+                .is_some_and(|(started_at, completed_at)| completed_at < started_at)
+            || self
+                .lease_owner
+                .is_some()
+                .ne(&self.lease_expires_at.is_some())
+            || self
+                .terminal_reason_code
+                .as_deref()
+                .is_some_and(|reason| !valid_reason(reason))
+        {
+            return Err(FeedbackError::InvalidCycleState {
+                detail: "invalid generation, timestamp, lease, or reason projection".to_owned(),
+            });
+        }
+        let valid = match self.status {
+            FeedbackCycleStatus::Queued => {
+                self.decision.is_none()
+                    && self.terminal_reason_code.is_none()
+                    && self.started_at.is_none()
+                    && self.completed_at.is_none()
+                    && self.lease_owner.is_none()
+            }
+            FeedbackCycleStatus::Running => {
+                self.decision.is_none()
+                    && self.terminal_reason_code.is_none()
+                    && self.started_at.is_some()
+                    && self.completed_at.is_none()
+                    && self.lease_owner.is_some()
+            }
+            FeedbackCycleStatus::Succeeded => {
+                self.decision.is_some()
+                    && self.terminal_reason_code.is_some()
+                    && self.started_at.is_some()
+                    && self.completed_at.is_some()
+                    && self.lease_owner.is_none()
+            }
+            FeedbackCycleStatus::Failed => {
+                self.decision.is_none()
+                    && self.terminal_reason_code.is_some()
+                    && self.started_at.is_some()
+                    && self.completed_at.is_some()
+                    && self.lease_owner.is_none()
+            }
+            FeedbackCycleStatus::Cancelled => {
+                self.decision.is_none()
+                    && self.terminal_reason_code.is_some()
+                    && self.completed_at.is_some()
+                    && self.lease_owner.is_none()
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(FeedbackError::InvalidCycleState {
+                detail: format!(
+                    "status {} is inconsistent with decision, lease, or timestamps",
+                    self.status
+                ),
+            })
+        }
+    }
+}
+
+/// Immutable input for one append-only stage timeline event.
+#[derive(Debug, Clone)]
+pub struct FeedbackStageEventInput {
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub event_sequence: i64,
+    pub stage: FeedbackStage,
+    pub event_kind: FeedbackStageEventKind,
+    pub research_job_id: Option<ResearchJobId>,
+    pub actor: Option<String>,
+    pub reason_code: Option<String>,
+    pub evidence_uri: Option<ArtifactUri>,
+    pub evidence_hash: Option<ContentHash>,
+    pub occurred_at: DateTime<Utc>,
+}
+
+/// Append-only feedback stage event sealed by a complete content hash.
+#[derive(Debug, Clone, Serialize, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::quant_feedback_stage_event::ActiveModel")]
+pub struct NewFeedbackStageEvent {
+    feedback_stage_event_id: FeedbackStageEventId,
+    feedback_cycle_id: FeedbackCycleId,
+    event_sequence: i64,
+    stage: FeedbackStage,
+    event_kind: FeedbackStageEventKind,
+    research_job_id: Option<ResearchJobId>,
+    actor: Option<String>,
+    reason_code: Option<String>,
+    evidence_uri: Option<ArtifactUri>,
+    evidence_hash: Option<ContentHash>,
+    occurred_at: DateTime<Utc>,
+    event_hash: ContentHash,
+}
+
+impl NewFeedbackStageEvent {
+    pub fn try_seal(input: FeedbackStageEventInput) -> Result<Self, FeedbackError> {
+        input.validate()?;
+        let event_hash = CanonicalDigest::content_hash_typed(
+            FEEDBACK_STAGE_EVENT_DOMAIN,
+            FEEDBACK_STAGE_EVENT_VERSION,
+            &StageEventDocument::from(&input),
+        )?;
+        Ok(Self {
+            feedback_stage_event_id: FeedbackStageEventId::from_event_hash(&event_hash),
+            feedback_cycle_id: input.feedback_cycle_id,
+            event_sequence: input.event_sequence,
+            stage: input.stage,
+            event_kind: input.event_kind,
+            research_job_id: input.research_job_id,
+            actor: input.actor,
+            reason_code: input.reason_code,
+            evidence_uri: input.evidence_uri,
+            evidence_hash: input.evidence_hash,
+            occurred_at: input.occurred_at,
+            event_hash,
+        })
+    }
+
+    #[must_use]
+    pub const fn feedback_stage_event_id(&self) -> FeedbackStageEventId {
+        self.feedback_stage_event_id
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct StageEventDocument<'a> {
+    feedback_cycle_id: FeedbackCycleId,
+    event_sequence: i64,
+    stage: FeedbackStage,
+    event_kind: FeedbackStageEventKind,
+    research_job_id: Option<ResearchJobId>,
+    actor: &'a Option<String>,
+    reason_code: &'a Option<String>,
+    evidence_uri: &'a Option<ArtifactUri>,
+    evidence_hash: Option<ContentHash>,
+    occurred_at: DateTime<Utc>,
+}
+
+impl<'a> From<&'a FeedbackStageEventInput> for StageEventDocument<'a> {
+    fn from(input: &'a FeedbackStageEventInput) -> Self {
+        Self {
+            feedback_cycle_id: input.feedback_cycle_id,
+            event_sequence: input.event_sequence,
+            stage: input.stage,
+            event_kind: input.event_kind,
+            research_job_id: input.research_job_id,
+            actor: &input.actor,
+            reason_code: &input.reason_code,
+            evidence_uri: &input.evidence_uri,
+            evidence_hash: input.evidence_hash,
+            occurred_at: input.occurred_at,
+        }
+    }
+}
+
+/// Full read projection for an append-only stage event.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::quant_feedback_stage_event::Entity")]
+pub struct FeedbackStageEventInfo {
+    pub feedback_stage_event_id: FeedbackStageEventId,
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub event_sequence: i64,
+    pub stage: FeedbackStage,
+    pub event_kind: FeedbackStageEventKind,
+    pub research_job_id: Option<ResearchJobId>,
+    pub actor: Option<String>,
+    pub reason_code: Option<String>,
+    pub evidence_uri: Option<ArtifactUri>,
+    pub evidence_hash: Option<ContentHash>,
+    pub occurred_at: DateTime<Utc>,
+    pub event_hash: ContentHash,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    FeedbackStageEventInfo,
+    quant_feedback_stage_event::Model,
+    {
+        feedback_stage_event_id,
+        feedback_cycle_id,
+        event_sequence,
+        stage,
+        event_kind,
+        research_job_id,
+        actor,
+        reason_code,
+        evidence_uri,
+        evidence_hash,
+        occurred_at,
+        event_hash,
+        created_at,
+    }
+);
+
+impl FeedbackStageEventInfo {
+    pub fn validate(&self) -> Result<(), FeedbackError> {
+        let input = FeedbackStageEventInput {
+            feedback_cycle_id: self.feedback_cycle_id,
+            event_sequence: self.event_sequence,
+            stage: self.stage,
+            event_kind: self.event_kind,
+            research_job_id: self.research_job_id,
+            actor: self.actor.clone(),
+            reason_code: self.reason_code.clone(),
+            evidence_uri: self.evidence_uri.clone(),
+            evidence_hash: self.evidence_hash,
+            occurred_at: self.occurred_at,
+        };
+        input.validate()?;
+        let expected_hash = CanonicalDigest::content_hash_typed(
+            FEEDBACK_STAGE_EVENT_DOMAIN,
+            FEEDBACK_STAGE_EVENT_VERSION,
+            &StageEventDocument::from(&input),
+        )?;
+        if self.created_at < self.occurred_at
+            || self.event_hash != expected_hash
+            || self.feedback_stage_event_id != FeedbackStageEventId::from_event_hash(&expected_hash)
+        {
+            return Err(FeedbackError::InvalidStageEvent {
+                detail: "event timeline, hash, or content-addressed id mismatch".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Complete immutable input for one typed drift summary.
+#[derive(Debug, Clone)]
+pub struct DriftReportInput {
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub kind: FeedbackDriftKind,
+    pub metric: FeedbackDriftMetric,
+    pub assessment: FeedbackDriftAssessment,
+    pub baseline_window_start: DateTime<Utc>,
+    pub baseline_window_end: DateTime<Utc>,
+    pub evaluation_window_start: DateTime<Utc>,
+    pub evaluation_window_end: DateTime<Utc>,
+    pub label_cutoff: DateTime<Utc>,
+    pub observed_value: Option<Decimal>,
+    pub threshold: Decimal,
+    pub sample_count: i64,
+    pub detail_uri: ArtifactUri,
+    pub detail_hash: ContentHash,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Content-addressed append-only drift report header.
+#[derive(Debug, Clone, Serialize, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::quant_drift_report::ActiveModel")]
+pub struct NewDriftReport {
+    drift_report_id: DriftReportId,
+    feedback_cycle_id: FeedbackCycleId,
+    kind: FeedbackDriftKind,
+    metric: FeedbackDriftMetric,
+    assessment: FeedbackDriftAssessment,
+    baseline_window_start: DateTime<Utc>,
+    baseline_window_end: DateTime<Utc>,
+    evaluation_window_start: DateTime<Utc>,
+    evaluation_window_end: DateTime<Utc>,
+    label_cutoff: DateTime<Utc>,
+    observed_value: Option<Decimal>,
+    threshold: Decimal,
+    sample_count: i64,
+    detail_uri: ArtifactUri,
+    detail_hash: ContentHash,
+    observed_at: DateTime<Utc>,
+    report_hash: ContentHash,
+}
+
+impl NewDriftReport {
+    pub fn try_seal(input: DriftReportInput) -> Result<Self, FeedbackError> {
+        input.validate()?;
+        let report_hash = CanonicalDigest::content_hash_typed(
+            DRIFT_REPORT_DOMAIN,
+            DRIFT_REPORT_VERSION,
+            &DriftReportDocument::from(&input),
+        )?;
+        Ok(Self {
+            drift_report_id: DriftReportId::from_report_hash(&report_hash),
+            feedback_cycle_id: input.feedback_cycle_id,
+            kind: input.kind,
+            metric: input.metric,
+            assessment: input.assessment,
+            baseline_window_start: input.baseline_window_start,
+            baseline_window_end: input.baseline_window_end,
+            evaluation_window_start: input.evaluation_window_start,
+            evaluation_window_end: input.evaluation_window_end,
+            label_cutoff: input.label_cutoff,
+            observed_value: input.observed_value,
+            threshold: input.threshold,
+            sample_count: input.sample_count,
+            detail_uri: input.detail_uri,
+            detail_hash: input.detail_hash,
+            observed_at: input.observed_at,
+            report_hash,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DriftReportDocument<'a> {
+    feedback_cycle_id: FeedbackCycleId,
+    kind: FeedbackDriftKind,
+    metric: FeedbackDriftMetric,
+    assessment: FeedbackDriftAssessment,
+    baseline_window_start: DateTime<Utc>,
+    baseline_window_end: DateTime<Utc>,
+    evaluation_window_start: DateTime<Utc>,
+    evaluation_window_end: DateTime<Utc>,
+    label_cutoff: DateTime<Utc>,
+    observed_value: Option<Decimal>,
+    threshold: Decimal,
+    sample_count: i64,
+    detail_uri: &'a ArtifactUri,
+    detail_hash: ContentHash,
+    observed_at: DateTime<Utc>,
+}
+
+impl<'a> From<&'a DriftReportInput> for DriftReportDocument<'a> {
+    fn from(input: &'a DriftReportInput) -> Self {
+        Self {
+            feedback_cycle_id: input.feedback_cycle_id,
+            kind: input.kind,
+            metric: input.metric,
+            assessment: input.assessment,
+            baseline_window_start: input.baseline_window_start,
+            baseline_window_end: input.baseline_window_end,
+            evaluation_window_start: input.evaluation_window_start,
+            evaluation_window_end: input.evaluation_window_end,
+            label_cutoff: input.label_cutoff,
+            observed_value: input.observed_value,
+            threshold: input.threshold,
+            sample_count: input.sample_count,
+            detail_uri: &input.detail_uri,
+            detail_hash: input.detail_hash,
+            observed_at: input.observed_at,
+        }
+    }
+}
+
+/// Full read projection of one immutable drift header.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::quant_drift_report::Entity")]
+pub struct DriftReportInfo {
+    pub drift_report_id: DriftReportId,
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub kind: FeedbackDriftKind,
+    pub metric: FeedbackDriftMetric,
+    pub assessment: FeedbackDriftAssessment,
+    pub baseline_window_start: DateTime<Utc>,
+    pub baseline_window_end: DateTime<Utc>,
+    pub evaluation_window_start: DateTime<Utc>,
+    pub evaluation_window_end: DateTime<Utc>,
+    pub label_cutoff: DateTime<Utc>,
+    pub observed_value: Option<Decimal>,
+    pub threshold: Decimal,
+    pub sample_count: i64,
+    pub detail_uri: ArtifactUri,
+    pub detail_hash: ContentHash,
+    pub observed_at: DateTime<Utc>,
+    pub report_hash: ContentHash,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    DriftReportInfo,
+    quant_drift_report::Model,
+    {
+        drift_report_id,
+        feedback_cycle_id,
+        kind,
+        metric,
+        assessment,
+        baseline_window_start,
+        baseline_window_end,
+        evaluation_window_start,
+        evaluation_window_end,
+        label_cutoff,
+        observed_value,
+        threshold,
+        sample_count,
+        detail_uri,
+        detail_hash,
+        observed_at,
+        report_hash,
+        created_at,
+    }
+);
+
+impl DriftReportInfo {
+    pub fn validate(&self) -> Result<(), FeedbackError> {
+        let input = DriftReportInput {
+            feedback_cycle_id: self.feedback_cycle_id,
+            kind: self.kind,
+            metric: self.metric,
+            assessment: self.assessment,
+            baseline_window_start: self.baseline_window_start,
+            baseline_window_end: self.baseline_window_end,
+            evaluation_window_start: self.evaluation_window_start,
+            evaluation_window_end: self.evaluation_window_end,
+            label_cutoff: self.label_cutoff,
+            observed_value: self.observed_value,
+            threshold: self.threshold,
+            sample_count: self.sample_count,
+            detail_uri: self.detail_uri.clone(),
+            detail_hash: self.detail_hash,
+            observed_at: self.observed_at,
+        };
+        input.validate()?;
+        let expected_hash = CanonicalDigest::content_hash_typed(
+            DRIFT_REPORT_DOMAIN,
+            DRIFT_REPORT_VERSION,
+            &DriftReportDocument::from(&input),
+        )?;
+        if self.created_at < self.observed_at
+            || self.report_hash != expected_hash
+            || self.drift_report_id != DriftReportId::from_report_hash(&expected_hash)
+        {
+            return Err(FeedbackError::InvalidDriftReport {
+                detail: "report timeline, hash, or content-addressed id mismatch".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Semantic identity of an unseen evaluation holdout use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackEvaluationUseKey {
+    format_version: u32,
+    purpose: FeedbackEvaluationPurpose,
+    profile_ref: ResearchProfileRef,
+    evaluation_dataset_id: TrainingDatasetId,
+    evaluation_dataset_hash: ContentHash,
+    evaluation_artifact_bytes_hash: ContentHash,
+    cohort_manifest_hash: ContentHash,
+    evaluation_window_start: DateTime<Utc>,
+    evaluation_window_end: DateTime<Utc>,
+    label_cutoff: DateTime<Utc>,
+    champion_model_version_id: ModelVersionId,
+    champion_serving_contract_hash: ContentHash,
+    candidate_family_hash: ContentHash,
+    comparison_contract_hash: ContentHash,
+}
+
+/// Inputs that irreversibly consume one unseen promotion holdout.
+#[derive(Debug, Clone)]
+pub struct FeedbackEvaluationUseInput {
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub profile_ref: ResearchProfileRef,
+    pub evaluation_dataset_id: TrainingDatasetId,
+    pub evaluation_dataset_hash: ContentHash,
+    pub evaluation_artifact_bytes_hash: ContentHash,
+    pub cohort_manifest_hash: ContentHash,
+    pub evaluation_window_start: DateTime<Utc>,
+    pub evaluation_window_end: DateTime<Utc>,
+    pub label_cutoff: DateTime<Utc>,
+    pub champion_model_version_id: ModelVersionId,
+    pub champion_serving_contract_hash: ContentHash,
+    pub candidate_family_hash: ContentHash,
+    pub comparison_contract_hash: ContentHash,
+    pub result_artifact_uri: ArtifactUri,
+    pub result_artifact_hash: ContentHash,
+    pub used_at: DateTime<Utc>,
+}
+
+/// Content-addressed append-only proof that an evaluation holdout was consumed.
+#[derive(Debug, Clone, Serialize, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::quant_feedback_evaluation_use::ActiveModel")]
+pub struct NewFeedbackEvaluationUse {
+    feedback_evaluation_use_id: FeedbackEvaluationUseId,
+    feedback_cycle_id: FeedbackCycleId,
+    purpose: FeedbackEvaluationPurpose,
+    dataset_purpose: DatasetPurpose,
+    #[sea_orm(column_type = "JsonBinary")]
+    profile_ref: ResearchProfileRef,
+    research_profile_artifact_id: ResearchProfileArtifactId,
+    evaluation_dataset_id: TrainingDatasetId,
+    evaluation_dataset_hash: ContentHash,
+    evaluation_artifact_bytes_hash: ContentHash,
+    cohort_manifest_hash: ContentHash,
+    evaluation_window_start: DateTime<Utc>,
+    evaluation_window_end: DateTime<Utc>,
+    label_cutoff: DateTime<Utc>,
+    champion_model_version_id: ModelVersionId,
+    champion_serving_contract_hash: ContentHash,
+    candidate_family_hash: ContentHash,
+    comparison_contract_hash: ContentHash,
+    semantic_use_hash: ContentHash,
+    result_artifact_uri: ArtifactUri,
+    result_artifact_hash: ContentHash,
+    used_at: DateTime<Utc>,
+    evaluation_use_hash: ContentHash,
+}
+
+impl NewFeedbackEvaluationUse {
+    pub fn try_seal(input: FeedbackEvaluationUseInput) -> Result<Self, FeedbackError> {
+        input.validate()?;
+        let key = FeedbackEvaluationUseKey::from(&input);
+        let semantic_use_hash = CanonicalDigest::content_hash_typed(
+            EVALUATION_SEMANTIC_DOMAIN,
+            EVALUATION_USE_VERSION,
+            &key,
+        )?;
+        let evaluation_use_hash = CanonicalDigest::content_hash_typed(
+            EVALUATION_USE_DOMAIN,
+            EVALUATION_USE_VERSION,
+            &EvaluationUseDocument {
+                feedback_cycle_id: input.feedback_cycle_id,
+                semantic_use_hash,
+                key: &key,
+                result_artifact_uri: &input.result_artifact_uri,
+                result_artifact_hash: input.result_artifact_hash,
+                used_at: input.used_at,
+            },
+        )?;
+        Ok(Self {
+            feedback_evaluation_use_id: FeedbackEvaluationUseId::from_semantic_hash(
+                &semantic_use_hash,
+            ),
+            feedback_cycle_id: input.feedback_cycle_id,
+            purpose: FeedbackEvaluationPurpose::PromotionComparison,
+            dataset_purpose: DatasetPurpose::Evaluation,
+            research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(
+                &input.profile_ref,
+            ),
+            profile_ref: input.profile_ref,
+            evaluation_dataset_id: input.evaluation_dataset_id,
+            evaluation_dataset_hash: input.evaluation_dataset_hash,
+            evaluation_artifact_bytes_hash: input.evaluation_artifact_bytes_hash,
+            cohort_manifest_hash: input.cohort_manifest_hash,
+            evaluation_window_start: input.evaluation_window_start,
+            evaluation_window_end: input.evaluation_window_end,
+            label_cutoff: input.label_cutoff,
+            champion_model_version_id: input.champion_model_version_id,
+            champion_serving_contract_hash: input.champion_serving_contract_hash,
+            candidate_family_hash: input.candidate_family_hash,
+            comparison_contract_hash: input.comparison_contract_hash,
+            semantic_use_hash,
+            result_artifact_uri: input.result_artifact_uri,
+            result_artifact_hash: input.result_artifact_hash,
+            used_at: input.used_at,
+            evaluation_use_hash,
+        })
+    }
+}
+
+impl From<&FeedbackEvaluationUseInput> for FeedbackEvaluationUseKey {
+    fn from(input: &FeedbackEvaluationUseInput) -> Self {
+        Self {
+            format_version: EVALUATION_USE_VERSION,
+            purpose: FeedbackEvaluationPurpose::PromotionComparison,
+            profile_ref: input.profile_ref.clone(),
+            evaluation_dataset_id: input.evaluation_dataset_id,
+            evaluation_dataset_hash: input.evaluation_dataset_hash,
+            evaluation_artifact_bytes_hash: input.evaluation_artifact_bytes_hash,
+            cohort_manifest_hash: input.cohort_manifest_hash,
+            evaluation_window_start: input.evaluation_window_start,
+            evaluation_window_end: input.evaluation_window_end,
+            label_cutoff: input.label_cutoff,
+            champion_model_version_id: input.champion_model_version_id,
+            champion_serving_contract_hash: input.champion_serving_contract_hash,
+            candidate_family_hash: input.candidate_family_hash,
+            comparison_contract_hash: input.comparison_contract_hash,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct EvaluationUseDocument<'a> {
+    feedback_cycle_id: FeedbackCycleId,
+    semantic_use_hash: ContentHash,
+    key: &'a FeedbackEvaluationUseKey,
+    result_artifact_uri: &'a ArtifactUri,
+    result_artifact_hash: ContentHash,
+    used_at: DateTime<Utc>,
+}
+
+/// Full read projection for one consumed evaluation holdout.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
+#[sea_orm(entity = "crate::entities::quant_feedback_evaluation_use::Entity")]
+pub struct FeedbackEvaluationUseInfo {
+    pub feedback_evaluation_use_id: FeedbackEvaluationUseId,
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub purpose: FeedbackEvaluationPurpose,
+    pub dataset_purpose: DatasetPurpose,
+    pub profile_ref: ResearchProfileRef,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    pub evaluation_dataset_id: TrainingDatasetId,
+    pub evaluation_dataset_hash: ContentHash,
+    pub evaluation_artifact_bytes_hash: ContentHash,
+    pub cohort_manifest_hash: ContentHash,
+    pub evaluation_window_start: DateTime<Utc>,
+    pub evaluation_window_end: DateTime<Utc>,
+    pub label_cutoff: DateTime<Utc>,
+    pub champion_model_version_id: ModelVersionId,
+    pub champion_serving_contract_hash: ContentHash,
+    pub candidate_family_hash: ContentHash,
+    pub comparison_contract_hash: ContentHash,
+    pub semantic_use_hash: ContentHash,
+    pub result_artifact_uri: ArtifactUri,
+    pub result_artifact_hash: ContentHash,
+    pub used_at: DateTime<Utc>,
+    pub evaluation_use_hash: ContentHash,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    FeedbackEvaluationUseInfo,
+    quant_feedback_evaluation_use::Model,
+    {
+        feedback_evaluation_use_id,
+        feedback_cycle_id,
+        purpose,
+        dataset_purpose,
+        profile_ref,
+        research_profile_artifact_id,
+        evaluation_dataset_id,
+        evaluation_dataset_hash,
+        evaluation_artifact_bytes_hash,
+        cohort_manifest_hash,
+        evaluation_window_start,
+        evaluation_window_end,
+        label_cutoff,
+        champion_model_version_id,
+        champion_serving_contract_hash,
+        candidate_family_hash,
+        comparison_contract_hash,
+        semantic_use_hash,
+        result_artifact_uri,
+        result_artifact_hash,
+        used_at,
+        evaluation_use_hash,
+        created_at,
+    }
+);
+
+impl FeedbackEvaluationUseInfo {
+    pub fn validate(&self) -> Result<(), FeedbackError> {
+        if self.purpose != FeedbackEvaluationPurpose::PromotionComparison
+            || self.dataset_purpose != DatasetPurpose::Evaluation
+            || self.research_profile_artifact_id
+                != ResearchProfileArtifactId::from_profile_ref(&self.profile_ref)
+        {
+            return Err(FeedbackError::InvalidEvaluationUse {
+                detail: "purpose or profile projection mismatch".to_owned(),
+            });
+        }
+        let input = FeedbackEvaluationUseInput {
+            feedback_cycle_id: self.feedback_cycle_id,
+            profile_ref: self.profile_ref.clone(),
+            evaluation_dataset_id: self.evaluation_dataset_id,
+            evaluation_dataset_hash: self.evaluation_dataset_hash,
+            evaluation_artifact_bytes_hash: self.evaluation_artifact_bytes_hash,
+            cohort_manifest_hash: self.cohort_manifest_hash,
+            evaluation_window_start: self.evaluation_window_start,
+            evaluation_window_end: self.evaluation_window_end,
+            label_cutoff: self.label_cutoff,
+            champion_model_version_id: self.champion_model_version_id,
+            champion_serving_contract_hash: self.champion_serving_contract_hash,
+            candidate_family_hash: self.candidate_family_hash,
+            comparison_contract_hash: self.comparison_contract_hash,
+            result_artifact_uri: self.result_artifact_uri.clone(),
+            result_artifact_hash: self.result_artifact_hash,
+            used_at: self.used_at,
+        };
+        input.validate()?;
+        let key = FeedbackEvaluationUseKey::from(&input);
+        let expected_semantic_hash = CanonicalDigest::content_hash_typed(
+            EVALUATION_SEMANTIC_DOMAIN,
+            EVALUATION_USE_VERSION,
+            &key,
+        )?;
+        let expected_use_hash = CanonicalDigest::content_hash_typed(
+            EVALUATION_USE_DOMAIN,
+            EVALUATION_USE_VERSION,
+            &EvaluationUseDocument {
+                feedback_cycle_id: self.feedback_cycle_id,
+                semantic_use_hash: expected_semantic_hash,
+                key: &key,
+                result_artifact_uri: &self.result_artifact_uri,
+                result_artifact_hash: self.result_artifact_hash,
+                used_at: self.used_at,
+            },
+        )?;
+        if self.created_at < self.used_at
+            || self.semantic_use_hash != expected_semantic_hash
+            || self.evaluation_use_hash != expected_use_hash
+            || self.feedback_evaluation_use_id
+                != FeedbackEvaluationUseId::from_semantic_hash(&expected_semantic_hash)
+        {
+            return Err(FeedbackError::InvalidEvaluationUse {
+                detail: "timeline, semantic hash, evidence hash, or id mismatch".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl FeedbackStageEventInput {
+    fn validate(&self) -> Result<(), FeedbackError> {
+        if self.event_sequence <= 0
+            || self
+                .actor
+                .as_deref()
+                .is_some_and(|actor| !valid_actor(actor))
+            || self
+                .reason_code
+                .as_deref()
+                .is_some_and(|reason| !valid_reason(reason))
+        {
+            return Err(FeedbackError::InvalidStageEvent {
+                detail: "invalid sequence, actor, or reason code".to_owned(),
+            });
+        }
+        validate_artifact_ref(
+            self.evidence_uri.as_ref(),
+            self.evidence_hash,
+            "stage evidence",
+        )
+        .map_err(|detail| FeedbackError::InvalidStageEvent { detail })?;
+        let trigger_stage = self.stage == FeedbackStage::Trigger;
+        let valid = match self.event_kind {
+            FeedbackStageEventKind::Triggered => {
+                trigger_stage
+                    && self.research_job_id.is_none()
+                    && self.actor.is_some()
+                    && self.reason_code.is_some()
+            }
+            FeedbackStageEventKind::CancellationRequested => {
+                !trigger_stage && self.actor.is_some() && self.reason_code.is_some()
+            }
+            FeedbackStageEventKind::JobLinked | FeedbackStageEventKind::Started => {
+                !trigger_stage
+                    && self.research_job_id.is_some()
+                    && self.actor.is_none()
+                    && self.reason_code.is_none()
+            }
+            FeedbackStageEventKind::Succeeded => {
+                !trigger_stage
+                    && self.research_job_id.is_some()
+                    && self.actor.is_none()
+                    && self.reason_code.is_none()
+                    && self.evidence_uri.is_some()
+            }
+            FeedbackStageEventKind::Failed
+            | FeedbackStageEventKind::Cancelled
+            | FeedbackStageEventKind::LeaseRecovered => {
+                !trigger_stage
+                    && self.research_job_id.is_some()
+                    && self.actor.is_none()
+                    && self.reason_code.is_some()
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(FeedbackError::InvalidStageEvent {
+                detail: format!(
+                    "stage {} and event kind {} have inconsistent job/actor/reason/evidence fields",
+                    self.stage, self.event_kind
+                ),
+            })
+        }
+    }
+}
+
+impl DriftReportInput {
+    fn validate(&self) -> Result<(), FeedbackError> {
+        validate_artifact_ref(
+            Some(&self.detail_uri),
+            Some(self.detail_hash),
+            "drift detail",
+        )
+        .map_err(|detail| FeedbackError::InvalidDriftReport { detail })?;
+        if self.metric.kind() != self.kind
+            || self.baseline_window_start >= self.baseline_window_end
+            || self.baseline_window_end > self.evaluation_window_start
+            || self.evaluation_window_start >= self.evaluation_window_end
+            || self.evaluation_window_end > self.label_cutoff
+            || self.label_cutoff > self.observed_at
+            || self.sample_count < 0
+            || self.threshold <= Decimal::ZERO
+            || self.metric.is_unit_interval() && self.threshold > Decimal::ONE
+        {
+            return Err(FeedbackError::InvalidDriftReport {
+                detail: "metric family, windows, cutoff, count, or threshold is invalid".to_owned(),
+            });
+        }
+        match (self.assessment, self.observed_value) {
+            (FeedbackDriftAssessment::InsufficientEvidence, None) => Ok(()),
+            (FeedbackDriftAssessment::InsufficientEvidence, Some(_)) | (_, None) => {
+                Err(FeedbackError::InvalidDriftReport {
+                    detail: "insufficient evidence must be the only assessment without a value"
+                        .to_owned(),
+                })
+            }
+            (assessment, Some(value)) => {
+                if self.sample_count == 0
+                    || value < Decimal::ZERO
+                    || self.metric.is_unit_interval() && value > Decimal::ONE
+                    || assessment != expected_assessment(self.metric, value, self.threshold)
+                {
+                    return Err(FeedbackError::InvalidDriftReport {
+                        detail: "observed value does not match metric range or assessment"
+                            .to_owned(),
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn expected_assessment(
+    metric: FeedbackDriftMetric,
+    value: Decimal,
+    threshold: Decimal,
+) -> FeedbackDriftAssessment {
+    let exceeded = match metric {
+        FeedbackDriftMetric::KolmogorovSmirnovPValue => value <= threshold,
+        FeedbackDriftMetric::PopulationStabilityIndex
+        | FeedbackDriftMetric::RankIcDrop
+        | FeedbackDriftMetric::JensenShannonDivergence => value >= threshold,
+    };
+    if exceeded {
+        FeedbackDriftAssessment::ThresholdExceeded
+    } else {
+        FeedbackDriftAssessment::WithinThreshold
+    }
+}
+
+impl FeedbackEvaluationUseInput {
+    fn validate(&self) -> Result<(), FeedbackError> {
+        self.profile_ref
+            .validate()
+            .map_err(|error| FeedbackError::InvalidEvaluationUse {
+                detail: error.to_string(),
+            })?;
+        validate_artifact_ref(
+            Some(&self.result_artifact_uri),
+            Some(self.result_artifact_hash),
+            "evaluation result",
+        )
+        .map_err(|detail| FeedbackError::InvalidEvaluationUse { detail })?;
+        if self.evaluation_window_start >= self.evaluation_window_end
+            || self.evaluation_window_end > self.label_cutoff
+            || self.label_cutoff > self.used_at
+        {
+            return Err(FeedbackError::InvalidEvaluationUse {
+                detail: "evaluation window, cutoff, or use timestamp is invalid".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn validate_artifact_ref(
+    uri: Option<&ArtifactUri>,
+    hash: Option<ContentHash>,
+    owner: &'static str,
+) -> Result<(), String> {
+    if uri.is_some() != hash.is_some() {
+        return Err(format!("{owner} URI and hash must be present together"));
+    }
+    if let Some(uri) = uri
+        && (uri.as_str().len() > MAX_ARTIFACT_URI_BYTES
+            || uri.scheme().is_empty()
+            || !uri.scheme().bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_lowercase()
+                    || index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.'))
+            }))
+    {
+        return Err(format!(
+            "{owner} URI has an invalid or oversized scheme/path"
+        ));
+    }
+    Ok(())
+}
+
+fn valid_actor(actor: &str) -> bool {
+    !actor.is_empty()
+        && actor.len() <= MAX_ACTOR_BYTES
+        && actor == actor.trim()
+        && actor.bytes().all(|byte| !byte.is_ascii_control())
+}
+
+fn valid_reason(reason: &str) -> bool {
+    !reason.is_empty()
+        && reason.len() <= MAX_REASON_BYTES
+        && reason.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.')
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Duration, TimeZone};
+    use rust_decimal_macros::dec;
+    use serde_json::{Value, from_value, to_value};
+
+    use super::{
+        ArtifactUri, CapabilityRegistryHashes, ContentHash, DriftReportInput, FeedbackCycleId,
+        FeedbackCycleKey, FeedbackCycleKeyInput, FeedbackDriftAssessment, FeedbackDriftKind,
+        FeedbackDriftMetric, FeedbackEvaluationUseInput, FeedbackStage, FeedbackStageEventInput,
+        FeedbackStageEventKind, FeedbackTriggerFamily, ModelVersionId, NewDriftReport,
+        NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent, ResearchJobId,
+        ResearchProfileRef, TrainingDatasetId, Utc,
+    };
+    use crate::types::ResearchProfileId;
+
+    fn hash(seed: u8) -> ContentHash {
+        ContentHash::from_bytes([seed; 32])
+    }
+
+    impl ResearchProfileRef {
+        fn fixture() -> Self {
+            Self {
+                id: ResearchProfileId::new("crypto_price_15m"),
+                version: 3,
+                content_hash: hash(1),
+            }
+        }
+    }
+
+    fn cutoff() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 7, 25, 0, 0, 0)
+            .single()
+            .expect("valid cutoff")
+    }
+
+    impl FeedbackCycleKey {
+        fn fixture() -> Self {
+            Self::try_new(FeedbackCycleKeyInput {
+                trigger_family: FeedbackTriggerFamily::Scheduled,
+                profile_ref: ResearchProfileRef::fixture(),
+                feedback_policy_hash: hash(2),
+                label_cutoff: cutoff(),
+                capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![
+                    hash(3),
+                    hash(4),
+                ])
+                .expect("canonical capabilities"),
+                champion_model_version_id: ModelVersionId::from_v7(),
+                champion_serving_contract_hash: hash(5),
+                candidate_family_hash: hash(6),
+            })
+            .expect("valid cycle key")
+        }
+    }
+
+    #[test]
+    fn cycle_identity_is_deterministic() {
+        let key = FeedbackCycleKey::fixture();
+        let first = NewFeedbackCycle::try_seal(key.clone()).expect("seal first");
+        let second = NewFeedbackCycle::try_seal(key.clone()).expect("seal second");
+        assert_eq!(first.idempotency_hash, second.idempotency_hash);
+        assert_eq!(first.feedback_cycle_id, second.feedback_cycle_id);
+        assert_eq!(
+            first.feedback_cycle_id,
+            FeedbackCycleId::from_idempotency_hash(
+                &key.idempotency_hash().expect("idempotency hash")
+            )
+        );
+
+        let roundtrip =
+            from_value::<FeedbackCycleKey>(to_value(&key).expect("serialize feedback-cycle key"))
+                .expect("deserialize feedback-cycle key");
+        assert_eq!(roundtrip, key);
+        let mut unknown = to_value(&key).expect("serialize feedback-cycle key");
+        unknown
+            .as_object_mut()
+            .expect("cycle key object")
+            .insert("legacy_run_id".to_owned(), Value::Bool(true));
+        assert!(from_value::<FeedbackCycleKey>(unknown).is_err());
+
+        let mut invalid_profile = key;
+        invalid_profile.profile_ref.version = 0;
+        assert!(invalid_profile.validate().is_err());
+    }
+
+    #[test]
+    fn stage_shape_fails_closed() {
+        let cycle_id = FeedbackCycleId::from_v7();
+        let triggered = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+            feedback_cycle_id: cycle_id,
+            event_sequence: 1,
+            stage: FeedbackStage::Trigger,
+            event_kind: FeedbackStageEventKind::Triggered,
+            research_job_id: None,
+            actor: Some("scheduler".to_owned()),
+            reason_code: Some("scheduled_cadence".to_owned()),
+            evidence_uri: None,
+            evidence_hash: None,
+            occurred_at: cutoff(),
+        })
+        .expect("seal trigger event");
+        assert_eq!(
+            triggered.feedback_stage_event_id,
+            super::FeedbackStageEventId::from_event_hash(&triggered.event_hash)
+        );
+
+        assert!(
+            NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+                feedback_cycle_id: cycle_id,
+                event_sequence: 2,
+                stage: FeedbackStage::Training,
+                event_kind: FeedbackStageEventKind::Succeeded,
+                research_job_id: Some(ResearchJobId::from_v7()),
+                actor: None,
+                reason_code: None,
+                evidence_uri: None,
+                evidence_hash: None,
+                occurred_at: cutoff(),
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn drift_direction_is_typed() {
+        let input = DriftReportInput {
+            feedback_cycle_id: FeedbackCycleId::from_v7(),
+            kind: FeedbackDriftKind::Data,
+            metric: FeedbackDriftMetric::PopulationStabilityIndex,
+            assessment: FeedbackDriftAssessment::ThresholdExceeded,
+            baseline_window_start: cutoff() - Duration::days(30),
+            baseline_window_end: cutoff() - Duration::days(15),
+            evaluation_window_start: cutoff() - Duration::days(14),
+            evaluation_window_end: cutoff() - Duration::days(1),
+            label_cutoff: cutoff(),
+            observed_value: Some(dec!(0.2)),
+            threshold: dec!(0.2),
+            sample_count: 500,
+            detail_uri: ArtifactUri::parse("file:///drift/data.json").expect("valid artifact URI"),
+            detail_hash: hash(7),
+            observed_at: cutoff() + Duration::minutes(1),
+        };
+        let sealed = NewDriftReport::try_seal(input.clone()).expect("seal drift");
+        assert_eq!(
+            sealed.drift_report_id,
+            super::DriftReportId::from_report_hash(&sealed.report_hash)
+        );
+
+        let mut wrong = input;
+        wrong.assessment = FeedbackDriftAssessment::WithinThreshold;
+        assert!(NewDriftReport::try_seal(wrong).is_err());
+    }
+
+    #[test]
+    fn evaluation_use_is_semantic() {
+        let input = FeedbackEvaluationUseInput {
+            feedback_cycle_id: FeedbackCycleId::from_v7(),
+            profile_ref: ResearchProfileRef::fixture(),
+            evaluation_dataset_id: TrainingDatasetId::from_v7(),
+            evaluation_dataset_hash: hash(8),
+            evaluation_artifact_bytes_hash: hash(9),
+            cohort_manifest_hash: hash(10),
+            evaluation_window_start: cutoff() - Duration::days(7),
+            evaluation_window_end: cutoff() - Duration::days(1),
+            label_cutoff: cutoff(),
+            champion_model_version_id: ModelVersionId::from_v7(),
+            champion_serving_contract_hash: hash(11),
+            candidate_family_hash: hash(12),
+            comparison_contract_hash: hash(13),
+            result_artifact_uri: ArtifactUri::parse("file:///evaluation/result.json")
+                .expect("valid artifact URI"),
+            result_artifact_hash: hash(14),
+            used_at: cutoff() + Duration::minutes(1),
+        };
+        let first = NewFeedbackEvaluationUse::try_seal(input.clone()).expect("seal evaluation use");
+        let second = NewFeedbackEvaluationUse::try_seal(input.clone()).expect("seal exact retry");
+        assert_eq!(first.semantic_use_hash, second.semantic_use_hash);
+        assert_eq!(
+            first.feedback_evaluation_use_id,
+            second.feedback_evaluation_use_id
+        );
+
+        let mut other_family = input;
+        other_family.candidate_family_hash = hash(15);
+        let other =
+            NewFeedbackEvaluationUse::try_seal(other_family).expect("seal other candidate family");
+        assert_ne!(first.semantic_use_hash, other.semantic_use_hash);
+        assert_ne!(
+            first.feedback_evaluation_use_id,
+            other.feedback_evaluation_use_id
+        );
+    }
+}

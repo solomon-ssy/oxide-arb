@@ -18,6 +18,7 @@
 //! ExecutionError────┤
 //! InfraError────────┤
 //! ControlError──────┤
+//! FeedbackError─────┤
 //! ResearchError─────┤
 //! GovernanceError───┤
 //! SeedError ────────┘
@@ -32,6 +33,7 @@ pub mod config;
 pub mod config_validation;
 pub mod control;
 pub mod execution;
+pub mod feedback;
 pub mod governance;
 pub mod hashing;
 pub mod infra;
@@ -54,6 +56,7 @@ use config::ConfigError;
 use config_validation::{ConfigValidationError, ConfigValidationReport};
 use control::ControlError;
 use execution::ExecutionError;
+use feedback::FeedbackError;
 use governance::GovernanceError;
 use hashing::CanonicalDigestError;
 use infra::InfraError;
@@ -127,6 +130,10 @@ pub enum QuantError {
     #[error(transparent)]
     Research(#[from] ResearchError),
 
+    // ── Feedback-cycle orchestration ────────────────────────────────────
+    #[error(transparent)]
+    Feedback(#[from] FeedbackError),
+
     // ── Model governance (publish / rollback / dataset promotion) ───────
     #[error(transparent)]
     Governance(#[from] GovernanceError),
@@ -174,6 +181,7 @@ impl QuantError {
             Self::Market(_) => "market",
             Self::Seed(_) => "seed",
             Self::Research(_) => "research",
+            Self::Feedback(_) => "feedback",
             Self::Governance(_) => "governance",
             Self::Hashing(_) => "hashing",
             Self::Report(_) => "report",
@@ -218,8 +226,8 @@ mod tests {
 
     use super::{
         ApiError, ConfigError, ConfigValidationError, ConfigValidationReport, ControlError, DbErr,
-        ExecutionError, InfraError, MarketError, QuantError, QuantResult, ReportError,
-        TransactionError, WsError,
+        ExecutionError, FeedbackError, InfraError, MarketError, QuantError, QuantResult,
+        ReportError, TransactionError, WsError,
     };
 
     #[test]
@@ -269,6 +277,17 @@ mod tests {
         }
         .into());
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn feedback_error_propagates() {
+        let error: QuantError = FeedbackError::StaleCycleGeneration {
+            expected: 4,
+            actual: 3,
+        }
+        .into();
+        assert_eq!(error.code(), "feedback");
+        assert!(matches!(error, QuantError::Feedback(_)));
     }
 
     #[test]

@@ -31,7 +31,6 @@ use prometheus::IntCounter;
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::{
     app::ports::structural_monitor::CoreStructuralMonitor,
-    governance::BiasTableApplicator,
     ingest::{book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry},
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
@@ -39,7 +38,7 @@ use quant_pivot_core::{
     },
     prefetch::feature_window::FeatureWindowProvider,
     service::{
-        factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
+        factor_pipeline::{FactorExecutionPlane, FactorPipelineRequest, FactorPipelineService},
         feature_pipeline::{
             FeaturePipelineDeps, FeaturePipelineRequest, FeaturePipelineResult,
             FeaturePipelineService,
@@ -67,7 +66,7 @@ use quant_pivot_models::{
         common::{CategorySet, MarketCategory, TickSize},
         factor::FactorFamily,
         market::{EventStatus, MarketStatus},
-        quant::{ModelRunKind, ModelRunStatus},
+        quant::ModelRunKind,
     },
     runtime_config::{
         DataQualityConfig, DecisionPolicySnapshot, DomainConfig, FactorsConfig, FeatureFamily,
@@ -84,8 +83,8 @@ use quant_pivot_repository::{
         PgFeatureRepository, PgMarketRepository, PgModelRunRepository,
     },
     traits::{
-        CalibrationArtifactRepository, EventRepository, FactorRepository, FeatureRepository,
-        MarketRepository, ModelRunRepository, QuantFactReadRepository,
+        EventRepository, FactorRepository, FeatureRepository, MarketRepository, ModelRunRepository,
+        QuantFactReadRepository,
     },
 };
 use quant_pivot_research::{
@@ -105,7 +104,7 @@ use quant_pivot_system_tests::{
     support::{
         catalog_fixtures::{make_event, make_market},
         fact_sink::DiscardFactWriter,
-        factor_governance::publish_all_factor_definitions,
+        factor_definitions::register_all_factor_definitions,
         pit::InMemoryDecisionSnapshotSource,
         publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
@@ -563,9 +562,9 @@ async fn run_factor_round_concentration(
 
     let factor_repo =
         Arc::new(PgFactorRepository::new(harness.db.clone())) as Arc<dyn FactorRepository>;
-    publish_all_factor_definitions(factor_repo.as_ref(), &factors, &features, &domain)
+    register_all_factor_definitions(factor_repo.as_ref(), &factors, &features, &domain)
         .await
-        .expect("publish factor definitions");
+        .expect("register immutable factor definitions");
 
     let model_run_id = ModelRunId::from_v7();
     PgModelRunRepository::new(harness.db.clone())
@@ -577,13 +576,7 @@ async fn run_factor_round_concentration(
             market_selection_id: None,
             window_start: harness.as_of,
             window_end: harness.as_of,
-            status: ModelRunStatus::Running,
             input_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
-            output_hash: None,
-            error_code: None,
-            error_message: None,
-            started_at: harness.as_of,
-            finished_at: None,
         })
         .await
         .expect("model run");
@@ -602,20 +595,16 @@ async fn run_factor_round_concentration(
     let factor_service = FactorPipelineService::new(
         Arc::clone(&factor_repo),
         noop_factor_writer(),
-        Arc::new(BiasTableApplicator::new(
-            Arc::new(PgCalibrationArtifactRepository::new(harness.db.clone()))
-                as Arc<dyn CalibrationArtifactRepository>,
-        )),
         Arc::new(ComputeExecutor::new().expect("test compute executor")),
     );
+    let factor_execution = FactorExecutionPlane::try_new(&factors, &features, &domain, None, None)
+        .expect("factor execution plane");
     let factor_result = factor_service
         .run(FactorPipelineRequest {
             model_run_id: &model_run_id,
             vectors: Arc::from(feature_result.accepted.clone()),
             feature_vector_ids: &feature_vector_ids,
-            factors: &factors,
-            features: &features,
-            domain: &domain,
+            factor_execution: &factor_execution,
         })
         .await
         .expect("factor pipeline");

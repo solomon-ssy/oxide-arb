@@ -4,7 +4,11 @@ use std::{future::pending, slice, sync::Arc, time::Duration as StdDuration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
+use quant_pivot_error::{
+    QuantError, QuantResult,
+    report::ReportError,
+    storage::{StorageError, entity::QUANT_FACTOR},
+};
 use quant_pivot_models::{
     domain::{
         quant::{ApplyEntryConditionEvaluation, EntryConditionInstanceInfo, MarketLinkageInfo},
@@ -183,10 +187,7 @@ impl LiveEntryConditionInputProvider {
                 factors
                     .iter()
                     .find(|definition| definition.factor_definition_id == binding.definition_id)
-                    .is_none_or(|definition| {
-                        definition.definition_hash != binding.definition_hash
-                            || definition.status != PublicationStatus::Published
-                    })
+                    .is_none_or(|definition| definition.definition_hash != binding.definition_hash)
             })
         {
             Some(ConditionUnavailableReason::FactorDefinitionMismatch)
@@ -238,6 +239,7 @@ impl LiveEntryConditionInputProvider {
         &self,
         market_id: &MarketId,
         required: Vec<FactorCondition>,
+        available_by: DateTime<Utc>,
     ) -> QuantResult<Vec<FactorSnapshotInput>> {
         let mut groups = Vec::new();
         for condition in &required {
@@ -254,11 +256,21 @@ impl LiveEntryConditionInputProvider {
         for (model_version_id, definition_ids) in groups {
             let Some(snapshot) = self
                 .factors
-                .latest_snapshot_bundle(&definition_ids, market_id, &model_version_id)
+                .latest_snapshot_bundle(&definition_ids, market_id, &model_version_id, available_by)
                 .await?
             else {
                 continue;
             };
+            if snapshot.observed_at > available_by || snapshot.available_at > available_by {
+                return Err(StorageError::invariant_violation(
+                    Some(QUANT_FACTOR),
+                    format!(
+                        "factor snapshot {} exceeded entry-condition cutoff {available_by}",
+                        snapshot.snapshot_hash
+                    ),
+                )
+                .into());
+            }
             for value in snapshot.values {
                 let (Some(raw_value), Some(normalized_value)) =
                     (value.raw_value, value.normalized_score)
@@ -444,7 +456,7 @@ impl EntryConditionInputProvider for LiveEntryConditionInputProvider {
         required.collect(&artifact.root);
         let prices = self.load_prices(required.prices);
         let factors = self
-            .load_factors(&artifact.binding.market_id, required.factors)
+            .load_factors(&artifact.binding.market_id, required.factors, evaluated_at)
             .await?;
         let crypto = self
             .load_crypto(instance, required.crypto, evaluated_at)

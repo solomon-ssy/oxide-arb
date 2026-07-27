@@ -2,10 +2,10 @@
 //! validate immutable definitions → persist values → emit.
 //!
 //! Consumes the accepted [`FeatureVector`]s of one online round (paired with
-//! their persisted ids) and a minted `model_run_id`, builds a
-//! [`FactorEngine`] from frozen config, computes the cross-sectional factor
-//! batch, partitions markets by [`FactorEligibility`], validates the governed
-//! revision identities, persists the eligible markets' factor values, and emits
+//! their persisted ids), a minted `model_run_id`, and an already-built
+//! [`FactorExecutionPlane`]. It computes the cross-sectional factor batch,
+//! partitions markets by [`FactorEligibility`], validates the governed revision
+//! identities, persists the eligible markets' factor values, and emits
 //! present-only long-format facts. Rejected markets are observable but never
 //! reach persistence, facts, or the downstream model plane.
 //!
@@ -19,10 +19,13 @@ use chrono::Utc;
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
-    domain::quant::{FactorValueInfo, NewFactorValue},
-    enums::quant::PublicationStatus,
+    domain::quant::{FactorDefinitionInfo, FactorValueInfo, NewFactorValue},
+    enums::common::MarketCategory,
     runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy},
-    types::{FactorDefinitionId, FeatureVectorId, MarketId, ModelRunId},
+    types::{
+        ContentHash, FactorDefinitionId, FeatureVectorId, MarketId, ModelRunId,
+        factor::FactorDefinitionRef,
+    },
 };
 use quant_pivot_repository::traits::FactorRepository;
 use quant_pivot_research::{
@@ -31,11 +34,63 @@ use quant_pivot_research::{
         MarketFactorOutcome, factor_events,
     },
     features::FeatureVector,
+    model::FavoriteLongshotBiasTable,
 };
 
-use crate::{
-    governance::BiasTableApplicator, observability::factor_fact_writer::FactorEventWriter,
-};
+use crate::observability::factor_fact_writer::FactorEventWriter;
+
+/// One immutable, reusable factor engine plus its exact computation policy.
+///
+/// Model serving constructs this value once per verified serving contract and
+/// then binds its derived [`quant_pivot_models::types::factor::FactorServingPlane`]
+/// and optional bias-table hash to that contract before publication. Offline
+/// factor workflows may use the same construction boundary without pretending
+/// to own a model-serving contract.
+pub struct FactorExecutionPlane {
+    engine: Arc<FactorEngine>,
+    config: FactorsConfig,
+    bias_table_hash: Option<ContentHash>,
+}
+
+impl FactorExecutionPlane {
+    /// Build one execution plane from frozen policy/profile inputs.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid derived serving plane.
+    pub fn try_new(
+        factors: &FactorsConfig,
+        features: &FeaturesConfig,
+        domain: &DomainConfig,
+        category_scope: Option<MarketCategory>,
+        bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
+    ) -> QuantResult<Self> {
+        let bias_table_hash = bias_table.as_ref().map(|table| table.content_hash);
+        let engine =
+            FactorEngine::for_model_scope(factors, features, domain, category_scope, bias_table);
+        engine.serving_plane()?;
+        Ok(Self {
+            engine: Arc::new(engine),
+            config: factors.clone(),
+            bias_table_hash,
+        })
+    }
+
+    #[must_use]
+    pub fn engine(&self) -> Arc<FactorEngine> {
+        Arc::clone(&self.engine)
+    }
+
+    #[must_use]
+    pub const fn config(&self) -> &FactorsConfig {
+        &self.config
+    }
+
+    #[must_use]
+    pub const fn bias_table_hash(&self) -> Option<ContentHash> {
+        self.bias_table_hash
+    }
+}
 
 /// Frozen inputs for one factor-plane round.
 pub struct FactorPipelineRequest<'a> {
@@ -45,12 +100,8 @@ pub struct FactorPipelineRequest<'a> {
     pub vectors: Arc<[FeatureVector]>,
     /// Persisted feature-vector ids, aligned 1:1 with `vectors`.
     pub feature_vector_ids: &'a [FeatureVectorId],
-    /// Frozen factor config (enabled families, confidence floor, missing policy).
-    pub factors: &'a FactorsConfig,
-    /// Frozen feature config (resolves windowed factor inputs).
-    pub features: &'a FeaturesConfig,
-    /// Frozen domain config (category-routed domain factor registration).
-    pub domain: &'a DomainConfig,
+    /// Fully validated engine/config pair owned by the serving-contract registry.
+    pub factor_execution: &'a FactorExecutionPlane,
 }
 
 /// A market excluded by `RejectCandidate` (a required factor was missing or below
@@ -77,7 +128,6 @@ pub struct FactorPipelineResult {
 pub struct FactorPipelineService {
     factor_repo: Arc<dyn FactorRepository>,
     event_writer: Arc<FactorEventWriter>,
-    bias_table: Arc<BiasTableApplicator>,
     compute: Arc<ComputeExecutor>,
 }
 
@@ -87,13 +137,11 @@ impl FactorPipelineService {
     pub fn new(
         factor_repo: Arc<dyn FactorRepository>,
         event_writer: Arc<FactorEventWriter>,
-        bias_table: Arc<BiasTableApplicator>,
         compute: Arc<ComputeExecutor>,
     ) -> Self {
         Self {
             factor_repo,
             event_writer,
-            bias_table,
             compute,
         }
     }
@@ -137,15 +185,7 @@ impl FactorPipelineService {
             .into());
         }
 
-        // Bind the currently-activated favorite-longshot bias table (content-hash
-        // verified at activation). `None` keeps `struct.favorite_longshot` inert.
-        let bias_table = self.bias_table.current();
-        let engine = FactorEngine::new(
-            request.factors,
-            request.features,
-            request.domain,
-            bias_table,
-        );
+        let engine = request.factor_execution.engine();
         if engine.registry().is_empty() {
             return Err(QuantError::config(
                 "no factors enabled: factors.enabled_factor_families selects an empty factor set",
@@ -154,7 +194,8 @@ impl FactorPipelineService {
 
         FactorEngine::validate_batch_invariants(request.vectors.as_ref())?;
         references.validate()?;
-        if request.factors.cross_section.small_cross_section_policy
+        let factors = request.factor_execution.config();
+        if factors.cross_section.small_cross_section_policy
             == SmallCrossSectionPolicy::FrozenReferenceQuantile
             && references.is_empty()
         {
@@ -166,23 +207,20 @@ impl FactorPipelineService {
             .into());
         }
 
-        // Definitions are registered out-of-band by the explicit factor-register
-        // governance action (not on this money-facing hot path). Fail closed if
-        // any enabled definition is not `Published`.
-        self.require_published_definitions(&engine).await?;
+        // Training seals and registers immutable definitions before a model
+        // contract can become serving-eligible. The money-facing path is
+        // read-only and fails closed unless every exact revision is present.
+        self.require_registered_definitions(engine.as_ref()).await?;
 
         // Factor compute is pure CPU work; run it on the blocking pool so a large
         // cross-sectional batch never stalls the async runtime. The engine moves
         // in and back out so its registry is reused for definition persistence.
-        let config = request.factors.clone();
+        let config = factors.clone();
         let vectors = request.vectors;
         let references = references.clone();
-        let (_engine, outcomes) = self
+        let outcomes = self
             .compute
-            .run_serving(move || {
-                let outcomes = engine.compute_batch_with_refs(&vectors, &config, &references)?;
-                Ok((engine, outcomes))
-            })
+            .run_serving(move || engine.compute_batch_with_refs(&vectors, &config, &references))
             .await?;
 
         // Build rows for eligible markets, tagging each factor with its source
@@ -234,45 +272,56 @@ impl FactorPipelineService {
         })
     }
 
-    /// Fail closed when any enabled definition is missing (never registered) or
-    /// not `Published`. Definitions are registered out-of-band by the explicit
-    /// factor-register governance action, so a fresh system with an unregistered
-    /// factor set is a hard block here (never a silent pass).
-    async fn require_published_definitions(&self, engine: &FactorEngine) -> QuantResult<()> {
-        let specs = engine.factor_set().definitions;
-        let identities = engine.definition_identities()?;
-        let ids: Vec<_> = identities
+    /// Fail closed when any exact, content-addressed serving definition is
+    /// absent or does not reconstruct the expected revision.
+    async fn require_registered_definitions(&self, engine: &FactorEngine) -> QuantResult<()> {
+        let plane = engine.serving_plane()?;
+        let ids: Vec<_> = plane
+            .definitions()
             .iter()
-            .map(|identity| identity.factor_definition_id)
+            .map(FactorDefinitionRef::factor_definition_id)
             .collect();
         let rows = self
             .factor_repo
             .find_definitions_by_ids(&ids)
             .await
             .map_err(QuantError::from)?;
-        let status_by_id: HashMap<FactorDefinitionId, PublicationStatus> = rows
-            .into_iter()
-            .map(|row| (row.factor_definition_id, row.status))
-            .collect();
         let mut violations = Vec::new();
-        for (spec, identity) in specs.iter().zip(identities) {
-            let id = identity.factor_definition_id;
-            match status_by_id.get(&id) {
-                Some(PublicationStatus::Published) => {}
-                Some(status) => {
-                    violations.push(format!("{}={}", spec.name.as_str(), status.as_str()));
-                }
-                None => violations.push(format!("{}=unregistered", spec.name.as_str())),
+        let mut rows_by_id: HashMap<FactorDefinitionId, FactorDefinitionInfo> = HashMap::new();
+        for row in rows {
+            let id = row.factor_definition_id;
+            if rows_by_id.insert(id, row).is_some() {
+                violations.push(format!("{id}=duplicate_persisted_row"));
             }
         }
+        for expected in plane.definitions() {
+            let id = expected.factor_definition_id();
+            let name = expected.factor_name();
+            match rows_by_id.remove(&id) {
+                None => violations.push(format!("{name}=unregistered")),
+                Some(row) => match FactorDefinitionRef::try_from(&row) {
+                    Err(error) => {
+                        violations.push(format!("{name}=invalid_persisted_revision({error})"));
+                    }
+                    Ok(actual) if actual != *expected => {
+                        violations.push(format!("{name}=serving_plane_mismatch"));
+                    }
+                    Ok(_) => {}
+                },
+            }
+        }
+        violations.extend(
+            rows_by_id
+                .into_keys()
+                .map(|id| format!("{id}=unexpected_persisted_row")),
+        );
         if violations.is_empty() {
             return Ok(());
         }
         Err(ReportError::ContractViolation {
             detail: format!(
-                "factor pipeline blocked: enabled definitions must be Published before compute \
-                 (unregistered definitions must first be registered via \
-                 POST /research/factors/register, then published) ({})",
+                "factor pipeline blocked: serving contract references definitions that were not \
+                 registered immutably during training ({})",
                 violations.join(", ")
             ),
         }

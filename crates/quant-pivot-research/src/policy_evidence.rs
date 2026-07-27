@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use polars::{
     error::PolarsError,
     prelude::{
-        Column, DataFrame, Int64Chunked, IntoLazy, ParquetReader, ParquetWriter, SerReader,
-        SortMultipleOptions, StringChunked, UInt32Chunked,
+        Column, DataFrame, Int64Chunked, ParquetReader, ParquetWriter, SerReader, StringChunked,
+        UInt32Chunked,
     },
 };
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
@@ -119,7 +119,7 @@ impl PolicyEvidenceParquetCodec {
             .iter()
             .map(|record| record.row_hash.to_string())
             .collect::<Vec<_>>();
-        let frame = DataFrame::new(
+        let mut frame = DataFrame::new(
             ordered.len(),
             vec![
                 Column::new("format_version".into(), format_versions),
@@ -130,14 +130,9 @@ impl PolicyEvidenceParquetCodec {
             ],
         )
         .map_err(PolicyEvidencePolarsError::from)?;
-        let mut sorted = frame
-            .lazy()
-            .sort(["record_key"], SortMultipleOptions::default())
-            .collect()
-            .map_err(PolicyEvidencePolarsError::from)?;
         let mut bytes = Vec::new();
         ParquetWriter::new(&mut bytes)
-            .finish(&mut sorted)
+            .finish(&mut frame)
             .map_err(PolicyEvidencePolarsError::from)?;
         Ok(bytes)
     }
@@ -316,20 +311,25 @@ fn timestamp(millis: Option<i64>, index: usize) -> QuantResult<Option<DateTime<U
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "research-jobs")]
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::types::ContentHash;
+    #[cfg(feature = "research-jobs")]
     use serde::{Deserialize, Serialize};
 
+    #[cfg(feature = "research-jobs")]
     use super::{PolicyEvidenceParquetCodec, PolicyEvidenceRecord};
 
+    #[cfg(feature = "research-jobs")]
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct Payload {
         value: u32,
     }
 
     #[cfg(feature = "research-jobs")]
-    #[test]
-    fn round_trip_preserves_chain() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn round_trip_preserves_chain() {
+        tokio::task::yield_now().await;
         let at = Utc
             .with_ymd_and_hms(2026, 7, 15, 0, 0, 0)
             .single()
@@ -339,6 +339,12 @@ mod tests {
             PolicyEvidenceRecord::from_typed("a", Some(at), &Payload { value: 1 }).expect("record"),
         ];
         let bytes = PolicyEvidenceParquetCodec::encode(&records).expect("encode");
+        let mut reordered = records.clone();
+        reordered.reverse();
+        assert_eq!(
+            PolicyEvidenceParquetCodec::encode(&reordered).expect("encode reordered"),
+            bytes
+        );
         let decoded = PolicyEvidenceParquetCodec::decode(&bytes).expect("decode");
 
         assert_eq!(decoded[0].record_key, "a");

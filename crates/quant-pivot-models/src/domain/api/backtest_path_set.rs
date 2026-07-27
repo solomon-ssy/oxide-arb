@@ -21,7 +21,10 @@ use crate::{
     types::{
         BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
         TrainingDatasetId,
-        backtest::{BacktestPaths, SharpeDistribution},
+        backtest::{
+            BacktestPaths, CpcvFoldArtifacts, CpcvMethodologyBinding, CpcvPathSetSubject,
+            SharpeDistribution,
+        },
     },
 };
 
@@ -105,6 +108,9 @@ pub struct BacktestPathSetView {
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
+    pub subject: CpcvPathSetSubject,
+    pub methodology: CpcvMethodologyBinding,
+    pub fold_artifacts: CpcvFoldArtifacts,
     pub path_count: i64,
     pub combination_count: i64,
     pub median_rank_ic: Decimal,
@@ -142,6 +148,9 @@ impl From<BacktestPathSetInfo> for BacktestPathSetView {
             decision_policy_snapshot_id: info.decision_policy_snapshot_id,
             window_start: info.window_start,
             window_end: info.window_end,
+            subject: info.subject,
+            methodology: info.methodology,
+            fold_artifacts: info.fold_artifacts,
             path_count: info.path_count,
             combination_count: info.combination_count,
             median_rank_ic: info.median_rank_ic,

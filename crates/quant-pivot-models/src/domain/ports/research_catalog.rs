@@ -81,7 +81,7 @@ pub trait ResearchCatalogPort: Send + Sync {
         query: ComparisonReportListQuery,
     ) -> QuantResult<Paginated<ModelComparisonReportInfo>>;
 
-    /// Page the factor-definition governance catalog, newest first.
+    /// Page the immutable factor-definition catalog, newest first.
     async fn list_factors(
         &self,
         query: FactorDefinitionListQuery,

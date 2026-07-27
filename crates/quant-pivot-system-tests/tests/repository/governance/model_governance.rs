@@ -3,9 +3,7 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
-    domain::quant::{
-        ModelGovernanceAuditDetail, NewModelGovernanceAudit, NewModelVersion, NewShadowComparison,
-    },
+    domain::quant::{ModelGovernanceAuditDetail, NewModelGovernanceAudit, NewShadowComparison},
     enums::{
         model::ModelFamily,
         quant::{ModelGovernanceAction, ModelWeightSource, PublicationStatus},
@@ -14,8 +12,6 @@ use quant_pivot_models::{
         AuditEventId, ContentHash, FeatureParityStateId, ModelGovernanceAuditId,
         ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, Probability,
         RoleCode, ShadowComparisonId,
-        model_metrics::ModelVersionMetrics,
-        model_training::ModelTrainingObjective,
         shadow::{ShadowRankDelta, ShadowScoreDelta},
     },
 };
@@ -27,7 +23,10 @@ use quant_pivot_repository::{
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
-    support::{execution_pg_seed, model_spec_fixtures},
+    support::{
+        model_serving_fixtures::{ModelVersionFixture, ModelVersionFixtureSeed},
+        model_spec_fixtures,
+    },
 };
 use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
@@ -46,7 +45,7 @@ async fn seed_two_versions(db: &DatabaseConnection) -> (ModelVersionId, ModelVer
             model_spec_id,
             "pg-governance-it",
             ModelFamily::WeightedFactor,
-            86_400,
+            model_spec_fixtures::pooled_horizon_secs(),
             ModelInputContract::single_required("book.mid"),
             ModelTrainingContract::settlement_default(),
         ))
@@ -54,28 +53,21 @@ async fn seed_two_versions(db: &DatabaseConnection) -> (ModelVersionId, ModelVer
         .expect("model spec");
 
     let mut ids = Vec::new();
-    for (index, seed) in [('a', 1), ('b', 2)].into_iter().enumerate() {
+    for seed in ['a', 'b'] {
         let id = ModelVersionId::from_v7();
-        registry
-            .create_model_version(NewModelVersion {
-                model_version_id: id,
+        let version = ModelVersionFixture::prepare(
+            db,
+            ModelVersionFixtureSeed::training(
+                format!("model-governance:{id}"),
+                id,
                 model_spec_id,
-                version: i32::try_from(index + 1).unwrap_or(1),
-                artifact_hash: content_hash(seed.0),
-                category_scope: None,
-                profile_ref: execution_pg_seed::fixture_profile_ref(),
-                training_dataset_id: None,
-                trade_policy_artifact_id: None,
-                trade_policy_hash: None,
-                publish_path_set_id: None,
-                derivation: NewModelVersion::training_derivation(),
-                metrics: ModelVersionMetrics::not_measured("test fixture"),
-                training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-                quality_gate_report: None,
-                publication_status: PublicationStatus::Candidate,
-                published_at: None,
-                retired_at: None,
-            })
+                content_hash(seed),
+            ),
+        )
+        .await
+        .expect("prepare exact model version");
+        registry
+            .create_model_version(version)
             .await
             .expect("model version");
         ids.push(id);

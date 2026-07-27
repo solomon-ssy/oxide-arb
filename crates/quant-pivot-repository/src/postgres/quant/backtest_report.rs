@@ -2,7 +2,7 @@
 
 use quant_pivot_error::storage::{
     StorageError,
-    entity::{QUANT_BACKTEST_REPORT, QUANT_MODEL_RUN, QUANT_MODEL_VERSION, QUANT_TRAINING_DATASET},
+    entity::{QUANT_BACKTEST_REPORT, QUANT_MODEL_RUN},
 };
 use quant_pivot_models::{
     domain::{
@@ -13,10 +13,8 @@ use quant_pivot_models::{
     entities::{
         quant_backtest_report::{Column, Entity},
         quant_model_run::Entity as ModelRunEntity,
-        quant_model_version::Entity as ModelVersionEntity,
-        quant_training_dataset::Entity as TrainingDatasetEntity,
     },
-    enums::quant::{DatasetPurpose, ModelRunKind, ModelRunStatus, TrainingDatasetStatus},
+    enums::quant::{DatasetPurpose, ModelRunKind, ModelRunStatus},
     types::{BacktestReportId, ModelVersionId},
 };
 use sea_orm::{
@@ -27,6 +25,7 @@ use sea_orm::{
 use crate::{
     postgres::{
         error,
+        quant::integrity::{load_dataset, load_model_lineage, verify_replay_dataset},
         query::{list_fk_desc, paginate_mapped},
     },
     traits::BacktestReportRepository,
@@ -50,65 +49,66 @@ impl PgBacktestReportRepository {
     where
         C: ConnectionTrait,
     {
-        let model_version = ModelVersionEntity::find_by_id(report.model_version_id)
-            .lock_shared()
-            .one(db)
-            .await
-            .map_err(StorageError::from)?
-            .ok_or_else(|| StorageError::not_found(QUANT_MODEL_VERSION, report.model_version_id))?;
-        let dataset = TrainingDatasetEntity::find_by_id(report.evaluation_dataset_id)
-            .lock_shared()
-            .one(db)
-            .await
-            .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::not_found(QUANT_TRAINING_DATASET, report.evaluation_dataset_id)
-            })?;
+        report.verify_hash().map_err(|detail| {
+            StorageError::invariant_violation(Some(QUANT_BACKTEST_REPORT), detail)
+        })?;
+        if report.parquet_uri.is_some() {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_BACKTEST_REPORT),
+                "backtest report parquet_uri is not part of the canonical report artifact",
+            ));
+        }
+        let model = load_model_lineage(db, report.model_version_id).await?;
+        let contract = model.version.serving_contract.bindings();
+        if contract.policy_snapshot.decision_policy_snapshot_id
+            != report.decision_policy_snapshot_id
+        {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_BACKTEST_REPORT),
+                "backtest report policy differs from the source model serving contract",
+            ));
+        }
+        let dataset = load_dataset(db, report.evaluation_dataset_id).await?;
+        let materialization =
+            verify_replay_dataset(db, &dataset, DatasetPurpose::Evaluation, &model).await?;
         let model_run = ModelRunEntity::find_by_id(report.model_run_id)
-            .lock_shared()
+            .lock_exclusive()
             .one(db)
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| StorageError::not_found(QUANT_MODEL_RUN, report.model_run_id))?;
 
-        let run_matches = model_run.run_kind == ModelRunKind::Backtest
-            && model_run.status == ModelRunStatus::Running
+        let run_identity_matches = model_run.run_kind == ModelRunKind::Backtest
             && model_run.model_version_id == Some(report.model_version_id)
             && model_run.decision_policy_snapshot_id == report.decision_policy_snapshot_id
-            && model_run.window_start == report.window_start
+            && model_run.market_selection_id.is_none();
+        let run_window_matches = model_run.window_start == report.window_start
             && model_run.window_end == report.window_end;
-        if !run_matches {
+        let run_state_matches = model_run.status == ModelRunStatus::Running
+            && model_run.input_hash == *materialization.dataset_hash
+            && model_run.output_hash.is_none()
+            && model_run.error_code.is_none()
+            && model_run.error_message.is_none()
+            && model_run.finished_at.is_none();
+        if !(run_identity_matches && run_window_matches && run_state_matches) {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_BACKTEST_REPORT),
-                "backtest report does not match its Running Backtest model run",
+                "backtest report does not match its exact Running Backtest model run",
             ));
         }
 
-        let dataset_matches = dataset.status == TrainingDatasetStatus::Ready
-            && dataset.purpose == DatasetPurpose::Evaluation
-            && dataset.model_spec_id == model_version.model_spec_id
-            && dataset.research_profile_artifact_id == model_version.research_profile_artifact_id
-            && dataset.decision_policy_snapshot_id == report.decision_policy_snapshot_id
+        let dataset_matches = dataset.decision_policy_snapshot_id
+            == report.decision_policy_snapshot_id
             && dataset.window_start == report.window_start
-            && dataset.window_end == report.window_end
-            && dataset.manifest.is_some()
-            && dataset.manifest_hash.is_some()
-            && dataset.artifact_bytes_hash.is_some()
-            && dataset.parquet_uri.is_some()
-            && dataset.coverage.is_some();
+            && dataset.window_end == report.window_end;
         if !dataset_matches {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_BACKTEST_REPORT),
-                "backtest report does not match a Ready Evaluation dataset with exact model, profile, policy, window, and artifact lineage",
+                "backtest report does not match the exact Evaluation Dataset policy/window",
             ));
         }
 
-        let dataset_sample_count = dataset.sample_count.ok_or_else(|| {
-            StorageError::invariant_violation(
-                Some(QUANT_BACKTEST_REPORT),
-                "Ready Evaluation dataset has no sealed sample count",
-            )
-        })?;
+        let dataset_sample_count = materialization.sample_count;
         if report.sample_count > dataset_sample_count {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_BACKTEST_REPORT),
@@ -126,7 +126,7 @@ impl PgBacktestReportRepository {
 impl BacktestReportRepository for PgBacktestReportRepository {
     async fn create(&self, report: NewBacktestReport) -> Result<BacktestReportInfo, StorageError> {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        self.validate_lineage(&transaction, &report).await?;
+        Box::pin(self.validate_lineage(&transaction, &report)).await?;
         let duplicate_key = report.backtest_report_id.to_string();
         let inserted = Entity::insert(report.into_active_model())
             .exec_with_returning(&transaction)

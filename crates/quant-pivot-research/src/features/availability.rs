@@ -70,7 +70,8 @@ fn source_available(candidate: &MarketCandidate, requirement: SourceRequirement)
         // *requiring* a domain feature therefore excludes every
         // unmapped / unresolved / source-empty market — fail-closed by
         // construction, never a fabricated value.
-        SourceRequirement::DomainObservationWindow => {
+        SourceRequirement::DomainCryptoObservationWindow
+        | SourceRequirement::DomainWeatherObservationWindow => {
             matches!(candidate.domain_availability, DomainAvailability::Available)
         }
         SourceRequirement::ResolvedLinkage => matches!(

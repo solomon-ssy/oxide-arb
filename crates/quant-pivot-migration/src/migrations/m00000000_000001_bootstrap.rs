@@ -137,6 +137,7 @@ impl MigrationTrait for Migration {
                 )
                 .await?;
         }
+        v1::drop_validation_programs(manager).await?;
         v1::drop_trigger_programs(manager).await
     }
 }

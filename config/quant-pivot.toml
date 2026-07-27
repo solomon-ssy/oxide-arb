@@ -487,6 +487,16 @@ require_versioning = false
 # signing_key = "64-lowercase-hex-characters"
 previous_signing_keys = []
 
+[research.model_serving_registry]
+# Successful immutable contracts retained in-process. Default: 32.
+max_cached_contracts = 32
+# Total cache-miss callers admitted across active and queued loads. Default: 64.
+max_pending_loads = 64
+# Distinct cold loads allowed to perform repository/object-store I/O. Default: 4.
+max_concurrent_loads = 4
+# End-to-end cold-load deadline in milliseconds. Default: 60000.
+load_timeout_ms = 60000
+
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #
 # Only `private_key` is configured. Polymarket CLOB L2 credentials are derived

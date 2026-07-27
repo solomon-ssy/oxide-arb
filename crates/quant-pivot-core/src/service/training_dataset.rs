@@ -4,15 +4,17 @@
 //! build needs (book snapshots, microstructure, market metadata, settlements),
 //! serves point-in-time lookups from an in-memory
 //! `MaterializedPitEngine` so the build loop issues zero DB queries, then runs
-//! the **same** feature builder and factor engine per `decision_at` cross-section
-//! the online path uses, attaches forward-looking labels, asserts no future
-//! leakage, materializes a content-hashed Parquet artifact, and records the
-//! ledger row. Features are bounded by the source cutoffs frozen in each
-//! [`DecisionBoundary`]; labels look strictly forward from `decision_at`; the
-//! dataset hash makes the whole thing reproducible.
+//! the **same** feature builder per `decision_at` cross-section the online path
+//! uses. Factor-native families additionally execute their exact frozen factor
+//! plane; classical families remain structurally feature-only. The service then
+//! attaches forward-looking labels, asserts no future leakage, materializes a
+//! content-hashed Parquet artifact, and records the ledger row. Features are
+//! bounded by the source cutoffs frozen in each [`DecisionBoundary`]; labels
+//! look strictly forward from `decision_at`; the dataset hash makes the whole
+//! thing reproducible.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -35,6 +37,7 @@ use quant_pivot_models::{
     },
     enums::{
         common::MarketCategory,
+        model::ModelFamily,
         quant::{DatasetPurpose, FeedbackCohort, TradePolicyStatus, TrainingDatasetStatus},
     },
     hashing::CanonicalDigest,
@@ -45,9 +48,10 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, ClobMarketInfoVersion, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
         DatasetCoverage, DatasetFeatureStateCounts, DatasetManifest, FeatureCellState, MarketId,
-        ModelInputContract, ModelSpecId, Price, ResearchJobProgress, Shares, TokenId,
-        TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId,
-        TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
+        ModelSpecId, Price, ResearchJobProgress, ResearchProfileArtifact, SchemaVersion, Shares,
+        TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId,
+        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, Usd,
+        factor::FactorServingPlane,
     },
 };
 use quant_pivot_repository::traits::{
@@ -58,7 +62,7 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     execution_semantics::BookFidelity,
-    factors::{FactorEligibility, FactorEngine, FactorSet, FactorValue, MarketFactorOutcome},
+    factors::{FactorEngine, FactorValue},
     features::ConfiguredFeatureBuilder,
     hashing::ResearchHasher,
     model::{
@@ -97,7 +101,8 @@ use crate::{
     service::{
         calibration_shared::assert_dataset_disjoint,
         historical_replay::{
-            CrossSectionRequest, ReplayConfig, ReplayCrossSection, materialize_cross_section,
+            CrossSectionRequest, ReplayCaptureKey, ReplayConfig, ReplayCrossSection,
+            ReplayFactorMode, ReplayFactorOutput, materialize_cross_section,
         },
         pit_selection::OfflinePitSelector,
     },
@@ -313,7 +318,7 @@ pub fn exit_decision_labelers() -> Vec<Box<dyn Labeler>> {
     ]
 }
 
-/// Verify exact bytes, the embedded v2 manifest and semantic rows against the
+/// Verify exact bytes, the embedded v3 manifest and semantic rows against the
 /// immutable dataset ledger.
 ///
 /// This gate runs before any trainer, calibrator or backtest consumes the
@@ -384,7 +389,9 @@ pub fn verify_frozen_dataset_artifact(
     })?;
     let bindings_match = manifest.training_dataset_id == dataset.training_dataset_id
         && manifest.model_spec_id == dataset.model_spec_id
+        && manifest.model_family == dataset.model_family
         && manifest.model_spec_definition_hash == dataset.model_spec_definition_hash
+        && manifest.factor_serving_plane == dataset.factor_serving_plane
         && manifest.source_lineage == dataset.source_lineage
         && manifest.cohort_manifest == dataset.cohort_manifest
         && manifest.source_lineage.research_profile_artifact_id
@@ -399,8 +406,8 @@ pub fn verify_frozen_dataset_artifact(
         && manifest.knowledge_lag_secs == knowledge_lag_secs
         && manifest.sample_interval_secs == sample_interval_secs
         && manifest.horizons_secs == dataset.horizons_secs.0
+        && manifest.feature_schema_version == dataset.feature_schema_version
         && &manifest.feature_schema_hash == materialization.feature_schema_hash
-        && &manifest.factor_schema_hash == materialization.factor_schema_hash
         && &manifest.label_schema_hash == materialization.label_schema_hash
         && &manifest.semantic_dataset_hash == materialization.dataset_hash
         && manifest.sample_count == sample_count;
@@ -543,9 +550,89 @@ pub struct TrainingDatasetService {
     bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
 }
 
+enum DatasetFactorEngine {
+    FactorNative {
+        engine: FactorEngine,
+        category_scope: Option<MarketCategory>,
+    },
+    FeatureOnly {
+        category_scope: Option<MarketCategory>,
+    },
+}
+
+struct DatasetFactorContract {
+    feature_schema_hash: ContentHash,
+    factor_serving_plane: FactorServingPlane,
+}
+
+impl DatasetFactorEngine {
+    fn try_new(
+        model_family: ModelFamily,
+        expected_plane: &FactorServingPlane,
+        category_scope: Option<MarketCategory>,
+        factors: &FactorsConfig,
+        features: &FeaturesConfig,
+        domain: &DomainConfig,
+        bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
+    ) -> QuantResult<Self> {
+        if model_family.is_classical() {
+            let empty =
+                FactorServingPlane::try_empty().map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!("seal classical factor-free plane: {error}"),
+                })?;
+            if expected_plane != &empty {
+                return Err(ResearchError::DatasetBuild {
+                    detail:
+                        "classical dataset plan is not bound to the canonical empty factor plane"
+                            .to_owned(),
+                }
+                .into());
+            }
+            return Ok(Self::FeatureOnly { category_scope });
+        }
+        let engine =
+            FactorEngine::for_model_scope(factors, features, domain, category_scope, bias_table);
+        if engine.registry().is_empty() {
+            return Err(QuantError::config(
+                "no factors enabled for a factor-native model family",
+            ));
+        }
+        if engine.serving_plane()? != expected_plane {
+            return Err(ResearchError::DatasetBuild {
+                detail: "active factor engine does not reproduce the frozen dataset factor plane"
+                    .to_owned(),
+            }
+            .into());
+        }
+        Ok(Self::FactorNative {
+            engine,
+            category_scope,
+        })
+    }
+
+    const fn replay_mode(&self) -> ReplayFactorMode<'_> {
+        match self {
+            Self::FactorNative { engine, .. } => ReplayFactorMode::FactorNative { engine },
+            Self::FeatureOnly { .. } => ReplayFactorMode::FeatureOnly,
+        }
+    }
+
+    const fn category_scope(&self) -> Option<MarketCategory> {
+        match self {
+            Self::FactorNative { category_scope, .. } | Self::FeatureOnly { category_scope } => {
+                *category_scope
+            }
+        }
+    }
+}
+
 impl TrainingDatasetService {
     /// Freeze a cohort-owned event-driven plan with no synthetic sample grid.
-    pub async fn plan_feedback(&self, request: DatasetPlanRequest) -> QuantResult<DatasetPlan> {
+    pub async fn plan_feedback(
+        &self,
+        request: DatasetPlanRequest,
+        factor_serving_plane: FactorServingPlane,
+    ) -> QuantResult<DatasetPlan> {
         require_half_open_window(request.window_start, request.window_end)?;
         let cohort =
             request
@@ -560,7 +647,7 @@ impl TrainingDatasetService {
                 detail: error.to_string(),
             })?;
         if cohort.cohort != FeedbackCohort::ModelLearning
-            || request.sample_sources != [TrainingSampleSource::RecommendationFeedback]
+            || request.sample_sources.as_slice() != [TrainingSampleSource::RecommendationFeedback]
             || request.sample_interval_secs != 0
             || request.horizons_secs != [0]
             || request.training_dataset_id.is_none()
@@ -580,8 +667,28 @@ impl TrainingDatasetService {
             .map_err(|error| ResearchError::DatasetPlan {
                 detail: error.to_string(),
             })?;
-        let (model_spec_definition_hash, trade_policy_artifact_id, trade_policy_hash, trade_policy) =
-            self.resolve_trade_policy_binding(&request).await?;
+        let profile = Self::resolve_research_profile(&request)?;
+        let (
+            model_spec_definition_hash,
+            model_family,
+            trade_policy_artifact_id,
+            trade_policy_hash,
+            trade_policy,
+        ) = self
+            .resolve_trade_policy_binding(&request, &profile)
+            .await?;
+        let expected_contract = self.factor_contract_for(
+            model_family,
+            request.feature_schema_version,
+            profile.spec.category,
+        )?;
+        if factor_serving_plane != expected_contract.factor_serving_plane {
+            return Err(ResearchError::DatasetPlan {
+                detail: "feedback factor plane differs from the exact ResearchProfile-scoped plane"
+                    .to_owned(),
+            }
+            .into());
+        }
         let training_dataset_id =
             request
                 .training_dataset_id
@@ -592,6 +699,9 @@ impl TrainingDatasetService {
             request,
             training_dataset_id,
             model_spec_definition_hash,
+            model_family,
+            feature_schema_hash: expected_contract.feature_schema_hash,
+            factor_serving_plane,
             samples: Vec::new(),
             lot_samples: Vec::new(),
             exit_training_lots: Vec::new(),
@@ -618,6 +728,7 @@ impl TrainingDatasetService {
             })?;
         if request
             .sample_sources
+            .as_slice()
             .iter()
             .any(|source| !matches!(source, TrainingSampleSource::HistoricalPit))
         {
@@ -626,19 +737,38 @@ impl TrainingDatasetService {
             }
             .into());
         }
-        let (model_spec_definition_hash, trade_policy_artifact_id, trade_policy_hash, trade_policy) =
-            self.resolve_trade_policy_binding(&request).await?;
-        let plan_markets = self.frozen_plan_markets(&request, &source.prefetched)?;
+        let profile = Self::resolve_research_profile(&request)?;
+        let (
+            model_spec_definition_hash,
+            model_family,
+            trade_policy_artifact_id,
+            trade_policy_hash,
+            trade_policy,
+        ) = self
+            .resolve_trade_policy_binding(&request, &profile)
+            .await?;
+        let factor_contract = self.factor_contract_for(
+            model_family,
+            request.feature_schema_version,
+            profile.spec.category,
+        )?;
+        let plan_markets =
+            self.frozen_plan_markets(&request, &source.prefetched, profile.spec.category)?;
         let samples = plan_samples(&request, &plan_markets)?;
         let training_dataset_id = request
             .training_dataset_id
             .unwrap_or_else(TrainingDatasetId::from_v7);
-        let label_names =
-            label_names_for_sources(&request.sample_sources, trade_policy_artifact_id.is_some());
+        let label_names = label_names_for_sources(
+            request.sample_sources.as_slice(),
+            trade_policy_artifact_id.is_some(),
+        );
         Ok(DatasetPlan {
             request,
             training_dataset_id,
             model_spec_definition_hash,
+            model_family,
+            feature_schema_hash: factor_contract.feature_schema_hash,
+            factor_serving_plane: factor_contract.factor_serving_plane,
             samples,
             lot_samples: Vec::new(),
             exit_training_lots: Vec::new(),
@@ -653,6 +783,7 @@ impl TrainingDatasetService {
         &self,
         request: &DatasetPlanRequest,
         prefetched: &Prefetched,
+        category_scope: Option<MarketCategory>,
     ) -> QuantResult<Vec<PlanMarket>> {
         let mut versions = BTreeMap::<MarketId, Vec<_>>::new();
         for version in &prefetched.catalog.market_changes {
@@ -696,13 +827,7 @@ impl TrainingDatasetService {
                     })
                 })
             });
-            if !observed
-                || (!self.enabled_categories.is_empty()
-                    && !info
-                        .categories
-                        .iter()
-                        .any(|category| self.enabled_categories.contains(&category)))
-            {
+            if !observed || !self.categories_selected(info.categories.iter(), category_scope) {
                 continue;
             }
             let created_at = info
@@ -792,11 +917,27 @@ impl TrainingDatasetService {
         ))
     }
 
+    fn resolve_research_profile(
+        request: &DatasetPlanRequest,
+    ) -> QuantResult<ResearchProfileArtifact> {
+        request
+            .source_lineage
+            .research_profile_artifact_id
+            .profile_ref()
+            .resolve_builtin_research_profile()
+            .map_err(|detail| ResearchError::DatasetPlan {
+                detail: format!("research profile preimage verification failed: {detail}"),
+            })
+            .map_err(Into::into)
+    }
+
     async fn resolve_trade_policy_binding(
         &self,
         request: &DatasetPlanRequest,
+        profile: &ResearchProfileArtifact,
     ) -> QuantResult<(
         ContentHash,
+        ModelFamily,
         Option<TradePolicyArtifactId>,
         Option<ContentHash>,
         Option<TradePolicyArtifactPayload>,
@@ -810,14 +951,36 @@ impl TrainingDatasetService {
                 entity: "quant_model_spec",
                 id: request.model_spec_id.to_string(),
             })?;
+        let prediction_horizon_secs =
+            u64::try_from(spec.prediction_horizon_secs).map_err(|error| {
+                ResearchError::DatasetPlan {
+                    detail: format!(
+                        "model spec {} prediction horizon is invalid: {error}",
+                        spec.model_spec_id
+                    ),
+                }
+            })?;
+        if prediction_horizon_secs != profile.spec.target_horizon_secs {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "model spec {} prediction horizon {}s differs from ResearchProfile {}@{} target {}s",
+                    spec.model_spec_id,
+                    prediction_horizon_secs,
+                    profile.profile_ref.id,
+                    profile.profile_ref.version,
+                    profile.spec.target_horizon_secs,
+                ),
+            }
+            .into());
+        }
         if request.purpose == DatasetPurpose::PolicyFit {
-            return Ok((spec.definition_hash, None, None, None));
+            return Ok((spec.definition_hash, spec.model_family, None, None, None));
         }
         spec.training_contract
             .validate()
             .map_err(|detail| ResearchError::DatasetPlan { detail })?;
         let Some(artifact_id) = spec.training_contract.trade_policy_artifact_id else {
-            return Ok((spec.definition_hash, None, None, None));
+            return Ok((spec.definition_hash, spec.model_family, None, None, None));
         };
         let artifact = self
             .trade_policy_repo
@@ -875,10 +1038,56 @@ impl TrainingDatasetService {
         }
         Ok((
             spec.definition_hash,
+            spec.model_family,
             Some(artifact.artifact_id),
             Some(artifact.content_hash),
             Some(artifact.payload_json),
         ))
+    }
+
+    fn factor_contract_for(
+        &self,
+        model_family: ModelFamily,
+        feature_schema_version: SchemaVersion,
+        category_scope: Option<MarketCategory>,
+    ) -> QuantResult<DatasetFactorContract> {
+        let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain)?;
+        if builder.schema().version() != feature_schema_version {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "requested feature schema version {feature_schema_version} does not match active profile schema {}",
+                    builder.schema().version()
+                ),
+            }
+            .into());
+        }
+        let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
+        if model_family.is_classical() {
+            let factor_serving_plane =
+                FactorServingPlane::try_empty().map_err(|error| ResearchError::DatasetPlan {
+                    detail: format!("seal classical factor-free plane: {error}"),
+                })?;
+            return Ok(DatasetFactorContract {
+                feature_schema_hash,
+                factor_serving_plane,
+            });
+        }
+        let engine = FactorEngine::for_model_scope(
+            &self.factors,
+            &self.features,
+            &self.domain,
+            category_scope,
+            self.bias_table.as_ref().map(Arc::clone),
+        );
+        if engine.registry().is_empty() {
+            return Err(QuantError::config(
+                "no factors enabled for a factor-native model family",
+            ));
+        }
+        Ok(DatasetFactorContract {
+            feature_schema_hash,
+            factor_serving_plane: engine.serving_plane()?.clone(),
+        })
     }
 
     /// The historical candidate set for a window, sourced point-in-time
@@ -936,6 +1145,7 @@ impl TrainingDatasetService {
         info: &MarketInfo,
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
+        category_scope: Option<MarketCategory>,
     ) -> bool {
         if info.created_at >= window_end {
             return false;
@@ -943,11 +1153,22 @@ impl TrainingDatasetService {
         if info.end_date.is_some_and(|end| end <= window_start) {
             return false;
         }
-        self.enabled_categories.is_empty()
-            || info
-                .categories
-                .iter()
-                .any(|category| self.enabled_categories.contains(category))
+        self.categories_selected(info.categories.iter().copied(), category_scope)
+    }
+
+    fn categories_selected<I>(&self, categories: I, category_scope: Option<MarketCategory>) -> bool
+    where
+        I: IntoIterator<Item = MarketCategory>,
+    {
+        match category_scope {
+            Some(category) => categories
+                .into_iter()
+                .any(|candidate| candidate == category),
+            None if self.enabled_categories.is_empty() => true,
+            None => categories
+                .into_iter()
+                .any(|category| self.enabled_categories.contains(&category)),
+        }
     }
 
     /// The deterministic candidate selection for a plan window.
@@ -956,10 +1177,11 @@ impl TrainingDatasetService {
         markets: &[MarketInfo],
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
+        category_scope: Option<MarketCategory>,
     ) -> Vec<PlanMarket> {
         markets
             .iter()
-            .filter(|info| self.in_selection(info, window_start, window_end))
+            .filter(|info| self.in_selection(info, window_start, window_end, category_scope))
             .map(|info| PlanMarket {
                 market_id: info.market_id.clone(),
                 token_id: info.yes_token_id.clone(),
@@ -981,9 +1203,11 @@ impl TrainingDatasetService {
         sample_markets: u32,
     ) -> QuantResult<PlanCounts> {
         require_half_open_window(request.window_start, request.window_end)?;
+        let profile = Self::resolve_research_profile(request)?;
         let mut total: u64 = 0;
         let wants_historical = request
             .sample_sources
+            .as_slice()
             .contains(&TrainingSampleSource::HistoricalPit);
         // Candidate `MarketInfo` set (category + lifetime), reused for both the
         // arithmetic spine upper bound and the sampled keep-rate estimate. Sourced
@@ -992,7 +1216,14 @@ impl TrainingDatasetService {
             self.historical_candidate_markets(request.window_start, request.window_end)
                 .await?
                 .into_iter()
-                .filter(|info| self.in_selection(info, request.window_start, request.window_end))
+                .filter(|info| {
+                    self.in_selection(
+                        info,
+                        request.window_start,
+                        request.window_end,
+                        profile.spec.category,
+                    )
+                })
                 .collect()
         } else {
             Vec::new()
@@ -1062,9 +1293,10 @@ impl TrainingDatasetService {
         let mut total = 0_u64;
         if request
             .sample_sources
+            .as_slice()
             .contains(&TrainingSampleSource::ExitDecision)
         {
-            let lots = self
+            let mut lots = self
                 .position_repo
                 .find_exit_training_lots(
                     request.window_start,
@@ -1073,6 +1305,26 @@ impl TrainingDatasetService {
                 )
                 .await
                 .map_err(QuantError::from)?;
+            let profile = Self::resolve_research_profile(request)?;
+            let market_ids = lots
+                .iter()
+                .map(|lot| lot.market_id.clone())
+                .collect::<HashSet<_>>();
+            let eligible_markets = self
+                .market_repo
+                .find_by_ids(&market_ids.into_iter().collect::<Vec<_>>())
+                .await
+                .map_err(QuantError::from)?
+                .into_iter()
+                .filter(|market| {
+                    self.categories_selected(
+                        market.categories.iter().copied(),
+                        profile.spec.category,
+                    )
+                })
+                .map(|market| market.market_id.clone())
+                .collect::<HashSet<_>>();
+            lots.retain(|lot| eligible_markets.contains(&lot.market_id));
             let lot_samples = plan_lot_timeline_samples(
                 request.sample_interval_secs,
                 request.window_start,
@@ -1113,7 +1365,7 @@ impl TrainingDatasetService {
         let model_requirements = self
             .resolve_model_requirements(&request.model_spec_id)
             .await?;
-        let selector = self.offline_pit_selector(request, model_requirements);
+        let selector = self.offline_pit_selector(request, model_requirements)?;
         // Bounded live linkage/domain-fact reads (one per slice, batched over
         // `sampled`), the same projector the live pipeline uses — never a
         // hardcoded conservative placeholder — so the dry-run estimate isn't
@@ -1222,8 +1474,21 @@ fn stride_sample<'a>(candidates: &[&'a MarketInfo], limit: usize) -> Vec<&'a Mar
 impl TrainingDatasetPlanner for TrainingDatasetService {
     async fn plan(&self, request: DatasetPlanRequest) -> QuantResult<DatasetPlan> {
         require_half_open_window(request.window_start, request.window_end)?;
-        let (model_spec_definition_hash, trade_policy_artifact_id, trade_policy_hash, trade_policy) =
-            self.resolve_trade_policy_binding(&request).await?;
+        let profile = Self::resolve_research_profile(&request)?;
+        let (
+            model_spec_definition_hash,
+            model_family,
+            trade_policy_artifact_id,
+            trade_policy_hash,
+            trade_policy,
+        ) = self
+            .resolve_trade_policy_binding(&request, &profile)
+            .await?;
+        let factor_contract = self.factor_contract_for(
+            model_family,
+            request.feature_schema_version,
+            profile.spec.category,
+        )?;
         // Point-in-time candidate selection: markets observed (had a book) in the
         // window whose fee-dominant category is in the enabled set (mirrors the
         // online [`CategoryFilter`]; per-`as_of` liquidity/data-quality eligibility
@@ -1232,13 +1497,18 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
         let markets = self
             .historical_candidate_markets(request.window_start, request.window_end)
             .await?;
-        let plan_markets =
-            self.candidate_plan_markets(&markets, request.window_start, request.window_end);
+        let plan_markets = self.candidate_plan_markets(
+            &markets,
+            request.window_start,
+            request.window_end,
+            profile.spec.category,
+        );
         let samples = plan_samples(&request, &plan_markets)?;
         let mut lot_samples = Vec::new();
         let mut exit_training_lots = Vec::new();
         if request
             .sample_sources
+            .as_slice()
             .contains(&TrainingSampleSource::ExitDecision)
         {
             exit_training_lots = self
@@ -1250,6 +1520,11 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
                 )
                 .await
                 .map_err(QuantError::from)?;
+            let eligible_markets = plan_markets
+                .iter()
+                .map(|market| &market.market_id)
+                .collect::<HashSet<_>>();
+            exit_training_lots.retain(|lot| eligible_markets.contains(&lot.market_id));
             lot_samples = plan_lot_timeline_samples(
                 request.sample_interval_secs,
                 request.window_start,
@@ -1259,12 +1534,17 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
         let training_dataset_id = request
             .training_dataset_id
             .unwrap_or_else(TrainingDatasetId::from_v7);
-        let label_names =
-            label_names_for_sources(&request.sample_sources, trade_policy_artifact_id.is_some());
+        let label_names = label_names_for_sources(
+            request.sample_sources.as_slice(),
+            trade_policy_artifact_id.is_some(),
+        );
         Ok(DatasetPlan {
             request,
             training_dataset_id,
             model_spec_definition_hash,
+            model_family,
+            feature_schema_hash: factor_contract.feature_schema_hash,
+            factor_serving_plane: factor_contract.factor_serving_plane,
             samples,
             lot_samples,
             exit_training_lots,
@@ -1283,6 +1563,7 @@ impl TrainingDatasetService {
         if plan
             .request
             .sample_sources
+            .as_slice()
             .contains(&TrainingSampleSource::ExitDecision)
         {
             total += plan.lot_samples.len() as u64;
@@ -1304,7 +1585,6 @@ impl TrainingDatasetService {
         &self,
         plan: DatasetPlan,
         examples: Vec<TrainingExample>,
-        factor_set: FactorSet,
         coverage: DatasetCoverage,
     ) -> QuantResult<TrainingDatasetArtifact> {
         if plan
@@ -1313,7 +1593,8 @@ impl TrainingDatasetService {
             .as_ref()
             .map(|manifest| manifest.cohort)
             != Some(FeedbackCohort::ModelLearning)
-            || plan.request.sample_sources != [TrainingSampleSource::RecommendationFeedback]
+            || plan.request.sample_sources.as_slice()
+                != [TrainingSampleSource::RecommendationFeedback]
             || plan.request.sample_interval_secs != 0
             || !plan.samples.is_empty()
             || !plan.lot_samples.is_empty()
@@ -1330,7 +1611,6 @@ impl TrainingDatasetService {
         self.prepare_build_ledger(&plan).await?;
         let training_dataset_id = plan.training_dataset_id;
         let result = async {
-            self.ensure_factors_enabled()?;
             let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain)?;
             if builder.schema().version() != plan.request.feature_schema_version {
                 return Err(ResearchError::DatasetBuild {
@@ -1342,7 +1622,7 @@ impl TrainingDatasetService {
                 }
                 .into());
             }
-            self.finalize_with_factors(&builder, &factor_set, plan, examples, coverage)
+            self.finalize_dataset(&builder, plan, examples, coverage)
                 .await
         }
         .await;
@@ -1368,7 +1648,11 @@ impl TrainingDatasetService {
             return Ok(None);
         }
         let plan_matches = dataset.model_spec_id == plan.request.model_spec_id
+            && dataset.model_family == plan.model_family
             && dataset.model_spec_definition_hash == plan.model_spec_definition_hash
+            && dataset.factor_serving_plane == plan.factor_serving_plane
+            && dataset.feature_schema_hash == plan.feature_schema_hash
+            && dataset.factor_schema_hash == plan.factor_serving_plane.factor_schema_hash()
             && dataset.source_lineage == plan.request.source_lineage
             && dataset.cohort_manifest == plan.request.cohort_manifest
             && dataset.window_start == plan.request.window_start
@@ -1384,9 +1668,8 @@ impl TrainingDatasetService {
                 })?
             && dataset.sample_interval_secs == 0
             && dataset.horizons_secs.0 == plan.request.horizons_secs
-            && dataset.feature_schema_version == Some(plan.request.feature_schema_version)
-            && dataset.sample_sources.as_ref().map(|sources| &sources.0)
-                == Some(&plan.request.sample_sources);
+            && dataset.feature_schema_version == plan.request.feature_schema_version
+            && dataset.sample_sources.as_ref() == Some(&plan.request.sample_sources);
         if !plan_matches {
             return Err(StorageError::state_conflict(
                 "quant_training_dataset",
@@ -1406,7 +1689,6 @@ impl TrainingDatasetService {
             window_end: dataset.window_end,
             examples,
             feature_schema_hash: *materialization.feature_schema_hash,
-            factor_schema_hash: *materialization.factor_schema_hash,
             label_schema_hash: *materialization.label_schema_hash,
             dataset_hash: *materialization.dataset_hash,
             manifest: materialization.manifest.clone(),
@@ -1487,7 +1769,6 @@ impl TrainingDatasetService {
         sink: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetArtifact> {
-        self.ensure_factors_enabled()?;
         // Fail closed on an oversized spine: a build this large would exhaust
         // memory/time; the operator must narrow the window / interval / selection
         // (the dry-run plan flags this as `hard_cap_exceeded` first).
@@ -1540,6 +1821,7 @@ impl TrainingDatasetService {
         if plan
             .request
             .sample_sources
+            .as_slice()
             .contains(&TrainingSampleSource::HistoricalPit)
         {
             let inputs = self
@@ -1639,7 +1921,11 @@ impl TrainingDatasetService {
                 .create_plan(NewTrainingDatasetPlan {
                     training_dataset_id: plan.training_dataset_id,
                     model_spec_id: plan.request.model_spec_id,
+                    model_family: plan.model_family,
                     model_spec_definition_hash: plan.model_spec_definition_hash,
+                    factor_serving_plane: plan.factor_serving_plane.clone(),
+                    feature_schema_hash: plan.feature_schema_hash,
+                    factor_schema_hash: plan.factor_serving_plane.factor_schema_hash(),
                     research_profile_artifact_id: plan
                         .request
                         .source_lineage
@@ -1660,10 +1946,8 @@ impl TrainingDatasetService {
                     knowledge_lag_secs,
                     sample_interval_secs,
                     horizons_secs: TrainingHorizonsSecs(plan.request.horizons_secs.clone()),
-                    feature_schema_version: Some(plan.request.feature_schema_version),
-                    sample_sources: Some(TrainingSampleSources(
-                        plan.request.sample_sources.clone(),
-                    )),
+                    feature_schema_version: plan.request.feature_schema_version,
+                    sample_sources: Some(plan.request.sample_sources.clone()),
                     decision_policy_snapshot_id: plan
                         .request
                         .source_lineage
@@ -1687,7 +1971,11 @@ impl TrainingDatasetService {
             }
         };
         let binding_matches = row.model_spec_id == plan.request.model_spec_id
+            && row.model_family == plan.model_family
             && row.model_spec_definition_hash == plan.model_spec_definition_hash
+            && row.factor_serving_plane == plan.factor_serving_plane
+            && row.feature_schema_hash == plan.feature_schema_hash
+            && row.factor_schema_hash == plan.factor_serving_plane.factor_schema_hash()
             && row.research_profile_artifact_id
                 == plan.request.source_lineage.research_profile_artifact_id
             && row.source_slice_id == plan.request.source_lineage.source_slice_id
@@ -1708,9 +1996,8 @@ impl TrainingDatasetService {
             && row.knowledge_lag_secs == knowledge_lag_secs
             && row.sample_interval_secs == sample_interval_secs
             && row.horizons_secs.0 == plan.request.horizons_secs
-            && row.feature_schema_version == Some(plan.request.feature_schema_version)
-            && row.sample_sources.as_ref().map(|sources| &sources.0)
-                == Some(&plan.request.sample_sources);
+            && row.feature_schema_version == plan.request.feature_schema_version
+            && row.sample_sources.as_ref() == Some(&plan.request.sample_sources);
         if !binding_matches {
             return Err(StorageError::state_conflict(
                 "quant_training_dataset",
@@ -1775,7 +2062,6 @@ impl TrainingDatasetService {
         plan: DatasetPlan,
         pit: &dyn PointInTimeSnapshotSource,
     ) -> QuantResult<TrainingDatasetArtifact> {
-        self.ensure_factors_enabled()?;
         let context = ReplayContext::new(&plan, &self.features)?;
         let loader = self.window_loader();
         let prefetched = loader
@@ -1791,6 +2077,7 @@ impl TrainingDatasetService {
         if plan
             .request
             .sample_sources
+            .as_slice()
             .contains(&TrainingSampleSource::HistoricalPit)
         {
             let params = self
@@ -1836,6 +2123,8 @@ impl TrainingDatasetService {
             cancel,
             samples: plan.samples.clone(),
             request: plan.request.clone(),
+            model_family: plan.model_family,
+            factor_serving_plane: plan.factor_serving_plane.clone(),
             features: self.features.clone(),
             factors: self.factors.clone(),
             data_quality: self.data_quality.clone(),
@@ -1844,7 +2133,11 @@ impl TrainingDatasetService {
             model_requirements,
             labelers: Arc::clone(&self.labelers),
             min_exit_depth_usd: self.min_exit_depth_usd,
-            bias_table: self.bias_table.as_ref().map(Arc::clone),
+            bias_table: if plan.model_family.is_classical() {
+                None
+            } else {
+                self.bias_table.as_ref().map(Arc::clone)
+            },
             context: ReplayContext::new(plan, &self.features)?,
             coverage,
         })
@@ -1869,6 +2162,8 @@ impl TrainingDatasetService {
             cancel,
             samples: &plan.samples,
             request: &plan.request,
+            model_family: plan.model_family,
+            factor_serving_plane: &plan.factor_serving_plane,
             features: &self.features,
             factors: &self.factors,
             data_quality: &self.data_quality,
@@ -1877,7 +2172,11 @@ impl TrainingDatasetService {
             model_requirements,
             labelers: &self.labelers,
             min_exit_depth_usd: self.min_exit_depth_usd,
-            bias_table: &self.bias_table,
+            bias_table: if plan.model_family.is_classical() {
+                None
+            } else {
+                self.bias_table.as_ref().map(Arc::clone)
+            },
             context: ReplayContext::new(plan, &self.features)?,
         })
     }
@@ -1899,16 +2198,26 @@ impl TrainingDatasetService {
             sink,
         } = tail;
         let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain)?;
-        let engine = FactorEngine::new(
+        let category_scope = Self::resolve_research_profile(&plan.request)?.spec.category;
+        let factor_engine = DatasetFactorEngine::try_new(
+            plan.model_family,
+            &plan.factor_serving_plane,
+            category_scope,
             &self.factors,
             &self.features,
             &self.domain,
-            self.bias_table.as_ref().map(Arc::clone),
+            if plan.model_family.is_classical() {
+                None
+            } else {
+                self.bias_table.as_ref().map(Arc::clone)
+            },
         );
+        let factor_engine = factor_engine?;
 
         if plan
             .request
             .sample_sources
+            .as_slice()
             .contains(&TrainingSampleSource::ExitDecision)
         {
             coverage.exit_decision_candidates = plan.lot_samples.len() as u64;
@@ -1921,6 +2230,7 @@ impl TrainingDatasetService {
                     clob_market_info,
                     context,
                 },
+                &factor_engine,
                 &mut ExampleBuildSink {
                     coverage: &mut coverage,
                     examples: &mut spine.examples,
@@ -1937,21 +2247,8 @@ impl TrainingDatasetService {
             "finalize",
             spine.examples.len() as u64,
         ));
-        self.finalize(&builder, &engine, plan, spine.examples, coverage)
+        self.finalize_dataset(&builder, plan, spine.examples, coverage)
             .await
-    }
-
-    /// Reject an empty factor set (no enabled families).
-    fn ensure_factors_enabled(&self) -> QuantResult<()> {
-        if FactorEngine::new(&self.factors, &self.features, &self.domain, None)
-            .registry()
-            .is_empty()
-        {
-            return Err(QuantError::config(
-                "no factors enabled: factors.enabled_factor_families selects an empty factor set",
-            ));
-        }
-        Ok(())
     }
 
     /// Assemble the historical-window loader from the frozen staleness bound.
@@ -1972,31 +2269,38 @@ impl TrainingDatasetService {
         &self,
         request: &DatasetPlanRequest,
         model_requirements: ModelFeatureRequirements,
-    ) -> OfflinePitSelector {
-        OfflinePitSelector::new(
+    ) -> QuantResult<OfflinePitSelector> {
+        let category_scope = Self::resolve_research_profile(request)?.spec.category;
+        Ok(OfflinePitSelector::new(
             &self.selection,
             &self.data_quality,
             &self.features,
             request.source_lineage.decision_policy_snapshot_id,
             request.knowledge_lag_secs,
             model_requirements,
-        )
+            category_scope,
+        ))
     }
 
     /// The frozen replay config (feature/factor/domain/data-quality) for this build.
-    fn replay_config(&self) -> ReplayConfig {
+    fn replay_config(&self, model_family: ModelFamily) -> ReplayConfig {
         ReplayConfig {
             features: self.features.clone(),
             factors: self.factors.clone(),
             domain: self.domain.clone(),
             data_quality: self.data_quality.clone(),
-            bias_table: self.bias_table.as_ref().map(Arc::clone),
+            bias_table: if model_family.is_classical() {
+                None
+            } else {
+                self.bias_table.as_ref().map(Arc::clone)
+            },
         }
     }
 
     async fn append_exit_decision_examples(
         &self,
         input: ExitDecisionAppendInput<'_>,
+        factor_engine: &DatasetFactorEngine,
         sink: &mut ExampleBuildSink<'_>,
     ) -> QuantResult<()> {
         let lot_by_intent: HashMap<_, _> = input
@@ -2007,18 +2311,13 @@ impl TrainingDatasetService {
             .collect();
         let exit_labelers = exit_decision_labelers();
         let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain)?;
-        let engine = FactorEngine::new(
-            &self.factors,
-            &self.features,
-            &self.domain,
-            self.bias_table.as_ref().map(Arc::clone),
-        );
-        let replay_config = self.replay_config();
+        let replay_config = self.replay_config(input.plan.model_family);
 
         for (as_of, group) in group_lot_samples(&input.plan.lot_samples) {
             let Some(cross_section) = materialize_lot_cross_section(LotCrossSectionMaterialize {
                 builder: &builder,
-                engine: &engine,
+                factor_mode: factor_engine.replay_mode(),
+                category_scope: factor_engine.category_scope(),
                 replay_config: &replay_config,
                 pit: input.pit,
                 prefetched: input.prefetched,
@@ -2037,7 +2336,7 @@ impl TrainingDatasetService {
                 let Some(lot) = lot_by_intent.get(&sample.order_intent_id) else {
                     continue;
                 };
-                let Some(index) = lot_cross_section_index(&cross_section, sample) else {
+                let Some(index) = lot_cross_section_index(&cross_section, sample)? else {
                     sink.coverage.samples_dropped_insufficient += 1;
                     continue;
                 };
@@ -2070,8 +2369,8 @@ impl TrainingDatasetService {
         let market = &input.cross_section.markets[input.market_index];
         let vector = &input.cross_section.vectors[input.market_index];
         let entry_mid = input.cross_section.entry_mids[input.market_index];
-        let outcome = &input.cross_section.outcomes[input.market_index];
-        let factor_values = eligible_factor_values(outcome);
+        let factor_values =
+            factor_values_at(&input.cross_section.factor_output, input.market_index)?;
         let remaining = remaining_shares_at(
             &LotTerminalSnapshot::from(input.lot),
             input.sample.decision_at,
@@ -2082,6 +2381,11 @@ impl TrainingDatasetService {
         let evidence = self
             .resolve_exit_decision_evidence(&input, market, entry_mid, remaining)
             .await?;
+        if evidence.book_fidelity != Some(BookFidelity::FullL2) {
+            record_exit_fill_fidelity(sink.coverage, evidence.book_fidelity);
+            sink.coverage.samples_dropped_insufficient += 1;
+            return Ok(());
+        }
         let forward = forward_window(
             input.sample.decision_at,
             input.max_horizon_secs,
@@ -2113,7 +2417,10 @@ impl TrainingDatasetService {
         let decision_capture = input
             .cross_section
             .captures
-            .get(&input.sample.market_id)
+            .get(&ReplayCaptureKey::new(
+                &input.sample.market_id,
+                &input.sample.token_id,
+            ))
             .ok_or_else(|| ResearchError::DatasetBuild {
                 detail: format!(
                     "exit-decision replay omitted capture for market {}",
@@ -2137,6 +2444,7 @@ impl TrainingDatasetService {
             lot_context: Some(LotTrainingContext {
                 order_intent_id: input.sample.order_intent_id,
                 position_id: input.sample.position_id,
+                outcome_side: input.sample.outcome_side,
                 remaining_shares: remaining,
                 avg_price: input.lot.avg_price,
                 peak_mark: evidence.peak_mark,
@@ -2211,23 +2519,9 @@ impl TrainingDatasetService {
 
     /// Assert leakage-freedom, hash the schemas + content, write the Parquet
     /// artifact, and record the ledger row.
-    async fn finalize(
+    async fn finalize_dataset(
         &self,
         builder: &ConfiguredFeatureBuilder,
-        engine: &FactorEngine,
-        plan: DatasetPlan,
-        examples: Vec<TrainingExample>,
-        coverage: DatasetCoverage,
-    ) -> QuantResult<TrainingDatasetArtifact> {
-        let factor_set = engine.factor_set();
-        self.finalize_with_factors(builder, &factor_set, plan, examples, coverage)
-            .await
-    }
-
-    async fn finalize_with_factors(
-        &self,
-        builder: &ConfiguredFeatureBuilder,
-        factor_set: &FactorSet,
         plan: DatasetPlan,
         examples: Vec<TrainingExample>,
         coverage: DatasetCoverage,
@@ -2235,20 +2529,42 @@ impl TrainingDatasetService {
         self.validate_finalization_input(&plan, &examples).await?;
 
         let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
-        let factor_schema_hash = ResearchHasher::factor_schema(factor_set)?;
+        if feature_schema_hash != plan.feature_schema_hash
+            || plan
+                .factor_serving_plane
+                .definitions()
+                .iter()
+                .any(|definition| {
+                    definition.feature_contract_hash() != feature_schema_hash
+                        || definition.input_schema_version() != plan.request.feature_schema_version
+                })
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: "frozen factor plane does not bind the materialized feature contract"
+                    .to_owned(),
+            }
+            .into());
+        }
         let label_schema_hash = ResearchHasher::label_schema(&plan.label_names)?;
         let coverage = self
-            .complete_integrity_coverage(&plan.request.model_spec_id, &examples, builder, coverage)
+            .complete_integrity_coverage(
+                &plan.request.model_spec_id,
+                plan.model_family,
+                &examples,
+                builder,
+                coverage,
+            )
             .await?;
         let integrity = dataset_integrity_outcome(&coverage)?;
         let dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
             DatasetHashContract {
                 model_spec_id: &plan.request.model_spec_id,
+                model_family: plan.model_family,
                 window_start: plan.request.window_start,
                 window_end: plan.request.window_end,
                 purpose: plan.request.purpose,
                 feature_schema_hash: &feature_schema_hash,
-                factor_schema_hash: &factor_schema_hash,
+                factor_serving_plane: &plan.factor_serving_plane,
                 label_schema_hash: &label_schema_hash,
             },
             &examples,
@@ -2260,7 +2576,6 @@ impl TrainingDatasetService {
                 &examples,
                 DatasetSchemaHashes {
                     feature: feature_schema_hash,
-                    factor: factor_schema_hash,
                     label: label_schema_hash,
                 },
                 dataset_hash,
@@ -2291,7 +2606,6 @@ impl TrainingDatasetService {
             window_end: plan.request.window_end,
             examples,
             feature_schema_hash,
-            factor_schema_hash,
             label_schema_hash,
             dataset_hash,
             manifest: persisted.manifest,
@@ -2325,6 +2639,7 @@ impl TrainingDatasetService {
     async fn complete_integrity_coverage(
         &self,
         model_spec_id: &ModelSpecId,
+        model_family: ModelFamily,
         examples: &[TrainingExample],
         builder: &ConfiguredFeatureBuilder,
         coverage: DatasetCoverage,
@@ -2338,6 +2653,15 @@ impl TrainingDatasetService {
                 entity: "quant_model_spec",
                 id: model_spec_id.to_string(),
             })?;
+        if model_spec.model_family != model_family {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "frozen dataset family {model_family} no longer matches model spec family {}",
+                    model_spec.model_family
+                ),
+            }
+            .into());
+        }
         model_spec
             .training_contract
             .validate()
@@ -2348,33 +2672,19 @@ impl TrainingDatasetService {
                 ),
             })?;
         let target_label = LabelName::new(model_spec.training_contract.target_label_name.clone());
-        self.complete_coverage(
-            examples,
-            builder,
-            &model_spec.input_contract,
-            &target_label,
-            model_spec.training_contract.target_label_horizon_secs,
-            coverage,
-        )
-    }
-
-    fn complete_coverage(
-        &self,
-        examples: &[TrainingExample],
-        builder: &ConfiguredFeatureBuilder,
-        input_contract: &ModelInputContract,
-        target_label: &LabelName,
-        target_horizon_secs: u64,
-        mut coverage: DatasetCoverage,
-    ) -> QuantResult<DatasetCoverage> {
-        coverage.bias_table_hash = self.bias_table.as_ref().map(|table| table.content_hash);
+        let mut coverage = coverage;
+        coverage.bias_table_hash = if model_family.is_classical() {
+            None
+        } else {
+            self.bias_table.as_ref().map(|table| table.content_hash)
+        };
         coverage.feature_state_counts = dataset_feature_state_counts(examples);
         coverage.matrix_probe = Some(probe_matrix_coverage(
             examples,
             builder.schema(),
-            input_contract,
-            target_label,
-            target_horizon_secs,
+            &model_spec.input_contract,
+            &target_label,
+            model_spec.training_contract.target_label_horizon_secs,
         )?);
         Ok(coverage)
     }
@@ -2396,6 +2706,7 @@ impl TrainingDatasetService {
             source_lineage: plan.request.source_lineage.clone(),
             cohort_manifest: plan.request.cohort_manifest.clone(),
             model_spec_id: plan.request.model_spec_id,
+            model_family: plan.model_family,
             model_spec_definition_hash: plan.model_spec_definition_hash,
             trade_policy_artifact_id: plan.trade_policy_artifact_id,
             trade_policy_hash: plan.trade_policy_hash,
@@ -2405,8 +2716,9 @@ impl TrainingDatasetService {
             knowledge_lag_secs: plan.request.knowledge_lag_secs,
             sample_interval_secs: plan.request.sample_interval_secs,
             horizons_secs: plan.request.horizons_secs.clone(),
+            feature_schema_version: plan.request.feature_schema_version,
             feature_schema_hash: schema_hashes.feature,
-            factor_schema_hash: schema_hashes.factor,
+            factor_serving_plane: plan.factor_serving_plane.clone(),
             label_schema_hash: schema_hashes.label,
             semantic_dataset_hash: dataset_hash,
             source_fingerprint: dataset_source_fingerprint(examples)?,
@@ -2522,7 +2834,6 @@ fn dataset_feature_state_counts(examples: &[TrainingExample]) -> DatasetFeatureS
 
 struct DatasetSchemaHashes {
     feature: ContentHash,
-    factor: ContentHash,
     label: ContentHash,
 }
 
@@ -2580,6 +2891,11 @@ fn build_labels_for(
             }
         }
     }
+    labels.sort_unstable_by(|left, right| {
+        left.label_name
+            .cmp(&right.label_name)
+            .then_with(|| left.horizon_secs.cmp(&right.horizon_secs))
+    });
     Ok(labels)
 }
 
@@ -2608,6 +2924,8 @@ struct HistoricalSpineParams<'a> {
     cancel: &'a CancellationToken,
     samples: &'a [SamplePlan],
     request: &'a DatasetPlanRequest,
+    model_family: ModelFamily,
+    factor_serving_plane: &'a FactorServingPlane,
     features: &'a FeaturesConfig,
     factors: &'a FactorsConfig,
     data_quality: &'a DataQualityConfig,
@@ -2618,7 +2936,7 @@ struct HistoricalSpineParams<'a> {
     labelers: &'a [Box<dyn Labeler>],
     min_exit_depth_usd: Usd,
     /// Frozen favorite-longshot bias table bound to the spine factor engine.
-    bias_table: &'a Option<Arc<FavoriteLongshotBiasTable>>,
+    bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
     context: ReplayContext,
 }
 
@@ -2632,6 +2950,8 @@ struct HistoricalSpineInputs {
     cancel: CancellationToken,
     samples: Vec<SamplePlan>,
     request: DatasetPlanRequest,
+    model_family: ModelFamily,
+    factor_serving_plane: FactorServingPlane,
     features: FeaturesConfig,
     factors: FactorsConfig,
     data_quality: DataQualityConfig,
@@ -2665,6 +2985,8 @@ fn run_historical_spine_blocking(
             cancel: &inputs.cancel,
             samples: &inputs.samples,
             request: &inputs.request,
+            model_family: inputs.model_family,
+            factor_serving_plane: &inputs.factor_serving_plane,
             features: &inputs.features,
             factors: &inputs.factors,
             data_quality: &inputs.data_quality,
@@ -2673,7 +2995,7 @@ fn run_historical_spine_blocking(
             model_requirements: inputs.model_requirements,
             labelers: &inputs.labelers,
             min_exit_depth_usd: inputs.min_exit_depth_usd,
-            bias_table: &inputs.bias_table,
+            bias_table: inputs.bias_table.as_ref().map(Arc::clone),
             context: inputs.context,
         },
         inputs.coverage,
@@ -2690,18 +3012,33 @@ async fn run_historical_spine(
     mut coverage: DatasetCoverage,
 ) -> QuantResult<HistoricalSpineOutput> {
     let builder = ConfiguredFeatureBuilder::new(params.features, params.domain)?;
-    let engine = FactorEngine::new(
+    let category_scope = TrainingDatasetService::resolve_research_profile(params.request)?
+        .spec
+        .category;
+    let factor_engine = DatasetFactorEngine::try_new(
+        params.model_family,
+        params.factor_serving_plane,
+        category_scope,
         params.factors,
         params.features,
         params.domain,
-        params.bias_table.as_ref().map(Arc::clone),
+        if params.model_family.is_classical() {
+            None
+        } else {
+            params.bias_table.as_ref().map(Arc::clone)
+        },
     );
+    let factor_engine = factor_engine?;
     let replay_config = ReplayConfig {
         features: params.features.clone(),
         factors: params.factors.clone(),
         domain: params.domain.clone(),
         data_quality: params.data_quality.clone(),
-        bias_table: params.bias_table.as_ref().map(Arc::clone),
+        bias_table: if params.model_family.is_classical() {
+            None
+        } else {
+            params.bias_table.as_ref().map(Arc::clone)
+        },
     };
     let pit_selector = OfflinePitSelector::new(
         params.selection,
@@ -2710,6 +3047,7 @@ async fn run_historical_spine(
         params.request.source_lineage.decision_policy_snapshot_id,
         params.request.knowledge_lag_secs,
         params.model_requirements.clone(),
+        category_scope,
     );
     let mut examples: Vec<TrainingExample> = Vec::new();
     let mut market_set: HashSet<MarketId> = HashSet::new();
@@ -2748,13 +3086,14 @@ async fn run_historical_spine(
         }
         let Some(cross_section) = materialize_cross_section(
             &builder,
-            &engine,
+            factor_engine.replay_mode(),
             &replay_config,
             &CrossSectionRequest {
                 pit: params.pit,
                 prefetched: params.prefetched,
                 decision_at: as_of,
                 group: &replay_group,
+                category_scope: factor_engine.category_scope(),
                 knowledge_lag: params.context.knowledge_lag,
                 lookback: params.context.lookback,
             },
@@ -2856,19 +3195,12 @@ fn append_historical_examples(
         let entry_price = input
             .cross_section
             .captures
-            .get(&market.market_id)
+            .get(&ReplayCaptureKey::new(
+                &market.market_id,
+                &market.primary_token_id,
+            ))
             .and_then(|capture| capture.market_context.best_ask);
-        let outcome = &input.cross_section.outcomes[index];
-        let factor_values = match &outcome.eligibility {
-            FactorEligibility::Eligible => outcome
-                .factors
-                .iter()
-                .map(|scored| scored.value.clone())
-                .collect(),
-            FactorEligibility::RejectCandidate { .. } | FactorEligibility::NotApplicable { .. } => {
-                Vec::new()
-            }
-        };
+        let factor_values = factor_values_at(&input.cross_section.factor_output, index)?;
         let forward = forward_window(
             input.cross_section.boundary.decision_at(),
             input.max_horizon_secs,
@@ -2899,7 +3231,10 @@ fn append_historical_examples(
         let decision_capture = input
             .cross_section
             .captures
-            .get(&market.market_id)
+            .get(&ReplayCaptureKey::new(
+                &market.market_id,
+                &market.primary_token_id,
+            ))
             .ok_or_else(|| ResearchError::DatasetBuild {
                 detail: format!(
                     "historical replay omitted capture for market {}",
@@ -2932,6 +3267,7 @@ fn planned_historical_samples(plan: &DatasetPlan) -> u64 {
     if plan
         .request
         .sample_sources
+        .as_slice()
         .contains(&TrainingSampleSource::HistoricalPit)
     {
         plan.samples.len() as u64
@@ -3106,7 +3442,8 @@ struct ExitDecisionAppendInput<'a> {
 
 struct LotCrossSectionMaterialize<'a> {
     builder: &'a ConfiguredFeatureBuilder,
-    engine: &'a FactorEngine,
+    factor_mode: ReplayFactorMode<'a>,
+    category_scope: Option<MarketCategory>,
     replay_config: &'a ReplayConfig,
     pit: &'a dyn PointInTimeSnapshotSource,
     prefetched: &'a Prefetched,
@@ -3197,20 +3534,34 @@ impl ReplayContext {
 fn lot_cross_section_index(
     cross_section: &ReplayCrossSection,
     sample: &LotSamplePlan,
-) -> Option<usize> {
-    cross_section
-        .markets
-        .iter()
-        .enumerate()
-        .find_map(|(index, market)| {
-            if market.market_id != sample.market_id {
-                return None;
+) -> QuantResult<Option<usize>> {
+    for (index, market) in cross_section.markets.iter().enumerate() {
+        if (&market.market_id, &market.primary_token_id) != (&sample.market_id, &sample.token_id) {
+            continue;
+        }
+        let binding = cross_section.outcome_bindings.get(index).ok_or_else(|| {
+            ResearchError::DatasetBuild {
+                detail: format!(
+                    "replay row {index} for market/token {}/{} has no outcome binding",
+                    sample.market_id, sample.token_id
+                ),
             }
-            if market.primary_token_id != sample.token_id {
-                return None;
+        })?;
+        if binding.feature_side() != sample.outcome_side {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "lot {} declares side {:?}, but catalog token {} resolves to {:?}",
+                    sample.position_id,
+                    sample.outcome_side,
+                    sample.token_id,
+                    binding.feature_side()
+                ),
             }
-            Some(index)
-        })
+            .into());
+        }
+        return Ok(Some(index));
+    }
+    Ok(None)
 }
 
 async fn materialize_lot_cross_section(
@@ -3219,20 +3570,24 @@ async fn materialize_lot_cross_section(
     let replay_group: Vec<ReplaySample> = input
         .group
         .iter()
-        .map(|sample| ReplaySample {
-            market_id: sample.market_id.clone(),
-            token_id: sample.token_id.clone(),
+        .map(|sample| (sample.market_id.clone(), sample.token_id.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|(market_id, token_id)| ReplaySample {
+            market_id,
+            token_id,
         })
         .collect();
     materialize_cross_section(
         input.builder,
-        input.engine,
+        input.factor_mode,
         input.replay_config,
         &CrossSectionRequest {
             pit: input.pit,
             prefetched: input.prefetched,
             decision_at: input.as_of,
             group: &replay_group,
+            category_scope: input.category_scope,
             knowledge_lag: input.context.knowledge_lag,
             lookback: input.context.lookback,
         },
@@ -3240,16 +3595,26 @@ async fn materialize_lot_cross_section(
     .await
 }
 
-fn eligible_factor_values(outcome: &MarketFactorOutcome) -> Vec<FactorValue> {
-    match &outcome.eligibility {
-        FactorEligibility::Eligible => outcome
-            .factors
-            .iter()
-            .map(|scored| scored.value.clone())
-            .collect(),
-        FactorEligibility::RejectCandidate { .. } | FactorEligibility::NotApplicable { .. } => {
-            Vec::new()
-        }
+fn factor_values_at(output: &ReplayFactorOutput, index: usize) -> QuantResult<Vec<FactorValue>> {
+    match output {
+        ReplayFactorOutput::FeatureOnly => Ok(Vec::new()),
+        ReplayFactorOutput::FactorNative { outcomes } => outcomes
+            .get(index)
+            .map(|outcome| {
+                outcome
+                    .factors
+                    .iter()
+                    .map(|scored| scored.value.clone())
+                    .collect()
+            })
+            .ok_or_else(|| {
+                ResearchError::DatasetBuild {
+                    detail: format!(
+                        "factor-native replay omitted outcome at aligned row index {index}"
+                    ),
+                }
+                .into()
+            }),
     }
 }
 
@@ -3271,7 +3636,7 @@ mod keep_rate_tests {
             CapabilityRegistryHashes, DATASET_SOURCE_LINEAGE_FORMAT_VERSION, DatasetSourceLineage,
             DecisionPolicySnapshotId, ModelSpecId, ReaderContractVersion,
             ResearchProfileArtifactId, SchemaContractVersion, SchemaVersion, SourceSliceId,
-            default_sample_sources,
+            TrainingSampleSources,
         },
     };
 
@@ -3319,7 +3684,7 @@ mod keep_rate_tests {
             horizons_secs: vec![60],
             knowledge_lag_secs: 10,
             feature_schema_version: SchemaVersion::FIRST,
-            sample_sources: default_sample_sources(),
+            sample_sources: TrainingSampleSources::default(),
             training_dataset_id: None,
             purpose: DatasetPurpose::Training,
         }

@@ -241,6 +241,9 @@ impl From<QuantError> for WebError {
             QuantError::Research(ResearchError::NotEligible { code, detail }) => {
                 Self::UnprocessableEntity(format!("{code}: {detail}"))
             }
+            QuantError::Research(research @ ResearchError::SellOofEstimatorRequired) => {
+                Self::UnprocessableEntity(research.to_string())
+            }
             QuantError::Research(
                 ResearchError::DatasetPlan { detail }
                 | ResearchError::LeakageDetected { detail }
@@ -296,6 +299,7 @@ mod tests {
     use quant_pivot_error::{
         QuantError,
         execution::ExecutionError,
+        research::ResearchError,
         storage::{
             StorageError,
             entity::{QUANT_ORDER_INTENT, USER},
@@ -325,6 +329,12 @@ mod tests {
             reason: "spread too wide".to_owned(),
         }));
         assert_eq!(web.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn sell_oof_maps_422() {
+        let web = WebError::from(QuantError::from(ResearchError::SellOofEstimatorRequired));
+        assert_eq!(web.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[test]

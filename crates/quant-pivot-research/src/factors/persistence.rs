@@ -3,15 +3,12 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::quant::{FactorDefinitionInfo, FactorValueInfo, NewFactorDefinition, NewFactorValue},
-    enums::{factor::FactorValueState, quant::PublicationStatus},
-    types::{
-        FactorValueId, FeatureVectorId, MarketId, ModelRunId, SchemaVersion,
-        factor::{FactorDefinitionDocument, factor_definition_content_hash},
-    },
+    domain::quant::{FactorDefinitionInfo, FactorValueInfo, NewFactorValue},
+    enums::factor::FactorValueState,
+    types::{FactorValueId, FeatureVectorId, MarketId, ModelRunId, factor::FactorDefinitionRef},
 };
 
-use super::{FactorDefinitionIdentity, FactorValue, NormalizedFactor, factor_definition_identity};
+use super::{FactorValue, NormalizedFactor};
 
 /// Round-scoped identifiers required to project a research [`FactorValue`] into
 /// Postgres (not carried on the compute type itself).
@@ -32,29 +29,23 @@ impl FactorValue {
         value: &FactorValueInfo,
         definition: &FactorDefinitionInfo,
     ) -> QuantResult<Self> {
-        let definition_hash = factor_definition_content_hash(
-            &definition.definition,
-            &definition.feature_contract_hash,
-        )
-        .map_err(|error| ResearchError::Serialization {
-            detail: format!(
-                "hash persisted factor definition {}: {error}",
-                definition.factor_definition_id
-            ),
-        })?;
-        if value.factor_definition_id != definition.factor_definition_id
-            || definition.definition_hash != definition_hash
-            || definition.name != definition.definition.name.as_str()
-            || definition.factor_family != definition.definition.family
-        {
-            return Err(ResearchError::Serialization {
+        let revision = FactorDefinitionRef::try_from(definition).map_err(|error| {
+            ResearchError::Serialization {
                 detail: format!(
-                    "persisted factor value {} does not match definition {}",
-                    value.factor_value_id, definition.factor_definition_id
+                    "rebuild persisted factor definition {}: {error}",
+                    definition.factor_definition_id
                 ),
             }
-            .into());
-        }
+        })?;
+        value
+            .validate_against(&revision)
+            .map_err(|error| ResearchError::Serialization {
+                detail: format!(
+                    "rebuild persisted factor value {}: {error}",
+                    value.factor_value_id
+                ),
+            })?;
+        let document = revision.definition();
         let normalization = match (
             value.value_state,
             value.raw_value,
@@ -92,14 +83,14 @@ impl FactorValue {
         };
         Ok(Self {
             definition_id: value.factor_definition_id,
-            name: definition.definition.name.clone(),
-            family: definition.definition.family,
+            name: document.name.clone(),
+            family: document.family,
             raw_value: value.raw_value,
             normalization,
             direction: value.direction,
             confidence: value.confidence,
             explanation: value.explanation.clone(),
-            input_feature_refs: definition.definition.input_features.clone(),
+            input_feature_refs: document.input_features.clone(),
         })
     }
 
@@ -128,46 +119,6 @@ impl FactorValue {
     }
 }
 
-/// Project a governed spec into a `quant_factor_definition` insert payload.
-///
-/// `identity` is resolved by the owning [`super::FactorEngine`] from the
-/// canonical definition plus the active feature contract. The repository is
-/// insert-only and treats re-registration of the exact same content as an
-/// idempotent read.
-///
-/// # Errors
-///
-/// Returns an error when the spec cannot be serialized to canonical JSON.
-pub fn factor_definition_to_new(
-    definition: &FactorDefinitionDocument,
-    input_schema_version: SchemaVersion,
-    identity: &FactorDefinitionIdentity,
-) -> QuantResult<NewFactorDefinition> {
-    let expected = factor_definition_identity(definition, &identity.feature_contract_hash)?;
-    if expected != *identity {
-        return Err(ResearchError::FactorComputation {
-            detail: format!(
-                "factor definition identity does not match canonical content for `{}`",
-                definition.name
-            ),
-        }
-        .into());
-    }
-    Ok(NewFactorDefinition {
-        factor_definition_id: identity.factor_definition_id,
-        definition_hash: identity.definition_hash,
-        feature_contract_hash: identity.feature_contract_hash,
-        name: definition.name.to_string(),
-        factor_family: definition.family,
-        scope: definition.family.definition_scope(),
-        input_schema_version,
-        output_schema_version: SchemaVersion::FIRST,
-        definition: definition.clone(),
-        status: PublicationStatus::Draft,
-        created_by: None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
@@ -175,20 +126,21 @@ mod tests {
         domain::quant::{FactorDefinitionInfo, FactorValueInfo},
         enums::{
             factor::{FactorFamily, FactorNormalization, FactorValueState, NormalizationSource},
-            quant::{FactorDirection, PublicationStatus},
+            quant::FactorDirection,
         },
         types::{
             ContentHash, FactorValueId, FeatureVectorId, MarketId, ModelRunId, Probability,
             SchemaVersion,
             factor::{
-                FactorDefinitionDocument, FactorExplanation, FactorOutputKind, FactorQualityGate,
+                FactorComputationContract, FactorContextEffect, FactorDefinitionDocument,
+                FactorDefinitionRef, FactorExplanation, FactorOutputSemantics,
             },
             stable_name::{FactorName, FeatureName},
         },
     };
     use rust_decimal_macros::dec;
 
-    use super::{FactorValue, NormalizedFactor, factor_definition_identity};
+    use super::{FactorValue, NormalizedFactor};
 
     fn factor_rows() -> (FactorDefinitionInfo, FactorValueInfo) {
         let created_at = Utc.timestamp_opt(1_000, 0).single().expect("created-at");
@@ -196,21 +148,28 @@ mod tests {
             name: FactorName::new("feedback_depth"),
             family: FactorFamily::Liquidity,
             input_features: vec![FeatureName::new("book.depth_usd")],
-            output_kind: FactorOutputKind::NormalizedScore,
-            default_direction: FactorDirection::Positive,
+            output: FactorOutputSemantics::Context {
+                effect: FactorContextEffect::HigherIsSupportive,
+            },
             normalization: FactorNormalization::MinMax,
             owner: "feedback-test".to_owned(),
-            quality_gates: vec![FactorQualityGate {
-                name: "confidence".to_owned(),
-                min_confidence: Probability::new(dec!(0.5)),
-            }],
+            required: true,
+            computation: FactorComputationContract {
+                semantic_version: 1,
+                semantic_key: "quant-pivot/test-feedback-depth@1".to_owned(),
+            },
         };
         let feature_contract_hash = ContentHash::from_bytes([1; 32]);
-        let identity = factor_definition_identity(&definition, &feature_contract_hash)
-            .expect("factor identity");
+        let revision = FactorDefinitionRef::try_seal(
+            definition.clone(),
+            feature_contract_hash,
+            SchemaVersion::FIRST,
+            SchemaVersion::FIRST,
+        )
+        .expect("factor revision");
         let definition_info = FactorDefinitionInfo {
-            factor_definition_id: identity.factor_definition_id,
-            definition_hash: identity.definition_hash,
+            factor_definition_id: revision.factor_definition_id(),
+            definition_hash: revision.definition_hash(),
             feature_contract_hash,
             name: definition.name.to_string(),
             factor_family: definition.family,
@@ -218,14 +177,11 @@ mod tests {
             input_schema_version: SchemaVersion::FIRST,
             output_schema_version: SchemaVersion::FIRST,
             definition,
-            status: PublicationStatus::Draft,
-            created_by: None,
             created_at,
-            updated_at: created_at,
         };
         let value_info = FactorValueInfo {
             factor_value_id: FactorValueId::from_v7(),
-            factor_definition_id: identity.factor_definition_id,
+            factor_definition_id: revision.factor_definition_id(),
             feature_vector_id: FeatureVectorId::from_v7(),
             model_run_id: ModelRunId::from_v7(),
             market_id: MarketId::new("feedback-factor-market"),
@@ -235,7 +191,7 @@ mod tests {
             normalized_score: Some(Probability::new(dec!(0.8))),
             normalization_source: Some(NormalizationSource::PerMarket),
             indeterminate_reason: None,
-            direction: FactorDirection::Positive,
+            direction: FactorDirection::Neutral,
             confidence: Probability::new(dec!(0.9)),
             explanation: FactorExplanation {
                 headline: "depth supports fill quality".to_owned(),

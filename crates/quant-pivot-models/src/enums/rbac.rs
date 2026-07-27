@@ -270,15 +270,7 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
             Operation::Retire,
         ],
     ),
-    (
-        ResourceType::FactorDefinition,
-        &[
-            Operation::Read,
-            Operation::Create,
-            Operation::Publish,
-            Operation::Retire,
-        ],
-    ),
+    (ResourceType::FactorDefinition, &[Operation::Read]),
     (
         ResourceType::Materialization,
         &[Operation::Read, Operation::Create],

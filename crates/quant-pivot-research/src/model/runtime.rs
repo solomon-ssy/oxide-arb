@@ -1,5 +1,4 @@
-//! Model runtime contract: [`QuantModelRuntime`], [`ModelRuntimeFactory`], and the
-//! runtime I/O types.
+//! Model runtime contract: [`QuantModelRuntime`] and the runtime I/O types.
 //!
 //! [`ModelFamily`] / [`ClassicalKind`] are owned by `quant_pivot_models`
 //! (flat Postgres `qp_model_family` labels).
@@ -8,21 +7,23 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 pub(crate) use quant_pivot_models::{
-    domain::quant::ModelVersionInfo,
     enums::{
         common::MarketCategory,
-        model::{ClassicalKind, ModelFamily},
+        model::ModelFamily,
         quant::{DataQualityStatus, ModelWeightSource},
     },
     runtime_config::FactorCrossSectionConfig,
-    types::{ContentHash, MarketId, ModelRunId, ModelVersionId, Price, TokenId, Usd},
+    types::{
+        ContentHash, MarketId, ModelRunId, ModelVersionId, Price, TokenId, Usd,
+        factor::FactorServingPlane,
+    },
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     factors::{FactorValue, FrozenReferenceQuantiles},
     features::{FeatureCell, FeatureName, NullReason},
-    model::{overlay::WeightOverlay, sell_scorer::SellScorerRuntime, signal::SignalCandidate},
+    model::signal::SignalCandidate,
 };
 
 /// Per-market context the scorer needs beyond the factor vector.
@@ -247,26 +248,30 @@ pub trait QuantModelRuntime: Send + Sync {
     }
 
     /// The single market category this runtime's frozen artifact declares
-    /// itself scoped to, or `None` for a generic cross-category scorer
-    /// for category routing. Enforced by the core `ModelRunner` and
-    /// `CategoryPointerGuard` against `model.category_model_pointers`: a
-    /// pointer's target must declare exactly the pointer's own category, or
-    /// `None`. Defaults to `None`; only the weighted-factor artifact carries
-    /// a scope today.
+    /// itself scoped to, or `None` for the pooled route. Atomic serving
+    /// generation preparation requires every configured pointer to equal its
+    /// sealed route scope before any generation is published. Defaults to
+    /// `None`; only the weighted-factor artifact carries a scope today.
     fn category_scope(&self) -> Option<MarketCategory> {
         None
     }
 
-    /// Whether this runtime is scoring on its frozen artifact weights or on a
-    /// runtime-config weight overlay. Defaults to [`ModelWeightSource::Artifact`];
-    /// only the weighted-factor runtime overrides it. Surfaced into the run
-    /// metrics for governance audit.
+    /// Immutable estimator-weight provenance. Serving artifacts always return
+    /// [`ModelWeightSource::Artifact`].
     fn weight_source(&self) -> ModelWeightSource {
         ModelWeightSource::Artifact
     }
 
     /// Weighted-only normalization policy frozen in the artifact.
     fn factor_cross_section(&self) -> Option<&FactorCrossSectionConfig> {
+        None
+    }
+
+    /// Exact content-addressed factor plane frozen in a factor-native artifact.
+    ///
+    /// Classical runtimes return `None` because their serving contracts carry
+    /// the canonical empty plane and never enter factor computation.
+    fn factor_serving_plane(&self) -> Option<&FactorServingPlane> {
         None
     }
 
@@ -280,34 +285,11 @@ pub trait QuantModelRuntime: Send + Sync {
     async fn infer_batch(&self, input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput>;
 }
 
-/// Loads a [`QuantModelRuntime`] from a model version. The only place that reads
-/// artifact bytes and knows a concrete artifact type.
-#[async_trait]
-pub trait ModelRuntimeFactory: Send + Sync {
-    /// Load and validate the runtime for a model version (hash + schema checks),
-    /// optionally applying a non-persisted [`WeightOverlay`] for a non-published
-    /// candidate / shadow version. `overlay` is honoured only by the
-    /// weighted-factor family; other families ignore it.
-    async fn load(
-        &self,
-        model_version: &ModelVersionInfo,
-        overlay: Option<WeightOverlay>,
-    ) -> QuantResult<Box<dyn QuantModelRuntime>>;
-
-    /// Load and validate a Sell-side hold-vs-exit scorer for a model version.
-    /// Uses the same fail-closed hash and schema-binding checks as [`Self::load`],
-    /// but returns the exit-scorer runtime family; rejects a non-Sell artifact.
-    async fn load_sell_scorer(
-        &self,
-        model_version: &ModelVersionInfo,
-    ) -> QuantResult<Box<dyn SellScorerRuntime>>;
-}
-
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
-    use super::{ClassicalKind, ModelFamily};
+    use quant_pivot_models::enums::model::{ClassicalKind, ModelFamily};
 
     #[test]
     fn model_family_string_roundtrip() {

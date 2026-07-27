@@ -10,7 +10,6 @@ use std::{
 use async_trait::async_trait;
 use blake3::Hasher;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use futures_util::StreamExt;
 use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
@@ -47,26 +46,25 @@ use quant_pivot_models::{
         TradePolicyValidationStatus, TrainingDatasetStatus,
     },
     hashing::CanonicalDigest,
-    runtime_config::PolicyValidationConfig,
+    runtime_config::{BuyModelRoute, PolicyValidationConfig},
     types::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DecisionPolicySnapshotId,
         DiagnosticCode, ExecutablePriceBasis, MarketId, ModelSpecId, ModelVersionId,
-        POLICY_EVIDENCE_OBJECT_FORMAT_VERSION, ResearchEvaluationTrack, ResearchJobId,
-        ResearchJobProgress, ResearchProfileArtifact, ResearchProfileId, ResearchProfileRef,
-        ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload, SchemaVersion,
-        ShadowLatencyProfileV1, SourceSliceManifest, SourceSliceManifestRef, SourceSliceObjectKind,
-        StructuralVolatilityOosFoldRow, TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
+        ResearchEvaluationTrack, ResearchJobId, ResearchJobProgress, ResearchProfileArtifact,
+        ResearchProfileId, ResearchReadinessEvidenceId, ResearchReadinessEvidencePayload,
+        SchemaVersion, ShadowLatencyProfileV1, SourceSliceManifest, SourceSliceManifestRef,
+        SourceSliceObjectKind, TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
         TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION, TokenId, TradePolicyArtifactId,
         TradePolicyArtifactPayload, TradePolicyCandidateId, TradePolicyCandidateSpec,
         TradePolicyCandidateTrialRow, TradePolicyCohortTrialRow, TradePolicyCoverageGapRow,
-        TradePolicyCpcvPathRow, TradePolicyEvidenceBundleManifest, TradePolicyEvidenceBundleRef,
+        TradePolicyEvidenceBundleManifest, TradePolicyEvidenceBundleRef,
         TradePolicyEvidenceObjectKind, TradePolicyEvidenceObjectRef, TradePolicyExecutionEvidence,
         TradePolicyFillEvidenceRow, TradePolicyFitContract, TradePolicyGovernanceAuditId,
         TradePolicyObservationEligibilityRow, TradePolicyPitCutoffEvidence,
-        TradePolicyStatisticalSummaryRow, TradePolicyTrialAttemptId, TradePolicyTrialMetrics,
-        TradePolicyValidationEvidence, TradePolicyValidationRunId, TrainingDatasetId,
-        TrainingExampleId, TrainingSampleSource, UserId, VerticalActivationTarget,
-        VerticalGateEvidence, builtin_research_profiles, canonicalize_policy_candidates,
+        TradePolicyTrialAttemptId, TradePolicyTrialMetrics, TradePolicyValidationEvidence,
+        TradePolicyValidationRunId, TrainingDatasetId, TrainingExampleId, TrainingSampleSources,
+        UserId, VerticalActivationTarget, builtin_research_profiles,
+        canonicalize_policy_candidates,
     },
 };
 use quant_pivot_repository::traits::{
@@ -77,9 +75,7 @@ use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     execution_semantics::EXECUTION_SEMANTICS_VERSION,
     hashing::ResearchHasher,
-    model::ModelRuntimeFactoryBuilder,
     policy_evidence::{PolicyEvidenceParquetCodec, PolicyEvidenceRecord},
-    policy_replay::POLICY_REPLAY_KERNEL_VERSION,
     policy_validation::POLICY_PERFORMANCE_METHODOLOGY_VERSION,
     structural_volatility::evaluate_structural_volatility_oos,
     training::{
@@ -97,12 +93,17 @@ use crate::{
         source_slice::{FrozenSourceSlice, SourceSliceReader},
     },
     service::{
+        model_serving_preimage::ModelServingPreimageService,
         research_readiness::{ResearchReadinessEvidenceService, VerifiedOperationalEvidence},
+        trade_policy_evidence::{
+            TradePolicyEvidenceDurability, TradePolicyEvidenceVerifier,
+            TradePolicyEvidenceVerifierDeps, WeatherExperimentFamilyInput,
+            content_hash_from_hasher, weather_experiment_family_hash,
+        },
         trade_policy_replay::{
-            FrozenPolicySignals, PolicyStatisticalRun, WEATHER_REPLAY_ORCHESTRATOR_VERSION,
-            WeatherEvidenceRequest, WeatherExampleReplay, WeatherPolicyEvidence,
-            WeatherReplayRequest, evaluate_weather_policy_evidence, reinfer_frozen_policy_signals,
-            replay_weather_page,
+            FrozenPolicySignals, PolicyStatisticalRun, WeatherEvidenceRequest,
+            WeatherExampleReplay, WeatherPolicyEvidence, WeatherReplayRequest,
+            evaluate_weather_policy_evidence, reinfer_frozen_policy_signals, replay_weather_page,
         },
         training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
     },
@@ -118,7 +119,8 @@ pub struct TradePolicyService {
     runtime_configs: Arc<dyn PolicyRepository>,
     source_slices: Arc<dyn SourceSliceRepository>,
     readiness: Arc<ResearchReadinessEvidenceService>,
-    model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
+    evidence_verifier: TradePolicyEvidenceVerifier,
+    serving_preimages: Arc<ModelServingPreimageService>,
 }
 
 pub struct TradePolicyServiceDeps {
@@ -131,7 +133,7 @@ pub struct TradePolicyServiceDeps {
     pub runtime_configs: Arc<dyn PolicyRepository>,
     pub source_slices: Arc<dyn SourceSliceRepository>,
     pub readiness: Arc<ResearchReadinessEvidenceService>,
-    pub model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
+    pub serving_preimages: Arc<ModelServingPreimageService>,
 }
 
 struct RuntimePolicyLimits {
@@ -225,12 +227,6 @@ struct PolicyEvidenceObjects {
     objects: Vec<TradePolicyEvidenceObjectRef>,
 }
 
-struct VerifiedPolicyEvidence {
-    manifest: TradePolicyEvidenceBundleManifest,
-    records: BTreeMap<TradePolicyEvidenceObjectKind, Vec<PolicyEvidenceRecord>>,
-    latency_profile: ShadowLatencyProfileV1,
-}
-
 #[derive(Clone, Copy)]
 enum PolicyReplayPurpose {
     Fit,
@@ -309,19 +305,6 @@ struct SealedFitEvidence {
     trial_ledger_hash: ContentHash,
 }
 
-#[derive(Clone, Copy)]
-struct WeatherExperimentFamilyInput<'a> {
-    profile_ref: &'a ResearchProfileRef,
-    evaluation_track: ResearchEvaluationTrack,
-    research_program_hash: &'a ContentHash,
-    model_version_id: &'a ModelVersionId,
-    methodology_hash: &'a ContentHash,
-    latency_profile_hash: &'a ContentHash,
-    candidate_set_hash: &'a ContentHash,
-    fit_window_start: DateTime<Utc>,
-    fit_window_end: DateTime<Utc>,
-}
-
 struct PolicySourceSlice {
     manifest_ref: SourceSliceManifestRef,
     manifest: SourceSliceManifest,
@@ -381,6 +364,11 @@ impl SourceSlicePreflight {
 impl TradePolicyService {
     #[must_use]
     pub fn new(deps: TradePolicyServiceDeps) -> Self {
+        let evidence_verifier = TradePolicyEvidenceVerifier::new(TradePolicyEvidenceVerifierDeps {
+            artifacts: Arc::clone(&deps.artifacts),
+            policies: Arc::clone(&deps.policies),
+            readiness: Arc::clone(&deps.readiness),
+        });
         Self {
             compute: deps.compute,
             datasets: deps.datasets,
@@ -391,7 +379,8 @@ impl TradePolicyService {
             runtime_configs: deps.runtime_configs,
             source_slices: deps.source_slices,
             readiness: deps.readiness,
-            model_runtime_factory_builder: deps.model_runtime_factory_builder,
+            evidence_verifier,
+            serving_preimages: deps.serving_preimages,
         }
     }
 
@@ -409,23 +398,16 @@ impl TradePolicyService {
                 id: version_id.to_string(),
             })?;
         let config = version.snapshot;
-        let model_reference = profile
-            .spec
-            .category
-            .and_then(|category| {
-                config
-                    .model_routing
-                    .model
-                    .category_model_pointers
-                    .get(&category)
-            })
-            .or(config.model_routing.model.active_model_version_id.as_ref())
-            .ok_or_else(|| ResearchError::ValidationMethodology {
+        let route = BuyModelRoute::try_from(profile.spec.category)?;
+        let model_reference = config.model_routing.model.active_pointer(route).map_err(
+            |error| ResearchError::ValidationMethodology {
                 detail: format!(
-                    "runtime config {} has no governed model pointer for profile {}",
-                    version_id, profile.profile_ref.id
+                    "runtime config {version_id} has no exact {route:?} model pointer for profile \
+                     {}: {error}",
+                    profile.profile_ref.id
                 ),
-            })?;
+            },
+        )?;
         let model_version_id = model_reference.id;
         let model_version = self
             .model_registry
@@ -762,7 +744,7 @@ impl TradePolicyService {
             });
         if !profile_lineage_valid {
             messages.push(
-                "dataset v2 profile/program lineage does not match the fit request".to_owned(),
+                "Dataset v3 profile/program lineage does not match the fit request".to_owned(),
             );
         }
         let source_slice = self.evaluate_source_slice(&input).await;
@@ -824,7 +806,7 @@ impl TradePolicyService {
         input: &DatasetEvaluationInput<'_>,
     ) -> SourceSlicePreflight {
         let Some(dataset_manifest) = input.dataset.and_then(|row| row.manifest.as_ref()) else {
-            return SourceSlicePreflight::blocked("dataset v2 manifest is unavailable");
+            return SourceSlicePreflight::blocked("Dataset v3 manifest is unavailable");
         };
         let Some(source_slice_info) = input.source_slice else {
             return SourceSlicePreflight::blocked(
@@ -908,213 +890,6 @@ impl TradePolicyService {
             fee_model,
             messages: Vec::new(),
         }
-    }
-
-    async fn verify_evidence_bundle(
-        &self,
-        payload: &TradePolicyArtifactPayload,
-        require_production_durability: bool,
-    ) -> QuantResult<VerifiedPolicyEvidence> {
-        let bundle = payload.evidence_bundle.as_ref().ok_or_else(|| {
-            ResearchError::ValidationMethodology {
-                detail: "trade policy has no evidence bundle".to_owned(),
-            }
-        })?;
-        let manifest_bytes = self
-            .read_and_hash_manifest(&bundle.manifest_uri, &bundle.manifest_hash)
-            .await?;
-        let manifest = serde_json::from_slice::<TradePolicyEvidenceBundleManifest>(&manifest_bytes)
-            .map_err(|error| ResearchError::Serialization {
-                detail: format!("invalid trade-policy evidence manifest: {error}"),
-            })?;
-        manifest
-            .validate()
-            .map_err(|detail| QuantError::from(ResearchError::ValidationMethodology { detail }))?;
-        verify_evidence_identity(payload, &manifest)?;
-        let expected_simulator_hash = policy_simulator_hash()?;
-        let expected_replay_kernel_hash =
-            CanonicalDigest::content_hash_json(&POLICY_REPLAY_KERNEL_VERSION)?;
-        if payload.fill_simulator_version != EXECUTION_SEMANTICS_VERSION
-            || manifest.simulator_hash != expected_simulator_hash
-            || manifest.replay_kernel_hash != expected_replay_kernel_hash
-        {
-            return Err(ResearchError::ValidationMethodology {
-                detail: "policy evidence was not produced by the active execution/replay semantics"
-                    .to_owned(),
-            }
-            .into());
-        }
-        let latency_evidence = self
-            .readiness
-            .verified_by_id(&manifest.latency_evidence_id)
-            .await?;
-        if latency_evidence.payload_hash != manifest.latency_profile_hash {
-            return Err(ResearchError::ValidationMethodology {
-                detail: "signed latency evidence hash differs from the frozen manifest".to_owned(),
-            }
-            .into());
-        }
-        let ResearchReadinessEvidencePayload::ShadowLatencyProfile(latency_profile) =
-            latency_evidence.payload_json
-        else {
-            return Err(ResearchError::ValidationMethodology {
-                detail: "frozen latency evidence has the wrong typed payload".to_owned(),
-            }
-            .into());
-        };
-        self.verify_trial_ledger_binding(payload, &manifest).await?;
-        let records = self
-            .read_verified_evidence_objects(&manifest, require_production_durability)
-            .await?;
-        if require_production_durability {
-            require_durable_artifact(&self.artifacts, &bundle.manifest_uri).await?;
-        }
-        Ok(VerifiedPolicyEvidence {
-            manifest,
-            records,
-            latency_profile,
-        })
-    }
-
-    async fn verify_trial_ledger_binding(
-        &self,
-        payload: &TradePolicyArtifactPayload,
-        manifest: &TradePolicyEvidenceBundleManifest,
-    ) -> QuantResult<()> {
-        let trial_ledger = self
-            .policies
-            .list_trial_attempts(&manifest.fit_job_id, Some(manifest.trial_ledger_cutoff))
-            .await?;
-        let profile = payload
-            .fit_contract
-            .profile_ref
-            .resolve_builtin_research_profile()
-            .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
-        let expected_experiment_family =
-            weather_experiment_family_hash(WeatherExperimentFamilyInput {
-                profile_ref: &profile.profile_ref,
-                evaluation_track: payload.fit_contract.evaluation_track,
-                research_program_hash: &payload.fit_contract.research_program_hash,
-                model_version_id: &payload.fit_contract.model_version_id,
-                methodology_hash: &payload.fit_contract.methodology_hash,
-                latency_profile_hash: &payload.fit_contract.latency_profile_hash,
-                candidate_set_hash: &payload.candidate_set_hash,
-                fit_window_start: payload.fit_contract.fit_window_start,
-                fit_window_end: payload.fit_contract.fit_window_end,
-            })?;
-        let candidate_hashes = payload
-            .candidates
-            .iter()
-            .map(|candidate| {
-                Ok((
-                    candidate.candidate_id.as_str(),
-                    CanonicalDigest::content_hash_json(candidate)?,
-                ))
-            })
-            .collect::<QuantResult<HashMap<_, _>>>()?;
-        if trial_ledger.is_empty()
-            || trial_ledger.last().map(|attempt| attempt.created_at)
-                != Some(manifest.trial_ledger_cutoff)
-            || trial_ledger.iter().enumerate().any(|(ordinal, attempt)| {
-                let ordinal_matches =
-                    i64::try_from(ordinal).is_ok_and(|ordinal| ordinal == attempt.attempt_ordinal);
-                let candidate_matches = candidate_hashes
-                    .get(attempt.candidate_id.as_str())
-                    .is_some_and(|hash| hash == &attempt.candidate_hash);
-                let evidence_matches = match (
-                    &attempt.evidence_uri,
-                    &attempt.evidence_hash,
-                    attempt.evidence_row_count,
-                ) {
-                    (Some(uri), Some(hash), Some(row_count)) => {
-                        manifest.objects.iter().any(|object| {
-                            &object.uri == uri
-                                && &object.byte_hash == hash
-                                && i64::try_from(object.row_count) == Ok(row_count)
-                        })
-                    }
-                    _ => false,
-                };
-                !ordinal_matches
-                    || !candidate_matches
-                    || attempt.status != TradePolicyTrialStatus::Succeeded
-                    || attempt.experiment_family_hash != expected_experiment_family
-                    || attempt.research_program_hash != payload.fit_contract.research_program_hash
-                    || !evidence_matches
-                    || (attempt.expected_row_hash() != Ok(attempt.row_hash))
-            })
-        {
-            return Err(ResearchError::ValidationMethodology {
-                detail: "frozen trade-policy trial ledger is empty, truncated, or has an invalid row hash"
-                    .to_owned(),
-            }
-            .into());
-        }
-        let actual_trial_ledger_hash = ResearchHasher::canonical(&(
-            "trade_policy_trial_ledger_v1",
-            &manifest.fit_job_id,
-            trial_ledger
-                .iter()
-                .map(|attempt| (attempt.attempt_ordinal, &attempt.row_hash))
-                .collect::<Vec<_>>(),
-        ))?;
-        if actual_trial_ledger_hash != manifest.trial_ledger_hash {
-            return Err(ResearchError::ValidationMethodology {
-                detail: "frozen trade-policy trial ledger hash differs from the evidence manifest"
-                    .to_owned(),
-            }
-            .into());
-        }
-        Ok(())
-    }
-
-    async fn read_verified_evidence_objects(
-        &self,
-        manifest: &TradePolicyEvidenceBundleManifest,
-        require_production_durability: bool,
-    ) -> QuantResult<BTreeMap<TradePolicyEvidenceObjectKind, Vec<PolicyEvidenceRecord>>> {
-        let mut records = BTreeMap::new();
-        for object in &manifest.objects {
-            let bytes = self.artifacts.get(&object.uri).await?;
-            let actual_hash = CanonicalDigest::content_hash_bytes(&bytes);
-            if actual_hash != object.byte_hash {
-                return Err(ResearchError::ValidationMethodology {
-                    detail: format!(
-                        "policy evidence object {:?} byte hash mismatch",
-                        object.kind
-                    ),
-                }
-                .into());
-            }
-            let decoded = PolicyEvidenceParquetCodec::decode(&bytes)?;
-            let row_count = u64::try_from(decoded.len()).map_err(|error| {
-                ResearchError::ValidationMethodology {
-                    detail: format!("policy evidence row count does not fit u64: {error}"),
-                }
-            })?;
-            if row_count != object.row_count
-                || PolicyEvidenceParquetCodec::row_chain_hash(&decoded)? != object.row_chain_hash
-            {
-                return Err(ResearchError::ValidationMethodology {
-                    detail: format!(
-                        "policy evidence object {:?} row count or semantic chain mismatch",
-                        object.kind
-                    ),
-                }
-                .into());
-            }
-            validate_typed_policy_evidence(object.kind, &decoded)?;
-            if records.insert(object.kind, decoded).is_some() {
-                return Err(ResearchError::ValidationMethodology {
-                    detail: format!("policy evidence object {:?} is duplicated", object.kind),
-                }
-                .into());
-            }
-            if require_production_durability {
-                require_durable_artifact(&self.artifacts, &object.uri).await?;
-            }
-        }
-        Ok(records)
     }
 
     async fn write_policy_evidence_objects(
@@ -1367,7 +1142,8 @@ impl TradePolicyService {
                     ),
                 })?;
         let bytes = self
-            .read_and_hash_manifest(
+            .evidence_verifier
+            .read_manifest(
                 &dataset_manifest.source_lineage.source_slice.manifest_uri,
                 &dataset_manifest.source_lineage.source_slice.manifest_hash,
             )
@@ -1491,7 +1267,7 @@ impl TradePolicyService {
                     horizons_secs: vec![plan.profile.spec.target_horizon_secs],
                     knowledge_lag_secs: plan.runtime_limits.fit_model.knowledge_lag_secs,
                     feature_schema_version: plan.runtime_limits.fit_model.feature_schema_version,
-                    sample_sources: vec![TrainingSampleSource::HistoricalPit],
+                    sample_sources: TrainingSampleSources::default(),
                     reason: request.reason.clone(),
                     training_dataset_id: Some(*fit_dataset_id),
                 },
@@ -1539,7 +1315,7 @@ impl TradePolicyService {
             source_dataset_id,
             dataset_hash: *materialization.dataset_hash,
             feature_schema_hash: *materialization.feature_schema_hash,
-            factor_schema_hash: *materialization.factor_schema_hash,
+            factor_schema_hash: materialization.factor_schema_hash(),
             label_schema_hash: *materialization.label_schema_hash,
             source_slice_ref: materialization.manifest.source_lineage.source_slice.clone(),
             examples,
@@ -1692,8 +1468,8 @@ impl TradePolicyService {
         let catalog_ledger_hash = self
             .verified_source_catalog_hash(&data.source_slice_ref)
             .await?;
-        let simulator_hash = policy_simulator_hash()?;
-        let replay_kernel_hash = CanonicalDigest::content_hash_json(&POLICY_REPLAY_KERNEL_VERSION)?;
+        let simulator_hash = TradePolicyEvidenceVerifier::active_simulator_hash()?;
+        let replay_kernel_hash = TradePolicyEvidenceVerifier::active_replay_hash()?;
         let manifest = TradePolicyEvidenceBundleManifest {
             format_version: TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION,
             source_dataset_hash: data.dataset_hash,
@@ -1729,7 +1505,8 @@ impl TradePolicyService {
         source_slice_ref: &SourceSliceManifestRef,
     ) -> QuantResult<ContentHash> {
         let bytes = self
-            .read_and_hash_manifest(
+            .evidence_verifier
+            .read_manifest(
                 &source_slice_ref.manifest_uri,
                 &source_slice_ref.manifest_hash,
             )
@@ -1848,8 +1625,10 @@ impl TradePolicyService {
                 entity: "quant_model_version",
                 id: input.model_version_id.to_string(),
             })?;
+        let source = Box::pin(self.serving_preimages.load(&model_version)).await?;
+        let runtime = source.buy_runtime()?;
         let signals = reinfer_frozen_policy_signals(
-            self.model_runtime_factory_builder.as_ref(),
+            runtime.as_ref(),
             &model_version,
             input.feature_schema_hash,
             input.factor_schema_hash,
@@ -1939,7 +1718,7 @@ impl TradePolicyService {
                 .manifest
                 .ok_or_else(|| ResearchError::ValidationMethodology {
                     detail: format!(
-                        "policy {artifact_id} source dataset has no Dataset v2 manifest"
+                        "policy {artifact_id} source dataset has no Dataset v3 manifest"
                     ),
                 })?;
         if dataset_manifest
@@ -1959,7 +1738,8 @@ impl TradePolicyService {
         }
         let manifest_ref = dataset_manifest.source_lineage.source_slice;
         let bytes = self
-            .read_and_hash_manifest(&manifest_ref.manifest_uri, &manifest_ref.manifest_hash)
+            .evidence_verifier
+            .read_manifest(&manifest_ref.manifest_uri, &manifest_ref.manifest_hash)
             .await?;
         let manifest = serde_json::from_slice::<SourceSliceManifest>(&bytes).map_err(|error| {
             ResearchError::Serialization {
@@ -2086,7 +1866,9 @@ impl TradePolicyService {
             }
             .into());
         }
-        require_durable_artifact(&self.artifacts, materialization.parquet_uri).await?;
+        self.evidence_verifier
+            .require_durable(materialization.parquet_uri)
+            .await?;
         let dataset_bytes = self.artifacts.get(materialization.parquet_uri).await?;
         verify_frozen_dataset_artifact(&dataset, &dataset_bytes)?;
 
@@ -2097,9 +1879,12 @@ impl TradePolicyService {
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: "Ready PolicyFit dataset has no Source Slice binding".to_owned(),
             })?;
-        require_durable_artifact(&self.artifacts, &source_manifest.manifest_uri).await?;
+        self.evidence_verifier
+            .require_durable(&source_manifest.manifest_uri)
+            .await?;
         let source_manifest_bytes = self
-            .read_and_hash_manifest(
+            .evidence_verifier
+            .read_manifest(
                 &source_manifest.manifest_uri,
                 &source_manifest.manifest_hash,
             )
@@ -2112,7 +1897,7 @@ impl TradePolicyService {
             .validate()
             .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
         for object in &source_manifest.objects {
-            require_durable_artifact(&self.artifacts, &object.uri).await?;
+            self.evidence_verifier.require_durable(&object.uri).await?;
         }
         self.read_validation_source_slice(&dataset).await?;
         Ok(())
@@ -2274,11 +2059,16 @@ impl TradePolicyService {
         dataset: &TrainingDatasetInfo,
     ) -> QuantResult<()> {
         let materialization = require_dataset_materialization(dataset)?;
-        require_durable_artifact(&self.artifacts, materialization.parquet_uri).await?;
+        self.evidence_verifier
+            .require_durable(materialization.parquet_uri)
+            .await?;
         let source_ref = &materialization.manifest.source_lineage.source_slice;
-        require_durable_artifact(&self.artifacts, &source_ref.manifest_uri).await?;
+        self.evidence_verifier
+            .require_durable(&source_ref.manifest_uri)
+            .await?;
         let manifest_bytes = self
-            .read_and_hash_manifest(&source_ref.manifest_uri, &source_ref.manifest_hash)
+            .evidence_verifier
+            .read_manifest(&source_ref.manifest_uri, &source_ref.manifest_hash)
             .await?;
         let manifest =
             serde_json::from_slice::<SourceSliceManifest>(&manifest_bytes).map_err(|error| {
@@ -2292,7 +2082,7 @@ impl TradePolicyService {
             .validate()
             .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
         for object in &manifest.objects {
-            require_durable_artifact(&self.artifacts, &object.uri).await?;
+            self.evidence_verifier.require_durable(&object.uri).await?;
         }
         Ok(())
     }
@@ -2408,7 +2198,11 @@ impl TradePolicyService {
             0,
         ));
         let verified = self
-            .verify_evidence_bundle(&inputs.current.payload_json, true)
+            .evidence_verifier
+            .verify(
+                &inputs.current.payload_json,
+                TradePolicyEvidenceDurability::Production,
+            )
             .await?;
         let payload = &inputs.current.payload_json;
         payload
@@ -2425,7 +2219,7 @@ impl TradePolicyService {
             .await?;
         if runtime_limits.fit_model.model_version_id != payload.fit_contract.model_version_id
             || runtime_limits.methodology_hash != payload.fit_contract.methodology_hash
-            || payload.fit_contract.methodology_hash != verified.manifest.methodology_hash
+            || payload.fit_contract.methodology_hash != verified.manifest().methodology_hash
         {
             return Err(ResearchError::ValidationMethodology {
                 detail:
@@ -2465,6 +2259,7 @@ impl TradePolicyService {
                 fit_window_start: payload.fit_contract.fit_window_start,
                 fit_window_end: payload.fit_contract.fit_window_end,
             })?;
+        let factor_schema_hash = materialization.factor_schema_hash();
         let recomputed = self
             .recompute_weather_policy(WeatherPolicyRecomputeInput {
                 purpose: PolicyReplayPurpose::Validation,
@@ -2475,9 +2270,9 @@ impl TradePolicyService {
                 model_version_id: &payload.fit_contract.model_version_id,
                 decision_policy_snapshot_id: &payload.fit_contract.decision_policy_snapshot_id,
                 feature_schema_hash: materialization.feature_schema_hash,
-                factor_schema_hash: materialization.factor_schema_hash,
+                factor_schema_hash: &factor_schema_hash,
                 experiment_family_hash: &experiment_family_hash,
-                latency_profile: &verified.latency_profile,
+                latency_profile: verified.latency_profile(),
                 fit_window_start: payload.fit_contract.fit_window_start,
                 fit_window_end: payload.fit_contract.fit_window_end,
                 pit_cutoff: payload.fit_contract.pit_cutoff,
@@ -2499,7 +2294,7 @@ impl TradePolicyService {
         let row_summary = self
             .persist_validation_rows(
                 validation_run_id,
-                &verified.records,
+                verified.records(),
                 &actual_records,
                 &inputs.examples,
                 progress,
@@ -2640,42 +2435,6 @@ impl TradePolicyService {
             required_raw_retention_days,
             retention_runway_proven,
         })
-    }
-
-    async fn read_and_hash_manifest(
-        &self,
-        uri: &ArtifactUri,
-        expected_hash: &ContentHash,
-    ) -> QuantResult<Vec<u8>> {
-        const MAX_MANIFEST_BYTES: usize = 1_048_576;
-
-        let mut stream = self.artifacts.get_stream(uri).await?;
-        let mut hasher = Hasher::new();
-        let mut bytes = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            let next_len = bytes.len().checked_add(chunk.len()).ok_or_else(|| {
-                ResearchError::ValidationMethodology {
-                    detail: "policy evidence manifest size overflow".to_owned(),
-                }
-            })?;
-            if next_len > MAX_MANIFEST_BYTES {
-                return Err(ResearchError::ValidationMethodology {
-                    detail: "policy evidence manifest exceeds 1 MiB".to_owned(),
-                }
-                .into());
-            }
-            hasher.update(&chunk);
-            bytes.extend_from_slice(&chunk);
-        }
-        let actual_hash = content_hash_from_hasher(&hasher);
-        if &actual_hash != expected_hash {
-            return Err(ResearchError::ValidationMethodology {
-                detail: "policy evidence manifest byte hash mismatch".to_owned(),
-            }
-            .into());
-        }
-        Ok(bytes)
     }
 }
 
@@ -3050,44 +2809,6 @@ const fn evidence_kind_slug(kind: TradePolicyEvidenceObjectKind) -> &'static str
     }
 }
 
-fn validate_typed_policy_evidence(
-    kind: TradePolicyEvidenceObjectKind,
-    records: &[PolicyEvidenceRecord],
-) -> QuantResult<()> {
-    for record in records {
-        match kind {
-            TradePolicyEvidenceObjectKind::ObservationEligibility => {
-                let _: TradePolicyObservationEligibilityRow = record.decode_typed()?;
-            }
-            TradePolicyEvidenceObjectKind::Fills => {
-                let _: TradePolicyFillEvidenceRow = record.decode_typed()?;
-            }
-            TradePolicyEvidenceObjectKind::CandidateTrials => {
-                let _: TradePolicyCandidateTrialRow = record.decode_typed()?;
-            }
-            TradePolicyEvidenceObjectKind::CohortTrials => {
-                let _: TradePolicyCohortTrialRow = record.decode_typed()?;
-            }
-            TradePolicyEvidenceObjectKind::CpcvPaths => {
-                let _: TradePolicyCpcvPathRow = record.decode_typed()?;
-            }
-            TradePolicyEvidenceObjectKind::CoverageGaps => {
-                let _: TradePolicyCoverageGapRow = record.decode_typed()?;
-            }
-            TradePolicyEvidenceObjectKind::StatisticalSummaries => {
-                let _: TradePolicyStatisticalSummaryRow = record.decode_typed()?;
-            }
-            TradePolicyEvidenceObjectKind::VerticalGates => {
-                let _: VerticalGateEvidence = record.decode_typed()?;
-            }
-            TradePolicyEvidenceObjectKind::StructuralVolatilityOos => {
-                let _: StructuralVolatilityOosFoldRow = record.decode_typed()?;
-            }
-        }
-    }
-    Ok(())
-}
-
 #[derive(serde::Serialize)]
 struct ValidationRowLineage {
     example_id: Option<TrainingExampleId>,
@@ -3300,76 +3021,6 @@ fn require_fit_dataset(dataset: &TrainingDatasetInfo) -> QuantResult<()> {
     .into())
 }
 
-fn policy_simulator_hash() -> QuantResult<ContentHash> {
-    CanonicalDigest::content_hash_json(&(
-        EXECUTION_SEMANTICS_VERSION,
-        POLICY_REPLAY_KERNEL_VERSION,
-        WEATHER_REPLAY_ORCHESTRATOR_VERSION,
-        WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
-        POLICY_EVIDENCE_OBJECT_FORMAT_VERSION,
-    ))
-    .map_err(Into::into)
-}
-
-fn content_hash_from_hasher(hasher: &Hasher) -> ContentHash {
-    ContentHash::from_bytes(*hasher.finalize().as_bytes())
-}
-
-async fn require_durable_artifact(
-    artifacts: &Arc<dyn ArtifactStore>,
-    uri: &ArtifactUri,
-) -> QuantResult<()> {
-    if !artifacts
-        .durability(uri)
-        .await?
-        .permits_production_publish()
-    {
-        return Err(ResearchError::ValidationMethodology {
-            detail: format!(
-                "artifact {} is not backed by versioned Object-Lock storage",
-                uri.as_str()
-            ),
-        }
-        .into());
-    }
-    Ok(())
-}
-
-fn verify_evidence_identity(
-    payload: &TradePolicyArtifactPayload,
-    manifest: &TradePolicyEvidenceBundleManifest,
-) -> QuantResult<()> {
-    let bundle =
-        payload
-            .evidence_bundle
-            .as_ref()
-            .ok_or_else(|| ResearchError::ValidationMethodology {
-                detail: "trade policy has no evidence bundle".to_owned(),
-            })?;
-    let identity_matches = manifest.source_dataset_hash == payload.source_dataset_hash
-        && manifest.candidate_set_hash == payload.candidate_set_hash
-        && manifest.simulator_hash == bundle.simulator_hash
-        && manifest.replay_kernel_hash == bundle.replay_kernel_hash
-        && manifest.methodology_hash == bundle.methodology_hash
-        && manifest.latency_evidence_id == bundle.latency_evidence_id
-        && manifest.latency_evidence_id == payload.fit_contract.latency_evidence_id
-        && manifest.latency_profile_hash == bundle.latency_profile_hash
-        && manifest.catalog_ledger_hash == bundle.catalog_ledger_hash
-        && manifest.source_slice_manifest_hash == bundle.source_slice_manifest_hash
-        && manifest.fit_job_id == bundle.fit_job_id
-        && manifest.trial_ledger_hash == bundle.trial_ledger_hash
-        && payload.validation.trial_ledger_hash.as_ref() == Some(&manifest.trial_ledger_hash)
-        && payload.validation.trial_ledger_cutoff == Some(manifest.trial_ledger_cutoff);
-    if !identity_matches {
-        return Err(ResearchError::ValidationMethodology {
-            detail: "policy evidence manifest identity does not match the frozen artifact"
-                .to_owned(),
-        }
-        .into());
-    }
-    Ok(())
-}
-
 struct PreflightBlockerContext<'a> {
     request: &'a TradePolicyFitPreflightRequest,
     dataset_info: Option<&'a TrainingDatasetInfo>,
@@ -3436,7 +3087,7 @@ fn append_contract_dataset_blockers(
         TradePolicyPreflightBlockerDetail::DatasetNotReady {
             actual_status: context.dataset_info.map(|row| row.status),
         },
-        "Build and integrity-verify the exact Dataset v2 source before fitting.",
+        "Build and integrity-verify the exact Dataset v3 source before fitting.",
         blocker_dataset_link(context),
     );
     push_blocker(
@@ -3445,7 +3096,7 @@ fn append_contract_dataset_blockers(
         TradePolicyPreflightBlockerDetail::DatasetPurposeMismatch {
             actual_purpose: context.dataset_info.map(|row| row.purpose),
         },
-        "Select a Dataset v2 materialized specifically for PolicyFit.",
+        "Select a Dataset v3 materialized specifically for PolicyFit.",
         blocker_dataset_link(context),
     );
     push_blocker(
@@ -3455,7 +3106,7 @@ fn append_contract_dataset_blockers(
             labels_matured_by_cutoff: dataset.labels_matured_by_cutoff,
             labels_excluded_after_cutoff: dataset.labels_excluded_after_cutoff,
         },
-        "Rebuild the source slice and Dataset v2 with mature row-level trajectory labels.",
+        "Rebuild the source slice and Dataset v3 with mature row-level trajectory labels.",
         blocker_dataset_link(context),
     );
     push_blocker(
@@ -3932,7 +3583,7 @@ impl TradePolicyPort for TradePolicyService {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TradePolicyArtifactInfo> {
-        self.fit_policy_job(fit_job_id, training_dataset_id, request, progress, cancel)
+        Box::pin(self.fit_policy_job(fit_job_id, training_dataset_id, request, progress, cancel))
             .await
     }
     async fn validate(
@@ -4076,32 +3727,21 @@ impl TradePolicyPort for TradePolicyService {
         let Some(policy) = self.policies.find(artifact_id).await? else {
             return Ok(None);
         };
-        let bundle = policy
-            .payload_json
-            .evidence_bundle
-            .as_ref()
-            .ok_or_else(|| ResearchError::ValidationMethodology {
-                detail: format!("policy {artifact_id} has no evidence bundle"),
-            })?;
-        let bytes = self
-            .read_and_hash_manifest(&bundle.manifest_uri, &bundle.manifest_hash)
+        let verified = self
+            .evidence_verifier
+            .verify(
+                &policy.payload_json,
+                TradePolicyEvidenceDurability::Production,
+            )
             .await?;
-        let manifest = serde_json::from_slice::<TradePolicyEvidenceBundleManifest>(&bytes)
-            .map_err(|error| ResearchError::Serialization {
-                detail: format!("invalid trade-policy evidence manifest: {error}"),
-            })?;
-        manifest
-            .validate()
-            .map_err(|detail| ResearchError::ValidationMethodology { detail })?;
-        verify_evidence_identity(&policy.payload_json, &manifest)?;
-        let object = manifest
+        let object = verified
+            .manifest()
             .objects
-            .into_iter()
+            .iter()
             .find(|object| object.kind == kind)
             .ok_or_else(|| ResearchError::ValidationMethodology {
                 detail: format!("policy {artifact_id} evidence object {kind:?} is missing"),
             })?;
-        require_durable_artifact(&self.artifacts, &object.uri).await?;
         let url = self
             .artifacts
             .signed_download_url(&object.uri, StdDuration::from_secs(SIGNED_DOWNLOAD_SECS))
@@ -4126,15 +3766,17 @@ impl TradePolicyPort for TradePolicyService {
             return Ok(None);
         };
         let mut evidence = self
-            .verify_evidence_bundle(&policy.payload_json, false)
+            .evidence_verifier
+            .verify(
+                &policy.payload_json,
+                TradePolicyEvidenceDurability::ContentVerified,
+            )
             .await?;
-        let rows =
-            evidence
-                .records
-                .remove(&kind)
-                .ok_or_else(|| ResearchError::ValidationMethodology {
-                    detail: format!("policy {artifact_id} evidence object {kind:?} is missing"),
-                })?;
+        let rows = evidence.records_mut().remove(&kind).ok_or_else(|| {
+            ResearchError::ValidationMethodology {
+                detail: format!("policy {artifact_id} evidence object {kind:?} is missing"),
+            }
+        })?;
         let page = query.page.normalized();
         let total =
             u64::try_from(rows.len()).map_err(|error| ResearchError::ValidationMethodology {
@@ -4277,7 +3919,11 @@ impl TradePolicyPort for TradePolicyService {
         }
         if target == TradePolicyStatus::Published {
             self.verify_publish_validation_binding(&current).await?;
-            self.verify_evidence_bundle(&current.payload_json, true)
+            self.evidence_verifier
+                .verify(
+                    &current.payload_json,
+                    TradePolicyEvidenceDurability::Production,
+                )
                 .await?;
         }
         let publication_blockers = current.payload_json.publication_blockers();
@@ -4523,24 +4169,6 @@ fn weather_embargo_secs(input: &WeatherPolicyRecomputeInput<'_>) -> QuantResult<
         })
         .map(|value| value.max(input.profile.spec.max_feature_lookback_secs))
         .map_err(Into::into)
-}
-
-fn weather_experiment_family_hash(
-    input: WeatherExperimentFamilyInput<'_>,
-) -> QuantResult<ContentHash> {
-    CanonicalDigest::content_hash_json(&(
-        "weather_policy_experiment_family_v1",
-        input.profile_ref,
-        input.evaluation_track,
-        input.research_program_hash,
-        input.model_version_id,
-        input.methodology_hash,
-        input.latency_profile_hash,
-        input.candidate_set_hash,
-        input.fit_window_start,
-        input.fit_window_end,
-    ))
-    .map_err(Into::into)
 }
 
 fn label_cutoff_counts(

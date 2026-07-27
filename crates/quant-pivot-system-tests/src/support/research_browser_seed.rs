@@ -7,29 +7,24 @@ use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
         data_plane::DecisionClock,
-        quant::{NewBacktestReport, NewModelRun, NewModelVersion},
+        quant::{NewBacktestReport, NewModelRun},
     },
     enums::{
         common::MarketCategory,
-        factor::FactorFamily,
-        quant::{
-            DataQualityStatus, DatasetPurpose, FactorDirection, ModelRunKind, ModelRunStatus,
-            PublicationStatus, TrainingDatasetStatus,
-        },
+        model::ModelFamily,
+        quant::{DataQualityStatus, DatasetPurpose, ModelRunKind, TrainingDatasetStatus},
     },
     hashing::CanonicalDigest,
     types::{
-        BacktestReportId, ContentHash, DecisionPolicySnapshotId, EventId, FactorDefinitionId,
-        FeatureCell, FeatureStaleness, FeatureValue, MarketId, ModelRunId, ModelSpecId,
-        ModelVersionId, Probability, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId,
-        TrainingSampleSource, TrainingSampleSources, Usd,
+        BacktestReportId, ContentHash, DecisionPolicySnapshotId, EventId, FeatureCell,
+        FeatureStaleness, FeatureValue, MarketId, ModelRunId, ModelSpecId, ModelVersionId,
+        Probability, ResearchEvaluationTrack, SchemaVersion, TokenId, TrainingDatasetId,
+        TrainingExampleId, TrainingSampleSource, TrainingSampleSources, Usd,
         backtest::{
             CategoryMetric, CategoryMetrics, ExpectedVsRealized, PnlCurvePoint, PnlSimulation,
         },
-        default_sample_sources,
-        factor::FactorExplanation,
-        model_metrics::ModelVersionMetrics,
-        model_training::ModelTrainingObjective,
+        factor::{FactorExplanation, FactorServingPlane},
+        model_serving::ModelServingTradePolicyBinding,
     },
 };
 use quant_pivot_repository::{
@@ -44,7 +39,7 @@ use quant_pivot_repository::{
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
-    factors::{FactorValue, NormalizedFactor, names::LIQUIDITY_DEPTH},
+    factors::{FactorValue, NormalizedFactor},
     features::{
         FeatureVector,
         names::{book::MID, market::CATEGORY},
@@ -61,12 +56,12 @@ use sea_orm::DatabaseConnection;
 
 use super::{
     execution_pg_seed::{
-        ExecutionModelArtifactSeed, SharedDemoInfra, fixture_profile_ref, store_execution_model,
+        CalibratedModelSeed, SharedDemoInfra, fixture_profile_ref, seed_calibrated_model,
     },
     research_fixtures::{
         DatasetLedgerFixture, DatasetLedgerSeed, ReplayableSourceSliceFixture,
-        bind_fixture_decision_capture, model_learning_cohort, persist_replayable_source_slice,
-        seed_source_manifest,
+        bind_fixture_decision_capture, fixture_factor_plane, model_learning_cohort,
+        persist_replayable_source_slice, seed_source_manifest,
     },
 };
 
@@ -85,20 +80,59 @@ pub struct BrowserResearchFixture {
 struct PersistedDataset {
     id: TrainingDatasetId,
     semantic_hash: ContentHash,
-    feature_schema_hash: ContentHash,
-    factor_schema_hash: ContentHash,
 }
 
 struct DatasetSeed {
     scope: String,
     model_spec_id: ModelSpecId,
+    model_family: ModelFamily,
     model_spec_definition_hash: ContentHash,
+    factor_serving_plane: FactorServingPlane,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    runtime_config_hash: ContentHash,
+    trade_policy: ModelServingTradePolicyBinding,
     purpose: DatasetPurpose,
     examples: Vec<TrainingExample>,
     feature_schema_hash: ContentHash,
-    factor_schema_hash: ContentHash,
     label_schema_hash: ContentHash,
+}
+
+struct BrowserCandidateSeed<'a> {
+    db: &'a DatabaseConnection,
+    store: &'a Arc<dyn ArtifactStore>,
+    registry: &'a PgModelRegistryRepository,
+    model_spec_id: ModelSpecId,
+    model_spec_definition_hash: ContentHash,
+    training: &'a PersistedDataset,
+}
+
+impl BrowserCandidateSeed<'_> {
+    async fn persist(&self) -> QuantResult<ModelVersionId> {
+        let model_version_id = ModelVersionId::from_v7();
+        let training_input_hash = CanonicalDigest::content_hash_json(&(
+            "browser-research-training-input-v1",
+            self.training.semantic_hash,
+            self.model_spec_definition_hash,
+        ))?;
+        let fixture = Box::pin(seed_calibrated_model(
+            self.db,
+            self.store,
+            CalibratedModelSeed {
+                model_version_id,
+                training_dataset_id: self.training.id,
+                training_input_hash,
+            },
+        ))
+        .await;
+        let version = self
+            .registry
+            .next_version_for_spec(&self.model_spec_id)
+            .await?;
+        self.registry
+            .create_model_version(fixture.version(self.model_spec_id, version))
+            .await?;
+        Ok(model_version_id)
+    }
 }
 
 /// Seed a loadable candidate, reusable Evaluation dataset, and immutable report.
@@ -128,8 +162,13 @@ pub async fn seed_browser_research(
         })?;
     let feature_schema_hash =
         CanonicalDigest::content_hash_json(&"browser-research-feature-schema-v1")?;
-    let factor_schema_hash =
-        CanonicalDigest::content_hash_json(&"browser-research-factor-schema-v1")?;
+    let factor_serving_plane = if model_spec.model_family.is_classical() {
+        FactorServingPlane::try_empty().map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("browser classical factor plane is invalid: {error}"),
+        })?
+    } else {
+        fixture_factor_plane(feature_schema_hash, SchemaVersion::FIRST)?
+    };
     let label_schema_hash =
         CanonicalDigest::content_hash_json(&"browser-research-label-schema-v1")?;
     let observed_at = Utc::now();
@@ -138,78 +177,65 @@ pub async fn seed_browser_research(
             detail: "browser research fixture time does not fit millisecond precision".to_owned(),
         }
     })?;
+    let policy_snapshot_hash = template
+        .serving_contract
+        .bindings()
+        .policy_snapshot
+        .snapshot_hash;
+    let trade_policy = ModelServingTradePolicyBinding {
+        artifact_id: infra.trade_policy.artifact_id,
+        content_hash: infra.trade_policy.artifact_hash,
+    };
     let training = persist_dataset(
         db,
         store,
         DatasetSeed {
             scope: "browser-research-training".to_owned(),
             model_spec_id: template.model_spec_id,
+            model_family: model_spec.model_family,
             model_spec_definition_hash: model_spec.definition_hash,
+            factor_serving_plane: factor_serving_plane.clone(),
             decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
+            runtime_config_hash: policy_snapshot_hash,
+            trade_policy: trade_policy.clone(),
             purpose: DatasetPurpose::Training,
-            examples: model_examples("training", now - Duration::days(120))?,
+            examples: model_examples("training", now - Duration::days(120), &factor_serving_plane)?,
             feature_schema_hash,
-            factor_schema_hash,
             label_schema_hash,
         },
     )
     .await?;
-    let model_version_id = ModelVersionId::from_v7();
-    let training_input_hash = CanonicalDigest::content_hash_json(&(
-        "browser-research-training-input-v1",
-        training.semantic_hash,
-        model_spec.definition_hash,
-    ))?;
-    let artifact_hash = store_execution_model(
-        db,
-        store,
-        ExecutionModelArtifactSeed {
-            model_version_id,
-            model_spec_definition_hash: model_spec.definition_hash,
-            training_dataset_hash: training.semantic_hash,
-            training_input_hash,
-            feature_schema_hash: training.feature_schema_hash,
-            factor_schema_hash: training.factor_schema_hash,
-            trade_policy: infra.trade_policy.clone(),
-        },
-    )
-    .await;
-    let version = registry
-        .next_version_for_spec(&template.model_spec_id)
-        .await?;
-    registry
-        .create_model_version(NewModelVersion {
-            model_version_id,
+    let model_version_id = Box::pin(
+        BrowserCandidateSeed {
+            db,
+            store,
+            registry: &registry,
             model_spec_id: template.model_spec_id,
-            version,
-            artifact_hash,
-            category_scope: None,
-            profile_ref: fixture_profile_ref(),
-            training_dataset_id: Some(training.id),
-            trade_policy_artifact_id: Some(infra.trade_policy.artifact_id),
-            trade_policy_hash: Some(infra.trade_policy.artifact_hash),
-            publish_path_set_id: None,
-            derivation: NewModelVersion::training_derivation(),
-            metrics: ModelVersionMetrics::not_measured("browser production fixture"),
-            training_objective: ModelTrainingObjective::hand_authored("browser production fixture"),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Candidate,
-            published_at: None,
-            retired_at: None,
-        })
-        .await?;
+            model_spec_definition_hash: model_spec.definition_hash,
+            training: &training,
+        }
+        .persist(),
+    )
+    .await?;
     let evaluation = persist_dataset(
         db,
         store,
         DatasetSeed {
             scope: "browser-research-evaluation".to_owned(),
             model_spec_id: template.model_spec_id,
+            model_family: model_spec.model_family,
             model_spec_definition_hash: model_spec.definition_hash,
+            factor_serving_plane: factor_serving_plane.clone(),
             decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
+            runtime_config_hash: policy_snapshot_hash,
+            trade_policy,
             purpose: DatasetPurpose::Evaluation,
-            examples: model_examples("evaluation", now - Duration::days(30))?,
+            examples: model_examples(
+                "evaluation",
+                now - Duration::days(30),
+                &factor_serving_plane,
+            )?,
             feature_schema_hash,
-            factor_schema_hash,
             label_schema_hash,
         },
     )
@@ -229,7 +255,11 @@ pub async fn seed_browser_research(
     })
 }
 
-fn model_examples(scope: &str, window_start: DateTime<Utc>) -> QuantResult<Vec<TrainingExample>> {
+fn model_examples(
+    scope: &str,
+    window_start: DateTime<Utc>,
+    factor_serving_plane: &FactorServingPlane,
+) -> QuantResult<Vec<TrainingExample>> {
     let mut examples = Vec::with_capacity(
         usize::try_from(TICK_COUNT).map_err(|error| ResearchError::DatasetBuild {
             detail: format!("browser tick count is invalid: {error}"),
@@ -238,7 +268,13 @@ fn model_examples(scope: &str, window_start: DateTime<Utc>) -> QuantResult<Vec<T
     for tick in 0..TICK_COUNT {
         let decision_at = window_start + Duration::seconds(tick * TICK_INTERVAL_SECS);
         for ordinal in 0..MARKETS_PER_TICK {
-            examples.push(model_example(scope, tick, ordinal, decision_at)?);
+            examples.push(model_example(
+                scope,
+                tick,
+                ordinal,
+                decision_at,
+                factor_serving_plane,
+            )?);
         }
     }
     Ok(examples)
@@ -249,6 +285,7 @@ fn model_example(
     tick: i64,
     ordinal: usize,
     decision_at: DateTime<Utc>,
+    factor_serving_plane: &FactorServingPlane,
 ) -> QuantResult<TrainingExample> {
     let strength = Decimal::from(u64::try_from(ordinal % 9 + 1).map_err(|error| {
         ResearchError::DatasetBuild {
@@ -262,6 +299,7 @@ fn model_example(
     );
     let market_id = MarketId::new(format!("browser-{scope}-market-{tick}-{ordinal}"));
     let token_id = TokenId::new(format!("browser-{scope}-token-{tick}-{ordinal}"));
+    let secondary_token_id = TokenId::new(format!("browser-{scope}-token-no-{tick}-{ordinal}"));
     let feature_vector = FeatureVector {
         market_id: market_id.clone(),
         token_id: Some(token_id.clone()),
@@ -288,20 +326,35 @@ fn model_example(
         domain: None,
         data_quality: DataQualityStatus::Fresh,
     };
-    let factor = FactorValue {
-        definition_id: FactorDefinitionId::from_v7(),
-        name: LIQUIDITY_DEPTH,
-        family: FactorFamily::Liquidity,
-        raw_value: Some(liquidity),
-        normalization: NormalizedFactor::cross_section(Probability::new(strength)),
-        direction: FactorDirection::Positive,
-        confidence: Probability::ONE,
-        explanation: FactorExplanation {
-            headline: "browser fixture liquidity rank".to_owned(),
-            drivers: Vec::new(),
-        },
-        input_feature_refs: Vec::new(),
-    };
+    let factor_values = factor_serving_plane
+        .definitions()
+        .iter()
+        .map(|revision| {
+            let definition = revision.definition();
+            let direction = definition.contribution_direction(strength).ok_or_else(|| {
+                ResearchError::DatasetBuild {
+                    detail: format!(
+                        "browser factor `{}` cannot project fixture strength",
+                        definition.name
+                    ),
+                }
+            })?;
+            Ok(FactorValue {
+                definition_id: revision.factor_definition_id(),
+                name: definition.name.clone(),
+                family: definition.family,
+                raw_value: Some(strength),
+                normalization: NormalizedFactor::cross_section(Probability::new(strength)),
+                direction,
+                confidence: Probability::ONE,
+                explanation: FactorExplanation {
+                    headline: format!("browser fixture {} rank", definition.name),
+                    drivers: Vec::new(),
+                },
+                input_feature_refs: definition.input_features.clone(),
+            })
+        })
+        .collect::<QuantResult<Vec<_>>>()?;
     let mut example = TrainingExample {
         example_id: TrainingExampleId::from_v7(),
         market_id: market_id.clone(),
@@ -311,7 +364,7 @@ fn model_example(
             event_id: EventId::new(format!("browser-{scope}-event")),
             category: MarketCategory::Weather,
             primary_token_id: token_id,
-            secondary_token_id: None,
+            secondary_token_id: Some(secondary_token_id),
             liquidity_usd: Some(Usd::new(liquidity)),
             volume_24h_usd: Some(Usd::new(liquidity * dec!(2))),
             source_refs: Vec::new(),
@@ -319,7 +372,7 @@ fn model_example(
         decision_boundary: DecisionClock::new(KNOWLEDGE_LAG_SECS).boundary(decision_at)?,
         sample_source: TrainingSampleSource::HistoricalPit,
         feature_vector,
-        factor_values: vec![factor],
+        factor_values,
         labels: vec![TrainingLabel {
             label_name: TOKEN_PAYOUT_RATIO,
             horizon_secs: 0,
@@ -366,31 +419,47 @@ async fn persist_dataset(
     let semantic_hash = TrainingDatasetArtifact::compute_dataset_hash(
         DatasetHashContract {
             model_spec_id: &seed.model_spec_id,
+            model_family: seed.model_family,
             window_start,
             window_end,
             purpose: seed.purpose,
             feature_schema_hash: &seed.feature_schema_hash,
-            factor_schema_hash: &seed.factor_schema_hash,
+            factor_serving_plane: &seed.factor_serving_plane,
             label_schema_hash: &seed.label_schema_hash,
         },
         &seed.examples,
     )?;
+    let profile_ref = fixture_profile_ref();
+    let profile = profile_ref
+        .resolve_builtin_research_profile()
+        .map_err(|detail| ResearchError::DatasetBuild {
+            detail: format!("resolve browser ResearchProfile: {detail}"),
+        })?;
+    let source_window_end = window_end
+        .checked_add_signed(Duration::seconds(
+            i64::try_from(profile.spec.target_horizon_secs).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!("browser profile horizon overflow: {error}"),
+                }
+            })?,
+        ))
+        .ok_or_else(|| ResearchError::DatasetBuild {
+            detail: "browser Source Slice terminal bound overflow".to_owned(),
+        })?;
     let stored_source = persist_replayable_source_slice(
         store,
         &seed.examples,
         ReplayableSourceSliceFixture {
-            profile_ref: fixture_profile_ref(),
+            profile_ref,
+            evaluation_track: ResearchEvaluationTrack::ResearchOnly,
             research_program_hash: CanonicalDigest::content_hash_json(&(
                 &seed.scope,
                 "research-program",
             ))?,
             decision_policy_snapshot_id: seed.decision_policy_snapshot_id,
-            runtime_config_hash: CanonicalDigest::content_hash_json(&(
-                &seed.scope,
-                "runtime-config",
-            ))?,
+            runtime_config_hash: seed.runtime_config_hash,
             window_start,
-            window_end,
+            window_end: source_window_end,
         },
     )
     .await?;
@@ -411,10 +480,12 @@ async fn persist_dataset(
         None
     };
     let dataset_id = TrainingDatasetId::from_v7();
-    let fixture = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
+    let mut fixture = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
         training_dataset_id: dataset_id,
         model_spec_id: seed.model_spec_id,
+        model_family: seed.model_family,
         model_spec_definition_hash: seed.model_spec_definition_hash,
+        factor_serving_plane: seed.factor_serving_plane.clone(),
         source_lineage,
         cohort_manifest,
         window_start,
@@ -426,16 +497,23 @@ async fn persist_dataset(
                 detail: format!("browser Dataset interval is invalid: {error}"),
             }
         })?,
-        horizons_secs: vec![0],
-        feature_schema_version: Some(SchemaVersion::FIRST),
-        sample_sources: Some(TrainingSampleSources(default_sample_sources())),
+        horizons_secs: vec![0, profile.spec.target_horizon_secs],
+        feature_schema_version: SchemaVersion::FIRST,
+        sample_sources: Some(TrainingSampleSources::default()),
         feature_schema_hash: seed.feature_schema_hash,
-        factor_schema_hash: seed.factor_schema_hash,
         label_schema_hash: seed.label_schema_hash,
         semantic_dataset_hash: semantic_hash,
         source_fingerprint: dataset_source_fingerprint(&seed.examples)?,
         sample_count,
     })?;
+    fixture.manifest.trade_policy_artifact_id = Some(seed.trade_policy.artifact_id);
+    fixture.manifest.trade_policy_hash = Some(seed.trade_policy.content_hash);
+    fixture
+        .manifest
+        .validate()
+        .map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("browser model dataset policy binding is invalid: {error}"),
+        })?;
     let bytes = DatasetParquetCodec::encode(&seed.examples, &fixture.manifest)?;
     let artifact_bytes_hash = CanonicalDigest::content_hash_bytes(&bytes);
     let key = ArtifactKey::new(
@@ -462,8 +540,6 @@ async fn persist_dataset(
     Ok(PersistedDataset {
         id: dataset_id,
         semantic_hash,
-        feature_schema_hash: seed.feature_schema_hash,
-        factor_schema_hash: seed.factor_schema_hash,
     })
 }
 
@@ -492,13 +568,7 @@ async fn seed_backtest_report(
             market_selection_id: None,
             window_start,
             window_end,
-            status: ModelRunStatus::Running,
             input_hash,
-            output_hash: None,
-            error_code: None,
-            error_message: None,
-            started_at: now,
-            finished_at: None,
         })
         .await?;
     let backtest_report_id = BacktestReportId::from_v7();
@@ -557,7 +627,7 @@ async fn seed_backtest_report(
         })
         .await?;
     model_runs
-        .succeed(&model_run_id, report_hash, now, Some(model_version_id))
+        .succeed(&model_run_id, report_hash, Some(model_version_id))
         .await?;
     Ok(backtest_report_id)
 }

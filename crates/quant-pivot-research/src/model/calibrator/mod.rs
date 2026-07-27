@@ -72,58 +72,16 @@ pub fn apply_mapping(mapping: &MonotoneMapping, score: Decimal) -> QuantResult<P
 /// isotonic knots. Both artifact loading and inference call this boundary so a
 /// malformed artifact cannot silently emit a plausible probability.
 pub fn validate_mapping(mapping: &MonotoneMapping) -> QuantResult<()> {
-    let MonotoneMapping::Isotonic { knots } = mapping else {
-        return Ok(());
-    };
-    if knots.is_empty() {
-        return Err(ResearchError::Inference {
-            detail: "isotonic calibration mapping has no fitted knots".to_owned(),
-        }
-        .into());
-    }
-    for knot in knots {
-        if knot.probability < Decimal::ZERO || knot.probability > Decimal::ONE {
-            return Err(ResearchError::Inference {
-                detail: format!(
-                    "isotonic calibration probability {} at score {} is outside [0, 1]",
-                    knot.probability, knot.score
-                ),
-            }
-            .into());
-        }
-    }
-    for pair in knots.windows(2) {
-        let [left, right] = pair else {
-            continue;
-        };
-        if left.score >= right.score {
-            return Err(ResearchError::Inference {
-                detail: format!(
-                    "isotonic calibration scores must be strictly increasing, got {} then {}",
-                    left.score, right.score
-                ),
-            }
-            .into());
-        }
-        if left.probability > right.probability {
-            return Err(ResearchError::Inference {
-                detail: format!(
-                    "isotonic calibration probabilities must be non-decreasing, got {} then {}",
-                    left.probability, right.probability
-                ),
-            }
-            .into());
-        }
-    }
-    Ok(())
+    mapping
+        .validate()
+        .map_err(|detail| ResearchError::Inference { detail }.into())
 }
 
 /// A `model_score` calibration artifact resolved for runtime scoring.
 ///
 /// Carries the fitted [`MonotoneMapping`] plus its [`ReliabilityReport`] (the
 /// `DownsideSource::MfeMae` per-score-bucket lookup). Bound once at model-runtime
-/// load time (mirrors [`crate::model::overlay::WeightOverlay`]) — never
-/// re-fetched per candidate.
+/// load time and never re-fetched per candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCalibration {
     pub artifact_id: CalibrationArtifactId,

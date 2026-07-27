@@ -358,10 +358,6 @@ impl TrainingExampleId {
     }
 }
 
-/// Stored model artifact (serialized weights / model) identifier.
-#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ModelArtifactId(Uuid);
-
 /// Governed, content-addressed entry/exit policy artifact identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TradePolicyArtifactId(Uuid);
@@ -482,26 +478,57 @@ impl DomainSourceExpectationId {
     }
 }
 
-/// One durable feedback-cycle run.
+/// One durable feedback cycle, derived from its frozen idempotency key.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FeedbackRunId(Uuid);
+pub struct FeedbackCycleId(Uuid);
 
-/// One append-only stage event in a feedback run.
+impl FeedbackCycleId {
+    /// Project the typed feedback idempotency hash into its stable UUID domain.
+    #[must_use]
+    pub fn from_idempotency_hash(idempotency_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f201);
+        Self::new(uuid_v5_for_content(&NAMESPACE, idempotency_hash))
+    }
+}
+
+/// One content-addressed append-only event in a feedback-cycle timeline.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FeedbackRunStageId(Uuid);
+pub struct FeedbackStageEventId(Uuid);
+
+impl FeedbackStageEventId {
+    /// Project the complete immutable event hash into its stable UUID domain.
+    #[must_use]
+    pub fn from_event_hash(event_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f202);
+        Self::new(uuid_v5_for_content(&NAMESPACE, event_hash))
+    }
+}
 
 /// One immutable data/concept/label drift report.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DriftReportId(Uuid);
 
-/// One immutable factor bundle promoted atomically with a model.
-#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FactorBundleId(Uuid);
+impl DriftReportId {
+    /// Project the complete immutable report hash into its stable UUID domain.
+    #[must_use]
+    pub fn from_report_hash(report_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f203);
+        Self::new(uuid_v5_for_content(&NAMESPACE, report_hash))
+    }
+}
 
-/// One append-only model + factor governance decision.
+/// One content-addressed one-time evaluation-holdout use.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FactorGovernanceAuditId(Uuid);
+pub struct FeedbackEvaluationUseId(Uuid);
 
+impl FeedbackEvaluationUseId {
+    /// Project the semantic-use hash into its stable UUID domain.
+    #[must_use]
+    pub fn from_semantic_hash(semantic_use_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f204);
+        Self::new(uuid_v5_for_content(&NAMESPACE, semantic_use_hash))
+    }
+}
 /// One governed cross-profile allocation proposal.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProfileAllocationId(Uuid);

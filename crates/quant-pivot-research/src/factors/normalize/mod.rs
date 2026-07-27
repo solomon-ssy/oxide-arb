@@ -23,3 +23,4 @@ pub use cross_section::{
 };
 pub use outcome::{NormalizationClampAudit, NormalizedFactor, RawFactorColumn};
 pub use stats::NormalizationStats;
+pub(in crate::factors) use stats::interpolated_percentile;

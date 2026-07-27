@@ -21,7 +21,7 @@ use quant_pivot_models::{
         execution::KillSwitchState,
         quant::{ExecutionWalletKind, QuantRuntimeMode},
     },
-    runtime_config::{DecisionPolicySnapshot, ModelVersionRef},
+    runtime_config::{BuyModelRoute, DecisionPolicySnapshot, ModelVersionRef},
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ModelRegistryRepository, ReconciliationRepository,
@@ -239,9 +239,18 @@ impl DefaultModePreflight {
         now: DateTime<Utc>,
     ) -> QuantResult<PreflightCheck> {
         let min_age = config.model_routing.model.min_quality_gate_age_secs;
-        let active = match &config.model_routing.model.active_model_version_id {
-            Some(reference) => self.active_status(reference, min_age, now).await?,
-            None => Err("no active model configured".to_owned()),
+        let active_reference = BuyModelRoute::try_from(&config.recommendation.selection)
+            .map_err(|error| error.to_string())
+            .and_then(|route| {
+                config
+                    .model_routing
+                    .model
+                    .active_pointer(route)
+                    .map_err(|error| error.to_string())
+            });
+        let active = match active_reference {
+            Ok(reference) => self.active_status(reference, min_age, now).await?,
+            Err(error) => Err(error),
         };
         if active.is_ok() {
             return Ok(PreflightCheck::hard(
@@ -275,12 +284,23 @@ impl DefaultModePreflight {
         &self,
         config: &DecisionPolicySnapshot,
     ) -> QuantResult<PreflightCheck> {
-        let Some(reference) = &config.model_routing.model.active_model_version_id else {
-            return Ok(PreflightCheck::hard(
-                "published_model",
-                false,
-                "auto_execution requires an active published model",
-            ));
+        let reference = match BuyModelRoute::try_from(&config.recommendation.selection)
+            .map_err(|error| error.to_string())
+            .and_then(|route| {
+                config
+                    .model_routing
+                    .model
+                    .active_pointer(route)
+                    .map_err(|error| error.to_string())
+            }) {
+            Ok(reference) => reference,
+            Err(error) => {
+                return Ok(PreflightCheck::hard(
+                    "published_model",
+                    false,
+                    format!("auto_execution requires the exact active report route: {error}"),
+                ));
+            }
         };
         let id = reference.id;
         let Some(version) = self.deps.model_registry.find_model_version(&id).await? else {

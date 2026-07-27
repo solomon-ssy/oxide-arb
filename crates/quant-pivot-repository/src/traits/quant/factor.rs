@@ -5,8 +5,9 @@ use quant_pivot_models::{
         api::FactorDefinitionListQuery,
         pagination::Paginated,
         quant::{
-            FactorDefinitionInfo, FactorValueInfo, LatestFactorSnapshotBundleInfo,
-            LatestFactorSnapshotInfo, NewFactorDefinition, NewFactorValue,
+            FactorDefinitionInfo, FactorRegistrationOutcome, FactorValueInfo,
+            LatestFactorSnapshotBundleInfo, LatestFactorSnapshotInfo, NewFactorDefinition,
+            NewFactorValue,
         },
     },
     types::{FactorDefinitionId, FeatureVectorId, MarketId, ModelRunId, ModelVersionId},
@@ -15,10 +16,15 @@ use quant_pivot_models::{
 /// Factor definition and value persistence port.
 #[async_trait::async_trait]
 pub trait FactorRepository: Send + Sync {
-    async fn create_definition(
+    /// Atomically register one canonical batch of immutable factor revisions.
+    ///
+    /// Implementations reject duplicate names, IDs, or hashes before writing
+    /// and return outcomes in canonical factor-name order. Exact retries are
+    /// idempotent; any persisted identity collision rolls back the entire batch.
+    async fn register_definitions(
         &self,
-        definition: NewFactorDefinition,
-    ) -> Result<FactorDefinitionInfo, StorageError>;
+        definitions: Vec<NewFactorDefinition>,
+    ) -> Result<Vec<FactorRegistrationOutcome>, StorageError>;
 
     async fn create_values(
         &self,
@@ -35,29 +41,11 @@ pub trait FactorRepository: Send + Sync {
         factor_definition_ids: &[FactorDefinitionId],
     ) -> Result<Vec<FactorDefinitionInfo>, StorageError>;
 
-    /// Page the factor-definition governance catalog, newest (`created_at`) first.
+    /// Page the immutable factor-definition catalog, newest (`created_at`) first.
     async fn page_definitions(
         &self,
         query: FactorDefinitionListQuery,
     ) -> Result<Paginated<FactorDefinitionInfo>, StorageError>;
-
-    async fn publish_definition(
-        &self,
-        factor_definition_id: &FactorDefinitionId,
-    ) -> Result<FactorDefinitionInfo, StorageError>;
-
-    /// Atomically publish all requested revisions, returning only definitions
-    /// changed by this call and retiring any previously published revision with
-    /// the same logical name in the same transaction.
-    async fn publish_definitions(
-        &self,
-        factor_definition_ids: &[FactorDefinitionId],
-    ) -> Result<Vec<FactorDefinitionInfo>, StorageError>;
-
-    async fn retire_definition(
-        &self,
-        factor_definition_id: &FactorDefinitionId,
-    ) -> Result<FactorDefinitionInfo, StorageError>;
 
     async fn list_values_for_run(
         &self,
@@ -80,23 +68,29 @@ pub trait FactorRepository: Send + Sync {
         until: DateTime<Utc>,
     ) -> Result<Vec<FactorValueInfo>, StorageError>;
 
-    /// Latest scored value for the exact online PIT binding.
+    /// Latest scored value visible by `available_by` for the exact online PIT
+    /// binding. Only succeeded live-inference runs are serving-visible.
     async fn latest_snapshot(
         &self,
         factor_definition_id: &FactorDefinitionId,
         market_id: &MarketId,
         model_version_id: &ModelVersionId,
+        available_by: DateTime<Utc>,
     ) -> Result<Option<LatestFactorSnapshotInfo>, StorageError>;
 
-    /// Latest coherent factor plane for one exact market/model binding.
+    /// Latest coherent factor plane visible by `available_by` for one exact
+    /// market/model binding.
     ///
-    /// Implementations must select a single serving run containing every
-    /// requested definition; values from different runs must never be mixed.
+    /// Implementations must select one exact feature vector in a single
+    /// serving run containing every requested definition. Values from
+    /// different vectors or runs must never be mixed. A newer incomplete plane
+    /// must not mask an older complete plane.
     async fn latest_snapshot_bundle(
         &self,
         _factor_definition_ids: &[FactorDefinitionId],
         _market_id: &MarketId,
         _model_version_id: &ModelVersionId,
+        _available_by: DateTime<Utc>,
     ) -> Result<Option<LatestFactorSnapshotBundleInfo>, StorageError> {
         Ok(None)
     }

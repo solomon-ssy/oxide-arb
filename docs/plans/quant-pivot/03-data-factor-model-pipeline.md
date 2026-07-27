@@ -1247,22 +1247,22 @@ pub struct ModelRuntimeOutput {
 }
 ```
 
-加载模型：
+加载并构造模型：
 
 ```rust
-pub trait ModelRuntimeFactory {
-    async fn load(
-        &self,
-        model_version: &ModelVersionInfo,
-    ) -> QuantResult<Box<dyn QuantModelRuntime>>;
-}
+let source = serving_preimages.load(model_version).await?;
+let runtime: Arc<dyn QuantModelRuntime> = source.buy_runtime()?;
 ```
 
 规则：
 
-- `ModelRuntimeFactory` 是唯一知道第三方 crate concrete type 的地方。
+- `ModelArtifact::load_verified` 唯一拥有内容寻址字节、canonical hash 与 persisted
+  serving-contract/header 一致性校验。
+- `VerifiedModelServingPreimage` 唯一拥有完整 dependency graph、classical estimator
+  bytes、resolved calibration 与 concrete Buy/Sell runtime 构造。
 - `ReportBuilder` 只依赖 `QuantModelRuntime`。
-- `ModelVersionInfo.artifact_kind` 决定加载哪个 runtime。
+- sealed `ModelServingContract` 与 artifact payload family 共同决定 runtime；caller
+  不得提供 family override。
 - 加载失败时不能 panic，必须返回 typed error。
 
 ## 28. 推理降级策略

@@ -10,7 +10,7 @@ use crate::{
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
         Probability, TrainingDatasetId,
-        backtest::{CategoryMetrics, ExpectedVsRealized, PnlSimulation},
+        backtest::{BacktestReportHashInput, CategoryMetrics, ExpectedVsRealized, PnlSimulation},
     },
 };
 
@@ -73,6 +73,29 @@ info_from_model!(
     }
 );
 
+impl BacktestReportInfo {
+    /// Recompute the canonical compute-artifact hash from the persisted
+    /// semantic payload.
+    pub fn recomputed_hash(&self) -> Result<ContentHash, String> {
+        BacktestReportHashInput::try_from(self)?
+            .content_hash()
+            .map_err(|error| format!("backtest report hash failed: {error}"))
+    }
+
+    /// Verify that the stored hash seals the exact persisted report payload.
+    pub fn verify_hash(&self) -> Result<(), String> {
+        let recomputed = self.recomputed_hash()?;
+        if self.report_hash == recomputed {
+            Ok(())
+        } else {
+            Err(format!(
+                "backtest report hash mismatch: stored {}, recomputed {recomputed}",
+                self.report_hash
+            ))
+        }
+    }
+}
+
 /// Insert payload for `quant_backtest_report`.
 ///
 /// Covers every `ActiveModel` column except the DB-managed `created_at`.
@@ -101,4 +124,89 @@ pub struct NewBacktestReport {
     pub report_pnl_simulation: PnlSimulation,
     pub report_hash: ContentHash,
     pub parquet_uri: Option<String>,
+}
+
+impl NewBacktestReport {
+    /// Recompute the canonical compute-artifact hash before insertion.
+    pub fn recomputed_hash(&self) -> Result<ContentHash, String> {
+        BacktestReportHashInput::try_from(self)?
+            .content_hash()
+            .map_err(|error| format!("backtest report hash failed: {error}"))
+    }
+
+    /// Verify that the caller-provided hash is the exact canonical report
+    /// identity. Repositories must call this inside the insertion transaction.
+    pub fn verify_hash(&self) -> Result<(), String> {
+        let recomputed = self.recomputed_hash()?;
+        if self.report_hash == recomputed {
+            Ok(())
+        } else {
+            Err(format!(
+                "backtest report hash mismatch: stored {}, recomputed {recomputed}",
+                self.report_hash
+            ))
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a BacktestReportInfo> for BacktestReportHashInput<'a> {
+    type Error = String;
+
+    fn try_from(report: &'a BacktestReportInfo) -> Result<Self, Self::Error> {
+        Ok(Self {
+            backtest_report_id: &report.backtest_report_id,
+            model_version_id: &report.model_version_id,
+            dataset_id: &report.evaluation_dataset_id,
+            decision_policy_snapshot_id: &report.decision_policy_snapshot_id,
+            window_start: report.window_start,
+            window_end: report.window_end,
+            coverage: report.coverage,
+            sample_count: u64::try_from(report.sample_count)
+                .map_err(|error| format!("backtest sample_count must be non-negative: {error}"))?,
+            missing_feature_count: u64::try_from(report.missing_feature_count).map_err(
+                |error| format!("backtest missing_feature_count must be non-negative: {error}"),
+            )?,
+            rank_ic: report.rank_ic,
+            sharpe: report.sharpe,
+            hit_rate: report.hit_rate,
+            expected_vs_realized: &report.expected_vs_realized,
+            max_drawdown: report.max_drawdown,
+            turnover: report.turnover,
+            liquidity_feasibility: report.liquidity_feasibility,
+            category_breakdown: &report.category_breakdown,
+            tail_loss: report.tail_loss,
+            report_pnl_simulation: &report.report_pnl_simulation,
+        })
+    }
+}
+
+impl<'a> TryFrom<&'a NewBacktestReport> for BacktestReportHashInput<'a> {
+    type Error = String;
+
+    fn try_from(report: &'a NewBacktestReport) -> Result<Self, Self::Error> {
+        Ok(Self {
+            backtest_report_id: &report.backtest_report_id,
+            model_version_id: &report.model_version_id,
+            dataset_id: &report.evaluation_dataset_id,
+            decision_policy_snapshot_id: &report.decision_policy_snapshot_id,
+            window_start: report.window_start,
+            window_end: report.window_end,
+            coverage: report.coverage,
+            sample_count: u64::try_from(report.sample_count)
+                .map_err(|error| format!("backtest sample_count must be non-negative: {error}"))?,
+            missing_feature_count: u64::try_from(report.missing_feature_count).map_err(
+                |error| format!("backtest missing_feature_count must be non-negative: {error}"),
+            )?,
+            rank_ic: report.rank_ic,
+            sharpe: report.sharpe,
+            hit_rate: report.hit_rate,
+            expected_vs_realized: &report.expected_vs_realized,
+            max_drawdown: report.max_drawdown,
+            turnover: report.turnover,
+            liquidity_feasibility: report.liquidity_feasibility,
+            category_breakdown: &report.category_breakdown,
+            tail_loss: report.tail_loss,
+            report_pnl_simulation: &report.report_pnl_simulation,
+        })
+    }
 }

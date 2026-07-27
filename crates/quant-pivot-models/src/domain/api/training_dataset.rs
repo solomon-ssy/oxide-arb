@@ -25,13 +25,16 @@ use validator::Validate;
 
 use crate::{
     domain::{pagination::PageRequest, quant::TrainingDatasetInfo},
-    enums::quant::{DatasetPurpose, FeedbackCohort, TrainingDatasetStatus},
+    enums::{
+        model::ModelFamily,
+        quant::{DatasetPurpose, FeedbackCohort, TrainingDatasetStatus},
+    },
     half_open_window_request,
     types::{
         ContentHash, DatasetCohortManifest, DatasetCoverage, DatasetManifest, DatasetSourceLineage,
         DecisionPolicySnapshotId, ModelSpecId, ResearchProfileArtifactId, ResearchProfileRef,
         SchemaVersion, SourceSliceId, TrainingDatasetId, TrainingHorizonsSecs,
-        TrainingSampleSource, TrainingSampleSources, default_sample_sources,
+        TrainingSampleSources, factor::FactorServingPlane,
     },
 };
 
@@ -77,8 +80,8 @@ pub struct BuildTrainingDatasetRequest {
     #[serde(default)]
     pub feature_schema_version: SchemaVersion,
     /// Sample sources to materialize.
-    #[serde(default = "default_sample_sources")]
-    pub sample_sources: Vec<TrainingSampleSource>,
+    #[serde(default)]
+    pub sample_sources: TrainingSampleSources,
     /// Operator reason recorded on the operation log (UI should require non-empty).
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
@@ -96,7 +99,12 @@ pub struct TrainingDatasetPlanView {
     /// Pre-assigned id that the subsequent build will use (stable across plan → build).
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
+    pub model_family: ModelFamily,
     pub model_spec_definition_hash: ContentHash,
+    pub feature_schema_version: SchemaVersion,
+    pub feature_schema_hash: ContentHash,
+    pub factor_schema_hash: ContentHash,
+    pub factor_serving_plane: FactorServingPlane,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
@@ -127,7 +135,9 @@ pub struct TrainingDatasetPlanView {
 pub struct TrainingDatasetView {
     pub training_dataset_id: TrainingDatasetId,
     pub model_spec_id: ModelSpecId,
+    pub model_family: ModelFamily,
     pub model_spec_definition_hash: ContentHash,
+    pub factor_serving_plane: FactorServingPlane,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub source_slice_id: SourceSliceId,
     pub pit_cutoff: DateTime<Utc>,
@@ -139,12 +149,12 @@ pub struct TrainingDatasetView {
     /// Lifecycle state — UI should map to badges and gate trainer actions on `ready`.
     pub status: TrainingDatasetStatus,
     pub purpose: DatasetPurpose,
-    pub feature_schema_hash: Option<ContentHash>,
-    pub factor_schema_hash: Option<ContentHash>,
+    pub feature_schema_hash: ContentHash,
+    pub factor_schema_hash: ContentHash,
     pub label_schema_hash: Option<ContentHash>,
     pub dataset_hash: Option<ContentHash>,
     pub manifest_hash: Option<ContentHash>,
-    /// Structured projection of the exact frozen v2 artifact manifest. `None`
+    /// Structured projection of the exact frozen v3 artifact manifest. `None`
     /// means materialization did not complete successfully.
     pub manifest: Option<DatasetManifestView>,
     pub artifact_bytes_hash: Option<ContentHash>,
@@ -156,7 +166,7 @@ pub struct TrainingDatasetView {
     pub sample_interval_secs: i64,
     /// Forward label horizons frozen into this dataset (seconds).
     pub horizons_secs: TrainingHorizonsSecs,
-    pub feature_schema_version: Option<SchemaVersion>,
+    pub feature_schema_version: SchemaVersion,
     pub sample_sources: Option<TrainingSampleSources>,
     /// Build diagnostics: planned vs built examples, decode failures, label skips, etc.
     pub coverage: Option<DatasetCoverage>,
@@ -193,7 +203,9 @@ impl From<TrainingDatasetInfo> for TrainingDatasetView {
         Self {
             training_dataset_id: info.training_dataset_id,
             model_spec_id: info.model_spec_id,
+            model_family: info.model_family,
             model_spec_definition_hash: info.model_spec_definition_hash,
+            factor_serving_plane: info.factor_serving_plane,
             research_profile_artifact_id: info.research_profile_artifact_id,
             source_slice_id: info.source_slice_id,
             pit_cutoff: info.pit_cutoff,

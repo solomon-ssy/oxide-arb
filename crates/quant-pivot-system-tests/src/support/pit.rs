@@ -9,7 +9,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use quant_pivot_core::ingest::{book_store::BookStore, market_registry::MarketRegistry};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
@@ -51,10 +51,19 @@ impl InMemoryDecisionSnapshotSource {
         Self::freeze_inner(registry, book_store, false)
     }
 
-    /// Freeze a test venue whose catalog explicitly proves that fees are disabled.
+    /// Freeze a complete zero-fee test venue at one explicit decision instant.
+    ///
+    /// Every active market must have an event and both binary books, and all
+    /// frozen source timestamps must be visible at `decision_at`.
     #[must_use]
-    pub fn freeze_zero_fee(registry: &MarketRegistry, book_store: &BookStore) -> Self {
-        Self::freeze_inner(registry, book_store, true)
+    pub fn freeze_zero_fee_at(
+        registry: &MarketRegistry,
+        book_store: &BookStore,
+        decision_at: DateTime<Utc>,
+    ) -> Self {
+        let source = Self::freeze_inner(registry, book_store, true);
+        source.assert_complete_at(decision_at);
+        source
     }
 
     fn freeze_inner(
@@ -112,6 +121,58 @@ impl InMemoryDecisionSnapshotSource {
             events,
             leg_sets,
             fee_schedules,
+        }
+    }
+
+    fn assert_complete_at(&self, decision_at: DateTime<Utc>) {
+        assert!(
+            !self.markets.is_empty(),
+            "a complete PIT fixture requires at least one active market"
+        );
+        for market in self.markets.values() {
+            let event = self.events.get(&market.event_id).unwrap_or_else(|| {
+                panic!(
+                    "PIT fixture market {} is missing event {}",
+                    market.market_id, market.event_id
+                )
+            });
+            assert!(
+                market.updated_at <= decision_at,
+                "PIT fixture market {} updated at {} after decision {}",
+                market.market_id,
+                market.updated_at,
+                decision_at
+            );
+            assert!(
+                event.updated_at <= decision_at,
+                "PIT fixture event {} updated at {} after decision {}",
+                event.event_id,
+                event.updated_at,
+                decision_at
+            );
+            assert!(
+                self.fee_schedules.contains_key(&market.market_id),
+                "PIT fixture market {} is missing its zero-fee schedule",
+                market.market_id
+            );
+            for token_id in [&market.token_yes, &market.token_no] {
+                let snapshot = self.books.get(token_id).unwrap_or_else(|| {
+                    panic!(
+                        "PIT fixture market {} is missing book {}",
+                        market.market_id, token_id
+                    )
+                });
+                let snapshot_at = DateTime::from_timestamp_millis(
+                    i64::try_from(snapshot.timestamp_ms)
+                        .expect("PIT fixture book timestamp must fit i64"),
+                )
+                .expect("PIT fixture book timestamp must be representable");
+                assert!(
+                    snapshot_at <= decision_at,
+                    "PIT fixture book {token_id} published at {snapshot_at} after decision \
+                     {decision_at}"
+                );
+            }
         }
     }
 }

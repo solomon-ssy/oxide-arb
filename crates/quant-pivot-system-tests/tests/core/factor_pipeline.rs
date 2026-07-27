@@ -6,6 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -13,7 +14,6 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use prometheus::IntCounter;
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::{
-    governance::BiasTableApplicator,
     ingest::{book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry},
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
@@ -21,7 +21,7 @@ use quant_pivot_core::{
     },
     prefetch::feature_window::FeatureWindowProvider,
     service::{
-        factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
+        factor_pipeline::{FactorExecutionPlane, FactorPipelineRequest, FactorPipelineService},
         feature_pipeline::{FeaturePipelineDeps, FeaturePipelineRequest, FeaturePipelineService},
     },
 };
@@ -38,20 +38,20 @@ use quant_pivot_models::{
             EventRegistryInfo, MarketRegistryInfo, TokenInfo,
             book::{BookLevel, BookSnapshot},
         },
-        quant::NewModelRun,
+        quant::{FactorValueInfo, NewFactorValue, NewModelRun},
     },
     enums::{
         catalog::CatalogFilterReasonSet,
         common::{CategorySet, MarketCategory, TickSize},
-        factor::{FactorDefinitionScope, FactorFamily},
+        factor::{FactorDefinitionScope, FactorFamily, FactorValueState, NormalizationSource},
         market::{EventStatus, MarketStatus},
-        quant::{DataQualityStatus, ModelRunKind, ModelRunStatus},
+        quant::{DataQualityStatus, FactorDirection, ModelRunErrorCode, ModelRunKind},
     },
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
     types::{
-        ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FeatureCell,
-        FeatureStaleness, FeatureValue, FeatureVectorId, MarketId, ModelRunId, Price,
-        SchemaVersion, Shares, TokenId, Usd,
+        ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FactorDefinitionId,
+        FactorValueId, FeatureCell, FeatureStaleness, FeatureValue, FeatureVectorId, MarketId,
+        ModelRunId, ModelVersionId, Price, Probability, SchemaVersion, Shares, TokenId, Usd,
         stable_name::{FactorName, FeatureName},
     },
 };
@@ -61,8 +61,8 @@ use quant_pivot_repository::{
         PgFeatureRepository, PgMarketRepository, PgModelRunRepository,
     },
     traits::{
-        CalibrationArtifactRepository, EventRepository, FactorRepository, FeatureRepository,
-        MarketRepository, ModelRunRepository, QuantFactReadRepository,
+        EventRepository, FactorRepository, FeatureRepository, MarketRepository, ModelRunRepository,
+        QuantFactReadRepository,
     },
 };
 use quant_pivot_research::{
@@ -81,8 +81,9 @@ use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
         catalog_fixtures::{make_event, make_market},
+        execution_pg_seed::seed_shared_demo_infra,
         fact_sink::DiscardFactWriter,
-        factor_governance::{publish_all_factor_definitions, register_all_factor_definitions},
+        factor_definitions::register_all_factor_definitions,
         pit::InMemoryDecisionSnapshotSource,
         publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
@@ -90,7 +91,7 @@ use quant_pivot_system_tests::{
     },
 };
 use rust_decimal::Decimal;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, TryGetable};
 use tokio_util::sync::CancellationToken;
 
 struct Catalog {
@@ -420,113 +421,1073 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
     (result.accepted, ids)
 }
 
-pub async fn create_definition_values_run() {
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    seed_catalog(&db, &CATALOG).await;
-
-    let (vectors, feature_vector_ids) = build_features(&db).await;
-
-    let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
-    let (writer, _worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("factor-e2e-factor-events").capacity(256),
-        |_| Box::pin(async { Ok(()) }),
-        IntCounter::new("factor_e2e_drops", "drops").expect("counter"),
-        AsyncWriterObservability::default(),
-    );
-    let event_writer = Arc::new(FactorEventWriter::new(Arc::new(writer)));
-    let bias_table = Arc::new(BiasTableApplicator::new(Arc::new(
-        PgCalibrationArtifactRepository::new(db.clone()),
-    )
-        as Arc<dyn CalibrationArtifactRepository>));
-    let service = FactorPipelineService::new(
-        Arc::clone(&factor_repo),
-        event_writer,
-        bias_table,
-        Arc::new(ComputeExecutor::new().expect("test compute executor")),
-    );
-
-    let model_run_id = ModelRunId::from_v7();
-    // The factor-value → model_run FK (added in 3.4) requires the owning run to
-    // exist before any factor value is persisted.
-    let model_run_repo = PgModelRunRepository::new(db.clone());
-    model_run_repo
-        .create(NewModelRun {
-            model_run_id,
-            run_kind: ModelRunKind::LiveInference,
-            model_version_id: None,
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            market_selection_id: None,
-            window_start: Utc::now(),
-            window_end: Utc::now(),
-            status: ModelRunStatus::Running,
-            input_hash: ContentHash::parse(&format!("blake3:{}", "0".repeat(64)))
-                .expect("zero hash"),
-            output_hash: None,
-            error_code: None,
-            error_message: None,
-            started_at: Utc::now(),
-            finished_at: None,
-        })
-        .await
-        .expect("create owning model run");
-
-    let factors = factors_config();
-    let features = FeaturesConfig::default();
-    publish_all_factor_definitions(
-        factor_repo.as_ref(),
-        &factors,
-        &features,
-        &DomainConfig::default(),
-    )
-    .await
-    .expect("publish factor definitions");
-
-    let result = service
-        .run(FactorPipelineRequest {
-            model_run_id: &model_run_id,
-            vectors: Arc::from(vectors.clone()),
-            feature_vector_ids: &feature_vector_ids,
-            factors: &factors,
-            features: &features,
-            domain: &DomainConfig::default(),
-        })
-        .await
-        .expect("factor pipeline");
-
-    assert!(
-        !result.persisted.is_empty(),
-        "an eligible market must persist factor values"
-    );
-    assert!(result.rejected.is_empty(), "no market should be rejected");
-
-    let listed = factor_repo
-        .list_values_for_run(&model_run_id)
-        .await
-        .expect("list values for run");
-    assert_eq!(listed.len(), result.persisted.len());
-    assert!(
-        listed
-            .iter()
-            .all(|value| value.model_run_id == model_run_id),
-        "listed values must all belong to the run"
-    );
-
-    // The data-quality definition is always registered and idempotent.
-    let definition_id = FactorEngine::new(&factors, &features, &DomainConfig::default(), None)
-        .definition_identity(&FactorName::new("data_quality"))
-        .expect("data-quality identity")
-        .factor_definition_id;
-    let definition = factor_repo
-        .find_definition(&definition_id)
-        .await
-        .expect("find definition")
-        .expect("definition row");
-    assert_eq!(definition.name, "data_quality");
-    assert_eq!(definition.scope, FactorDefinitionScope::Generic);
+struct FactorPipelineScenario {
+    db: DatabaseConnection,
+    factor_repo: Arc<dyn FactorRepository>,
+    model_run_repo: PgModelRunRepository,
+    model_version_id: ModelVersionId,
+    model_run_id: ModelRunId,
+    run_decision_at: DateTime<Utc>,
+    factors: FactorsConfig,
+    features: FeaturesConfig,
+    listed: Vec<FactorValueInfo>,
+    snapshot_definition_ids: Vec<FactorDefinitionId>,
 }
 
-pub async fn unpublished_factor_definitions_pipeline() {
+impl FactorPipelineScenario {
+    async fn initialize(db: DatabaseConnection) -> Self {
+        seed_catalog(&db, &CATALOG).await;
+        let (vectors, feature_vector_ids) = build_features(&db).await;
+        let run_decision_at = vectors
+            .first()
+            .map(|vector| vector.decision_at)
+            .expect("factor pipeline decision boundary");
+        let model_version_id = seed_shared_demo_infra(&db).await.model_version_id;
+        let factor_repo =
+            Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
+        let model_run_repo = PgModelRunRepository::new(db.clone());
+        let model_run_id = ModelRunId::from_v7();
+        let factors = factors_config();
+        let features = FeaturesConfig::default();
+
+        let mut scenario = Self {
+            db,
+            factor_repo,
+            model_run_repo,
+            model_version_id,
+            model_run_id,
+            run_decision_at,
+            factors,
+            features,
+            listed: Vec::new(),
+            snapshot_definition_ids: Vec::new(),
+        };
+        scenario
+            .model_run_repo
+            .create(scenario.new_live_run(model_run_id, '0'))
+            .await
+            .expect("create owning model run");
+        register_all_factor_definitions(
+            scenario.factor_repo.as_ref(),
+            &scenario.factors,
+            &scenario.features,
+            &DomainConfig::default(),
+        )
+        .await
+        .expect("register immutable factor definitions");
+
+        let (writer, _worker) = AsyncWriter::new(
+            AsyncWriterConfig::new("factor-e2e-factor-events").capacity(256),
+            |_| Box::pin(async { Ok(()) }),
+            IntCounter::new("factor_e2e_drops", "drops").expect("counter"),
+            AsyncWriterObservability::default(),
+        );
+        let event_writer = Arc::new(FactorEventWriter::new(Arc::new(writer)));
+        let service = FactorPipelineService::new(
+            Arc::clone(&scenario.factor_repo),
+            event_writer,
+            Arc::new(ComputeExecutor::new().expect("test compute executor")),
+        );
+        let domain = DomainConfig::default();
+        let factor_execution = FactorExecutionPlane::try_new(
+            &scenario.factors,
+            &scenario.features,
+            &domain,
+            None,
+            None,
+        )
+        .expect("factor execution plane");
+        let result = service
+            .run(FactorPipelineRequest {
+                model_run_id: &scenario.model_run_id,
+                vectors: Arc::from(vectors),
+                feature_vector_ids: &feature_vector_ids,
+                factor_execution: &factor_execution,
+            })
+            .await
+            .expect("factor pipeline");
+        assert!(
+            !result.persisted.is_empty(),
+            "an eligible market must persist factor values"
+        );
+        assert!(result.rejected.is_empty(), "no market should be rejected");
+
+        scenario.listed = scenario
+            .factor_repo
+            .list_values_for_run(&scenario.model_run_id)
+            .await
+            .expect("list values for run");
+        assert_eq!(scenario.listed.len(), result.persisted.len());
+        assert!(
+            scenario
+                .listed
+                .iter()
+                .all(|value| value.model_run_id == scenario.model_run_id),
+            "listed values must all belong to the run"
+        );
+        scenario.snapshot_definition_ids = scenario
+            .listed
+            .iter()
+            .take(2)
+            .map(|value| value.factor_definition_id)
+            .collect();
+        assert_eq!(
+            scenario.snapshot_definition_ids.len(),
+            2,
+            "snapshot visibility contract requires at least two factors"
+        );
+        scenario
+    }
+
+    fn new_live_run(&self, model_run_id: ModelRunId, hash_seed: char) -> NewModelRun {
+        NewModelRun {
+            model_run_id,
+            run_kind: ModelRunKind::LiveInference,
+            model_version_id: Some(self.model_version_id),
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            market_selection_id: None,
+            window_start: self.run_decision_at,
+            window_end: self.run_decision_at,
+            input_hash: ContentHash::parse(&format!("blake3:{}", hash_seed.to_string().repeat(64)))
+                .expect("fixture model input hash"),
+        }
+    }
+
+    fn persisted_value(&self) -> &FactorValueInfo {
+        self.listed
+            .first()
+            .expect("at least one persisted factor value")
+    }
+
+    fn scored_value(&self) -> &FactorValueInfo {
+        self.listed
+            .iter()
+            .find(|value| value.value_state == FactorValueState::Scored)
+            .expect("factor pipeline must produce a scored value")
+    }
+
+    fn value_for_run(&self, source: &FactorValueInfo, model_run_id: ModelRunId) -> NewFactorValue {
+        assert_eq!(
+            source.model_run_id, self.model_run_id,
+            "factor fixture sources must belong to the canonical pipeline run"
+        );
+        NewFactorValue {
+            factor_value_id: FactorValueId::from_v7(),
+            factor_definition_id: source.factor_definition_id,
+            feature_vector_id: source.feature_vector_id,
+            model_run_id,
+            market_id: source.market_id.clone(),
+            decision_at: source.decision_at,
+            value_state: source.value_state,
+            raw_value: source.raw_value,
+            normalized_score: source.normalized_score,
+            normalization_source: source.normalization_source,
+            indeterminate_reason: source.indeterminate_reason,
+            direction: source.direction,
+            confidence: source.confidence,
+            explanation: source.explanation.clone(),
+        }
+    }
+}
+
+impl FactorPipelineScenario {
+    async fn verify_value_plane(&self) -> FeatureVectorId {
+        self.running_is_hidden().await;
+        let alternate_vector_id = self.reject_value_lineage().await;
+        self.reject_value_shape().await;
+        alternate_vector_id
+    }
+
+    async fn running_is_hidden(&self) {
+        let persisted = self.persisted_value();
+        assert!(
+            self.factor_repo
+                .latest_snapshot_bundle(
+                    &self.snapshot_definition_ids,
+                    &persisted.market_id,
+                    &self.model_version_id,
+                    Utc::now(),
+                )
+                .await
+                .expect("query Running factor snapshot")
+                .is_none(),
+            "Running model runs must be serving-invisible"
+        );
+    }
+
+    async fn reject_value_lineage(&self) -> FeatureVectorId {
+        let persisted = self.persisted_value();
+        let duplicate = self
+            .factor_repo
+            .create_values(vec![self.value_for_run(persisted, self.model_run_id)])
+            .await;
+        assert!(
+            matches!(duplicate, Err(StorageError::Duplicate { .. })),
+            "the natural model-run/vector/definition key must reject duplicate facts"
+        );
+
+        let mut lineage_mismatch = self.value_for_run(persisted, self.model_run_id);
+        lineage_mismatch.market_id = MarketId::new("0xfactor-lineage-mismatch");
+        assert!(matches!(
+            self.factor_repo.create_values(vec![lineage_mismatch]).await,
+            Err(StorageError::InvariantViolation { .. })
+        ));
+
+        let alternate_vector_id = FeatureVectorId::from_v7();
+        self.db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO quant_feature_vector (
+                    feature_vector_id, market_id, token_id, decision_at, decision_boundary,
+                    feature_schema_version, feature_hash, data_quality, staleness_ms, payload,
+                    source_refs, decision_capture, decision_capture_hash, created_at
+                 )
+                 SELECT $1, market_id, token_id, decision_at, decision_boundary,
+                        feature_schema_version, feature_hash, data_quality, staleness_ms, payload,
+                        source_refs, decision_capture, decision_capture_hash, created_at
+                 FROM quant_feature_vector
+                 WHERE feature_vector_id = $2",
+                [
+                    alternate_vector_id.as_uuid().into(),
+                    persisted.feature_vector_id.as_uuid().into(),
+                ],
+            ))
+            .await
+            .expect("clone alternate feature vector");
+        let mut alternate_binding = self.value_for_run(persisted, self.model_run_id);
+        alternate_binding.feature_vector_id = alternate_vector_id;
+        assert!(matches!(
+            self.factor_repo
+                .create_values(vec![alternate_binding])
+                .await,
+            Err(StorageError::InvariantViolation { .. })
+        ));
+        let raw_alternate_binding = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO quant_factor_value (
+                    factor_value_id, factor_definition_id, feature_vector_id, model_run_id,
+                    market_id, decision_at, value_state, raw_value, normalized_score,
+                    normalization_source, indeterminate_reason, direction, confidence,
+                    explanation, created_at
+                 )
+                 SELECT $1, factor_definition_id, $3, model_run_id,
+                        market_id, decision_at, value_state, raw_value, normalized_score,
+                        normalization_source, indeterminate_reason, direction, confidence,
+                        explanation, created_at
+                 FROM quant_factor_value
+                 WHERE factor_value_id = $2",
+                [
+                    FactorValueId::from_v7().as_uuid().into(),
+                    persisted.factor_value_id.as_uuid().into(),
+                    alternate_vector_id.as_uuid().into(),
+                ],
+            ))
+            .await;
+        assert!(
+            raw_alternate_binding.is_err(),
+            "one run/market/decision factor plane must bind one exact feature vector"
+        );
+        alternate_vector_id
+    }
+
+    async fn reject_value_shape(&self) {
+        let persisted = self.persisted_value();
+        let malformed = NewFactorValue {
+            factor_value_id: FactorValueId::from_v7(),
+            factor_definition_id: persisted.factor_definition_id,
+            feature_vector_id: persisted.feature_vector_id,
+            model_run_id: persisted.model_run_id,
+            market_id: persisted.market_id.clone(),
+            decision_at: persisted.decision_at,
+            value_state: FactorValueState::Scored,
+            raw_value: None,
+            normalized_score: Some(Probability::ZERO),
+            normalization_source: Some(NormalizationSource::PerMarket),
+            indeterminate_reason: None,
+            direction: persisted.direction,
+            confidence: persisted.confidence,
+            explanation: persisted.explanation.clone(),
+        };
+        assert!(matches!(
+            self.factor_repo.create_values(vec![malformed]).await,
+            Err(StorageError::InvariantViolation { .. })
+        ));
+
+        let direction = if persisted.direction == FactorDirection::Neutral {
+            FactorDirection::Positive
+        } else {
+            FactorDirection::Neutral
+        };
+        let direction_mismatch = NewFactorValue {
+            factor_value_id: FactorValueId::from_v7(),
+            factor_definition_id: persisted.factor_definition_id,
+            feature_vector_id: persisted.feature_vector_id,
+            model_run_id: persisted.model_run_id,
+            market_id: persisted.market_id.clone(),
+            decision_at: persisted.decision_at,
+            value_state: persisted.value_state,
+            raw_value: persisted.raw_value,
+            normalized_score: persisted.normalized_score,
+            normalization_source: persisted.normalization_source,
+            indeterminate_reason: persisted.indeterminate_reason,
+            direction,
+            confidence: persisted.confidence,
+            explanation: persisted.explanation.clone(),
+        };
+        assert!(matches!(
+            self.factor_repo
+                .create_values(vec![direction_mismatch])
+                .await,
+            Err(StorageError::InvariantViolation { .. })
+        ));
+    }
+}
+
+impl FactorPipelineScenario {
+    async fn verify_run_bindings(&self, alternate_vector_id: FeatureVectorId) {
+        self.reject_concurrent_binding(alternate_vector_id).await;
+        self.reject_window_mismatch().await;
+        self.terminal_runs_hidden().await;
+    }
+
+    async fn reject_concurrent_binding(&self, alternate_vector_id: FeatureVectorId) {
+        let persisted = self.persisted_value();
+        let concurrent_run_id = ModelRunId::from_v7();
+        self.model_run_repo
+            .create(self.new_live_run(concurrent_run_id, '3'))
+            .await
+            .expect("create concurrent-binding run");
+        let concurrent_sources = self
+            .listed
+            .iter()
+            .filter(|value| value.feature_vector_id == persisted.feature_vector_id)
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            concurrent_sources.len(),
+            2,
+            "concurrency contract requires two factors from one vector"
+        );
+        let left_value = self.value_for_run(concurrent_sources[0], concurrent_run_id);
+        let mut right_value = self.value_for_run(concurrent_sources[1], concurrent_run_id);
+        right_value.feature_vector_id = alternate_vector_id;
+        let concurrent_results: [_; 2] = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                self.factor_repo.create_values(vec![left_value]),
+                self.factor_repo.create_values(vec![right_value])
+            )
+        })
+        .await
+        .expect("concurrent factor binding must not deadlock")
+        .into();
+        assert_eq!(
+            concurrent_results
+                .iter()
+                .filter(|result| result.is_ok())
+                .count(),
+            1
+        );
+        assert_eq!(
+            concurrent_results
+                .iter()
+                .filter(|result| matches!(result, Err(StorageError::InvariantViolation { .. })))
+                .count(),
+            1
+        );
+        let concurrent_created_at = concurrent_results
+            .iter()
+            .find_map(|result| {
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(|values| values.first())
+                    .map(|value| value.created_at)
+            })
+            .expect("one concurrent factor value");
+        let premature_finish = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE quant_model_run
+                 SET status = 'cancelled'::qp_model_run_status,
+                     error_code = 'cancelled_by_operator'::qp_model_run_error_code,
+                     error_message = 'forged premature factor run finalization',
+                     finished_at = $2
+                 WHERE model_run_id = $1",
+                [
+                    concurrent_run_id.as_uuid().into(),
+                    (concurrent_created_at - ChronoDuration::microseconds(1)).into(),
+                ],
+            ))
+            .await;
+        assert!(
+            premature_finish.is_err(),
+            "the database must reject a terminal timestamp before an owned factor value"
+        );
+        self.model_run_repo
+            .cancel(
+                &concurrent_run_id,
+                "concurrent factor binding negative completed".to_owned(),
+            )
+            .await
+            .expect("cancel concurrent-binding run");
+    }
+
+    async fn reject_window_mismatch(&self) {
+        let persisted = self.persisted_value();
+        let model_run_id = ModelRunId::from_v7();
+        let mut model_run = self.new_live_run(model_run_id, '3');
+        let wrong_decision_at = DateTime::from_timestamp_micros(
+            self.run_decision_at
+                .timestamp_micros()
+                .checked_add(1)
+                .expect("wrong decision timestamp"),
+        )
+        .expect("wrong decision DateTime");
+        model_run.window_start = wrong_decision_at;
+        model_run.window_end = wrong_decision_at;
+        self.model_run_repo
+            .create(model_run)
+            .await
+            .expect("create wrong-window run");
+        assert!(matches!(
+            self.factor_repo
+                .create_values(vec![self.value_for_run(persisted, model_run_id)])
+                .await,
+            Err(StorageError::InvariantViolation { .. })
+        ));
+        self.model_run_repo
+            .cancel(
+                &model_run_id,
+                "factor run-lineage negative completed".to_owned(),
+            )
+            .await
+            .expect("cancel wrong-window run");
+    }
+
+    async fn terminal_runs_hidden(&self) {
+        self.failed_run_is_hidden().await;
+        self.cancelled_run_is_hidden().await;
+    }
+
+    async fn persist_run_values(&self, model_run_id: ModelRunId) -> DateTime<Utc> {
+        let values = self
+            .factor_repo
+            .create_values(
+                self.listed
+                    .iter()
+                    .map(|value| self.value_for_run(value, model_run_id))
+                    .collect(),
+            )
+            .await
+            .expect("persist terminal-visibility factor values");
+        values
+            .iter()
+            .map(|value| value.created_at)
+            .max()
+            .expect("terminal-visibility factor values")
+    }
+
+    async fn failed_run_is_hidden(&self) {
+        let persisted = self.persisted_value();
+        let model_run_id = ModelRunId::from_v7();
+        self.model_run_repo
+            .create(self.new_live_run(model_run_id, '3'))
+            .await
+            .expect("create failed-visibility run");
+        let latest_value_at = self.persist_run_values(model_run_id).await;
+        let failed = self
+            .model_run_repo
+            .fail(
+                &model_run_id,
+                ModelRunErrorCode::FactorPlaneFailed,
+                "factor visibility test failure".to_owned(),
+            )
+            .await
+            .expect("fail visibility run");
+        let finished_at = failed.finished_at.expect("database-owned failure time");
+        assert!(finished_at >= latest_value_at);
+        assert!(
+            self.factor_repo
+                .latest_snapshot_bundle(
+                    &self.snapshot_definition_ids,
+                    &persisted.market_id,
+                    &self.model_version_id,
+                    finished_at,
+                )
+                .await
+                .expect("query Failed factor snapshot")
+                .is_none(),
+            "Failed model runs must be serving-invisible"
+        );
+    }
+
+    async fn cancelled_run_is_hidden(&self) {
+        let persisted = self.persisted_value();
+        let model_run_id = ModelRunId::from_v7();
+        self.model_run_repo
+            .create(self.new_live_run(model_run_id, '3'))
+            .await
+            .expect("create cancelled-visibility run");
+        let latest_value_at = self.persist_run_values(model_run_id).await;
+        let cancelled = self
+            .model_run_repo
+            .cancel(
+                &model_run_id,
+                "factor visibility test cancellation".to_owned(),
+            )
+            .await
+            .expect("cancel visibility run");
+        let finished_at = cancelled
+            .finished_at
+            .expect("database-owned cancellation time");
+        assert!(finished_at >= latest_value_at);
+        assert!(
+            self.factor_repo
+                .latest_snapshot_bundle(
+                    &self.snapshot_definition_ids,
+                    &persisted.market_id,
+                    &self.model_version_id,
+                    finished_at,
+                )
+                .await
+                .expect("query Cancelled factor snapshot")
+                .is_none(),
+            "Cancelled model runs must be serving-invisible"
+        );
+    }
+}
+
+impl FactorPipelineScenario {
+    async fn verify_raw_contracts(&self) {
+        let model_run_id = ModelRunId::from_v7();
+        self.model_run_repo
+            .create(self.new_live_run(model_run_id, '3'))
+            .await
+            .expect("create raw-contract run");
+        let sealed_created_at = self.seal_database_clock(model_run_id).await;
+        self.reject_raw_shape(model_run_id).await;
+        self.reject_raw_numeric(model_run_id).await;
+        self.reject_future_decision(model_run_id, sealed_created_at)
+            .await;
+        self.ledger_is_immutable().await;
+    }
+
+    async fn seal_database_clock(&self, model_run_id: ModelRunId) -> DateTime<Utc> {
+        let persisted = self.persisted_value();
+        let clock_source = self
+            .listed
+            .iter()
+            .find(|value| value.factor_definition_id != persisted.factor_definition_id)
+            .expect("DB-clock source factor");
+        let factor_value_id = FactorValueId::from_v7();
+        let before_row = self
+            .db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT statement_timestamp() AS observed_at",
+            ))
+            .await
+            .expect("query database clock before factor insert")
+            .expect("database clock row before factor insert");
+        let before_insert =
+            DateTime::<Utc>::try_get(&before_row, "", "observed_at").expect("decode DB clock");
+        self.db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO quant_factor_value (
+                    factor_value_id, factor_definition_id, feature_vector_id, model_run_id,
+                    market_id, decision_at, value_state, raw_value, normalized_score,
+                    normalization_source, indeterminate_reason, direction, confidence,
+                    explanation, created_at
+                 )
+                 SELECT $1, factor_definition_id, feature_vector_id, $3,
+                        market_id, decision_at, value_state, raw_value, normalized_score,
+                        normalization_source, indeterminate_reason, direction, confidence,
+                        explanation, to_timestamp(0)
+                 FROM quant_factor_value
+                 WHERE factor_value_id = $2",
+                [
+                    factor_value_id.as_uuid().into(),
+                    clock_source.factor_value_id.as_uuid().into(),
+                    model_run_id.as_uuid().into(),
+                ],
+            ))
+            .await
+            .expect("insert DB-clock-sealed factor value");
+        let row = self
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT created_at, statement_timestamp() AS observed_at
+                 FROM quant_factor_value
+                 WHERE factor_value_id = $1",
+                [factor_value_id.as_uuid().into()],
+            ))
+            .await
+            .expect("query sealed factor value")
+            .expect("sealed factor value row");
+        let sealed_created_at =
+            DateTime::<Utc>::try_get(&row, "", "created_at").expect("decode DB clock");
+        let after_insert =
+            DateTime::<Utc>::try_get(&row, "", "observed_at").expect("decode DB observation clock");
+        assert!(
+            sealed_created_at >= before_insert && sealed_created_at <= after_insert,
+            "factor value availability must be sealed by the insert statement clock"
+        );
+        sealed_created_at
+    }
+
+    async fn reject_raw_shape(&self, model_run_id: ModelRunId) {
+        let persisted = self.persisted_value();
+        let malformed_insert = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO quant_factor_value (
+                    factor_value_id, factor_definition_id, feature_vector_id, model_run_id,
+                    market_id, decision_at, value_state, raw_value, normalized_score,
+                    normalization_source, indeterminate_reason, direction, confidence,
+                    explanation, created_at
+                 )
+                 SELECT $1, factor_definition_id, feature_vector_id, $3,
+                        market_id, decision_at, 'scored'::qp_factor_value_state, NULL,
+                        0.5::numeric, 'per_market'::qp_normalization_source, NULL,
+                        direction, confidence, explanation, created_at
+                 FROM quant_factor_value
+                 WHERE factor_value_id = $2",
+                [
+                    FactorValueId::from_v7().as_uuid().into(),
+                    persisted.factor_value_id.as_uuid().into(),
+                    model_run_id.as_uuid().into(),
+                ],
+            ))
+            .await;
+        assert!(
+            malformed_insert.is_err(),
+            "relational state-tuple contract must reject scored values without a raw value"
+        );
+
+        let malformed_explanation = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO quant_factor_value (
+                    factor_value_id, factor_definition_id, feature_vector_id, model_run_id,
+                    market_id, decision_at, value_state, raw_value, normalized_score,
+                    normalization_source, indeterminate_reason, direction, confidence,
+                    explanation, created_at
+                 )
+                 SELECT $1, factor_definition_id, feature_vector_id, $3,
+                        market_id, decision_at, value_state, raw_value, normalized_score,
+                        normalization_source, indeterminate_reason, direction, confidence,
+                        '{\"drivers\": [null]}'::jsonb, created_at
+                 FROM quant_factor_value
+                 WHERE factor_value_id = $2",
+                [
+                    FactorValueId::from_v7().as_uuid().into(),
+                    persisted.factor_value_id.as_uuid().into(),
+                    model_run_id.as_uuid().into(),
+                ],
+            ))
+            .await;
+        assert!(
+            malformed_explanation.is_err(),
+            "relational explanation contract must reject missing and malformed members"
+        );
+    }
+
+    async fn reject_raw_numeric(&self, model_run_id: ModelRunId) {
+        let persisted = self.persisted_value();
+        let raw_overflow = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO quant_factor_value (
+                    factor_value_id, factor_definition_id, feature_vector_id, model_run_id,
+                    market_id, decision_at, value_state, raw_value, normalized_score,
+                    normalization_source, indeterminate_reason, direction, confidence,
+                    explanation, created_at
+                 )
+                 SELECT $1, factor_definition_id, feature_vector_id, $3,
+                        market_id, decision_at, 'scored'::qp_factor_value_state,
+                        10000000000000000::numeric, 0.5::numeric,
+                        'per_market'::qp_normalization_source, NULL, direction, confidence,
+                        explanation, created_at
+                 FROM quant_factor_value
+                 WHERE factor_value_id = $2",
+                [
+                    FactorValueId::from_v7().as_uuid().into(),
+                    persisted.factor_value_id.as_uuid().into(),
+                    model_run_id.as_uuid().into(),
+                ],
+            ))
+            .await;
+        assert!(
+            raw_overflow.is_err(),
+            "numeric(28,12) must reject a raw factor value with seventeen integer digits"
+        );
+
+        let contribution_overflow = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO quant_factor_value (
+                    factor_value_id, factor_definition_id, feature_vector_id, model_run_id,
+                    market_id, decision_at, value_state, raw_value, normalized_score,
+                    normalization_source, indeterminate_reason, direction, confidence,
+                    explanation, created_at
+                 )
+                 SELECT $1, factor_definition_id, feature_vector_id, $3,
+                        market_id, decision_at, value_state, raw_value, normalized_score,
+                        normalization_source, indeterminate_reason, direction, confidence,
+                        jsonb_build_object(
+                            'headline', 'overflow',
+                            'drivers', jsonb_build_array(jsonb_build_object(
+                                'feature_name', 'book.mid',
+                                'contribution', '79228162514264337593543950336'
+                            ))
+                        ),
+                        created_at
+                 FROM quant_factor_value
+                 WHERE factor_value_id = $2",
+                [
+                    FactorValueId::from_v7().as_uuid().into(),
+                    persisted.factor_value_id.as_uuid().into(),
+                    model_run_id.as_uuid().into(),
+                ],
+            ))
+            .await;
+        assert!(
+            contribution_overflow.is_err(),
+            "factor explanations must reject contributions outside rust_decimal"
+        );
+    }
+
+    async fn reject_future_decision(
+        &self,
+        model_run_id: ModelRunId,
+        sealed_created_at: DateTime<Utc>,
+    ) {
+        let scored = self.scored_value();
+        let future_decision = Utc::now() + ChronoDuration::hours(1);
+        let future_insert = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO quant_factor_value (
+                    factor_value_id, factor_definition_id, feature_vector_id, model_run_id,
+                    market_id, decision_at, value_state, raw_value, normalized_score,
+                    normalization_source, indeterminate_reason, direction, confidence,
+                    explanation, created_at
+                 )
+                 SELECT $1, factor_definition_id, feature_vector_id, $3,
+                        market_id, $4, value_state, raw_value, normalized_score,
+                        normalization_source, indeterminate_reason, direction, confidence,
+                        explanation, created_at
+                 FROM quant_factor_value
+                 WHERE factor_value_id = $2",
+                [
+                    FactorValueId::from_v7().as_uuid().into(),
+                    scored.factor_value_id.as_uuid().into(),
+                    model_run_id.as_uuid().into(),
+                    future_decision.into(),
+                ],
+            ))
+            .await;
+        assert!(
+            future_insert.is_err(),
+            "raw future-decision values must fail model-run and feature-vector lineage"
+        );
+
+        let failed = self
+            .model_run_repo
+            .fail(
+                &model_run_id,
+                ModelRunErrorCode::FactorPlaneFailed,
+                "raw-contract negative completed".to_owned(),
+            )
+            .await
+            .expect("fail raw-contract run");
+        let finished_at = failed
+            .finished_at
+            .expect("database-owned raw-contract finish time");
+        assert!(finished_at >= sealed_created_at);
+        assert!(
+            self.factor_repo
+                .latest_snapshot(
+                    &scored.factor_definition_id,
+                    &scored.market_id,
+                    &self.model_version_id,
+                    finished_at,
+                )
+                .await
+                .expect("query before future decision")
+                .is_none(),
+            "a factor decision after available_by must remain invisible"
+        );
+        assert!(
+            self.factor_repo
+                .latest_snapshot(
+                    &scored.factor_definition_id,
+                    &scored.market_id,
+                    &self.model_version_id,
+                    future_decision,
+                )
+                .await
+                .expect("query rejected future decision")
+                .is_none(),
+            "a rejected future-decision row must never enter serving history"
+        );
+
+        let late_insert = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO quant_factor_value (
+                    factor_value_id, factor_definition_id, feature_vector_id, model_run_id,
+                    market_id, decision_at, value_state, raw_value, normalized_score,
+                    normalization_source, indeterminate_reason, direction, confidence,
+                    explanation, created_at
+                 )
+                 SELECT $1, factor_definition_id, feature_vector_id, $3,
+                        market_id, decision_at, value_state, raw_value, normalized_score,
+                        normalization_source, indeterminate_reason, direction, confidence,
+                        explanation, created_at
+                 FROM quant_factor_value
+                 WHERE factor_value_id = $2",
+                [
+                    FactorValueId::from_v7().as_uuid().into(),
+                    scored.factor_value_id.as_uuid().into(),
+                    model_run_id.as_uuid().into(),
+                ],
+            ))
+            .await;
+        assert!(
+            late_insert.is_err(),
+            "raw factor values must not be appended after run finalization"
+        );
+    }
+
+    async fn ledger_is_immutable(&self) {
+        let persisted = self.persisted_value();
+        let update = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE quant_factor_value SET confidence = confidence WHERE factor_value_id = $1",
+                [persisted.factor_value_id.as_uuid().into()],
+            ))
+            .await;
+        assert!(update.is_err(), "factor-value ledger must reject UPDATE");
+        let delete = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "DELETE FROM quant_factor_value WHERE factor_value_id = $1",
+                [persisted.factor_value_id.as_uuid().into()],
+            ))
+            .await;
+        assert!(delete.is_err(), "factor-value ledger must reject DELETE");
+
+        let vector_update = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE quant_feature_vector SET market_id = market_id WHERE feature_vector_id = $1",
+                [persisted.feature_vector_id.as_uuid().into()],
+            ))
+            .await;
+        assert!(
+            vector_update.is_err(),
+            "feature-vector ledger must reject UPDATE"
+        );
+        let vector_delete = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "DELETE FROM quant_feature_vector WHERE feature_vector_id = $1",
+                [persisted.feature_vector_id.as_uuid().into()],
+            ))
+            .await;
+        assert!(
+            vector_delete.is_err(),
+            "feature-vector ledger must reject DELETE"
+        );
+    }
+}
+
+impl FactorPipelineScenario {
+    async fn verify_serving_visibility(&self) {
+        self.finish_visible_run().await;
+        self.preserve_complete_snapshot().await;
+        self.assert_definition_revision().await;
+    }
+
+    async fn finish_visible_run(&self) -> DateTime<Utc> {
+        let persisted = self.persisted_value();
+        let scored = self.scored_value();
+        let latest_value_created_at = self
+            .listed
+            .iter()
+            .map(|value| value.created_at)
+            .max()
+            .expect("persisted factor value availability");
+        let succeeded = self
+            .model_run_repo
+            .succeed(
+                &self.model_run_id,
+                ContentHash::parse(&format!("blake3:{}", "4".repeat(64)))
+                    .expect("model output hash"),
+                None,
+            )
+            .await
+            .expect("succeed visible factor run");
+        let finished_at = succeeded
+            .finished_at
+            .expect("database-owned successful finish time");
+        assert!(finished_at >= latest_value_created_at);
+        let before_finish = finished_at - ChronoDuration::microseconds(1);
+        assert!(
+            self.factor_repo
+                .latest_snapshot_bundle(
+                    &self.snapshot_definition_ids,
+                    &persisted.market_id,
+                    &self.model_version_id,
+                    before_finish,
+                )
+                .await
+                .expect("query factor snapshot before run finish")
+                .is_none(),
+            "factor values must remain invisible until their owning run finishes"
+        );
+        let visible = self
+            .factor_repo
+            .latest_snapshot_bundle(
+                &self.snapshot_definition_ids,
+                &persisted.market_id,
+                &self.model_version_id,
+                finished_at,
+            )
+            .await
+            .expect("query succeeded factor snapshot")
+            .expect("Succeeded LiveInference run must be visible");
+        assert_eq!(visible.model_run_id, self.model_run_id);
+        assert_eq!(visible.feature_vector_id, persisted.feature_vector_id);
+        assert_eq!(visible.available_at, finished_at);
+
+        let scored_snapshot = self
+            .factor_repo
+            .latest_snapshot(
+                &scored.factor_definition_id,
+                &scored.market_id,
+                &self.model_version_id,
+                finished_at,
+            )
+            .await
+            .expect("query succeeded scored factor snapshot")
+            .expect("succeeded scored factor must be visible");
+        assert_eq!(scored_snapshot.factor_value_id, scored.factor_value_id);
+        assert_eq!(scored_snapshot.feature_vector_id, scored.feature_vector_id);
+        assert_eq!(scored_snapshot.model_run_id, self.model_run_id);
+        assert_eq!(scored_snapshot.available_at, finished_at);
+        assert!(matches!(
+            self.factor_repo
+                .create_values(vec![self.value_for_run(persisted, self.model_run_id)])
+                .await,
+            Err(StorageError::StateConflict { .. })
+        ));
+        finished_at
+    }
+
+    async fn preserve_complete_snapshot(&self) {
+        let persisted = self.persisted_value();
+        let model_run_id = ModelRunId::from_v7();
+        self.model_run_repo
+            .create(self.new_live_run(model_run_id, '3'))
+            .await
+            .expect("create newer incomplete run");
+        let source = self
+            .listed
+            .iter()
+            .find(|value| {
+                value.factor_definition_id
+                    == *self
+                        .snapshot_definition_ids
+                        .first()
+                        .expect("snapshot factor definition")
+            })
+            .expect("incomplete-run source value");
+        let incomplete_values = self
+            .factor_repo
+            .create_values(vec![self.value_for_run(source, model_run_id)])
+            .await
+            .expect("persist newer incomplete run");
+        let incomplete_value_created_at = incomplete_values
+            .first()
+            .map(|value| value.created_at)
+            .expect("newer incomplete factor value");
+        let succeeded = self
+            .model_run_repo
+            .succeed(
+                &model_run_id,
+                ContentHash::parse(&format!("blake3:{}", "5".repeat(64)))
+                    .expect("incomplete model output hash"),
+                None,
+            )
+            .await
+            .expect("succeed newer incomplete run");
+        let incomplete_finished_at = succeeded
+            .finished_at
+            .expect("database-owned incomplete-run finish time");
+        assert!(incomplete_finished_at >= incomplete_value_created_at);
+        let fallback = self
+            .factor_repo
+            .latest_snapshot_bundle(
+                &self.snapshot_definition_ids,
+                &persisted.market_id,
+                &self.model_version_id,
+                incomplete_finished_at,
+            )
+            .await
+            .expect("query older complete factor snapshot")
+            .expect("an older complete run must survive a newer incomplete run");
+        assert_eq!(fallback.model_run_id, self.model_run_id);
+    }
+
+    async fn assert_definition_revision(&self) {
+        let definition_id = FactorEngine::new(
+            &self.factors,
+            &self.features,
+            &DomainConfig::default(),
+            None,
+        )
+        .definition_ref(&FactorName::new("data_quality"))
+        .expect("data-quality revision")
+        .factor_definition_id();
+        let definition = self
+            .factor_repo
+            .find_definition(&definition_id)
+            .await
+            .expect("find definition")
+            .expect("definition row");
+        assert_eq!(definition.name, "data_quality");
+        assert_eq!(definition.scope, FactorDefinitionScope::Generic);
+    }
+}
+
+pub async fn create_definition_values_run() {
+    let (pool, _container) = setup_pg().await;
+    let scenario = FactorPipelineScenario::initialize(pool.connection().clone()).await;
+    let alternate_vector_id = scenario.verify_value_plane().await;
+    scenario.verify_run_bindings(alternate_vector_id).await;
+    scenario.verify_raw_contracts().await;
+    scenario.verify_serving_visibility().await;
+}
+
+pub async fn unregistered_factor_definitions_pipeline() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db, &CATALOG).await;
@@ -534,23 +1495,22 @@ pub async fn unpublished_factor_definitions_pipeline() {
     let (vectors, feature_vector_ids) = build_features(&db).await;
     let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
     let (writer, _worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("factor-e2e-unpublished").capacity(256),
+        AsyncWriterConfig::new("factor-e2e-unregistered").capacity(256),
         |_| Box::pin(async { Ok(()) }),
         IntCounter::new("factor_e2e_unpub_drops", "drops").expect("counter"),
         AsyncWriterObservability::default(),
     );
-    let bias_table = Arc::new(BiasTableApplicator::new(Arc::new(
-        PgCalibrationArtifactRepository::new(db.clone()),
-    )
-        as Arc<dyn CalibrationArtifactRepository>));
     let service = FactorPipelineService::new(
         Arc::clone(&factor_repo),
         Arc::new(FactorEventWriter::new(Arc::new(writer))),
-        bias_table,
         Arc::new(ComputeExecutor::new().expect("test compute executor")),
     );
 
     let model_run_id = ModelRunId::from_v7();
+    let run_decision_at = vectors
+        .first()
+        .map(|vector| vector.decision_at)
+        .expect("factor pipeline decision boundary");
     PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
             model_run_id,
@@ -558,21 +1518,18 @@ pub async fn unpublished_factor_definitions_pipeline() {
             model_version_id: None,
             decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
             market_selection_id: None,
-            window_start: Utc::now(),
-            window_end: Utc::now(),
-            status: ModelRunStatus::Running,
+            window_start: run_decision_at,
+            window_end: run_decision_at,
             input_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
-            output_hash: None,
-            error_code: None,
-            error_message: None,
-            started_at: Utc::now(),
-            finished_at: None,
         })
         .await
         .expect("create model run");
 
     let factors = factors_config();
     let features = FeaturesConfig::default();
+    let domain = DomainConfig::default();
+    let factor_execution = FactorExecutionPlane::try_new(&factors, &features, &domain, None, None)
+        .expect("factor execution plane");
 
     // Definitions are no longer auto-registered on the hot path: a fresh,
     // unregistered factor set must hard-block (never a silent pass).
@@ -581,45 +1538,31 @@ pub async fn unpublished_factor_definitions_pipeline() {
             model_run_id: &model_run_id,
             vectors: Arc::from(vectors.clone()),
             feature_vector_ids: &feature_vector_ids,
-            factors: &factors,
-            features: &features,
-            domain: &DomainConfig::default(),
+            factor_execution: &factor_execution,
         })
         .await;
     let Err(error) = unregistered else {
         panic!("unregistered definitions must block the factor plane");
     };
     assert!(
-        error.to_string().contains("must be Published"),
+        error
+            .to_string()
+            .contains("were not registered immutably during training"),
         "unexpected error: {error}"
     );
 
-    // Registered-but-Draft definitions must also block until published.
-    register_all_factor_definitions(
-        factor_repo.as_ref(),
-        &factors,
-        &features,
-        &DomainConfig::default(),
-    )
-    .await
-    .expect("register draft definitions");
-    let draft = service
+    register_all_factor_definitions(factor_repo.as_ref(), &factors, &features, &domain)
+        .await
+        .expect("register immutable definitions");
+    service
         .run(FactorPipelineRequest {
             model_run_id: &model_run_id,
-            vectors: Arc::from(vectors.clone()),
+            vectors: Arc::from(vectors),
             feature_vector_ids: &feature_vector_ids,
-            factors: &factors,
-            features: &features,
-            domain: &DomainConfig::default(),
+            factor_execution: &factor_execution,
         })
-        .await;
-    let Err(error) = draft else {
-        panic!("draft definitions must block the factor plane");
-    };
-    assert!(
-        error.to_string().contains("must be Published"),
-        "unexpected error: {error}"
-    );
+        .await
+        .expect("registered immutable definitions must allow factor compute");
 }
 
 pub async fn factor_event_writer_batches() {

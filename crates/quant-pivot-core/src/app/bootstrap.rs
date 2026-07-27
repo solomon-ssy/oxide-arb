@@ -70,6 +70,7 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
     );
 
     let result = runner.run().await;
+    ctx.research.runtime_registry.shutdown().await;
     ctx.infra.redis.close();
     drop(ctx);
     tracing::info!("shared Redis pool closed");

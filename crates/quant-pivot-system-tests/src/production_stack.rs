@@ -50,6 +50,7 @@ use wiremock::{
 
 use crate::{
     stack::SystemStack,
+    support::artifact_store::VersionedArtifactStoreFixture,
     support::execution_pg_seed::{
         ReportSeedConfig, enable_test_admission, fill_entry_lot, seed_approved_intent,
         seed_demo_with_store, seed_pending_intent, seed_report_fixture, seed_report_on_infra,
@@ -326,8 +327,10 @@ async fn start_at(
         .join(Uuid::now_v7().to_string());
     fs::create_dir_all(&run_dir)
         .with_context(|| format!("create production-stack run {}", run_dir.display()))?;
-    let artifact_store: Arc<dyn ArtifactStore> =
+    let inner: Arc<dyn ArtifactStore> =
         Arc::new(LocalArtifactStore::new(run_dir.join("artifacts")));
+    let artifact_store: Arc<dyn ArtifactStore> =
+        Arc::new(VersionedArtifactStoreFixture::new(inner));
     let browser_report_id = if browser_fixture {
         Some(
             Box::pin(seed_browser_fixture(
@@ -410,8 +413,8 @@ async fn seed_browser_fixture(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
 ) -> Result<RecommendationReportId> {
-    let infra = seed_demo_with_store(db, artifact_store).await;
-    let research = seed_browser_research(db, artifact_store, &infra).await?;
+    let infra = Box::pin(seed_demo_with_store(db, artifact_store)).await;
+    let research = Box::pin(seed_browser_research(db, artifact_store, &infra)).await?;
     println!(
         "browser research fixture: model_version_id={} evaluation_dataset_id={} backtest_report_id={}",
         research.model_version_id, research.evaluation_dataset_id, research.backtest_report_id,
@@ -459,7 +462,7 @@ async fn seed_browser_fixture(
     // Publish the parity-containment fixture last so the settlement report
     // cannot supersede its still-pending intent before the real worker
     // atomically revokes it.
-    let report = seed_report_fixture(db).await;
+    let report = Box::pin(seed_report_fixture(db)).await;
     seed_pending_intent(db, &report).await;
     Ok(report.report)
 }

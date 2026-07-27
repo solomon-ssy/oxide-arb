@@ -86,14 +86,15 @@ pub const STRUCT_NEGRISK_CONVERT_EDGE: FactorName =
 pub const STRUCT_FAVORITE_LONGSHOT: FactorName =
     FactorName::from_static("struct.favorite_longshot");
 
-/// Signed unrealized `PnL` as a fraction of cost basis (`(mark − avg) / avg`).
+/// Sell-only position state computed per lot from ledger state and its live
+/// mark, outside the market [`FactorEngine`](crate::factors::FactorEngine).
 ///
-/// Position-state pseudo-factors consumed only by the Sell-side hold-vs-exit
-/// scorer. Computed per open lot from the ledger + live mark, not
-/// by the market [`FactorEngine`](crate::factors::FactorEngine); they let the
-/// exit scorer weigh the lot's own state alongside market factors.
-pub const POSITION_UNREALIZED_PNL: FactorName =
-    FactorName::from_static("position_unrealized_pnl_pct");
+/// Positive unrealized `PnL` pressure, saturated at the governed move scale.
+pub const POSITION_TAKE_PROFIT_PRESSURE: FactorName =
+    FactorName::from_static("position_take_profit_pressure");
+/// Negative unrealized `PnL` magnitude supporting a stop-loss exit.
+pub const POSITION_STOP_LOSS_PRESSURE: FactorName =
+    FactorName::from_static("position_stop_loss_pressure");
 /// Fraction of the model horizon the lot has been held (`[0, 1]`).
 pub const POSITION_TIME_IN_TRADE: FactorName = FactorName::from_static("position_time_in_trade");
 /// Drawdown of the current mark from the lot's peak mark (`[0, 1]`).

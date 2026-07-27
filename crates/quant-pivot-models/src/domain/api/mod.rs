@@ -8,7 +8,7 @@ mod comparison_report;
 pub mod dashboard;
 mod decision_evidence;
 mod execution_recovery;
-mod factor_governance;
+mod factor_catalog;
 mod feature_contract;
 mod feature_integrity;
 mod health;
@@ -57,10 +57,9 @@ pub use decision_evidence::{
 pub use execution_recovery::{
     ExecutionRecoveryStep, ExecutionRecoverySummary, ExecutionRecoveryView,
 };
-pub use factor_governance::{
+pub use factor_catalog::{
     CollinearPairView, FactorCollinearityQuery, FactorCollinearitySource, FactorCollinearityView,
-    FactorDefinitionListQuery, FactorDefinitionView, PublishFactorRequest,
-    PublishFactorsBatchRequest, RegisterFactorDefinitionsRequest, RetireFactorRequest,
+    FactorDefinitionListQuery, FactorDefinitionView,
 };
 pub use feature_contract::{FeatureContractEntryView, FeatureContractView, FeatureNullPolicyView};
 pub use feature_integrity::{

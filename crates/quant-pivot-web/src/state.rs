@@ -14,13 +14,12 @@ use quant_pivot_models::{
         ports::{
             AccountReadPort, BacktestPort, CalibrationArtifactFitPort, CatalogStatusPort,
             CpcvBacktestPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
-            FactorGovernancePort, FeatureIntegrityPort, KillSwitchPort, MarketDataPort,
-            MarketLinkageGovernancePort, MetricsScrapePort, ModelCalibrationFitPort,
-            ModelGovernancePort, ModelSpecPort, ModelTrainingPort, OrderIntentPort,
-            PolicySnapshotPort, QuantReportPort, ReadinessPort, ReconciliationPort,
-            ResearchCatalogPort, ResearchJobPort, ResearchReadinessPort, RuntimeControlPort,
-            StructuralMonitorPort, SystemCapabilityPort, TradePolicyPort, TrainingDatasetPort,
-            settlement_control::SettlementControlPort,
+            FeatureIntegrityPort, KillSwitchPort, MarketDataPort, MarketLinkageGovernancePort,
+            MetricsScrapePort, ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort,
+            ModelTrainingPort, OrderIntentPort, PolicySnapshotPort, QuantReportPort, ReadinessPort,
+            ReconciliationPort, ResearchCatalogPort, ResearchJobPort, ResearchReadinessPort,
+            RuntimeControlPort, StructuralMonitorPort, SystemCapabilityPort, TradePolicyPort,
+            TrainingDatasetPort, settlement_control::SettlementControlPort,
         },
         runtime::{
             CoreEvent, CoreEventPublisher, MaterializationRunEvent, MaterializationRunKind,
@@ -78,8 +77,6 @@ pub struct AppState {
     pub cpcv_backtests: Arc<dyn CpcvBacktestPort>,
     /// Model publish and rollback governance API.
     pub model_governance: Arc<dyn ModelGovernancePort>,
-    /// Factor-definition publish and retire governance API.
-    pub factor_governance: Arc<dyn FactorGovernancePort>,
     /// Model-spec authoring — the offline research lifecycle root write path.
     pub model_spec: Arc<dyn ModelSpecPort>,
     /// Read-only research catalog paging (datasets / models / backtests /

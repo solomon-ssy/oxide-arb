@@ -25,11 +25,13 @@ mod feature;
 #[allow(clippy::needless_update)] // Insert DTOs omit database-managed timestamps.
 mod feature_parity;
 mod feedback_cohort;
+#[allow(clippy::needless_update)] // New feedback DTOs omit DB-managed lifecycle/timestamps.
+mod feedback_cycle;
 #[allow(clippy::needless_update)] // NewModelGovernanceAudit omits DB-managed created_at
 mod governance_audit;
 #[allow(clippy::needless_update)] // NewMarketLinkage omits DB-managed created_at
 mod linkage;
-#[allow(clippy::needless_update)] // NewModelRun covers all ActiveModel columns
+#[allow(clippy::needless_update)] // NewModelRun omits DB-managed lifecycle columns
 mod model;
 mod outcome_reconciliation;
 mod portfolio;
@@ -71,10 +73,13 @@ pub use account::{
     NewAccountSnapshot, NewEquitySnapshot,
 };
 pub use backtest::{BacktestReportInfo, NewBacktestReport};
-pub use backtest_path_set::{BacktestPathSetInfo, NewBacktestPathSet};
+pub use backtest_path_set::{
+    BacktestPathSetError, BacktestPathSetInfo, NewBacktestPathSet, NewBacktestPathSetInput,
+};
 pub use basis_alert::{BasisAlertInfo, NewBasisAlert};
 pub use calibration_artifact::{
-    CalibrationArtifactInfo, CalibrationArtifactPayload, NewCalibrationArtifact,
+    CalibrationArtifactInfo, CalibrationArtifactPayload, ModelScoreCalibrationCommit,
+    ModelScoreCalibrationCommitOutcome, NewCalibrationArtifact,
 };
 pub use candidate::{DomainAvailability, MarketCandidate, MarketDataHealth};
 pub use capital::{CapitalAllocationInfo, CapitalAllocationPatch, NewCapitalAllocation};
@@ -99,7 +104,8 @@ pub use execution::{
 pub use execution_account::{ExecutionAccountInfo, NewExecutionAccount};
 pub use exit_training::{ExitTrainingLotRow, LotExitEventRow};
 pub use factor::{
-    FactorDefinitionInfo, FactorValueInfo, FactorValueModel, LatestFactorSnapshotBundleInfo,
+    FactorDefinitionInfo, FactorDefinitionProjectionError, FactorRegistrationOutcome,
+    FactorValueInfo, FactorValueProjectionError, LatestFactorSnapshotBundleInfo,
     LatestFactorSnapshotInfo, LatestFactorSnapshotValueInfo, NewFactorDefinition, NewFactorValue,
 };
 pub use feature::{FeatureVectorInfo, FeatureVectorModel, NewFeatureVector};
@@ -115,6 +121,12 @@ pub use feedback_cohort::{
     FeedbackCohortCursor, FeedbackCohortDecision, FeedbackCohortEvidence, FeedbackCohortPage,
     FeedbackCohortPageQuery, FeedbackCohortWindow, FeedbackExecutionAttempt,
     FeedbackExecutionEvidence, FeedbackRecommendationContext, FeedbackResolutionEvidence,
+};
+pub use feedback_cycle::{
+    DriftReportInfo, DriftReportInput, FeedbackCycleInfo, FeedbackCycleKey, FeedbackCycleKeyInput,
+    FeedbackEvaluationUseInfo, FeedbackEvaluationUseInput, FeedbackEvaluationUseKey,
+    FeedbackStageEventInfo, FeedbackStageEventInput, NewDriftReport, NewFeedbackCycle,
+    NewFeedbackEvaluationUse, NewFeedbackStageEvent,
 };
 pub use governance_audit::{
     ModelGovernanceAuditDetail, ModelGovernanceAuditInfo, NewModelGovernanceAudit,

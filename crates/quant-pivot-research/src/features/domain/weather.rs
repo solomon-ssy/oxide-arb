@@ -396,7 +396,7 @@ fn compute_weather_features(
     let observed_headroom = match (observed_extreme, observed_evidence) {
         (Some(extreme), Some(evidence)) => RawFeature::present(
             OBSERVED_EXTREME_HEADROOM,
-            FeatureValue::Decimal(headroom(subject, extreme)),
+            FeatureValue::Decimal(observed_band_distance(subject, extreme)),
             evidence,
         ),
         _ => RawFeature::missing(
@@ -471,19 +471,13 @@ fn calibrated_ensemble(
     if extremes.len() != usize::from(config.minimum_complete_members) {
         return Err(NullReason::DomainSourceUnavailable);
     }
-    let effective_at = target
-        .points
-        .iter()
-        .map(|point| point.valid_time)
-        .max()
-        .ok_or(NullReason::DomainSourceUnavailable)?;
     Ok(CalibratedEnsemble {
         member_extremes: extremes
             .into_values()
             .map(TemperatureCelsius::new)
             .collect(),
         evidence: EvidenceSourceRef {
-            source_kind: EvidenceSourceKind::DomainExternal,
+            source_kind: EvidenceSourceKind::DomainWeather,
             reference: format!(
                 "gefs:{}#{}:bias={}@{}",
                 target.reference_time.timestamp_millis(),
@@ -491,7 +485,9 @@ fn calibrated_ensemble(
                 calibration.artifact_id,
                 calibration.content_hash,
             ),
-            effective_at,
+            // `valid_time` is the future Weather target. The source-effective
+            // clock for evidence/freshness is the GEFS model run itself.
+            effective_at: target.reference_time,
             available_at: Some(target.available_at.max(calibration.published_at)),
         },
     })
@@ -638,7 +634,7 @@ fn latest_observation_evidence(
             ))
         })
         .map(|fact| EvidenceSourceRef {
-            source_kind: EvidenceSourceKind::DomainExternal,
+            source_kind: EvidenceSourceKind::DomainWeather,
             reference: format!(
                 "{}:{}@{}#{}",
                 fact.source_id,
@@ -651,15 +647,21 @@ fn latest_observation_evidence(
         })
 }
 
-fn headroom(subject: &WeatherSubject, extreme: TemperatureCelsius) -> Decimal {
+/// Non-negative distance of the observed daily extreme from the complete
+/// outcome band. A bounded band evaluates both boundaries; using only its
+/// upper bound would incorrectly treat an observation far below the lower
+/// bound as strongly favorable.
+fn observed_band_distance(subject: &WeatherSubject, extreme: TemperatureCelsius) -> Decimal {
     let extreme = extreme.whole_degrees(subject.decision_group.market_unit);
     match (
         subject.outcome_band.lower_inclusive,
         subject.outcome_band.upper_inclusive,
     ) {
-        (_, Some(upper)) => upper - extreme,
-        (Some(lower), None) => extreme - lower,
-        (None, None) => Decimal::ZERO,
+        (Some(lower), Some(_)) if extreme < lower => lower - extreme,
+        (Some(_), Some(upper)) if extreme > upper => extreme - upper,
+        (Some(_), Some(_)) | (None, None) => Decimal::ZERO,
+        (None, Some(upper)) => (extreme - upper).max(Decimal::ZERO),
+        (Some(lower), None) => (lower - extreme).max(Decimal::ZERO),
     }
 }
 
@@ -753,7 +755,7 @@ fn noaa_basis_risk(
         NOAA_RESOLUTION_BASIS_RISK,
         FeatureValue::Decimal(risk),
         EvidenceSourceRef {
-            source_kind: EvidenceSourceKind::DomainExternal,
+            source_kind: EvidenceSourceKind::DomainWeather,
             reference: format!(
                 "weather-basis:{}:{statistic:?}#{evidence_hash}",
                 subject.decision_group.station

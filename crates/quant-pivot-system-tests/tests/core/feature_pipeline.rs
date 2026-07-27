@@ -35,7 +35,8 @@ use quant_pivot_models::{
         },
         pagination::Paginated,
         quant::{
-            CalibrationArtifactInfo, FeatureVectorInfo, NewCalibrationArtifact, NewFeatureVector,
+            CalibrationArtifactInfo, FeatureVectorInfo, ModelScoreCalibrationCommit,
+            ModelScoreCalibrationCommitOutcome, NewCalibrationArtifact, NewFeatureVector,
         },
     },
     enums::{
@@ -215,6 +216,13 @@ impl CalibrationArtifactRepository for EmptyCalibrationArtifactRepo {
         _artifact: NewCalibrationArtifact,
     ) -> Result<CalibrationArtifactInfo, StorageError> {
         unimplemented!("feature-plane test does not create calibration artifacts")
+    }
+
+    async fn commit_model_score(
+        &self,
+        _commit: ModelScoreCalibrationCommit,
+    ) -> Result<ModelScoreCalibrationCommitOutcome, StorageError> {
+        unimplemented!("feature-plane test does not commit calibration artifacts")
     }
 
     async fn find_by_id(

@@ -19,8 +19,11 @@ use quant_pivot_models::{
         },
         research_profile_artifact::Entity as ResearchProfileArtifactEntity,
     },
-    enums::quant::{SourceSliceStatus, TrainingDatasetStatus},
-    types::{ContentHash, TrainingDatasetId},
+    enums::{
+        model::ModelFamily,
+        quant::{SourceSliceStatus, TrainingDatasetStatus},
+    },
+    types::{ContentHash, SchemaVersion, TrainingDatasetId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
@@ -130,7 +133,9 @@ impl PgTrainingDatasetRepository {
         })?;
         let bound = manifest.training_dataset_id == row.training_dataset_id
             && manifest.model_spec_id == row.model_spec_id
+            && manifest.model_family == row.model_family
             && manifest.model_spec_definition_hash == row.model_spec_definition_hash
+            && manifest.factor_serving_plane == row.factor_serving_plane
             && manifest.source_lineage == row.source_lineage
             && manifest.cohort_manifest == row.cohort_manifest
             && manifest.source_lineage.research_profile_artifact_id
@@ -145,8 +150,12 @@ impl PgTrainingDatasetRepository {
             && manifest.knowledge_lag_secs == knowledge_lag_secs
             && manifest.sample_interval_secs == sample_interval_secs
             && manifest.horizons_secs == row.horizons_secs.0
+            && manifest.feature_schema_version == row.feature_schema_version
+            && manifest.feature_schema_hash == row.feature_schema_hash
             && manifest.feature_schema_hash == *completion.feature_schema_hash()
-            && manifest.factor_schema_hash == *completion.factor_schema_hash()
+            && manifest.factor_schema_hash() == completion.factor_schema_hash()
+            && row.factor_schema_hash == completion.factor_schema_hash()
+            && row.factor_serving_plane.factor_schema_hash() == row.factor_schema_hash
             && manifest.label_schema_hash == *completion.label_schema_hash()
             && manifest.semantic_dataset_hash == *completion.dataset_hash()
             && manifest.sample_count == sample_count
@@ -172,20 +181,27 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         plan: NewTrainingDatasetPlan,
     ) -> Result<TrainingDatasetInfo, StorageError> {
         self.validate_plan_sources(&plan).await?;
-        let stored_definition_hash = Entity::find_by_id(plan.model_spec_id)
+        let stored_contract = Entity::find_by_id(plan.model_spec_id)
             .select_only()
             .column(Column::DefinitionHash)
-            .into_tuple::<ContentHash>()
+            .column(Column::ModelFamily)
+            .column(Column::FeatureSchemaVersion)
+            .into_tuple::<(ContentHash, ModelFamily, SchemaVersion)>()
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
             .ok_or_else(|| StorageError::not_found(QUANT_MODEL_SPEC, plan.model_spec_id))?;
-        if plan.model_spec_definition_hash != stored_definition_hash {
+        let (stored_definition_hash, stored_model_family, stored_feature_schema_version) =
+            stored_contract;
+        if plan.model_spec_definition_hash != stored_definition_hash
+            || plan.model_family != stored_model_family
+            || plan.feature_schema_version != stored_feature_schema_version
+        {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_TRAINING_DATASET),
                 format!(
-                    "model_spec_definition_hash mismatch for {}: expected {stored_definition_hash}, got {}",
-                    plan.model_spec_id, plan.model_spec_definition_hash
+                    "dataset plan does not match model spec {} immutable contract",
+                    plan.model_spec_id
                 ),
             ));
         }
@@ -305,8 +321,6 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
         Self::validate_completion(&row, &completion)?;
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(completion.status());
-        active.feature_schema_hash = ActiveValue::Set(Some(*completion.feature_schema_hash()));
-        active.factor_schema_hash = ActiveValue::Set(Some(*completion.factor_schema_hash()));
         active.label_schema_hash = ActiveValue::Set(Some(*completion.label_schema_hash()));
         active.dataset_hash = ActiveValue::Set(Some(*completion.dataset_hash()));
         active.manifest_hash = ActiveValue::Set(Some(completion.manifest_hash()));

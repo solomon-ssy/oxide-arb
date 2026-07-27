@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use polars::{
     error::PolarsError,
     prelude::{
-        Column, DataFrame, Int64Chunked, IntoLazy, ParquetReader, ParquetWriter, SerReader,
-        SortMultipleOptions, StringChunked, UInt32Chunked,
+        Column, DataFrame, Int64Chunked, ParquetReader, ParquetWriter, SerReader, StringChunked,
+        UInt32Chunked,
     },
 };
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
@@ -124,7 +124,7 @@ impl SourceSliceParquetCodec {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let frame = DataFrame::new(
+        let mut frame = DataFrame::new(
             ordered.len(),
             vec![
                 Column::new("format_version".into(), format_versions),
@@ -135,17 +135,9 @@ impl SourceSliceParquetCodec {
             ],
         )
         .map_err(SourceSlicePolarsError::from)?;
-        let mut sorted = frame
-            .lazy()
-            .sort(
-                ["record_key", "event_at_ms", "available_at_ms"],
-                SortMultipleOptions::default(),
-            )
-            .collect()
-            .map_err(SourceSlicePolarsError::from)?;
         let mut bytes = Vec::new();
         ParquetWriter::new(&mut bytes)
-            .finish(&mut sorted)
+            .finish(&mut frame)
             .map_err(SourceSlicePolarsError::from)?;
         Ok(bytes)
     }
@@ -278,11 +270,15 @@ fn timestamp(millis: Option<i64>, index: usize, name: &str) -> QuantResult<Optio
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "research-jobs")]
     use chrono::{Duration, TimeZone, Utc};
+    #[cfg(feature = "research-jobs")]
     use quant_pivot_error::{QuantError, research::ResearchError};
 
+    #[cfg(feature = "research-jobs")]
     use super::{SourceSliceParquetCodec, SourceSliceRecord};
 
+    #[cfg(feature = "research-jobs")]
     fn record(key: &str, second: u32) -> SourceSliceRecord {
         SourceSliceRecord {
             record_key: key.to_owned(),
@@ -301,8 +297,9 @@ mod tests {
     }
 
     #[cfg(feature = "research-jobs")]
-    #[test]
-    fn source_slice_parquet_lossless() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn source_slice_parquet_lossless() {
+        tokio::task::yield_now().await;
         let expected = vec![record("a", 1), record("b", 2)];
         let reversed = vec![expected[1].clone(), expected[0].clone()];
         let first = SourceSliceParquetCodec::encode(&expected).expect("encode");

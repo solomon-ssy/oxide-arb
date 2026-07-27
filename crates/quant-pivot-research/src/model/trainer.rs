@@ -1,12 +1,13 @@
 //! Model training contract and the [`WeightedFactorTrainer`].
 //!
-//! The weighted-factor trainer optimizes the **frozen factor weights** that the
-//! online [`WeightedFactorRuntime`](crate::model::weighted::WeightedFactorRuntime)
-//! applies. It mirrors that runtime's ranking formula exactly:
+//! The weighted-factor trainer optimizes only the **`OutcomeAlpha` simplex** in a
+//! complete revision-bound [`FactorHeadSpec`]. Context penalties and the alpha
+//! deadband are governed inputs and are never optimizer degrees of freedom.
+//! It mirrors the alpha head's ranking kernel:
 //!
 //! ```text
-//! signedᵢ = dir_signᵢ · normalizedᵢ · confidenceᵢ
-//! net = Σ weightᵢ · signedᵢ (the ranking score, ∈ [-1, 1])
+//! yes_alpha = Σ applicable(weightᵢ · confidenceᵢ · signed_strengthᵢ)
+//!             / Σ applicable(weightᵢ)
 //! ```
 //!
 //! and searches the weight **simplex** (non-negative, sum to 1) to minimize the
@@ -16,8 +17,9 @@
 //! that is kept only when it strictly improves the training objective. Configuring
 //! `argmin` without the feature **fails closed** (never silently degrades).
 //!
-//! Determinism is a hard, money-critical invariant: the same `(examples, label,
-//! seed, objective)` must yield a byte-identical artifact hash.
+//! Determinism is a hard, money-critical invariant: the same examples, plane,
+//! seed head, label, and objective must yield byte-identical payload and
+//! training-input commitments.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -31,10 +33,11 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::data_plane::DecisionBoundary,
-    enums::{common::MarketCategory, factor::NormalizationSource},
+    enums::{factor::NormalizationSource, model::ModelFamily},
     runtime_config::{FactorCrossSectionConfig, SmallCrossSectionPolicy, TrainingOptimizerKind},
     types::{
-        ContentHash, MarketId, ModelInputContract, TokenId, model_training::TrainingObjectiveSpec,
+        ContentHash, FactorDefinitionId, MarketId, ModelInputContract, Probability, TokenId,
+        factor::FactorServingPlane, model_training::TrainingObjectiveSpec,
     },
 };
 use rust_decimal::Decimal;
@@ -47,18 +50,13 @@ use crate::{
     hashing::ResearchHasher,
     model::{
         artifact::{
-            FactorWeight, ModelArtifact, ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec,
-            SubstitutionConfidenceRules, TrainingObjectiveReport, WeightedFactorModelArtifact,
-            model_input_contract_hash,
+            HorizonMultipliers, ReturnModelSpec, SubstitutionConfidenceRules,
+            TrainingObjectiveReport, WeightedFactorModelPayload, model_input_contract_hash,
         },
-        category_scope::validate_category_scope_weights,
+        factor_heads::{AlphaFactorWeight, FactorHeadSpec},
         objective::{
             CrossSectionGroup, ObjectiveComponentReport, ObjectiveEvaluator, RankingDiagnostics,
             SampleRow,
-        },
-        runtime::ModelFamily,
-        sell_scorer::position_state::{
-            is_position_state_factor, position_state_signed_contribution,
         },
     },
     parallel::par_map_with_index,
@@ -177,33 +175,29 @@ pub struct ValidationReport {
     pub coord_search_effective_n: u32,
 }
 
-/// Request to train a weighted-factor model from frozen examples.
+/// Header-free request to fit a `WeightedFactor` family payload.
 ///
-/// All artifact governance (multipliers, substitution rules, return model,
-/// required features) is supplied frozen; the trainer only optimizes `weights`
-/// and fills the objective report.
+/// The complete factor plane and seed head are immutable training inputs. The
+/// optimizer may change only the alpha simplex; context penalties and the alpha
+/// deadband remain byte-for-byte equal to the seed head.
 #[derive(Debug, Clone)]
 pub struct TrainModelRequest {
     /// Cooperative cancellation observed at fold/trial/search boundaries.
     pub cancellation: CancellationProbe,
     /// Frozen, point-in-time training examples (decoded from the dataset Parquet).
     pub examples: Arc<[TrainingExample]>,
-    /// Semantic hash of the frozen dataset envelope supplying `examples`.
-    pub training_dataset_hash: ContentHash,
     /// Supervised target label.
     pub label: LabelSelector,
-    /// Initial weights / candidate factor set (from `FactorsConfig.factor_weights`).
-    pub seed_weights: Vec<FactorWeight>,
+    /// Exact governed factor plane consumed by both training and serving.
+    pub factor_plane: FactorServingPlane,
+    /// Complete governed estimator head. Only `alpha_weights` are optimized.
+    pub seed_head: FactorHeadSpec,
     /// Governed training objective snapshot.
     pub objective: TrainingObjectiveSpec,
     /// Rolling validation split.
     pub validation: ValidationSpec,
-    /// Frozen artifact header (model version + schema hashes).
-    pub header: ModelArtifactHeader,
-    /// Frozen prediction horizon (from `ModelConfig.prediction_horizon_secs`).
-    pub prediction_horizon_secs: u64,
-    /// Governed score multipliers.
-    pub multipliers: ScoreMultiplierSpec,
+    /// Governed horizon multiplier.
+    pub horizon_multipliers: HorizonMultipliers,
     /// Governed substitution confidence penalties.
     pub substitution_rules: SubstitutionConfidenceRules,
     /// Return model (heuristic until the independent calibration pipeline binds a calibrator).
@@ -213,32 +207,37 @@ pub struct TrainModelRequest {
     /// Small-cross-section transform policy/minimum fitted together with the
     /// weighted artifact.
     pub factor_cross_section: FactorCrossSectionConfig,
-    /// When set, this artifact is scoped to one market category.
-    /// `None` means the generic cross-category scorer.
-    pub category_scope: Option<MarketCategory>,
 }
 
-/// A freshly trained, content-addressed model artifact with its metrics.
+/// Verified header-free `WeightedFactor` training output.
+///
+/// The orchestration layer uses these commitments to build the immutable
+/// [`ModelServingContract`](quant_pivot_models::types::model_serving::ModelServingContract),
+/// then seals exactly one outer [`ModelArtifact`](crate::model::artifact::ModelArtifact).
 #[derive(Debug, Clone)]
-pub struct TrainedModelArtifact {
-    /// The trained artifact.
-    pub artifact: ModelArtifact,
-    /// Canonical hash of the artifact.
-    pub artifact_hash: ContentHash,
+pub struct WeightedModelTrainingOutput {
+    /// Executable family payload, already validated against `factor_plane`.
+    pub payload: WeightedFactorModelPayload,
+    /// Exact estimator-row commitment after fitted preprocessing.
+    pub training_input_hash: ContentHash,
+    /// Canonical ordered raw-input contract commitment.
+    pub input_contract_hash: ContentHash,
+    /// Canonical fitted transform commitment.
+    pub input_transform_hash: ContentHash,
     /// In-sample (training-fold) objective.
     pub in_sample_metrics: TrainingObjectiveReport,
     /// Held-out validation objective.
     pub validation_metrics: ValidationReport,
 }
 
-/// Trains a model family into a content-addressed artifact.
+/// Trains a family payload without constructing its serving contract or outer artifact.
 #[async_trait]
 pub trait ModelTrainer: Send + Sync {
     /// Family this trainer produces.
     fn model_family(&self) -> ModelFamily;
 
-    /// Train and emit a hashed artifact.
-    async fn train(&self, request: TrainModelRequest) -> QuantResult<TrainedModelArtifact>;
+    /// Fit and verify a header-free family payload.
+    async fn train(&self, request: TrainModelRequest) -> QuantResult<WeightedModelTrainingOutput>;
 }
 
 /// Coordinate-search step schedule for the simplex local search.
@@ -270,29 +269,35 @@ impl ModelTrainer for WeightedFactorTrainer {
         ModelFamily::WeightedFactor
     }
 
-    async fn train(&self, request: TrainModelRequest) -> QuantResult<TrainedModelArtifact> {
+    async fn train(&self, request: TrainModelRequest) -> QuantResult<WeightedModelTrainingOutput> {
         request.train_weighted()
     }
 }
 
 impl TrainModelRequest {
     /// The pure training routine (CPU-bound, deterministic).
-    fn train_weighted(&self) -> QuantResult<TrainedModelArtifact> {
-        let fit = fit_simplex_weights(
-            &self.examples,
-            &self.label,
-            &self.seed_weights,
-            &self.objective,
-            self.validation,
-            Some(&self.factor_cross_section),
-            &self.cancellation,
-        )?;
-
-        let factors = fit
-            .factor_weights
+    fn train_weighted(&self) -> QuantResult<WeightedModelTrainingOutput> {
+        self.seed_head.validate(&self.factor_plane)?;
+        let seed_weights = self
+            .seed_head
+            .alpha_weights
             .iter()
-            .map(|weight| weight.factor.clone())
+            .map(OptimizerFactorWeight::from)
             .collect::<Vec<_>>();
+        let reference_factors = cross_sectional_factor_names(&self.factor_plane);
+        let fit = SimplexFitInput {
+            examples: &self.examples,
+            label: &self.label,
+            seed_weights: &seed_weights,
+            reference_factors: &reference_factors,
+            objective: &self.objective,
+            validation: self.validation,
+            factor_cross_section: Some(&self.factor_cross_section),
+            cancellation: &self.cancellation,
+        }
+        .fit()?;
+
+        let factors = estimator_factor_names(&self.factor_plane);
         let training_input_hash = weighted_training_input_hash(
             &self.examples,
             &self.label,
@@ -301,34 +306,47 @@ impl TrainModelRequest {
             Some(&self.factor_cross_section),
         )?;
         let input_contract_hash = model_input_contract_hash(&self.input_contract)?;
-        let artifact = WeightedFactorModelArtifact {
-            header: self.header.clone(),
-            training_dataset_hash: self.training_dataset_hash,
-            training_input_hash,
+        let mut factor_head = self.seed_head.clone();
+        factor_head.alpha_weights = fit.alpha_weights;
+        let payload = WeightedFactorModelPayload {
+            factor_head,
             input_contract: self.input_contract.clone(),
-            input_contract_hash,
-            weights: fit.factor_weights,
-            prediction_horizon_secs: self.prediction_horizon_secs,
-            multipliers: self.multipliers.clone(),
+            horizon_multipliers: self.horizon_multipliers.clone(),
             substitution_confidence_rules: self.substitution_rules.clone(),
             return_model: self.return_model.clone(),
             factor_cross_section: self.factor_cross_section.clone(),
             frozen_reference_quantiles: fit.frozen_reference_quantiles,
-            objective_report: Some(fit.objective_report.clone()),
-            category_scope: self.category_scope,
         };
-        validate_category_scope_weights(self.category_scope, &artifact.weights)?;
-        artifact.validate()?;
-        let model_artifact = ModelArtifact::WeightedFactor(Box::new(artifact));
-        let artifact_hash = model_artifact.content_hash()?;
-
-        Ok(TrainedModelArtifact {
-            artifact: model_artifact,
-            artifact_hash,
+        payload.validate_for_plane(&self.factor_plane)?;
+        let input_transform_hash = payload.input_transform_hash()?;
+        payload.model_payload_hash()?;
+        Ok(WeightedModelTrainingOutput {
+            payload,
+            training_input_hash,
+            input_contract_hash,
+            input_transform_hash,
             in_sample_metrics: fit.objective_report,
             validation_metrics: fit.validation,
         })
     }
+}
+
+fn cross_sectional_factor_names(plane: &FactorServingPlane) -> Vec<FactorName> {
+    plane
+        .definitions()
+        .iter()
+        .filter(|revision| revision.definition().normalization.is_cross_sectional())
+        .map(|revision| revision.factor_name().clone())
+        .collect()
+}
+
+fn estimator_factor_names(plane: &FactorServingPlane) -> Vec<FactorName> {
+    plane
+        .definitions()
+        .iter()
+        .filter(|revision| !revision.definition().is_diagnostic())
+        .map(|revision| revision.factor_name().clone())
+        .collect()
 }
 
 /// Fit one empirical raw-factor CDF per model input from the supplied training
@@ -372,6 +390,7 @@ pub fn fit_frozen_reference_quantiles(
                     .iter()
                     .find(|value| value.name == *factor)
                     .and_then(|value| value.raw_value)
+                    .map(|value| value.abs())
             })
             .collect();
         if values.len() < min_size {
@@ -502,16 +521,15 @@ fn apply_reference_quantiles(
             let Some(raw) = factor.raw_value else {
                 continue;
             };
-            let reference = references.get(&factor.name).ok_or_else(|| {
-                QuantError::from(ResearchError::DatasetBuild {
-                    detail: format!(
-                        "factor `{}` has no frozen reference CDF in this training partition",
-                        factor.name
-                    ),
-                })
-            })?;
+            let Some(reference) = references.get(&factor.name) else {
+                continue;
+            };
             factor.normalization = NormalizedFactor::Scored {
-                score: reference.percentile(raw),
+                score: if raw.is_zero() {
+                    Probability::ZERO
+                } else {
+                    reference.percentile(raw.abs())?
+                },
                 source: NormalizationSource::FrozenReferenceQuantile,
                 clamp: None,
             };
@@ -520,15 +538,29 @@ fn apply_reference_quantiles(
     Ok(prepared)
 }
 
-/// The outcome of the shared simplex weight fit: the frozen normalized factor
-/// weights plus the training / validation objective reports. Reused by every
-/// weighted family (Buy-side [`WeightedFactorModelArtifact`], Sell-side
-/// [`SellScorerArtifact`](crate::model::artifact::SellScorerArtifact)) so the
-/// deterministic LTR simplex search lives in exactly one place.
+/// Private optimizer row. Public payloads always use revision-bound head rows.
 #[derive(Debug, Clone)]
-pub(crate) struct FittedWeights {
+struct OptimizerFactorWeight {
+    factor_definition_id: FactorDefinitionId,
+    factor: FactorName,
+    weight: Decimal,
+}
+
+impl From<&AlphaFactorWeight> for OptimizerFactorWeight {
+    fn from(weight: &AlphaFactorWeight) -> Self {
+        Self {
+            factor_definition_id: weight.factor_definition_id,
+            factor: weight.factor.clone(),
+            weight: weight.weight,
+        }
+    }
+}
+
+/// The outcome of the private alpha-simplex fit.
+#[derive(Debug, Clone)]
+struct FittedWeights {
     /// Frozen, normalized per-factor weights in seed order.
-    pub factor_weights: Vec<FactorWeight>,
+    alpha_weights: Vec<AlphaFactorWeight>,
     /// In-sample (training-fold) objective report.
     pub objective_report: TrainingObjectiveReport,
     /// Held-out validation report.
@@ -540,77 +572,99 @@ pub(crate) struct FittedWeights {
 struct SimplexFitContext<'a> {
     examples: &'a [TrainingExample],
     label: &'a LabelSelector,
-    factors: &'a [FactorName],
+    seed_weights: &'a [OptimizerFactorWeight],
+    alpha_factors: &'a [FactorName],
+    reference_factors: &'a [FactorName],
     seed: &'a [Decimal],
     evaluator: &'a ObjectiveEvaluator,
     factor_cross_section: Option<&'a FactorCrossSectionConfig>,
     cancellation: &'a CancellationProbe,
 }
 
-/// Fit the weight simplex against a supervised label via deterministic LTR
-/// coordinate search (+ optional `argmin` refinement). Family-agnostic: the
-/// caller wraps the frozen weights into its concrete artifact body.
-pub(crate) fn fit_simplex_weights(
-    examples: &[TrainingExample],
-    label: &LabelSelector,
-    seed_weights: &[FactorWeight],
-    objective: &TrainingObjectiveSpec,
+struct SimplexFitInput<'a> {
+    examples: &'a [TrainingExample],
+    label: &'a LabelSelector,
+    seed_weights: &'a [OptimizerFactorWeight],
+    reference_factors: &'a [FactorName],
+    objective: &'a TrainingObjectiveSpec,
     validation: ValidationSpec,
-    factor_cross_section: Option<&FactorCrossSectionConfig>,
-    cancellation: &CancellationProbe,
-) -> QuantResult<FittedWeights> {
-    cancellation.check("dataset matrix")?;
-    if seed_weights.is_empty() {
-        return Err(ResearchError::InvalidModelArtifact {
-            detail: "trainer requires a non-empty seed weight (candidate factor) set".to_owned(),
+    factor_cross_section: Option<&'a FactorCrossSectionConfig>,
+    cancellation: &'a CancellationProbe,
+}
+
+impl SimplexFitInput<'_> {
+    /// Fit only the governed alpha-head simplex.
+    fn fit(self) -> QuantResult<FittedWeights> {
+        let Self {
+            examples,
+            label,
+            seed_weights,
+            reference_factors,
+            objective,
+            validation,
+            factor_cross_section,
+            cancellation,
+        } = self;
+        cancellation.check("dataset matrix")?;
+        if seed_weights.is_empty() {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "trainer requires a non-empty seed weight (candidate factor) set"
+                    .to_owned(),
+            }
+            .into());
         }
-        .into());
-    }
-    ensure_optimizer_available(objective.optimizer)?;
+        ensure_optimizer_available(objective.optimizer)?;
 
-    // Deterministic factor order: the seed-weight order defines the columns.
-    let factors: Vec<FactorName> = seed_weights.iter().map(|w| w.factor.clone()).collect();
-    // Build the label/timeline skeleton before fitting any transform. Its group
-    // boundaries are independent of factor scores and define the purged split.
-    let timeline_dataset = TrainingDataset::build(examples, label, &factors)?;
-
-    // `folds == 1` (or less): full-window fit — used by CPCV fold training where
-    // the outer CPCV already supplies the OOS distribution. `folds >= 2`: purged
-    // hold-out CV matching CPCV label-horizon semantics.
-    let folds = validation.folds.max(1) as usize;
-    if folds >= 2 && timeline_dataset.groups.len() < folds {
-        return Err(ResearchError::DatasetBuild {
-            detail: format!(
-                "insufficient resolved cross-section groups ({}) for {} validation folds",
-                timeline_dataset.groups.len(),
-                folds
-            ),
-        }
-        .into());
-    }
-
-    let evaluator = ObjectiveEvaluator::new(objective.clone());
-    let seed = normalize_simplex(
-        &seed_weights
+        // Deterministic factor order: the seed-weight order defines the columns.
+        let factors = seed_weights
             .iter()
-            .map(|w| w.weight.max(Decimal::ZERO))
-            .collect::<Vec<_>>(),
-    );
+            .map(|weight| weight.factor.clone())
+            .collect::<Vec<_>>();
+        // Build the label/timeline skeleton before fitting any transform. Its group
+        // boundaries are independent of factor scores and define the purged split.
+        let timeline_dataset = TrainingDataset::build(examples, label, &factors)?;
 
-    let context = SimplexFitContext {
-        examples,
-        label,
-        factors: &factors,
-        seed: &seed,
-        evaluator: &evaluator,
-        factor_cross_section,
-        cancellation,
-    };
-    if folds < 2 {
-        return fit_full_window(&context);
+        // `folds == 1` (or less): full-window fit — used by CPCV fold training where
+        // the outer CPCV already supplies the OOS distribution. `folds >= 2`: purged
+        // hold-out CV matching CPCV label-horizon semantics.
+        let folds = validation.folds.max(1) as usize;
+        if folds >= 2 && timeline_dataset.groups.len() < folds {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "insufficient resolved cross-section groups ({}) for {} validation folds",
+                    timeline_dataset.groups.len(),
+                    folds
+                ),
+            }
+            .into());
+        }
+
+        let evaluator = ObjectiveEvaluator::new(objective.clone());
+        let seed = normalize_simplex(
+            &seed_weights
+                .iter()
+                .map(|weight| weight.weight.max(Decimal::ZERO))
+                .collect::<Vec<_>>(),
+        );
+
+        let context = SimplexFitContext {
+            examples,
+            label,
+            seed_weights,
+            alpha_factors: &factors,
+            reference_factors,
+            seed: &seed,
+            evaluator: &evaluator,
+            factor_cross_section,
+            cancellation,
+        };
+        if folds < 2 {
+            return fit_full_window(&context);
+        }
+        let validation_report =
+            fit_purged_validation(&context, &timeline_dataset, validation, folds)?;
+        fit_final_full_window(&context, validation_report)
     }
-    let validation_report = fit_purged_validation(&context, &timeline_dataset, validation, folds)?;
-    fit_final_full_window(&context, validation_report)
 }
 
 fn fit_full_window(context: &SimplexFitContext<'_>) -> QuantResult<FittedWeights> {
@@ -618,12 +672,12 @@ fn fit_full_window(context: &SimplexFitContext<'_>) -> QuantResult<FittedWeights
     let references = fit_frozen_reference_quantiles(
         context.examples,
         context.label,
-        context.factors,
+        context.reference_factors,
         context.factor_cross_section,
     )?;
     let prepared =
         apply_reference_quantiles(context.examples, &references, context.factor_cross_section)?;
-    let dataset = TrainingDataset::build(&prepared, context.label, context.factors)?;
+    let dataset = TrainingDataset::build(&prepared, context.label, context.alpha_factors)?;
     let (grid_weights, coord_search_effective_n) = coordinate_search(
         context.seed,
         &dataset.groups,
@@ -638,7 +692,7 @@ fn fit_full_window(context: &SimplexFitContext<'_>) -> QuantResult<FittedWeights
         context.evaluator,
     )?;
     assemble_full_window_weights(
-        context.factors,
+        context.seed_weights,
         &weights,
         train_report.rounded(),
         context.evaluator,
@@ -776,13 +830,13 @@ fn fit_validation_fold(
     let references = fit_frozen_reference_quantiles(
         &reference_examples,
         context.label,
-        context.factors,
+        context.reference_factors,
         context.factor_cross_section,
     )?;
     let transformed_examples =
         apply_reference_quantiles(context.examples, &references, context.factor_cross_section)?;
     let fold_dataset =
-        TrainingDataset::build(&transformed_examples, context.label, context.factors)?;
+        TrainingDataset::build(&transformed_examples, context.label, context.alpha_factors)?;
     timeline_dataset.ensure_fold_spine(&fold_dataset, fold_index)?;
     let train_groups = train_indices
         .iter()
@@ -844,7 +898,7 @@ fn fit_final_full_window(
     let final_references = fit_frozen_reference_quantiles(
         context.examples,
         context.label,
-        context.factors,
+        context.reference_factors,
         context.factor_cross_section,
     )?;
     let final_examples = apply_reference_quantiles(
@@ -852,7 +906,8 @@ fn fit_final_full_window(
         &final_references,
         context.factor_cross_section,
     )?;
-    let final_dataset = TrainingDataset::build(&final_examples, context.label, context.factors)?;
+    let final_dataset =
+        TrainingDataset::build(&final_examples, context.label, context.alpha_factors)?;
     let (final_grid, final_effective_n) = coordinate_search(
         context.seed,
         &final_dataset.groups,
@@ -869,7 +924,7 @@ fn fit_final_full_window(
         context.evaluator,
     )?;
     let mut final_fit = assemble_full_window_weights(
-        context.factors,
+        context.seed_weights,
         &final_weights,
         final_report.rounded(),
         context.evaluator,
@@ -894,7 +949,7 @@ fn fit_final_full_window(
 
 /// Full-window fit path (`folds < 2`): no hold-out; held-out metrics mirror train.
 fn assemble_full_window_weights(
-    factors: &[FactorName],
+    seed_weights: &[OptimizerFactorWeight],
     weights: &[Decimal],
     train_components: ObjectiveComponentReport,
     evaluator: &ObjectiveEvaluator,
@@ -909,16 +964,17 @@ fn assemble_full_window_weights(
         .map(|w| w.round_dp(RESEARCH_DECIMAL_SCALE))
         .collect::<Vec<_>>();
     let frozen = normalize_simplex(&weights_dp);
-    let factor_weights: Vec<FactorWeight> = factors
+    let alpha_weights = seed_weights
         .iter()
         .zip(&frozen)
-        .map(|(factor, weight)| FactorWeight {
-            factor: factor.clone(),
+        .map(|(seed, weight)| AlphaFactorWeight {
+            factor_definition_id: seed.factor_definition_id,
+            factor: seed.factor.clone(),
             weight: weight.round_dp(RESEARCH_DECIMAL_SCALE),
         })
-        .collect();
+        .collect::<Vec<_>>();
     Ok(FittedWeights {
-        factor_weights,
+        alpha_weights,
         objective_report: TrainingObjectiveReport {
             objective_value: train_objective.round_dp(RESEARCH_DECIMAL_SCALE),
             spec: evaluator.spec().clone(),
@@ -1289,16 +1345,6 @@ fn push_group(
 /// `dir_sign · normalized · confidence` for one factor of one example, or `0`
 /// when the factor is absent / unresolved (confidence carries the missingness).
 pub(crate) fn signed_contribution(example: &TrainingExample, factor: &FactorName) -> Decimal {
-    if is_position_state_factor(factor) {
-        if let Some(state) = &example.position_state {
-            // The dense additive objective uses zero contribution for an
-            // explicitly missing pseudo-factor. The frozen `position_state`
-            // remains missing and never gains confidence; pseudo-factors are
-            // not duplicated into the governed factor-revision ledger.
-            return position_state_signed_contribution(state, factor).unwrap_or(Decimal::ZERO);
-        }
-        return Decimal::ZERO;
-    }
     example
         .factor_values
         .iter()
@@ -1386,9 +1432,12 @@ mod tests {
         },
         runtime_config::{FactorCrossSectionConfig, SmallCrossSectionPolicy},
         types::{
-            FactorDefinitionId, MarketId, ModelInputContract, ModelVersionId, Probability,
-            SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource,
-            builtin_research_profiles,
+            MarketId, ModelInputContract, Probability, SchemaVersion, TokenId, TrainingExampleId,
+            TrainingSampleSource,
+            factor::{
+                FactorAlphaOrientation, FactorExplanation, FactorOutputSemantics,
+                FactorServingPlane,
+            },
         },
     };
     use rayon::ThreadPoolBuilder;
@@ -1402,25 +1451,41 @@ mod tests {
     };
     use crate::{
         factors::{
-            FactorExplanation, FactorName, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,
+            FactorName, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,
             names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
         },
         features::FeatureVector,
         model::{
             ReturnModelSpec,
-            artifact::{
-                FactorWeight, ModelArtifact, ModelArtifactHeader, ScoreMultiplierSpec,
-                SubstitutionConfidenceRules,
-            },
+            artifact::{HorizonMultipliers, SubstitutionConfidenceRules},
             objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow},
-            runtime::ModelFamily,
         },
-        test_support::content_hash as hash,
+        test_support::{factor_head, factor_revision},
         training::{LabelName, TrainingExample, TrainingLabel, fixtures},
     };
 
     fn label_name() -> LabelName {
         LabelName::new("token_payout_ratio")
+    }
+
+    fn training_factor_plane() -> FactorServingPlane {
+        FactorServingPlane::try_seal(vec![
+            factor_revision(
+                LIQUIDITY_DEPTH,
+                FactorFamily::Liquidity,
+                FactorOutputSemantics::OutcomeAlpha {
+                    orientation: FactorAlphaOrientation::CanonicalYes,
+                },
+            ),
+            factor_revision(
+                MOMENTUM_ROC,
+                FactorFamily::Momentum,
+                FactorOutputSemantics::OutcomeAlpha {
+                    orientation: FactorAlphaOrientation::CanonicalYes,
+                },
+            ),
+        ])
+        .expect("training factor plane")
     }
 
     fn example(
@@ -1439,19 +1504,35 @@ mod tests {
             domain: None,
             data_quality: DataQualityStatus::Fresh,
         };
-        let mk = |name: FactorName, score: Decimal| FactorValue {
-            definition_id: FactorDefinitionId::from_v7(),
-            name,
-            family: FactorFamily::Liquidity,
-            raw_value: Some(score),
-            normalization: NormalizedFactor::cross_section(Probability::new(score)),
-            direction: dir,
-            confidence: Probability::new(dec!(1)),
-            explanation: FactorExplanation {
-                headline: "t".to_owned(),
-                drivers: Vec::new(),
-            },
-            input_feature_refs: Vec::new(),
+        let plane = training_factor_plane();
+        let mk = |name: FactorName, score: Decimal| {
+            let revision = plane
+                .definitions()
+                .iter()
+                .find(|revision| revision.factor_name() == &name)
+                .expect("training factor revision");
+            let raw_value = if dir == FactorDirection::Negative {
+                -score
+            } else {
+                score
+            };
+            FactorValue {
+                definition_id: revision.factor_definition_id(),
+                name: revision.factor_name().clone(),
+                family: revision.definition().family,
+                raw_value: Some(raw_value),
+                normalization: NormalizedFactor::cross_section(Probability::new(score)),
+                direction: revision
+                    .definition()
+                    .contribution_direction(raw_value)
+                    .expect("training factor direction"),
+                confidence: Probability::new(dec!(1)),
+                explanation: FactorExplanation {
+                    headline: "t".to_owned(),
+                    drivers: Vec::new(),
+                },
+                input_feature_refs: Vec::new(),
+            }
         };
         let as_of = Utc.timestamp_opt(1_700_000_000 + (idx / 2), 0).unwrap();
         TrainingExample {
@@ -1483,24 +1564,16 @@ mod tests {
     }
 
     fn request(examples: Vec<TrainingExample>) -> TrainModelRequest {
+        let factor_plane = training_factor_plane();
         TrainModelRequest {
             cancellation: CancellationProbe::default(),
             examples: examples.into(),
-            training_dataset_hash: hash("cc"),
             label: LabelSelector {
                 name: label_name(),
                 horizon_secs: 0,
             },
-            seed_weights: vec![
-                FactorWeight {
-                    factor: LIQUIDITY_DEPTH,
-                    weight: dec!(0.5),
-                },
-                FactorWeight {
-                    factor: MOMENTUM_ROC,
-                    weight: dec!(0.5),
-                },
-            ],
+            seed_head: factor_head(&factor_plane),
+            factor_plane,
             objective: TrainingObjectiveSpec {
                 lambda_tail: Decimal::ZERO,
                 lambda_turnover: Decimal::ZERO,
@@ -1511,26 +1584,11 @@ mod tests {
                 folds: 3,
                 ..ValidationSpec::default()
             },
-            header: ModelArtifactHeader {
-                model_version_id: ModelVersionId::from_v7(),
-                model_spec_definition_hash: hash("spec"),
-                profile_ref: builtin_research_profiles()
-                    .expect("built-in profiles")
-                    .remove(0)
-                    .profile_ref,
-                model_family: ModelFamily::WeightedFactor,
-                feature_schema_hash: hash("aa"),
-                factor_schema_hash: hash("bb"),
-                trade_policy_artifact_id: None,
-                trade_policy_hash: None,
-            },
-            prediction_horizon_secs: 86_400,
-            multipliers: ScoreMultiplierSpec::conservative(),
+            horizon_multipliers: HorizonMultipliers::conservative(),
             substitution_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
             input_contract: ModelInputContract::single_required("book.mid"),
             factor_cross_section: FactorCrossSectionConfig::default(),
-            category_scope: None,
         }
     }
 
@@ -1591,31 +1649,32 @@ mod tests {
     #[tokio::test]
     async fn weighted_trainer_produces_hash() {
         let trainer = WeightedFactorTrainer::new();
-        // Same request (identical version id + data) ⇒ identical artifact hash.
+        // Same request and data produce byte-identical payload commitments.
         let req = request(momentum_dataset());
-        let expected_dataset_hash = req.training_dataset_hash;
         let a = trainer.train(req.clone()).await.expect("train a");
         let b = trainer.train(req).await.expect("train b");
         assert_eq!(
-            a.artifact_hash, b.artifact_hash,
+            a.payload
+                .model_payload_hash()
+                .expect("first model payload hash"),
+            b.payload
+                .model_payload_hash()
+                .expect("second model payload hash"),
             "training must be deterministic"
         );
-        match a.artifact {
-            ModelArtifact::WeightedFactor(art) => {
-                art.validate().expect("valid weights");
-                assert!(art.objective_report.is_some(), "objective report filled");
-                assert_eq!(art.training_dataset_hash, expected_dataset_hash);
-                assert!(
-                    art.training_input_hash
-                        .as_bytes()
-                        .iter()
-                        .any(|byte| *byte != 0)
-                );
-            }
-            ModelArtifact::Classical(_) | ModelArtifact::SellScorer(_) => {
-                panic!("expected weighted artifact")
-            }
-        }
+        a.payload
+            .validate_for_plane(&training_factor_plane())
+            .expect("valid trained payload");
+        assert!(
+            a.training_input_hash
+                .as_bytes()
+                .iter()
+                .any(|byte| *byte != 0)
+        );
+        assert_eq!(
+            a.in_sample_metrics.objective_value,
+            b.in_sample_metrics.objective_value
+        );
     }
 
     #[tokio::test]
@@ -1671,7 +1730,14 @@ mod tests {
             "future validation rows must not fit an earlier fold reference CDF or estimator"
         );
         assert_ne!(
-            baseline.artifact_hash, shifted.artifact_hash,
+            baseline
+                .payload
+                .model_payload_hash()
+                .expect("baseline payload hash"),
+            shifted
+                .payload
+                .model_payload_hash()
+                .expect("shifted payload hash"),
             "the explicit final full-window refit must still bind the changed future rows"
         );
     }
@@ -1729,7 +1795,12 @@ mod tests {
             .expect("train single");
         let b = many.install(|| req.train_weighted()).expect("train many");
         assert_eq!(
-            a.artifact_hash, b.artifact_hash,
+            a.payload
+                .model_payload_hash()
+                .expect("single-thread payload hash"),
+            b.payload
+                .model_payload_hash()
+                .expect("multi-thread payload hash"),
             "rayon thread count must not change the trained artifact"
         );
     }
@@ -1743,11 +1814,10 @@ mod tests {
             .train(request(momentum_dataset()))
             .await
             .expect("train");
-        let ModelArtifact::WeightedFactor(art) = outcome.artifact else {
-            panic!("weighted");
-        };
-        let momentum = art
-            .weights
+        let momentum = outcome
+            .payload
+            .factor_head
+            .alpha_weights
             .iter()
             .find(|w| w.factor == MOMENTUM_ROC)
             .expect("momentum weight");
@@ -1756,10 +1826,7 @@ mod tests {
             "momentum weight {} should exceed the 0.5 seed",
             momentum.weight
         );
-        let report = art
-            .objective_report
-            .as_ref()
-            .expect("weighted artifact objective report");
+        let report = &outcome.in_sample_metrics;
         assert_eq!(
             report.objective_value,
             outcome.in_sample_metrics.objective_value

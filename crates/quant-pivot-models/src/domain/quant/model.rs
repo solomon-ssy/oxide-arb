@@ -5,6 +5,7 @@ use sea_orm::{
     ActiveValue, ActiveValue::Set, DeriveIntoActiveModel, DerivePartialModel, FromQueryResult,
 };
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     entities::quant_model_version::ActiveModel,
@@ -24,6 +25,7 @@ use crate::{
         model_lineage::{ModelVersionDerivation, ModelVersionDerivationError},
         model_metrics::ModelVersionMetrics,
         model_quality::QualityGateReport,
+        model_serving::{ModelServingContract, ModelServingContractError},
         model_spec::{ModelSpecDefinition, ModelSpecThesis},
         model_training::ModelTrainingObjective,
     },
@@ -109,8 +111,14 @@ pub struct ModelVersionInfo {
     pub model_family: ModelFamily,
     pub model_spec_thesis: ModelSpecThesis,
     pub model_spec_definition_hash: ContentHash,
+    pub model_spec_prediction_horizon_secs: i64,
     pub version: i32,
     pub artifact_hash: ContentHash,
+    /// Complete, sealed dependency graph used to load this exact model.
+    pub serving_contract: ModelServingContract,
+    /// Normalized raw 32-byte database digest projected back into the canonical
+    /// in-memory hash type.
+    pub serving_contract_hash: ContentHash,
     pub category_scope: Option<MarketCategory>,
     #[sea_orm(nested(prefix = "profile_ref_"))]
     pub profile_ref: ResearchProfileRef,
@@ -149,6 +157,82 @@ impl ModelVersionInfo {
             self.derivation_evidence_hash,
         )
     }
+
+    /// Revalidate the sealed contract, its normalized database hash, and every
+    /// model-version/spec projection carried by this joined row.
+    pub fn verified_serving_contract(
+        &self,
+    ) -> Result<&ModelServingContract, ModelVersionPersistenceError> {
+        self.serving_contract
+            .verify_persisted_hash(self.serving_contract_hash)?;
+        let bindings = self.serving_contract.bindings();
+        let model = &bindings.model;
+        if model.model_version_id != self.model_version_id {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "model_version_id",
+            });
+        }
+        if model.model_spec_id != self.model_spec_id {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "model_spec_id",
+            });
+        }
+        if model.model_spec_definition_hash != self.model_spec_definition_hash {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "model_spec_definition_hash",
+            });
+        }
+        if model.model_family != self.model_family {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "model_family",
+            });
+        }
+        if model.category_scope != self.category_scope {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "category_scope",
+            });
+        }
+        if model.profile_ref != self.profile_ref {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "research_profile",
+            });
+        }
+        if i64::try_from(model.prediction_horizon_secs)
+            .ok()
+            .as_ref()
+            .is_none_or(|horizon| *horizon != self.model_spec_prediction_horizon_secs)
+        {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "prediction_horizon_secs",
+            });
+        }
+        if self.training_dataset_id != Some(bindings.dataset.manifest.training_dataset_id) {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "training_dataset_id",
+            });
+        }
+        let trade_policy = bindings
+            .trade_policy
+            .as_ref()
+            .map(|binding| (binding.artifact_id, binding.content_hash));
+        if trade_policy != self.trade_policy_artifact_id.zip(self.trade_policy_hash) {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "trade_policy",
+            });
+        }
+        Ok(&self.serving_contract)
+    }
+}
+
+/// Typed failures while projecting a sealed serving contract into persistence.
+#[derive(Debug, Error)]
+pub enum ModelVersionPersistenceError {
+    #[error(transparent)]
+    Derivation(#[from] ModelVersionDerivationError),
+    #[error(transparent)]
+    ServingContract(#[from] ModelServingContractError),
+    #[error("model-serving contract does not match persisted `{binding}`")]
+    ServingProjectionMismatch { binding: &'static str },
 }
 
 /// Insert payload for `quant_model_version`.
@@ -158,6 +242,7 @@ pub struct NewModelVersion {
     pub model_spec_id: ModelSpecId,
     pub version: i32,
     pub artifact_hash: ContentHash,
+    pub serving_contract: ModelServingContract,
     pub category_scope: Option<MarketCategory>,
     pub profile_ref: ResearchProfileRef,
     pub training_dataset_id: Option<TrainingDatasetId>,
@@ -180,8 +265,53 @@ impl NewModelVersion {
         ModelVersionDerivation::Training
     }
 
+    /// Validate the sealed contract and every scalar projection available on
+    /// the insert payload. The database hash is always derived here; callers
+    /// cannot supply a second, potentially drifting value.
+    pub fn serving_contract_hash(&self) -> Result<ContentHash, ModelVersionPersistenceError> {
+        self.serving_contract.validate()?;
+        let bindings = self.serving_contract.bindings();
+        let model = &bindings.model;
+        if model.model_version_id != self.model_version_id {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "model_version_id",
+            });
+        }
+        if model.model_spec_id != self.model_spec_id {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "model_spec_id",
+            });
+        }
+        if model.category_scope != self.category_scope {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "category_scope",
+            });
+        }
+        if model.profile_ref != self.profile_ref {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "research_profile",
+            });
+        }
+        if self.training_dataset_id != Some(bindings.dataset.manifest.training_dataset_id) {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "training_dataset_id",
+            });
+        }
+        let trade_policy = bindings
+            .trade_policy
+            .as_ref()
+            .map(|binding| (binding.artifact_id, binding.content_hash));
+        if trade_policy != self.trade_policy_artifact_id.zip(self.trade_policy_hash) {
+            return Err(ModelVersionPersistenceError::ServingProjectionMismatch {
+                binding: "trade_policy",
+            });
+        }
+        Ok(self.serving_contract.contract_hash())
+    }
+
     /// Decompose typed derivation evidence into FK-backed persistence columns.
-    pub fn try_into_active_model(self) -> Result<ActiveModel, ModelVersionDerivationError> {
+    pub fn try_into_active_model(self) -> Result<ActiveModel, ModelVersionPersistenceError> {
+        let serving_contract_hash = self.serving_contract_hash()?;
         let derivation_evidence_hash = self.derivation.evidence_hash()?;
         let derivation_kind = self.derivation.kind();
         let parent_model_version_id = self.derivation.parent_model_version_id().copied();
@@ -192,6 +322,8 @@ impl NewModelVersion {
             model_spec_id: Set(self.model_spec_id),
             version: Set(self.version),
             artifact_hash: Set(self.artifact_hash),
+            serving_contract: Set(self.serving_contract),
+            serving_contract_hash: Set(serving_contract_hash.as_bytes().to_vec()),
             category_scope: Set(self.category_scope),
             research_profile_artifact_id: Set(self.profile_ref.artifact_id()),
             training_dataset_id: Set(self.training_dataset_id),
@@ -257,8 +389,9 @@ info_from_model!(ModelRunInfo, crate::entities::quant_model_run::Model, {
 
 /// Insert payload for `quant_model_run`.
 ///
-/// Covers every `ActiveModel` column (no DB-managed timestamps); `SeaORM`'s derive
-/// emits a redundant `..Default::default` that triggers `needless_update`.
+/// Contains immutable run lineage only. `PostgreSQL` owns the initial `Running`
+/// state and `started_at`; terminal state is written exclusively through the
+/// repository's guarded lifecycle operations.
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_model_run::ActiveModel")]
 pub struct NewModelRun {
@@ -269,13 +402,7 @@ pub struct NewModelRun {
     pub market_selection_id: Option<MarketSelectionId>,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
-    pub status: ModelRunStatus,
     pub input_hash: ContentHash,
-    pub output_hash: Option<ContentHash>,
-    pub error_code: Option<ModelRunErrorCode>,
-    pub error_message: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
 }
 
 /// Runtime model-run aggregate before persistence.

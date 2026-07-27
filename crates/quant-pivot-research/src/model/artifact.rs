@@ -15,33 +15,43 @@
 //! online history. Training fills [`ReturnModelSpec::Calibrated`] and
 //! [`TrainingObjectiveReport`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
+    domain::quant::ModelVersionInfo,
     enums::{
         common::MarketCategory,
+        model::{ClassicalKind, ModelFamily},
         quant::{DataQualityStatus, DownsideSource, ModelSerializationFormat},
     },
-    runtime_config::{FactorCrossSectionConfig, SmallCrossSectionPolicy},
+    hashing::CanonicalDigest,
+    runtime_config::{FactorCrossSectionConfig, SellScorerConfig, SmallCrossSectionPolicy},
     types::{
-        ArtifactUri, CalibrationArtifactId, ContentHash, ModelArtifactId, ModelInputContract,
-        ModelInputRequiredness, ModelVersionId, Price, Probability, ResearchProfileRef,
-        TradePolicyArtifactId, model_training::TrainingObjectiveSpec,
+        ArtifactUri, CalibrationArtifactId, ContentHash, ModelInputContract,
+        ModelInputRequiredness, ModelSpecId, ModelVersionId, Price, Probability,
+        ResearchProfileRef, TradePolicyArtifactId,
+        factor::{FactorDefinitionRef, FactorServingPlane},
+        model_serving::{
+            ModelServingContract, ModelServingEstimatorBinding, ModelServingEstimatorInput,
+            ModelServingIntrinsicInputKind, ModelServingIntrinsicInputRef,
+        },
+        model_training::TrainingObjectiveSpec,
     },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    artifact::{ArtifactKey, ArtifactNamespace},
-    factors::{FactorName, FrozenReferenceQuantiles},
+    artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
+    factors::FrozenReferenceQuantiles,
     features::{FeatureName, FeatureUnit, FeatureValueKind, NullReason},
     hashing::ResearchHasher,
     model::{
         calibrator::ResolvedCalibration,
+        category_scope::validate_category_scope,
+        factor_heads::FactorHeadSpec,
         objective::{ObjectiveComponentReport, RankingDiagnostics},
-        runtime::{ClassicalKind, ModelFamily},
     },
     naming::stable_name,
     precision::RESEARCH_DECIMAL_SCALE,
@@ -71,23 +81,6 @@ pub fn model_input_contract_hash(contract: &ModelInputContract) -> QuantResult<C
     ResearchHasher::canonical(contract)
 }
 
-fn validate_frozen_input_contract(
-    artifact_kind: &str,
-    contract: &ModelInputContract,
-    expected_hash: &ContentHash,
-) -> QuantResult<()> {
-    let actual_hash = model_input_contract_hash(contract)?;
-    if &actual_hash != expected_hash {
-        return Err(ResearchError::InvalidModelArtifact {
-            detail: format!(
-                "{artifact_kind} artifact input-contract hash mismatch: expected {expected_hash}, got {actual_hash}"
-            ),
-        }
-        .into());
-    }
-    Ok(())
-}
-
 fn required_features_from_contract(contract: &ModelInputContract) -> Vec<FeatureName> {
     contract
         .inputs
@@ -105,35 +98,93 @@ fn input_features_from_contract(contract: &ModelInputContract) -> Vec<FeatureNam
         .collect()
 }
 
-/// Provenance header shared by every model artifact: which version, family, and
-/// the schema hashes it is bound to. Loading must reject a mismatch against the
-/// active feature/factor schema.
+/// Common model-artifact header.
+///
+/// The complete immutable serving contract is the sole source of serving
+/// identity and lineage. Scalar projections are exposed only through semantic
+/// getters; they are never serialized in parallel with the contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelArtifactHeader {
-    /// The published model version this artifact realizes.
-    pub model_version_id: ModelVersionId,
-    /// Immutable owning model-spec definition hash copied from the dataset.
-    pub model_spec_definition_hash: ContentHash,
-    /// Immutable research profile shared by the source slice and dataset.
-    pub profile_ref: ResearchProfileRef,
-    /// Model family.
-    pub model_family: ModelFamily,
-    /// Feature-schema hash the artifact was trained/built against.
-    pub feature_schema_hash: ContentHash,
-    /// Factor-schema hash the artifact was trained/built against.
-    pub factor_schema_hash: ContentHash,
-    /// Trade policy frozen into executable policy-derived training, when applicable.
-    pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
-    pub trade_policy_hash: Option<ContentHash>,
+    serving_contract: ModelServingContract,
 }
 
-/// A single factor weight in a weighted-factor artifact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FactorWeight {
-    /// The weighted factor.
-    pub factor: FactorName,
-    /// The (frozen) non-negative weight; the set is normalized to sum to 1.
-    pub weight: Decimal,
+impl ModelArtifactHeader {
+    #[must_use]
+    pub const fn serving_contract(&self) -> &ModelServingContract {
+        &self.serving_contract
+    }
+
+    #[must_use]
+    pub const fn model_version_id(&self) -> ModelVersionId {
+        self.serving_contract.bindings().model.model_version_id
+    }
+
+    #[must_use]
+    pub const fn model_spec_id(&self) -> ModelSpecId {
+        self.serving_contract.bindings().model.model_spec_id
+    }
+
+    #[must_use]
+    pub const fn model_spec_definition_hash(&self) -> ContentHash {
+        self.serving_contract
+            .bindings()
+            .model
+            .model_spec_definition_hash
+    }
+
+    #[must_use]
+    pub const fn profile_ref(&self) -> &ResearchProfileRef {
+        &self.serving_contract.bindings().model.profile_ref
+    }
+
+    #[must_use]
+    pub const fn model_family(&self) -> ModelFamily {
+        self.serving_contract.bindings().model.model_family
+    }
+
+    #[must_use]
+    pub const fn category_scope(&self) -> Option<MarketCategory> {
+        self.serving_contract.bindings().model.category_scope
+    }
+
+    #[must_use]
+    pub const fn prediction_horizon_secs(&self) -> u64 {
+        self.serving_contract
+            .bindings()
+            .model
+            .prediction_horizon_secs
+    }
+
+    #[must_use]
+    pub const fn feature_schema_hash(&self) -> ContentHash {
+        self.serving_contract.bindings().schemas.feature_schema_hash
+    }
+
+    #[must_use]
+    pub const fn factor_schema_hash(&self) -> ContentHash {
+        self.serving_contract
+            .bindings()
+            .factors
+            .plane
+            .factor_schema_hash()
+    }
+
+    #[must_use]
+    pub const fn trade_policy_artifact_id(&self) -> Option<TradePolicyArtifactId> {
+        match &self.serving_contract.bindings().trade_policy {
+            Some(binding) => Some(binding.artifact_id),
+            None => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn trade_policy_hash(&self) -> Option<ContentHash> {
+        match &self.serving_contract.bindings().trade_policy {
+            Some(binding) => Some(binding.content_hash),
+            None => None,
+        }
+    }
 }
 
 /// Governed multipliers applied to the base weighted score by data-quality
@@ -288,6 +339,22 @@ impl HorizonMultipliers {
             min_ratio: Decimal::new(5, 1),
             max_ratio: Decimal::from(4),
         }
+    }
+
+    fn validate_horizon(&self) -> QuantResult<()> {
+        for (label, value) in [
+            ("horizon.in_window", self.in_window),
+            ("horizon.too_soon", self.too_soon),
+            ("horizon.too_late", self.too_late),
+        ] {
+            validate_unit_interval(label, value)?;
+        }
+        if self.min_ratio <= Decimal::ZERO || self.max_ratio < self.min_ratio {
+            return Err(invalid_model_payload(
+                "horizon ratios must satisfy 0 < min_ratio <= max_ratio".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -455,9 +522,10 @@ impl ReturnModelSpec {
     /// `market_price` is the executable YES-leg reference price (required by
     /// the `Calibrated` formula `E[r] = P(win)·(1-p)/p − (1−P(win))`; ignored
     /// by `Heuristic`). `calibration` must be `Some` whenever `self` is
-    /// `Calibrated` — the runtime factory resolves it once at load time and
-    /// fails the load closed otherwise. A missing binding is rejected here as
-    /// well; it never becomes a zero-valued business prediction.
+    /// `Calibrated` — the verified serving preimage resolves it once before
+    /// runtime construction and fails the load closed otherwise. A missing
+    /// binding is rejected here as well; it never becomes a zero-valued
+    /// business prediction.
     ///
     /// # Errors
     ///
@@ -525,63 +593,29 @@ pub struct TrainingObjectiveReport {
     pub summary: String,
 }
 
-/// Weighted-factor scorer artifact (first-class, fully explainable).
+/// Header-free `WeightedFactor` family payload.
 ///
-/// Inputs arrive already normalized by the [`FactorEngine`](crate::factors::FactorEngine);
-/// this body governs the *scoring* on top: per-factor weights, the data-quality /
-/// liquidity / horizon multipliers, the substitution confidence penalties, the
-/// return model, and the feature requirements the selector must honour.
+/// Identity, schemas, dataset, category, horizon, and policy lineage live only
+/// in the serving contract. This payload contains the executable preimages
+/// whose hashes the contract commits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WeightedFactorModelArtifact {
-    /// Common provenance header.
-    pub header: ModelArtifactHeader,
-    /// Semantic hash of the exact frozen dataset consumed by training.
-    pub training_dataset_hash: ContentHash,
-    /// Canonical final estimator-input groups after the frozen reference
-    /// transform, including aligned labels and decision boundaries.
-    pub training_input_hash: ContentHash,
-    /// Exact ordered raw-input contract frozen by the owning `ModelSpec`.
+#[serde(deny_unknown_fields)]
+pub struct WeightedFactorModelPayload {
+    pub factor_head: FactorHeadSpec,
     pub input_contract: ModelInputContract,
-    /// Canonical hash of [`Self::input_contract`], including order and
-    /// requiredness. This is the contract identity written to serving audit.
-    pub input_contract_hash: ContentHash,
-    /// Frozen per-factor non-negative weights (normalized to sum to 1).
-    pub weights: Vec<FactorWeight>,
-    /// Model-intrinsic prediction horizon, in seconds. Frozen at authoring from
-    /// `ModelConfig.prediction_horizon_secs`; authoritative for the horizon
-    /// multiplier and the candidate's `suggested_horizon_secs`.
-    pub prediction_horizon_secs: u64,
-    /// Governed score multipliers (data-quality / liquidity / horizon).
-    pub multipliers: ScoreMultiplierSpec,
-    /// Governed confidence penalty for imputed / kept-missing features.
+    pub horizon_multipliers: HorizonMultipliers,
     pub substitution_confidence_rules: SubstitutionConfidenceRules,
-    /// Return/downside mapping, either heuristic or calibrated.
     pub return_model: ReturnModelSpec,
-    /// Small-cross-section transform frozen at training time. Serving uses this
-    /// artifact contract, not a mutable history or unrelated active config.
     pub factor_cross_section: FactorCrossSectionConfig,
-    /// Empirical raw-factor CDFs fitted from the final training partition.
     pub frozen_reference_quantiles: FrozenReferenceQuantiles,
-    /// Trainer objective report (`None` when hand-authored).
-    pub objective_report: Option<TrainingObjectiveReport>,
-    /// When set, this artifact is scoped to one market category for category
-    /// routing. `None` means the generic cross-category scorer.
-    #[serde(default)]
-    pub category_scope: Option<MarketCategory>,
 }
 
-impl WeightedFactorModelArtifact {
-    /// Required selection features derived from the frozen typed contract.
+impl WeightedFactorModelPayload {
     #[must_use]
     pub fn required_features(&self) -> Vec<FeatureName> {
         required_features_from_contract(&self.input_contract)
     }
 
-    /// Hash the complete frozen factor-input transform applied by serving.
-    ///
-    /// Training-integrity verification and the online audit path share this
-    /// canonical implementation, so neither side can serialize a look-alike
-    /// transform graph independently.
     pub fn input_transform_hash(&self) -> QuantResult<ContentHash> {
         #[derive(Serialize)]
         struct WeightedTransform<'a> {
@@ -595,283 +629,235 @@ impl WeightedFactorModelArtifact {
         })
     }
 
-    /// Validate the structural money-adjacent invariants: a non-empty weight set,
-    /// every weight non-negative, and weights normalized to sum to 1.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ResearchError::InvalidModelArtifact`] on any violation.
-    pub fn validate(&self) -> QuantResult<()> {
-        if self.header.model_family != ModelFamily::WeightedFactor {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: format!(
-                    "weighted artifact has incompatible model family {:?}",
-                    self.header.model_family
-                ),
-            }
-            .into());
-        }
-        if self.prediction_horizon_secs == 0 {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: "weighted artifact prediction horizon must be positive".to_owned(),
-            }
-            .into());
-        }
-        validate_frozen_input_contract(
-            "weighted",
-            &self.input_contract,
-            &self.input_contract_hash,
-        )?;
-        if self.weights.is_empty() {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: "weighted artifact has no factor weights".to_owned(),
-            }
-            .into());
-        }
-        let mut sum = Decimal::ZERO;
-        let mut factor_names = BTreeSet::new();
-        for weight in &self.weights {
-            if !factor_names.insert(weight.factor.clone()) {
-                return Err(ResearchError::InvalidModelArtifact {
-                    detail: format!("duplicate weighted factor `{}`", weight.factor),
-                }
-                .into());
-            }
-            if weight.weight < Decimal::ZERO {
-                return Err(ResearchError::InvalidModelArtifact {
-                    detail: format!(
-                        "factor `{}` has negative weight {}",
-                        weight.factor, weight.weight
-                    ),
-                }
-                .into());
-            }
-            sum += weight.weight;
-        }
-        if (sum - Decimal::ONE).abs() > weight_sum_tolerance() {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: format!("factor weights must sum to 1, got {sum}"),
-            }
-            .into());
-        }
-        self.frozen_reference_quantiles.validate()?;
-        match self.factor_cross_section.small_cross_section_policy {
-            SmallCrossSectionPolicy::Indeterminate => {
-                if !self.frozen_reference_quantiles.is_empty() {
-                    return Err(ResearchError::InvalidModelArtifact {
-                        detail: "weighted artifact carries frozen reference CDFs while its \
-                                 small-cross-section policy is Indeterminate"
-                            .to_owned(),
-                    }
-                    .into());
-                }
-            }
-            SmallCrossSectionPolicy::FrozenReferenceQuantile => {
-                if self.frozen_reference_quantiles.is_empty() {
-                    return Err(ResearchError::InvalidModelArtifact {
-                        detail: "weighted artifact FrozenReferenceQuantile policy has no frozen \
-                                 reference CDFs"
-                            .to_owned(),
-                    }
-                    .into());
-                }
-                for weight in &self.weights {
-                    if self
-                        .frozen_reference_quantiles
-                        .get(&weight.factor)
-                        .is_none()
-                    {
-                        return Err(ResearchError::InvalidModelArtifact {
-                            detail: format!(
-                                "weighted factor `{}` has no frozen reference CDF",
-                                weight.factor
-                            ),
-                        }
-                        .into());
-                    }
-                }
-            }
-        }
-        Ok(())
+    pub fn model_payload_hash(&self) -> QuantResult<ContentHash> {
+        typed_payload_hash(
+            WEIGHTED_MODEL_PAYLOAD_HASH_DOMAIN,
+            WEIGHTED_MODEL_PAYLOAD_VERSION,
+            self,
+        )
     }
 
-    /// The frozen weights indexed by factor name for O(1) scorer lookup.
-    #[must_use]
-    pub fn weight_index(&self) -> BTreeMap<FactorName, Decimal> {
-        self.weights
-            .iter()
-            .map(|weight| (weight.factor.clone(), weight.weight))
-            .collect()
+    pub fn validate_for_plane(&self, plane: &FactorServingPlane) -> QuantResult<()> {
+        self.factor_head.validate(plane)?;
+        model_input_contract_hash(&self.input_contract)?;
+        self.horizon_multipliers.validate_horizon()?;
+        self.substitution_confidence_rules
+            .validate_substitution_rules()?;
+        validate_reference_quantiles(
+            plane,
+            &self.factor_cross_section,
+            &self.frozen_reference_quantiles,
+        )
     }
 }
 
-/// Sell-side hold-vs-exit output mapping.
-///
-/// Converts the signed ranking `net = Σ weightᵢ·signedᵢ ∈ [-1, 1]` (positive ⇒
-/// exiting now beats holding) into the three business outputs the opportunistic
-/// evaluator consumes: expected exit alpha, the probability the exit is better,
-/// and a target cumulative exit fraction.
+/// Governed Sell decision policy applied after the signed exit estimator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SellScorerOutputSpec {
-    /// Expected exit alpha (bps over holding) at `net = 1`; scales linearly with
-    /// `net`, so a negative net yields a negative alpha (hold is better).
+    /// Expected exit alpha (bps over holding) at a net estimator score of one.
     pub max_exit_alpha_bps: Decimal,
-    /// Logistic gain mapping `net → P(exit_better) = 1 / (1 + e^{-gain·net})`.
-    /// Must be strictly positive (a monotone increasing map).
+    /// Positive logistic gain for the calibrated `P(exit_better)` projection.
     pub p_exit_gain: Decimal,
-    /// Floor target cumulative exit fraction when the scorer fires; the realized
-    /// target scales from this floor up to `1.0` with conviction (`net⁺`).
+    /// Exit evidence at or below this non-negative threshold remains Hold.
+    pub exit_deadband: Decimal,
+    /// Governed cumulative exit target after the estimator clears the deadband.
     pub default_sell_pct: Decimal,
 }
 
 impl SellScorerOutputSpec {
-    /// A conservative bootstrap mapping (hand-authored, pre-calibration).
-    #[must_use]
-    pub fn conservative() -> Self {
+    pub fn validate(&self) -> QuantResult<()> {
+        if self.max_exit_alpha_bps <= Decimal::ZERO {
+            return Err(invalid_model_payload(format!(
+                "sell max_exit_alpha_bps must be positive, got {}",
+                self.max_exit_alpha_bps
+            )));
+        }
+        if self.p_exit_gain <= Decimal::ZERO {
+            return Err(invalid_model_payload(format!(
+                "sell p_exit_gain must be positive, got {}",
+                self.p_exit_gain
+            )));
+        }
+        if !(Decimal::ZERO..Decimal::ONE).contains(&self.exit_deadband) {
+            return Err(invalid_model_payload(format!(
+                "sell exit deadband must be in [0, 1), got {}",
+                self.exit_deadband
+            )));
+        }
+        if self.default_sell_pct <= Decimal::ZERO || self.default_sell_pct > Decimal::ONE {
+            return Err(invalid_model_payload(format!(
+                "sell default_sell_pct {} must be within (0, 1]",
+                self.default_sell_pct
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl TryFrom<&SellScorerConfig> for SellScorerOutputSpec {
+    type Error = QuantError;
+
+    /// Freeze the governed runtime-config preimage into artifact state.
+    fn try_from(config: &SellScorerConfig) -> Result<Self, Self::Error> {
+        let spec = Self {
+            max_exit_alpha_bps: config.max_exit_alpha_bps.value(),
+            p_exit_gain: config.p_exit_gain.value(),
+            exit_deadband: config.exit_deadband.value(),
+            default_sell_pct: config.default_sell_pct.value(),
+        };
+        spec.validate()?;
+        Ok(spec)
+    }
+}
+
+impl Default for SellScorerOutputSpec {
+    fn default() -> Self {
+        let config = SellScorerConfig::default();
         Self {
-            max_exit_alpha_bps: Decimal::from(300),
-            p_exit_gain: Decimal::from(4),
-            default_sell_pct: Decimal::ONE,
+            max_exit_alpha_bps: config.max_exit_alpha_bps.value(),
+            p_exit_gain: config.p_exit_gain.value(),
+            exit_deadband: config.exit_deadband.value(),
+            default_sell_pct: config.default_sell_pct.value(),
         }
     }
 }
 
-/// Sell-side hold-vs-exit weighted scorer artifact.
-///
-/// Symmetric to [`WeightedFactorModelArtifact`] but scores the *exit* decision
-/// for one open position lot rather than an entry ranking. Inputs are the
-/// already-normalized market factors plus lot position-state pseudo-factors
-/// (`unrealized_pnl_pct` / `time_in_trade` / `peak_mark_drawdown`); the frozen
-/// weights and [`SellScorerOutputSpec`] govern the mapping to `(exit_alpha_bps,
-/// p_exit_better, recommended cumulative exit fraction)`. A distinct artifact
-/// family so a Sell scorer can never be loaded where a Buy scorer is expected.
+/// One exact content-addressed model-intrinsic Sell input weight.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SellScorerArtifact {
-    /// Common provenance header (`model_family = HoldVsExitWeighted`).
-    pub header: ModelArtifactHeader,
-    /// Frozen per-factor non-negative weights (normalized to sum to 1), over
-    /// both market factors and position-state pseudo-factors.
-    pub weights: Vec<FactorWeight>,
-    /// Model-intrinsic hold-vs-exit horizon, in seconds.
-    pub prediction_horizon_secs: u64,
-    /// Governed net → business-output mapping.
-    pub output_spec: SellScorerOutputSpec,
-    /// Hold-vs-exit label-schema hash the scorer was trained against.
-    pub label_schema_hash: ContentHash,
-    /// Semantic hash of the exact frozen training dataset/partition.
-    pub training_dataset_hash: ContentHash,
-    /// Canonical final weighted estimator input commitment.
-    pub training_input_hash: ContentHash,
-    /// Exact ordered raw-input contract frozen by the owning `ModelSpec`.
-    pub input_contract: ModelInputContract,
-    /// Canonical hash of [`Self::input_contract`], including order and
-    /// requiredness.
-    pub input_contract_hash: ContentHash,
-    /// Trainer objective report (`None` when hand-authored).
-    pub objective_report: Option<TrainingObjectiveReport>,
+#[serde(deny_unknown_fields)]
+pub struct SellIntrinsicWeight {
+    pub binding: ModelServingIntrinsicInputRef,
+    pub weight: Decimal,
 }
 
-impl SellScorerArtifact {
-    /// Required selection features derived from the frozen typed contract.
+/// Sell estimator composition.
+///
+/// The canonical market factor head is one input. The other four inputs are
+/// model-intrinsic position features and can never masquerade as governed
+/// factor definitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SellEstimatorSpec {
+    pub market_head_weight: Decimal,
+    pub intrinsic_weights: Vec<SellIntrinsicWeight>,
+}
+
+impl SellEstimatorSpec {
+    pub fn validate(&self) -> QuantResult<()> {
+        if self.market_head_weight < Decimal::ZERO {
+            return Err(invalid_model_payload(format!(
+                "sell market-head weight must be non-negative, got {}",
+                self.market_head_weight
+            )));
+        }
+        let expected_kinds = canonical_sell_intrinsic_kinds();
+        if self.intrinsic_weights.len() != expected_kinds.len() {
+            return Err(invalid_model_payload(
+                "sell estimator must carry exactly four intrinsic inputs".to_owned(),
+            ));
+        }
+        let mut sum = self.market_head_weight;
+        for (weight, expected_kind) in self.intrinsic_weights.iter().zip(expected_kinds) {
+            let expected_binding = ModelServingIntrinsicInputRef::try_from(expected_kind)
+                .map_err(|error| invalid_model_payload(error.to_string()))?;
+            if weight.binding != expected_binding {
+                return Err(invalid_model_payload(format!(
+                    "sell intrinsic inputs are not in canonical order at {expected_kind:?}"
+                )));
+            }
+            if weight.weight < Decimal::ZERO {
+                return Err(invalid_model_payload(format!(
+                    "sell intrinsic {:?} has negative weight {}",
+                    expected_kind, weight.weight
+                )));
+            }
+            sum += weight.weight;
+        }
+        validate_simplex_sum("sell estimator", sum)
+    }
+}
+
+impl TryFrom<&SellScorerConfig> for SellEstimatorSpec {
+    type Error = QuantError;
+
+    /// Freeze the exact governed market/intrinsic composition.
+    fn try_from(config: &SellScorerConfig) -> Result<Self, Self::Error> {
+        let weights = [
+            config.position_take_profit_weight.value(),
+            config.position_stop_loss_weight.value(),
+            config.position_time_in_trade_weight.value(),
+            config.position_peak_drawdown_weight.value(),
+        ];
+        let intrinsic_weights = canonical_sell_intrinsic_kinds()
+            .into_iter()
+            .zip(weights)
+            .map(|(kind, weight)| {
+                Ok(SellIntrinsicWeight {
+                    binding: ModelServingIntrinsicInputRef::try_from(kind)
+                        .map_err(|error| invalid_model_payload(error.to_string()))?,
+                    weight,
+                })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        let spec = Self {
+            market_head_weight: config.market_head_weight.value(),
+            intrinsic_weights,
+        };
+        spec.validate()?;
+        Ok(spec)
+    }
+}
+
+/// Header-free `HoldVsExitWeighted` family payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SellScorerPayload {
+    pub factor_head: FactorHeadSpec,
+    pub estimator: SellEstimatorSpec,
+    pub output_spec: SellScorerOutputSpec,
+    pub input_contract: ModelInputContract,
+    pub factor_cross_section: FactorCrossSectionConfig,
+    pub frozen_reference_quantiles: FrozenReferenceQuantiles,
+}
+
+impl SellScorerPayload {
     #[must_use]
     pub fn required_features(&self) -> Vec<FeatureName> {
         required_features_from_contract(&self.input_contract)
     }
 
-    /// Hash the complete frozen factor-input transform applied by serving.
     pub fn input_transform_hash(&self) -> QuantResult<ContentHash> {
-        ResearchHasher::canonical(&(
-            &self.header.factor_schema_hash,
-            &self.weights,
-            &self.input_contract_hash,
-        ))
+        #[derive(Serialize)]
+        struct SellTransform<'a> {
+            cross_section: &'a FactorCrossSectionConfig,
+            frozen_reference_quantiles: &'a FrozenReferenceQuantiles,
+        }
+
+        ResearchHasher::canonical(&SellTransform {
+            cross_section: &self.factor_cross_section,
+            frozen_reference_quantiles: &self.frozen_reference_quantiles,
+        })
     }
 
-    /// Validate the structural, money-adjacent invariants: a non-empty weight
-    /// set, every weight non-negative and summing to 1, a strictly positive
-    /// logistic gain, and a default exit fraction in `(0, 1]`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ResearchError::InvalidModelArtifact`] on any violation.
-    pub fn validate(&self) -> QuantResult<()> {
-        // Family guard (doc Blocker): a mis-tagged header must never load as a
-        // Sell scorer, or a Buy ranker could be scored as an exit model.
-        if self.header.model_family != ModelFamily::HoldVsExitWeighted {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: format!(
-                    "sell scorer artifact has non-exit model family {:?}",
-                    self.header.model_family
-                ),
-            }
-            .into());
-        }
-        validate_frozen_input_contract(
-            "sell scorer",
-            &self.input_contract,
-            &self.input_contract_hash,
-        )?;
-        if self.output_spec.max_exit_alpha_bps <= Decimal::ZERO {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: format!(
-                    "sell scorer max_exit_alpha_bps {} must be > 0",
-                    self.output_spec.max_exit_alpha_bps
-                ),
-            }
-            .into());
-        }
-        if self.weights.is_empty() {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: "sell scorer artifact has no factor weights".to_owned(),
-            }
-            .into());
-        }
-        let mut sum = Decimal::ZERO;
-        for weight in &self.weights {
-            if weight.weight < Decimal::ZERO {
-                return Err(ResearchError::InvalidModelArtifact {
-                    detail: format!(
-                        "sell factor `{}` has negative weight {}",
-                        weight.factor, weight.weight
-                    ),
-                }
-                .into());
-            }
-            sum += weight.weight;
-        }
-        if (sum - Decimal::ONE).abs() > weight_sum_tolerance() {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: format!("sell factor weights must sum to 1, got {sum}"),
-            }
-            .into());
-        }
-        if self.output_spec.p_exit_gain <= Decimal::ZERO {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: "sell scorer p_exit_gain must be > 0".to_owned(),
-            }
-            .into());
-        }
-        if self.output_spec.default_sell_pct <= Decimal::ZERO
-            || self.output_spec.default_sell_pct > Decimal::ONE
-        {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: format!(
-                    "sell scorer default_sell_pct {} must be within (0, 1]",
-                    self.output_spec.default_sell_pct
-                ),
-            }
-            .into());
-        }
-        Ok(())
+    pub fn model_payload_hash(&self) -> QuantResult<ContentHash> {
+        typed_payload_hash(
+            SELL_MODEL_PAYLOAD_HASH_DOMAIN,
+            SELL_MODEL_PAYLOAD_VERSION,
+            self,
+        )
     }
 
-    /// The frozen weights indexed by factor name for O(1) scorer lookup.
-    #[must_use]
-    pub fn weight_index(&self) -> BTreeMap<FactorName, Decimal> {
-        self.weights
-            .iter()
-            .map(|weight| (weight.factor.clone(), weight.weight))
-            .collect()
+    pub fn validate_for_plane(&self, plane: &FactorServingPlane) -> QuantResult<()> {
+        self.factor_head.validate(plane)?;
+        self.estimator.validate()?;
+        model_input_contract_hash(&self.input_contract)?;
+        self.output_spec.validate()?;
+        validate_reference_quantiles(
+            plane,
+            &self.factor_cross_section,
+            &self.frozen_reference_quantiles,
+        )
     }
 }
 
@@ -1006,31 +992,21 @@ pub enum ClassicalOutputSemantics {
     FullPayoutProbability,
 }
 
-/// Classical-ML artifact (smartcore-backed).
+/// Header-free classical-ML family payload (smartcore-backed).
 ///
 /// The trained estimator's bytes live in the [`ArtifactStore`](crate::artifact::ArtifactStore)
 /// at [`Self::serialized_model_uri`] (content-addressed by their own digest);
-/// this JSON body — itself content-addressed as the `quant_model_version`
-/// `artifact_hash` — carries only the metadata needed to reload, version-check,
-/// and explain the model.
+/// the serving contract owns estimator kind/format/hash plus all schema,
+/// dataset, label, horizon, and training-input commitments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClassicalModelArtifact {
-    /// Common provenance header.
-    pub header: ModelArtifactHeader,
-    /// Stored-artifact id for the serialized estimator bytes.
-    pub artifact_id: ModelArtifactId,
-    /// Concrete classical kind.
+#[serde(deny_unknown_fields)]
+pub struct ClassicalModelPayload {
+    /// Exact estimator algorithm required to deserialize and execute the bytes.
     pub kind: ClassicalKind,
     /// ML crate that produced the estimator (`"smartcore"`).
     pub crate_name: String,
     /// Exact crate version; a load-time mismatch is rejected.
     pub crate_version: String,
-    /// Label-schema hash the model was trained against.
-    pub label_schema_hash: ContentHash,
-    /// Dataset hash the model was trained on.
-    pub training_dataset_hash: ContentHash,
-    /// Model-intrinsic prediction horizon, frozen from the owning model spec.
-    pub prediction_horizon_secs: u64,
     /// Exact governed meaning of the estimator's raw prediction.
     pub output_semantics: ClassicalOutputSemantics,
     /// Governed data-quality, liquidity, and horizon score multipliers applied
@@ -1040,18 +1016,11 @@ pub struct ClassicalModelArtifact {
     pub substitution_confidence_rules: SubstitutionConfidenceRules,
     /// Exact ordered raw-input contract frozen by the owning `ModelSpec`.
     pub input_contract: ModelInputContract,
-    /// Canonical hash of [`Self::input_contract`], including order and
-    /// requiredness.
-    pub input_contract_hash: ContentHash,
-    /// Complete fitted transform hash.
-    pub input_transform_hash: ContentHash,
-    /// Exact final estimator-ready rows plus aligned labels hash.
-    pub training_input_hash: ContentHash,
     /// Location of the serialized estimator bytes in the artifact store.
     pub serialized_model_uri: ArtifactUri,
-    /// BLAKE3 digest of the exact serialized estimator bytes.
+    /// Exact content hash of the serialized estimator bytes.
     pub serialized_model_hash: ContentHash,
-    /// Serialization format of the estimator bytes.
+    /// Serialization codec required by the estimator adapter.
     pub serialization_format: ModelSerializationFormat,
     /// Frozen unit-conversion, imputation, indicators, and standardization.
     pub input_transform: FittedInputTransform,
@@ -1059,7 +1028,7 @@ pub struct ClassicalModelArtifact {
     pub metrics: ClassicalModelMetrics,
 }
 
-impl ClassicalModelArtifact {
+impl ClassicalModelPayload {
     /// Required selection features derived from the frozen typed contract.
     #[must_use]
     pub fn required_features(&self) -> Vec<FeatureName> {
@@ -1073,8 +1042,16 @@ impl ClassicalModelArtifact {
     }
 
     /// Validate all metadata-only invariants before estimator bytes are loaded.
+    pub fn model_payload_hash(&self) -> QuantResult<ContentHash> {
+        typed_payload_hash(
+            CLASSICAL_MODEL_PAYLOAD_HASH_DOMAIN,
+            CLASSICAL_MODEL_PAYLOAD_VERSION,
+            self,
+        )
+    }
+
     pub fn validate(&self) -> QuantResult<()> {
-        (self).validate_classical_identity()?;
+        self.validate_classical_identity()?;
         validate_fitted_inputs(&self.input_transform.inputs)?;
         let encoded_names = self.input_transform.validate_encoded_transform()?;
         validate_classical_metrics(self, &encoded_names)?;
@@ -1089,23 +1066,12 @@ fn invalid_classical_artifact(detail: impl Into<String>) -> QuantError {
     .into()
 }
 
-impl ClassicalModelArtifact {
+impl ClassicalModelPayload {
     fn validate_classical_identity(&self) -> QuantResult<()> {
-        if self.header.model_family != ModelFamily::from_classical(self.kind) {
-            return Err(invalid_classical_artifact(format!(
-                "classical artifact family {:?} does not match kind {}",
-                self.header.model_family, self.kind
-            )));
-        }
         if self.input_transform.inputs.is_empty() || self.input_transform.encoded_columns.is_empty()
         {
             return Err(invalid_classical_artifact(
                 "classical input transform must contain inputs and encoded columns",
-            ));
-        }
-        if self.prediction_horizon_secs == 0 {
-            return Err(invalid_classical_artifact(
-                "classical artifact prediction horizon must be positive",
             ));
         }
         let expected_semantics = if self.kind == ClassicalKind::LogisticRegression {
@@ -1122,11 +1088,13 @@ impl ClassicalModelArtifact {
         self.multipliers.validate_score_multipliers()?;
         self.substitution_confidence_rules
             .validate_substitution_rules()?;
-        validate_frozen_input_contract(
-            "classical",
-            &self.input_contract,
-            &self.input_contract_hash,
-        )?;
+        if self.serialization_format != ModelSerializationFormat::Bincode {
+            return Err(invalid_classical_artifact(format!(
+                "classical payload requires bincode serialization, got {:?}",
+                self.serialization_format
+            )));
+        }
+        model_input_contract_hash(&self.input_contract)?;
         if self.input_transform.inputs.len() != self.input_contract.inputs.len()
             || !self
                 .input_transform
@@ -1142,13 +1110,7 @@ impl ClassicalModelArtifact {
                 "classical fitted inputs differ from the frozen typed input contract",
             ));
         }
-        let transform_hash = self.input_transform.transform_hash()?;
-        if transform_hash != self.input_transform_hash {
-            return Err(invalid_classical_artifact(format!(
-                "classical input-transform hash mismatch: expected {}, got {transform_hash}",
-                self.input_transform_hash
-            )));
-        }
+        self.input_transform.transform_hash()?;
         Ok(())
     }
 }
@@ -1421,7 +1383,7 @@ fn expected_encoded_columns(
 }
 
 fn validate_classical_metrics(
-    artifact: &ClassicalModelArtifact,
+    artifact: &ClassicalModelPayload,
     encoded_names: &BTreeSet<EncodedColumnName>,
 ) -> QuantResult<()> {
     let encoded = &artifact.input_transform.encoded_columns;
@@ -1461,22 +1423,86 @@ fn validate_classical_metrics(
     Ok(())
 }
 
-/// A versioned, content-addressable model artifact.
+const WEIGHTED_MODEL_PAYLOAD_HASH_DOMAIN: &str = "quant-pivot/model-payload/weighted-factor";
+const WEIGHTED_MODEL_PAYLOAD_VERSION: u32 = 1;
+const CLASSICAL_MODEL_PAYLOAD_HASH_DOMAIN: &str = "quant-pivot/model-payload/classical";
+const CLASSICAL_MODEL_PAYLOAD_VERSION: u32 = 1;
+const SELL_MODEL_PAYLOAD_HASH_DOMAIN: &str = "quant-pivot/model-payload/hold-vs-exit";
+const SELL_MODEL_PAYLOAD_VERSION: u32 = 1;
+
+/// Header-free family payload committed before the serving contract exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelArtifact {
-    /// Weighted-factor scorer (Buy-side entry ranking).
-    WeightedFactor(Box<WeightedFactorModelArtifact>),
-    /// Classical ML model.
-    Classical(Box<ClassicalModelArtifact>),
-    /// Sell-side hold-vs-exit scorer.
-    SellScorer(Box<SellScorerArtifact>),
-    // Additional artifact families remain unsupported until their full
-    // persistence, validation, and serving contracts exist.
+#[serde(
+    tag = "family",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ModelPayload {
+    WeightedFactor(Box<WeightedFactorModelPayload>),
+    Classical(Box<ClassicalModelPayload>),
+    SellScorer(Box<SellScorerPayload>),
+}
+
+impl ModelPayload {
+    pub fn model_payload_hash(&self) -> QuantResult<ContentHash> {
+        match self {
+            Self::WeightedFactor(payload) => payload.model_payload_hash(),
+            Self::Classical(payload) => payload.model_payload_hash(),
+            Self::SellScorer(payload) => payload.model_payload_hash(),
+        }
+    }
+
+    /// Build the sole canonical estimator commitment for a serving contract.
+    pub fn serving_estimator_binding(
+        &self,
+        plane: &FactorServingPlane,
+    ) -> QuantResult<ModelServingEstimatorBinding> {
+        let model_payload_hash = self.model_payload_hash()?;
+        match self {
+            Self::WeightedFactor(payload) => {
+                payload.validate_for_plane(plane)?;
+                Ok(ModelServingEstimatorBinding::FactorNative {
+                    ordered_inputs: factor_estimator_inputs(plane, false)?,
+                    model_payload_hash,
+                })
+            }
+            Self::SellScorer(payload) => {
+                payload.validate_for_plane(plane)?;
+                Ok(ModelServingEstimatorBinding::FactorNative {
+                    ordered_inputs: factor_estimator_inputs(plane, true)?,
+                    model_payload_hash,
+                })
+            }
+            Self::Classical(payload) => {
+                if !plane.definitions().is_empty() {
+                    return Err(invalid_model_payload(
+                        "classical payload requires the canonical empty factor plane".to_owned(),
+                    ));
+                }
+                payload.validate()?;
+                Ok(ModelServingEstimatorBinding::Classical {
+                    kind: payload.kind,
+                    model_payload_hash,
+                    serialized_model_hash: payload.serialized_model_hash,
+                    serialization_format: payload.serialization_format,
+                })
+            }
+        }
+    }
+}
+
+/// Sealed outer artifact. Construction is possible only after the payload hash
+/// has been embedded in a complete serving contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelArtifact {
+    header: ModelArtifactHeader,
+    payload: ModelPayload,
 }
 
 /// Breaking stored-model wire version. No legacy parser is provided.
-pub const MODEL_ARTIFACT_FORMAT_VERSION: u32 = 1;
+pub const MODEL_ARTIFACT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Serialize)]
 pub(crate) struct StoredModelArtifactRef<'a> {
@@ -1485,45 +1511,91 @@ pub(crate) struct StoredModelArtifactRef<'a> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredModelArtifact {
     format_version: u32,
     artifact: ModelArtifact,
 }
 
 impl ModelArtifact {
-    /// The common provenance header, regardless of family.
-    #[must_use]
-    pub const fn header(&self) -> &ModelArtifactHeader {
-        match self {
-            Self::WeightedFactor(artifact) => &artifact.header,
-            Self::Classical(artifact) => &artifact.header,
-            Self::SellScorer(artifact) => &artifact.header,
-        }
-    }
-
-    /// The single market category this artifact declares itself scoped to
-    /// for category routing, or `None` for a generic cross-category
-    /// scorer. Only the weighted-factor family carries a declared scope
-    /// today; every other family is unconditionally generic.
-    #[must_use]
-    pub const fn category_scope(&self) -> Option<MarketCategory> {
-        match self {
-            Self::WeightedFactor(artifact) => artifact.category_scope,
-            Self::Classical(_) | Self::SellScorer(_) => None,
-        }
-    }
-
-    /// Validate the family-specific structural invariants.
+    /// Load and verify the exact content-addressed artifact bound to a persisted
+    /// model version.
     ///
     /// # Errors
     ///
-    /// Propagates the family validator's [`ResearchError::InvalidModelArtifact`].
-    pub fn validate(&self) -> QuantResult<()> {
-        match self {
-            Self::WeightedFactor(artifact) => artifact.validate(),
-            Self::Classical(artifact) => artifact.validate(),
-            Self::SellScorer(artifact) => artifact.validate(),
+    /// Rejects an invalid persisted serving-contract projection, missing or
+    /// malformed bytes, a canonical hash mismatch, payload invariant failure,
+    /// or any drift between the artifact header and persisted contract.
+    pub async fn load_verified(
+        store: &dyn ArtifactStore,
+        model_version: &ModelVersionInfo,
+    ) -> QuantResult<Self> {
+        let persisted = model_version.verified_serving_contract().map_err(|error| {
+            ResearchError::InvalidModelArtifact {
+                detail: format!("invalid persisted serving contract: {error}"),
+            }
+        })?;
+        let recorded = model_version.artifact_hash;
+        let key = Self::artifact_key(&recorded)?;
+        let bytes = store.get_by_key(&key).await?;
+        let artifact = Self::from_bytes(&bytes)?;
+        let recomputed = artifact.content_hash()?;
+        if recomputed != recorded {
+            return Err(ResearchError::ArtifactHashMismatch {
+                expected: recorded.to_string(),
+                actual: recomputed.to_string(),
+            }
+            .into());
         }
+        if artifact.header().serving_contract() != persisted {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "artifact header differs from the exact persisted serving contract"
+                    .to_owned(),
+            }
+            .into());
+        }
+        Ok(artifact)
+    }
+
+    /// Seal one already-hashed family payload against its complete contract.
+    pub fn try_seal(
+        serving_contract: ModelServingContract,
+        payload: ModelPayload,
+    ) -> QuantResult<Self> {
+        let artifact = Self {
+            header: ModelArtifactHeader { serving_contract },
+            payload,
+        };
+        artifact.validate()?;
+        Ok(artifact)
+    }
+
+    #[must_use]
+    pub const fn header(&self) -> &ModelArtifactHeader {
+        &self.header
+    }
+
+    #[must_use]
+    pub const fn payload(&self) -> &ModelPayload {
+        &self.payload
+    }
+
+    pub(crate) fn into_parts(self) -> QuantResult<(ModelArtifactHeader, ModelPayload)> {
+        self.validate()?;
+        Ok((self.header, self.payload))
+    }
+
+    #[must_use]
+    pub const fn category_scope(&self) -> Option<MarketCategory> {
+        self.header.category_scope()
+    }
+
+    pub fn validate(&self) -> QuantResult<()> {
+        self.header
+            .serving_contract
+            .validate()
+            .map_err(|error| invalid_model_payload(format!("invalid serving contract: {error}")))?;
+        validate_payload_contract(&self.header.serving_contract, &self.payload)
     }
 
     /// The canonical content hash of this artifact (`blake3:<hex>`), the address
@@ -1533,6 +1605,7 @@ impl ModelArtifact {
     ///
     /// Propagates canonical-serialization failures.
     pub fn content_hash(&self) -> QuantResult<ContentHash> {
+        self.validate()?;
         ResearchHasher::model_artifact(self)
     }
 
@@ -1542,6 +1615,7 @@ impl ModelArtifact {
     ///
     /// Returns [`ResearchError::Serialization`] on a serde failure.
     pub fn to_bytes(&self) -> QuantResult<Vec<u8>> {
+        self.validate()?;
         serde_json::to_vec(&StoredModelArtifactRef {
             format_version: MODEL_ARTIFACT_FORMAT_VERSION,
             artifact: self,
@@ -1596,11 +1670,11 @@ impl ModelArtifact {
     /// sell-side artifacts are unconditionally uncalibrated for this gate.
     #[must_use]
     pub const fn return_model_is_calibrated(&self) -> bool {
-        match self {
-            Self::WeightedFactor(weighted) => {
+        match &self.payload {
+            ModelPayload::WeightedFactor(weighted) => {
                 matches!(weighted.return_model, ReturnModelSpec::Calibrated(_))
             }
-            Self::Classical(_) | Self::SellScorer(_) => false,
+            ModelPayload::Classical(_) | ModelPayload::SellScorer(_) => false,
         }
     }
 
@@ -1610,104 +1684,471 @@ impl ModelArtifact {
     /// publish time, not that it is still active today).
     #[must_use]
     pub const fn calibrator_ref(&self) -> Option<&CalibrationArtifactId> {
-        match self {
-            Self::WeightedFactor(weighted) => match &weighted.return_model {
+        match &self.payload {
+            ModelPayload::WeightedFactor(weighted) => match &weighted.return_model {
                 ReturnModelSpec::Calibrated(calibrated) => Some(&calibrated.calibrator_ref),
                 ReturnModelSpec::Heuristic(_) => None,
             },
-            Self::Classical(_) | Self::SellScorer(_) => None,
+            ModelPayload::Classical(_) | ModelPayload::SellScorer(_) => None,
         }
     }
 }
 
+fn validate_payload_contract(
+    contract: &ModelServingContract,
+    payload: &ModelPayload,
+) -> QuantResult<()> {
+    let bindings = contract.bindings();
+    let payload_hash = payload.model_payload_hash()?;
+    match (&bindings.model.estimator, payload) {
+        (
+            ModelServingEstimatorBinding::FactorNative {
+                ordered_inputs,
+                model_payload_hash,
+            },
+            ModelPayload::WeightedFactor(weighted),
+        ) if bindings.model.model_family == ModelFamily::WeightedFactor => {
+            validate_payload_hash(*model_payload_hash, payload_hash)?;
+            weighted.validate_for_plane(&bindings.factors.plane)?;
+            validate_factor_inputs(&bindings.factors.plane, ordered_inputs, false)?;
+            validate_transform(
+                contract,
+                &weighted.input_contract,
+                weighted.input_transform_hash()?,
+            )?;
+            validate_weighted_calibration(contract, &weighted.return_model)?;
+            validate_category_scope(contract, &weighted.factor_head)
+        }
+        (
+            ModelServingEstimatorBinding::FactorNative {
+                ordered_inputs,
+                model_payload_hash,
+            },
+            ModelPayload::SellScorer(sell),
+        ) if bindings.model.model_family == ModelFamily::HoldVsExitWeighted => {
+            validate_payload_hash(*model_payload_hash, payload_hash)?;
+            sell.validate_for_plane(&bindings.factors.plane)?;
+            validate_factor_inputs(&bindings.factors.plane, ordered_inputs, true)?;
+            validate_transform(contract, &sell.input_contract, sell.input_transform_hash()?)?;
+            validate_category_scope(contract, &sell.factor_head)
+        }
+        (
+            ModelServingEstimatorBinding::Classical {
+                kind,
+                model_payload_hash,
+                serialized_model_hash,
+                serialization_format,
+            },
+            ModelPayload::Classical(classical),
+        ) if bindings.model.model_family == ModelFamily::from_classical(*kind) => {
+            validate_payload_hash(*model_payload_hash, payload_hash)?;
+            if *serialization_format != ModelSerializationFormat::Bincode {
+                return Err(invalid_model_payload(format!(
+                    "classical payload requires bincode, got {serialization_format:?}"
+                )));
+            }
+            if classical.serialization_format != *serialization_format
+                || classical.serialized_model_hash != *serialized_model_hash
+            {
+                return Err(invalid_model_payload(
+                    "classical serialized estimator binding differs from payload".to_owned(),
+                ));
+            }
+            if classical.kind != *kind {
+                return Err(invalid_model_payload(format!(
+                    "classical payload kind {} differs from contract kind {}",
+                    classical.kind, kind
+                )));
+            }
+            classical.validate()?;
+            validate_transform(
+                contract,
+                &classical.input_contract,
+                classical.input_transform.transform_hash()?,
+            )
+        }
+        _ => Err(invalid_model_payload(format!(
+            "payload family is incompatible with contract family {:?}",
+            bindings.model.model_family
+        ))),
+    }
+}
+
+fn validate_payload_hash(expected: ContentHash, actual: ContentHash) -> QuantResult<()> {
+    if expected != actual {
+        return Err(invalid_model_payload(format!(
+            "model payload hash mismatch: contract={expected}, payload={actual}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_transform(
+    contract: &ModelServingContract,
+    input_contract: &ModelInputContract,
+    input_transform_hash: ContentHash,
+) -> QuantResult<()> {
+    let transform = &contract.bindings().transform;
+    let input_contract_hash = model_input_contract_hash(input_contract)?;
+    if transform.input_contract_hash != input_contract_hash {
+        return Err(invalid_model_payload(format!(
+            "input contract hash mismatch: contract={}, payload={input_contract_hash}",
+            transform.input_contract_hash
+        )));
+    }
+    if transform.input_transform_hash != input_transform_hash {
+        return Err(invalid_model_payload(format!(
+            "input transform hash mismatch: contract={}, payload={input_transform_hash}",
+            transform.input_transform_hash
+        )));
+    }
+    Ok(())
+}
+
+fn validate_weighted_calibration(
+    contract: &ModelServingContract,
+    return_model: &ReturnModelSpec,
+) -> QuantResult<()> {
+    match (return_model, &contract.bindings().model.calibration) {
+        (ReturnModelSpec::Heuristic(_), None) => Ok(()),
+        (ReturnModelSpec::Calibrated(model), Some(binding))
+            if model.calibrator_ref == binding.artifact_id =>
+        {
+            Ok(())
+        }
+        _ => Err(invalid_model_payload(
+            "weighted return-model calibration differs from serving contract".to_owned(),
+        )),
+    }
+}
+
+fn validate_factor_inputs(
+    plane: &FactorServingPlane,
+    actual: &[ModelServingEstimatorInput],
+    include_intrinsic: bool,
+) -> QuantResult<()> {
+    let expected = factor_estimator_inputs(plane, include_intrinsic)?;
+    if actual != expected {
+        return Err(invalid_model_payload(
+            "contract estimator input order differs from canonical payload input order".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn factor_estimator_inputs(
+    plane: &FactorServingPlane,
+    include_intrinsic: bool,
+) -> QuantResult<Vec<ModelServingEstimatorInput>> {
+    plane
+        .validate()
+        .map_err(|error| invalid_model_payload(format!("invalid factor serving plane: {error}")))?;
+    let mut inputs = plane
+        .definitions()
+        .iter()
+        .filter(|revision| !revision.definition().is_diagnostic())
+        .map(|revision| ModelServingEstimatorInput::GovernedFactor {
+            factor_definition_id: revision.factor_definition_id(),
+        })
+        .collect::<Vec<_>>();
+    if include_intrinsic {
+        for kind in canonical_sell_intrinsic_kinds() {
+            let binding = ModelServingIntrinsicInputRef::try_from(kind)
+                .map_err(|error| invalid_model_payload(error.to_string()))?;
+            inputs.push(ModelServingEstimatorInput::ModelIntrinsic { binding });
+        }
+    }
+    Ok(inputs)
+}
+
+fn validate_reference_quantiles(
+    plane: &FactorServingPlane,
+    cross_section: &FactorCrossSectionConfig,
+    references: &FrozenReferenceQuantiles,
+) -> QuantResult<()> {
+    references.validate()?;
+    match cross_section.small_cross_section_policy {
+        SmallCrossSectionPolicy::Indeterminate if references.is_empty() => Ok(()),
+        SmallCrossSectionPolicy::Indeterminate => Err(invalid_model_payload(
+            "Indeterminate cross-section policy cannot carry frozen references".to_owned(),
+        )),
+        SmallCrossSectionPolicy::FrozenReferenceQuantile => {
+            let required = plane
+                .definitions()
+                .iter()
+                .filter(|revision| revision.definition().normalization.is_cross_sectional())
+                .map(FactorDefinitionRef::factor_name)
+                .collect::<BTreeSet<_>>();
+            let actual = references.index();
+            if required.len() != actual.len()
+                || required.iter().any(|factor| !actual.contains_key(*factor))
+            {
+                return Err(invalid_model_payload(
+                    "frozen reference CDFs do not exactly cover the cross-sectional factor plane"
+                        .to_owned(),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+const fn canonical_sell_intrinsic_kinds() -> [ModelServingIntrinsicInputKind; 4] {
+    [
+        ModelServingIntrinsicInputKind::PositionTakeProfitPressure,
+        ModelServingIntrinsicInputKind::PositionStopLossPressure,
+        ModelServingIntrinsicInputKind::PositionTimeInTrade,
+        ModelServingIntrinsicInputKind::PositionPeakDrawdown,
+    ]
+}
+
+fn validate_simplex_sum(label: &str, sum: Decimal) -> QuantResult<()> {
+    if (sum - Decimal::ONE).abs() > weight_sum_tolerance() {
+        return Err(invalid_model_payload(format!(
+            "{label} weights must sum to one, got {sum}"
+        )));
+    }
+    Ok(())
+}
+
+fn typed_payload_hash<T>(domain: &str, version: u32, payload: &T) -> QuantResult<ContentHash>
+where
+    T: Serialize,
+{
+    Ok(CanonicalDigest::content_hash_typed(
+        domain, version, payload,
+    )?)
+}
+
+fn invalid_model_payload(detail: String) -> QuantError {
+    ResearchError::InvalidModelArtifact { detail }.into()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{env, process, sync::Arc};
+
+    use chrono::Utc;
     use quant_pivot_models::{
-        enums::quant::{DataQualityStatus, DownsideSource},
-        runtime_config::FactorCrossSectionConfig,
+        domain::quant::ModelVersionInfo,
+        enums::{
+            model::ModelFamily,
+            quant::{DataQualityStatus, DownsideSource, PublicationStatus},
+        },
+        runtime_config::{DecimalValue, SellScorerConfig},
         types::{
             CalibrationArtifactId, ContentHash, ModelInputContract, ModelInputRequiredness,
-            ModelInputSpec, ModelVersionId, Price, Probability, builtin_research_profiles,
+            ModelInputSpec, Price, Probability,
             calibration::{IsotonicKnot, MonotoneMapping, ReliabilityBin, ReliabilityReport},
+            model_metrics::ModelVersionMetrics,
+            model_spec::ModelSpecThesis,
+            model_training::ModelTrainingObjective,
         },
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+    use serde_json::Value;
 
     use super::{
-        DataQualityMultipliers, HorizonMultipliers, LiquidityMultipliers,
-        MODEL_ARTIFACT_FORMAT_VERSION, ModelArtifact, ModelArtifactHeader, ReturnModelSpec,
-        ScoreMultiplierSpec, SellScorerArtifact, SellScorerOutputSpec, StoredModelArtifactRef,
-        SubstitutionConfidenceRules, WeightedFactorModelArtifact, model_input_contract_hash,
+        CalibratedReturnModel, DataQualityMultipliers, HeuristicReturnModel, HorizonMultipliers,
+        LiquidityMultipliers, MODEL_ARTIFACT_FORMAT_VERSION, ModelArtifact, ModelPayload,
+        ReturnModelSpec, SellEstimatorSpec, SellScorerOutputSpec, StoredModelArtifactRef,
     };
     use crate::{
-        factors::{
-            FrozenReferenceQuantiles,
-            names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
-        },
+        artifact::{ArtifactStore, LocalArtifactStore},
         features::FeatureName,
-        model::{
-            artifact::{CalibratedReturnModel, FactorWeight, HeuristicReturnModel},
-            calibrator::ResolvedCalibration,
-            runtime::ModelFamily,
+        model::calibrator::ResolvedCalibration,
+        test_support::{
+            content_hash as hash, seal_model_payload, sell_payload, weighted_factor_plane,
+            weighted_payload,
         },
-        test_support::content_hash as hash,
     };
 
-    fn input_contract() -> (ModelInputContract, ContentHash) {
-        let contract = ModelInputContract::single_required("book.mid");
-        let hash = model_input_contract_hash(&contract).expect("input contract hash");
-        (contract, hash)
+    fn version_info(artifact: &ModelArtifact, artifact_hash: ContentHash) -> ModelVersionInfo {
+        let serving_contract = artifact.header().serving_contract().clone();
+        let bindings = serving_contract.bindings();
+        let model = &bindings.model;
+        let trade_policy = bindings
+            .trade_policy
+            .as_ref()
+            .map(|policy| (policy.artifact_id, policy.content_hash));
+        ModelVersionInfo {
+            model_version_id: model.model_version_id,
+            model_spec_id: model.model_spec_id,
+            model_spec_name: "artifact-load-test".to_owned(),
+            model_family: model.model_family,
+            model_spec_thesis: ModelSpecThesis {
+                summary: "Artifact load contract".to_owned(),
+                hypothesis: "The exact governed bytes load deterministically".to_owned(),
+                limitations: vec!["Test-only artifact".to_owned()],
+            },
+            model_spec_definition_hash: model.model_spec_definition_hash,
+            model_spec_prediction_horizon_secs: i64::try_from(model.prediction_horizon_secs)
+                .expect("fixture horizon fits i64"),
+            version: 1,
+            artifact_hash,
+            serving_contract_hash: serving_contract.contract_hash(),
+            category_scope: model.category_scope,
+            profile_ref: model.profile_ref.clone(),
+            training_dataset_id: Some(bindings.dataset.manifest.training_dataset_id),
+            trade_policy_artifact_id: trade_policy.map(|(artifact_id, _)| artifact_id),
+            trade_policy_hash: trade_policy.map(|(_, content_hash)| content_hash),
+            publish_path_set_id: None,
+            derivation_kind: ModelVersionInfo::training_derivation_kind(),
+            parent_model_version_id: None,
+            calibration_artifact_id: model
+                .calibration
+                .as_ref()
+                .map(|calibration| calibration.artifact_id),
+            derivation_evidence_hash: None,
+            metrics: ModelVersionMetrics::not_measured("test fixture"),
+            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+            quality_gate_report: None,
+            publication_status: PublicationStatus::Published,
+            published_at: Some(Utc::now()),
+            retired_at: None,
+            created_at: Utc::now(),
+            serving_contract,
+        }
     }
 
-    impl WeightedFactorModelArtifact {
-        fn artifact_fixture() -> Self {
-            let (input_contract, input_contract_hash) = input_contract();
-            Self {
-                header: ModelArtifactHeader {
-                    model_version_id: ModelVersionId::from_v7(),
-                    model_spec_definition_hash: hash("spec"),
-                    profile_ref: builtin_research_profiles()
-                        .expect("built-in profiles")
-                        .remove(0)
-                        .profile_ref,
-                    model_family: ModelFamily::WeightedFactor,
-                    feature_schema_hash: hash("aaa"),
-                    factor_schema_hash: hash("bbb"),
-                    trade_policy_artifact_id: None,
-                    trade_policy_hash: None,
-                },
-                training_dataset_hash: hash("ccc"),
-                training_input_hash: hash("ddd"),
-                input_contract,
-                input_contract_hash,
-                weights: vec![
-                    FactorWeight {
-                        factor: LIQUIDITY_DEPTH,
-                        weight: dec!(0.6),
-                    },
-                    FactorWeight {
-                        factor: MOMENTUM_ROC,
-                        weight: dec!(0.4),
-                    },
-                ],
-                prediction_horizon_secs: 86_400,
-                multipliers: ScoreMultiplierSpec::conservative(),
-                substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-                return_model: ReturnModelSpec::heuristic_default(),
-                factor_cross_section: FactorCrossSectionConfig::default(),
-                frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
-                objective_report: None,
-                category_scope: None,
-            }
-        }
+    fn temp_store() -> Arc<dyn ArtifactStore> {
+        let root = env::temp_dir().join(format!(
+            "qp_artifact_load_test_{}_{}",
+            process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        Arc::new(LocalArtifactStore::new(root))
+    }
+
+    #[tokio::test]
+    async fn verified_artifact_loads_consistently() {
+        let store = temp_store();
+        let artifact = ModelArtifact::weighted_fixture();
+        let digest = artifact.content_hash().expect("hash");
+        let key = ModelArtifact::artifact_key(&digest).expect("key");
+        store
+            .put(key, &artifact.to_bytes().expect("bytes"))
+            .await
+            .expect("put");
+
+        let loaded = ModelArtifact::load_verified(store.as_ref(), &version_info(&artifact, digest))
+            .await
+            .expect("load");
+        assert_eq!(loaded, artifact);
+    }
+
+    #[tokio::test]
+    async fn load_rejects_artifact_mismatch() {
+        let store = temp_store();
+        let artifact = ModelArtifact::weighted_fixture();
+        let wrong = hash("dead");
+        let key = ModelArtifact::artifact_key(&wrong).expect("key");
+        store
+            .put(key, &artifact.to_bytes().expect("bytes"))
+            .await
+            .expect("put");
+
+        let error = ModelArtifact::load_verified(store.as_ref(), &version_info(&artifact, wrong))
+            .await
+            .expect_err("hash mismatch must be rejected");
+        assert!(error.to_string().contains("artifact hash mismatch"));
+    }
+
+    #[tokio::test]
+    async fn load_rejects_contract_drift() {
+        let store = temp_store();
+        let artifact = ModelArtifact::weighted_fixture();
+        let digest = artifact.content_hash().expect("hash");
+        let key = ModelArtifact::artifact_key(&digest).expect("key");
+        store
+            .put(key, &artifact.to_bytes().expect("bytes"))
+            .await
+            .expect("put");
+
+        let persisted = ModelArtifact::sell_fixture();
+        let error = ModelArtifact::load_verified(store.as_ref(), &version_info(&persisted, digest))
+            .await
+            .expect_err("serving-contract drift must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("artifact header differs from the exact persisted serving contract")
+        );
+    }
+
+    #[tokio::test]
+    async fn load_rejects_persisted_drift() {
+        let store = temp_store();
+        let artifact = ModelArtifact::weighted_fixture();
+        let digest = artifact.content_hash().expect("hash");
+        let key = ModelArtifact::artifact_key(&digest).expect("key");
+        store
+            .put(key, &artifact.to_bytes().expect("bytes"))
+            .await
+            .expect("put");
+        let mut persisted = version_info(&artifact, digest);
+        persisted.serving_contract_hash = hash("persisted-contract-drift");
+
+        let error = ModelArtifact::load_verified(store.as_ref(), &persisted)
+            .await
+            .expect_err("persisted serving-contract hash drift must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid persisted serving contract")
+        );
+    }
+
+    #[test]
+    fn sell_config_freezes_exactly() {
+        let config = SellScorerConfig {
+            market_head_weight: DecimalValue::new(dec!(0.4)),
+            position_take_profit_weight: DecimalValue::new(dec!(0.1)),
+            position_stop_loss_weight: DecimalValue::new(dec!(0.2)),
+            position_time_in_trade_weight: DecimalValue::new(dec!(0.1)),
+            position_peak_drawdown_weight: DecimalValue::new(dec!(0.2)),
+            max_exit_alpha_bps: DecimalValue::new(dec!(425)),
+            p_exit_gain: DecimalValue::new(dec!(3.5)),
+            exit_deadband: DecimalValue::new(dec!(0.08)),
+            default_sell_pct: DecimalValue::new(dec!(0.6)),
+        };
+
+        let estimator = SellEstimatorSpec::try_from(&config).expect("sell estimator");
+        assert_eq!(estimator.market_head_weight, dec!(0.4));
+        assert_eq!(
+            estimator
+                .intrinsic_weights
+                .iter()
+                .map(|weight| weight.weight)
+                .collect::<Vec<_>>(),
+            vec![dec!(0.1), dec!(0.2), dec!(0.1), dec!(0.2)]
+        );
+        let output = SellScorerOutputSpec::try_from(&config).expect("sell output");
+        assert_eq!(output.max_exit_alpha_bps, dec!(425));
+        assert_eq!(output.p_exit_gain, dec!(3.5));
+        assert_eq!(output.exit_deadband, dec!(0.08));
+        assert_eq!(output.default_sell_pct, dec!(0.6));
+    }
+
+    #[test]
+    fn sell_config_rejects_simplex() {
+        let config = SellScorerConfig {
+            market_head_weight: DecimalValue::new(dec!(0.6)),
+            ..SellScorerConfig::default()
+        };
+        assert!(SellEstimatorSpec::try_from(&config).is_err());
+
+        let output = SellScorerConfig {
+            exit_deadband: DecimalValue::new(Decimal::ONE),
+            ..SellScorerConfig::default()
+        };
+        assert!(SellScorerOutputSpec::try_from(&output).is_err());
     }
 
     #[test]
     fn weighted_artifact_serde_hash() {
-        let artifact = ModelArtifact::WeightedFactor(Box::new(
-            WeightedFactorModelArtifact::artifact_fixture(),
-        ));
+        let artifact = ModelArtifact::weighted_fixture();
         let bytes = artifact.to_bytes().expect("serialize");
         let back = ModelArtifact::from_bytes(&bytes).expect("deserialize");
         assert_eq!(back, artifact);
@@ -1720,18 +2161,14 @@ mod tests {
 
     #[test]
     fn model_artifact_rejects_bytes() {
-        let artifact = ModelArtifact::WeightedFactor(Box::new(
-            WeightedFactorModelArtifact::artifact_fixture(),
-        ));
+        let artifact = ModelArtifact::weighted_fixture();
         let legacy = serde_json::to_vec(&artifact).expect("legacy serialization");
         assert!(ModelArtifact::from_bytes(&legacy).is_err());
     }
 
     #[test]
     fn model_rejects_unknown_version() {
-        let artifact = ModelArtifact::WeightedFactor(Box::new(
-            WeightedFactorModelArtifact::artifact_fixture(),
-        ));
+        let artifact = ModelArtifact::weighted_fixture();
         let bytes = serde_json::to_vec(&StoredModelArtifactRef {
             format_version: MODEL_ARTIFACT_FORMAT_VERSION + 1,
             artifact: &artifact,
@@ -1741,154 +2178,159 @@ mod tests {
     }
 
     #[test]
+    fn nested_payloads_reject_unknown() {
+        for pointer in [
+            "/artifact/payload/payload/factor_head",
+            "/artifact/payload/payload/factor_head/alpha_weights/0",
+            "/artifact/payload/payload/factor_head/context_weights/0",
+        ] {
+            assert_unknown_field_rejected(&ModelArtifact::weighted_fixture(), pointer);
+        }
+        for pointer in [
+            "/artifact/payload/payload/estimator",
+            "/artifact/payload/payload/estimator/intrinsic_weights/0",
+        ] {
+            assert_unknown_field_rejected(&ModelArtifact::sell_fixture(), pointer);
+        }
+    }
+
+    fn assert_unknown_field_rejected(artifact: &ModelArtifact, pointer: &str) {
+        let mut document: Value =
+            serde_json::from_slice(&artifact.to_bytes().expect("artifact bytes"))
+                .expect("artifact JSON");
+        let object = document
+            .pointer_mut(pointer)
+            .and_then(Value::as_object_mut)
+            .expect("fixture object at JSON pointer");
+        object.insert("unknown_nested_field".to_owned(), Value::Bool(true));
+        let bytes = serde_json::to_vec(&document).expect("mutated artifact bytes");
+        assert!(
+            ModelArtifact::from_bytes(&bytes).is_err(),
+            "unknown field at {pointer} must fail closed"
+        );
+    }
+
+    #[test]
     fn calibrator_ref_present_factor() {
-        let heuristic = ModelArtifact::WeightedFactor(Box::new(
-            WeightedFactorModelArtifact::artifact_fixture(),
-        ));
+        let heuristic = ModelArtifact::weighted_fixture();
         assert!(heuristic.calibrator_ref().is_none());
 
         let calibrator_ref = CalibrationArtifactId::from_v7();
-        let mut calibrated = WeightedFactorModelArtifact::artifact_fixture();
+        let plane = weighted_factor_plane();
+        let mut calibrated = weighted_payload(&plane);
         calibrated.return_model = ReturnModelSpec::Calibrated(CalibratedReturnModel {
             calibrator_ref,
             downside_source: DownsideSource::MfeMae,
         });
-        let calibrated = ModelArtifact::WeightedFactor(Box::new(calibrated));
+        let calibrated = seal_model_payload(
+            ModelPayload::WeightedFactor(Box::new(calibrated)),
+            plane,
+            ModelFamily::WeightedFactor,
+        );
         assert_eq!(calibrated.calibrator_ref(), Some(&calibrator_ref));
 
-        let sell =
-            ModelArtifact::SellScorer(Box::new(sell_artifact(ModelFamily::HoldVsExitWeighted)));
+        let sell = ModelArtifact::sell_fixture();
         assert!(sell.calibrator_ref().is_none());
     }
 
     #[test]
     fn weighted_rejects_unnormalized_weights() {
-        let mut artifact = WeightedFactorModelArtifact::artifact_fixture();
-        artifact.weights[0].weight = dec!(0.9);
-        assert!(artifact.validate().is_err(), "weights must sum to 1");
-
-        let mut negative = WeightedFactorModelArtifact::artifact_fixture();
-        negative.weights[0].weight = dec!(-0.1);
-        negative.weights[1].weight = dec!(1.1);
-        assert!(negative.validate().is_err(), "no negative weight allowed");
-
+        let plane = weighted_factor_plane();
+        let mut payload = weighted_payload(&plane);
+        payload.factor_head.alpha_weights[0].weight = dec!(0.9);
         assert!(
-            WeightedFactorModelArtifact::artifact_fixture()
-                .validate()
-                .is_ok()
+            payload.validate_for_plane(&plane).is_err(),
+            "alpha weights must sum to one"
         );
-    }
 
-    fn sell_artifact(family: ModelFamily) -> SellScorerArtifact {
-        let (input_contract, input_contract_hash) = input_contract();
-        SellScorerArtifact {
-            header: ModelArtifactHeader {
-                model_version_id: ModelVersionId::from_v7(),
-                model_spec_definition_hash: hash("spec"),
-                profile_ref: builtin_research_profiles()
-                    .expect("built-in profiles")
-                    .remove(0)
-                    .profile_ref,
-                model_family: family,
-                feature_schema_hash: hash("aaa"),
-                factor_schema_hash: hash("bbb"),
-                trade_policy_artifact_id: None,
-                trade_policy_hash: None,
-            },
-            weights: vec![
-                FactorWeight {
-                    factor: LIQUIDITY_DEPTH,
-                    weight: dec!(0.6),
-                },
-                FactorWeight {
-                    factor: MOMENTUM_ROC,
-                    weight: dec!(0.4),
-                },
-            ],
-            prediction_horizon_secs: 86_400,
-            output_spec: SellScorerOutputSpec::conservative(),
-            label_schema_hash: hash("ccc"),
-            training_dataset_hash: hash("ddd"),
-            training_input_hash: hash("eee"),
-            input_contract,
-            input_contract_hash,
-            objective_report: None,
-        }
+        let mut negative = weighted_payload(&plane);
+        negative.factor_head.alpha_weights[0].weight = dec!(-0.1);
+        assert!(
+            negative.validate_for_plane(&plane).is_err(),
+            "negative alpha weight must fail closed"
+        );
+
+        weighted_payload(&plane)
+            .validate_for_plane(&plane)
+            .expect("valid weighted payload");
     }
 
     #[test]
     fn weighted_rejects_without_hash() {
-        let mut artifact = WeightedFactorModelArtifact::artifact_fixture();
-        artifact.input_contract.inputs[0].requiredness = ModelInputRequiredness::Optional;
-        assert!(artifact.validate().is_err());
+        let plane = weighted_factor_plane();
+        let mut payload = weighted_payload(&plane);
+        payload.input_contract.inputs[0].requiredness = ModelInputRequiredness::Optional;
+        assert!(
+            ModelArtifact::try_seal(
+                ModelArtifact::weighted_fixture()
+                    .header()
+                    .serving_contract()
+                    .clone(),
+                ModelPayload::WeightedFactor(Box::new(payload)),
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn weighted_required_features_requiredness() {
-        let mut artifact = WeightedFactorModelArtifact::artifact_fixture();
-        artifact.input_contract = ModelInputContract {
+        let plane = weighted_factor_plane();
+        let mut payload = weighted_payload(&plane);
+        payload.input_contract = ModelInputContract {
             inputs: vec![
                 ModelInputSpec::required("book.mid"),
                 ModelInputSpec::optional("market.age_secs"),
             ],
         };
-        artifact.input_contract_hash =
-            model_input_contract_hash(&artifact.input_contract).expect("contract hash");
-        artifact.validate().expect("valid artifact");
+        payload
+            .validate_for_plane(&plane)
+            .expect("valid weighted payload");
         assert_eq!(
-            artifact.required_features(),
+            payload.required_features(),
             vec![FeatureName::new("book.mid")]
         );
     }
 
     #[test]
     fn sell_rejects_malformed_hash() {
-        let mut malformed = sell_artifact(ModelFamily::HoldVsExitWeighted);
+        let plane = weighted_factor_plane();
+        let mut malformed = sell_payload(&plane);
         malformed
             .input_contract
             .inputs
             .push(malformed.input_contract.inputs[0].clone());
-        assert!(malformed.validate().is_err());
-
-        let mut swapped = sell_artifact(ModelFamily::HoldVsExitWeighted);
-        let other = ModelInputContract::single_required("market.age_secs");
-        swapped.input_contract_hash = model_input_contract_hash(&other).expect("other hash");
-        assert!(swapped.validate().is_err());
+        assert!(malformed.validate_for_plane(&plane).is_err());
     }
 
     #[test]
     fn sell_validates_rejects_family() {
-        // A correctly-tagged exit scorer validates.
+        let sell = ModelArtifact::sell_fixture();
+        sell.validate().expect("valid Sell artifact");
+        let plane = weighted_factor_plane();
         assert!(
-            sell_artifact(ModelFamily::HoldVsExitWeighted)
-                .validate()
-                .is_ok()
-        );
-        // A Buy family tagged into a Sell artifact is rejected (Blocker guard):
-        // a Sell scorer must never load where a Buy ranker is expected.
-        assert!(
-            sell_artifact(ModelFamily::WeightedFactor)
-                .validate()
-                .is_err(),
-            "non-exit model family must be rejected"
+            ModelArtifact::try_seal(
+                sell.header().serving_contract().clone(),
+                ModelPayload::WeightedFactor(Box::new(weighted_payload(&plane))),
+            )
+            .is_err(),
+            "payload-family confusion must fail closed"
         );
     }
 
     #[test]
     fn sell_rejects_non_scale() {
-        let mut artifact = sell_artifact(ModelFamily::HoldVsExitWeighted);
-        artifact.output_spec.max_exit_alpha_bps = Decimal::ZERO;
+        let plane = weighted_factor_plane();
+        let mut payload = sell_payload(&plane);
+        payload.output_spec.max_exit_alpha_bps = Decimal::ZERO;
         assert!(
-            artifact.validate().is_err(),
+            payload.validate_for_plane(&plane).is_err(),
             "max_exit_alpha_bps must be > 0 (a zero/negative scale flips alpha sign)"
         );
     }
 
     #[test]
     fn artifact_key_content_addressed() {
-        let artifact = ModelArtifact::WeightedFactor(Box::new(
-            WeightedFactorModelArtifact::artifact_fixture(),
-        ));
+        let artifact = ModelArtifact::weighted_fixture();
         let digest = artifact.content_hash().expect("hash");
         let key = ModelArtifact::artifact_key(&digest).expect("key");
         assert_eq!(key.relative_path(), format!("models/{}.json", digest.hex()));

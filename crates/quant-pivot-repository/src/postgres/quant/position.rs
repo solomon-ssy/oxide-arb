@@ -265,6 +265,7 @@ impl PositionRepository for PgPositionRepository {
                 position_id: position.position_id,
                 market_id: position.market_id,
                 token_id: position.token_id,
+                outcome_side: position.side,
                 opened_at: position.opened_at,
                 closed_at,
                 entry_shares,

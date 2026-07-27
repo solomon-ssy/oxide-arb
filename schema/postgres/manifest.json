@@ -994,22 +994,9 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "bundle_generation",
-      "nullable": false,
-      "ordinal": 1,
-      "storage": "p",
-      "table": "decision_policy_snapshot",
-      "type": "bigint"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
       "name": "decision_policy_snapshot_id",
       "nullable": false,
-      "ordinal": 2,
+      "ordinal": 1,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1022,7 +1009,7 @@
       "identity": "",
       "name": "snapshot_hash",
       "nullable": false,
-      "ordinal": 3,
+      "ordinal": 2,
       "storage": "x",
       "table": "decision_policy_snapshot",
       "type": "text"
@@ -1035,7 +1022,7 @@
       "identity": "",
       "name": "snapshot",
       "nullable": false,
-      "ordinal": 4,
+      "ordinal": 3,
       "storage": "x",
       "table": "decision_policy_snapshot",
       "type": "jsonb"
@@ -1048,7 +1035,7 @@
       "identity": "",
       "name": "recommendation_policy_revision_id",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 4,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1061,7 +1048,7 @@
       "identity": "",
       "name": "execution_risk_policy_revision_id",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 5,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1074,7 +1061,7 @@
       "identity": "",
       "name": "model_routing_revision_id",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 6,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1087,7 +1074,7 @@
       "identity": "",
       "name": "report_schedule_revision_id",
       "nullable": false,
-      "ordinal": 8,
+      "ordinal": 7,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1100,7 +1087,7 @@
       "identity": "",
       "name": "operational_control_revision_id",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 8,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1113,7 +1100,7 @@
       "identity": "",
       "name": "execution_authorization_revision_id",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 9,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1126,7 +1113,7 @@
       "identity": "",
       "name": "source",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 10,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "qp_decision_policy_snapshot_source"
@@ -1139,7 +1126,7 @@
       "identity": "",
       "name": "created_by_kind",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 11,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "qp_policy_actor_kind"
@@ -1152,7 +1139,7 @@
       "identity": "",
       "name": "created_by_user_id",
       "nullable": true,
-      "ordinal": 13,
+      "ordinal": 12,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "uuid"
@@ -1165,7 +1152,7 @@
       "identity": "",
       "name": "created_by_label",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 13,
       "storage": "x",
       "table": "decision_policy_snapshot",
       "type": "text"
@@ -1178,7 +1165,7 @@
       "identity": "",
       "name": "reason",
       "nullable": false,
-      "ordinal": 15,
+      "ordinal": 14,
       "storage": "x",
       "table": "decision_policy_snapshot",
       "type": "text"
@@ -1191,7 +1178,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 16,
+      "ordinal": 15,
       "storage": "p",
       "table": "decision_policy_snapshot",
       "type": "timestamp with time zone"
@@ -3438,9 +3425,48 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "path_count",
+      "name": "subject",
       "nullable": false,
       "ordinal": 8,
+      "storage": "x",
+      "table": "quant_backtest_path_set",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "methodology",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_backtest_path_set",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "fold_artifacts",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_backtest_path_set",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "path_count",
+      "nullable": false,
+      "ordinal": 11,
       "storage": "p",
       "table": "quant_backtest_path_set",
       "type": "bigint"
@@ -3453,7 +3479,7 @@
       "identity": "",
       "name": "combination_count",
       "nullable": false,
-      "ordinal": 9,
+      "ordinal": 12,
       "storage": "p",
       "table": "quant_backtest_path_set",
       "type": "bigint"
@@ -3466,7 +3492,7 @@
       "identity": "",
       "name": "median_rank_ic",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 13,
       "storage": "m",
       "table": "quant_backtest_path_set",
       "type": "numeric"
@@ -3479,7 +3505,7 @@
       "identity": "",
       "name": "sharpe_distribution",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 14,
       "storage": "x",
       "table": "quant_backtest_path_set",
       "type": "jsonb"
@@ -3492,7 +3518,7 @@
       "identity": "",
       "name": "paths",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 15,
       "storage": "x",
       "table": "quant_backtest_path_set",
       "type": "jsonb"
@@ -3505,7 +3531,7 @@
       "identity": "",
       "name": "deflated_sharpe",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 16,
       "storage": "m",
       "table": "quant_backtest_path_set",
       "type": "numeric"
@@ -3518,7 +3544,7 @@
       "identity": "",
       "name": "dsr_benchmark_sharpe",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 17,
       "storage": "m",
       "table": "quant_backtest_path_set",
       "type": "numeric"
@@ -3531,7 +3557,7 @@
       "identity": "",
       "name": "pbo",
       "nullable": false,
-      "ordinal": 15,
+      "ordinal": 18,
       "storage": "m",
       "table": "quant_backtest_path_set",
       "type": "numeric"
@@ -3544,7 +3570,7 @@
       "identity": "",
       "name": "min_track_record_length_secs",
       "nullable": true,
-      "ordinal": 16,
+      "ordinal": 19,
       "storage": "p",
       "table": "quant_backtest_path_set",
       "type": "bigint"
@@ -3557,7 +3583,7 @@
       "identity": "",
       "name": "trial_count",
       "nullable": false,
-      "ordinal": 17,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_backtest_path_set",
       "type": "bigint"
@@ -3570,7 +3596,7 @@
       "identity": "",
       "name": "trial_grid_count",
       "nullable": false,
-      "ordinal": 18,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_backtest_path_set",
       "type": "bigint"
@@ -3583,7 +3609,7 @@
       "identity": "",
       "name": "coord_search_effective_n",
       "nullable": false,
-      "ordinal": 19,
+      "ordinal": 22,
       "storage": "p",
       "table": "quant_backtest_path_set",
       "type": "bigint"
@@ -3596,7 +3622,7 @@
       "identity": "",
       "name": "path_set_hash",
       "nullable": false,
-      "ordinal": 20,
+      "ordinal": 23,
       "storage": "x",
       "table": "quant_backtest_path_set",
       "type": "text"
@@ -3609,7 +3635,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 21,
+      "ordinal": 24,
       "storage": "p",
       "table": "quant_backtest_path_set",
       "type": "timestamp with time zone"
@@ -4964,6 +4990,240 @@
       "ordinal": 15,
       "storage": "p",
       "table": "quant_domain_source_expectation",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "drift_report_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_cycle_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "kind",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "qp_feedback_drift_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "metric",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "qp_feedback_drift_metric"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "assessment",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "qp_feedback_drift_assessment"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "baseline_window_start",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "baseline_window_end",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evaluation_window_start",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evaluation_window_end",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "label_cutoff",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "observed_value",
+      "nullable": true,
+      "ordinal": 11,
+      "storage": "m",
+      "table": "quant_drift_report",
+      "type": "numeric(28,12)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "threshold",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "m",
+      "table": "quant_drift_report",
+      "type": "numeric(28,12)"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "sample_count",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "detail_uri",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "x",
+      "table": "quant_drift_report",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "detail_hash",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "x",
+      "table": "quant_drift_report",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "observed_at",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "p",
+      "table": "quant_drift_report",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "report_hash",
+      "nullable": false,
+      "ordinal": 17,
+      "storage": "x",
+      "table": "quant_drift_report",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 18,
+      "storage": "p",
+      "table": "quant_drift_report",
       "type": "timestamp with time zone"
     },
     {
@@ -6516,51 +6776,12 @@
     {
       "collation": null,
       "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "status",
-      "nullable": false,
-      "ordinal": 10,
-      "storage": "p",
-      "table": "quant_factor_definition",
-      "type": "qp_publication_status"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "created_by",
-      "nullable": true,
-      "ordinal": 11,
-      "storage": "p",
-      "table": "quant_factor_definition",
-      "type": "uuid"
-    },
-    {
-      "collation": null,
-      "compression": "",
       "default": "statement_timestamp()",
       "generated": "",
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 12,
-      "storage": "p",
-      "table": "quant_factor_definition",
-      "type": "timestamp with time zone"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": "statement_timestamp()",
-      "generated": "",
-      "identity": "",
-      "name": "updated_at",
-      "nullable": false,
-      "ordinal": 13,
+      "ordinal": 10,
       "storage": "p",
       "table": "quant_factor_definition",
       "type": "timestamp with time zone"
@@ -6667,7 +6888,7 @@
       "ordinal": 8,
       "storage": "m",
       "table": "quant_factor_value",
-      "type": "numeric"
+      "type": "numeric(28,12)"
     },
     {
       "collation": null,
@@ -6680,7 +6901,7 @@
       "ordinal": 9,
       "storage": "m",
       "table": "quant_factor_value",
-      "type": "numeric"
+      "type": "numeric(20,18)"
     },
     {
       "collation": null,
@@ -6732,7 +6953,7 @@
       "ordinal": 13,
       "storage": "m",
       "table": "quant_factor_value",
-      "type": "numeric"
+      "type": "numeric(20,18)"
     },
     {
       "collation": null,
@@ -7668,6 +7889,786 @@
       "ordinal": 14,
       "storage": "p",
       "table": "quant_feature_vector",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_cycle_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "idempotency_hash",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "x",
+      "table": "quant_feedback_cycle",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "idempotency_key",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "quant_feedback_cycle",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "trigger_family",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "qp_feedback_trigger_family"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "profile_ref",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_feedback_cycle",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_profile_artifact_id",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_feedback_cycle",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "profile_hash",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_feedback_cycle",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_policy_hash",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_feedback_cycle",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "label_cutoff",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "capability_registry_hashes",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_feedback_cycle",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "champion_model_version_id",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "champion_serving_contract_hash",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "x",
+      "table": "quant_feedback_cycle",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "candidate_family_hash",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "x",
+      "table": "quant_feedback_cycle",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "'queued'::qp_feedback_cycle_status",
+      "generated": "",
+      "identity": "",
+      "name": "status",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "qp_feedback_cycle_status"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision",
+      "nullable": true,
+      "ordinal": 15,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "qp_feedback_decision"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "terminal_reason_code",
+      "nullable": true,
+      "ordinal": 16,
+      "storage": "x",
+      "table": "quant_feedback_cycle",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "name": "generation",
+      "nullable": false,
+      "ordinal": 17,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "lease_owner",
+      "nullable": true,
+      "ordinal": 18,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "lease_expires_at",
+      "nullable": true,
+      "ordinal": 19,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "cancel_requested_at",
+      "nullable": true,
+      "ordinal": 20,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "started_at",
+      "nullable": true,
+      "ordinal": 21,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "completed_at",
+      "nullable": true,
+      "ordinal": 22,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 23,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "updated_at",
+      "nullable": false,
+      "ordinal": 24,
+      "storage": "p",
+      "table": "quant_feedback_cycle",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_evaluation_use_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_feedback_evaluation_use",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_cycle_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_feedback_evaluation_use",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "purpose",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_feedback_evaluation_use",
+      "type": "qp_feedback_evaluation_purpose"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "dataset_purpose",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_feedback_evaluation_use",
+      "type": "qp_dataset_purpose"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "profile_ref",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_feedback_evaluation_use",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_profile_artifact_id",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_feedback_evaluation_use",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evaluation_dataset_id",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_feedback_evaluation_use",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evaluation_dataset_hash",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_feedback_evaluation_use",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evaluation_artifact_bytes_hash",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_feedback_evaluation_use",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "cohort_manifest_hash",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_feedback_evaluation_use",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evaluation_window_start",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_feedback_evaluation_use",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evaluation_window_end",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_feedback_evaluation_use",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "label_cutoff",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_feedback_evaluation_use",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "champion_model_version_id",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "quant_feedback_evaluation_use",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "champion_serving_contract_hash",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "x",
+      "table": "quant_feedback_evaluation_use",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "candidate_family_hash",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "x",
+      "table": "quant_feedback_evaluation_use",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "comparison_contract_hash",
+      "nullable": false,
+      "ordinal": 17,
+      "storage": "x",
+      "table": "quant_feedback_evaluation_use",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "semantic_use_hash",
+      "nullable": false,
+      "ordinal": 18,
+      "storage": "x",
+      "table": "quant_feedback_evaluation_use",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "result_artifact_uri",
+      "nullable": false,
+      "ordinal": 19,
+      "storage": "x",
+      "table": "quant_feedback_evaluation_use",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "result_artifact_hash",
+      "nullable": false,
+      "ordinal": 20,
+      "storage": "x",
+      "table": "quant_feedback_evaluation_use",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "used_at",
+      "nullable": false,
+      "ordinal": 21,
+      "storage": "p",
+      "table": "quant_feedback_evaluation_use",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evaluation_use_hash",
+      "nullable": false,
+      "ordinal": 22,
+      "storage": "x",
+      "table": "quant_feedback_evaluation_use",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 23,
+      "storage": "p",
+      "table": "quant_feedback_evaluation_use",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_stage_event_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_feedback_stage_event",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_cycle_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_feedback_stage_event",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "event_sequence",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_feedback_stage_event",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "stage",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_feedback_stage_event",
+      "type": "qp_feedback_stage"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "event_kind",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_feedback_stage_event",
+      "type": "qp_feedback_stage_event_kind"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_job_id",
+      "nullable": true,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_feedback_stage_event",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "actor",
+      "nullable": true,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_feedback_stage_event",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "reason_code",
+      "nullable": true,
+      "ordinal": 8,
+      "storage": "x",
+      "table": "quant_feedback_stage_event",
+      "type": "character varying"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_uri",
+      "nullable": true,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_feedback_stage_event",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "evidence_hash",
+      "nullable": true,
+      "ordinal": 10,
+      "storage": "x",
+      "table": "quant_feedback_stage_event",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "occurred_at",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "p",
+      "table": "quant_feedback_stage_event",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "event_hash",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "x",
+      "table": "quant_feedback_stage_event",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_feedback_stage_event",
       "type": "timestamp with time zone"
     },
     {
@@ -8622,7 +9623,7 @@
     {
       "collation": null,
       "compression": "",
-      "default": null,
+      "default": "'running'::qp_model_run_status",
       "generated": "",
       "identity": "",
       "name": "status",
@@ -8687,7 +9688,7 @@
     {
       "collation": null,
       "compression": "",
-      "default": null,
+      "default": "statement_timestamp()",
       "generated": "",
       "identity": "",
       "name": "started_at",
@@ -8963,9 +9964,35 @@
       "default": null,
       "generated": "",
       "identity": "",
+      "name": "serving_contract",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_model_version",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "serving_contract_hash",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_model_version",
+      "type": "bytea"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
       "name": "category_scope",
       "nullable": true,
-      "ordinal": 5,
+      "ordinal": 7,
       "storage": "p",
       "table": "quant_model_version",
       "type": "qp_market_category"
@@ -8978,7 +10005,7 @@
       "identity": "",
       "name": "research_profile_artifact_id",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 8,
       "storage": "x",
       "table": "quant_model_version",
       "type": "text"
@@ -8991,7 +10018,7 @@
       "identity": "",
       "name": "training_dataset_id",
       "nullable": true,
-      "ordinal": 7,
+      "ordinal": 9,
       "storage": "p",
       "table": "quant_model_version",
       "type": "uuid"
@@ -9004,7 +10031,7 @@
       "identity": "",
       "name": "trade_policy_artifact_id",
       "nullable": true,
-      "ordinal": 8,
+      "ordinal": 10,
       "storage": "p",
       "table": "quant_model_version",
       "type": "uuid"
@@ -9017,7 +10044,7 @@
       "identity": "",
       "name": "trade_policy_hash",
       "nullable": true,
-      "ordinal": 9,
+      "ordinal": 11,
       "storage": "x",
       "table": "quant_model_version",
       "type": "text"
@@ -9030,7 +10057,7 @@
       "identity": "",
       "name": "publish_path_set_id",
       "nullable": true,
-      "ordinal": 10,
+      "ordinal": 12,
       "storage": "p",
       "table": "quant_model_version",
       "type": "uuid"
@@ -9043,7 +10070,7 @@
       "identity": "",
       "name": "derivation_kind",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 13,
       "storage": "p",
       "table": "quant_model_version",
       "type": "qp_model_version_derivation_kind"
@@ -9056,7 +10083,7 @@
       "identity": "",
       "name": "parent_model_version_id",
       "nullable": true,
-      "ordinal": 12,
+      "ordinal": 14,
       "storage": "p",
       "table": "quant_model_version",
       "type": "uuid"
@@ -9069,7 +10096,7 @@
       "identity": "",
       "name": "calibration_artifact_id",
       "nullable": true,
-      "ordinal": 13,
+      "ordinal": 15,
       "storage": "p",
       "table": "quant_model_version",
       "type": "uuid"
@@ -9082,7 +10109,7 @@
       "identity": "",
       "name": "derivation_evidence_hash",
       "nullable": true,
-      "ordinal": 14,
+      "ordinal": 16,
       "storage": "x",
       "table": "quant_model_version",
       "type": "text"
@@ -9095,7 +10122,7 @@
       "identity": "",
       "name": "metrics",
       "nullable": false,
-      "ordinal": 15,
+      "ordinal": 17,
       "storage": "x",
       "table": "quant_model_version",
       "type": "jsonb"
@@ -9108,7 +10135,7 @@
       "identity": "",
       "name": "training_objective",
       "nullable": false,
-      "ordinal": 16,
+      "ordinal": 18,
       "storage": "x",
       "table": "quant_model_version",
       "type": "jsonb"
@@ -9121,7 +10148,7 @@
       "identity": "",
       "name": "quality_gate_report",
       "nullable": true,
-      "ordinal": 17,
+      "ordinal": 19,
       "storage": "x",
       "table": "quant_model_version",
       "type": "jsonb"
@@ -9134,7 +10161,7 @@
       "identity": "",
       "name": "publication_status",
       "nullable": false,
-      "ordinal": 18,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_model_version",
       "type": "qp_publication_status"
@@ -9147,7 +10174,7 @@
       "identity": "",
       "name": "published_at",
       "nullable": true,
-      "ordinal": 19,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_model_version",
       "type": "timestamp with time zone"
@@ -9160,7 +10187,7 @@
       "identity": "",
       "name": "retired_at",
       "nullable": true,
-      "ordinal": 20,
+      "ordinal": 22,
       "storage": "p",
       "table": "quant_model_version",
       "type": "timestamp with time zone"
@@ -9173,7 +10200,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 21,
+      "ordinal": 23,
       "storage": "p",
       "table": "quant_model_version",
       "type": "timestamp with time zone"
@@ -16355,6 +17382,19 @@
       "type": "uuid"
     },
     {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "model_family",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_training_dataset",
+      "type": "qp_model_family"
+    },
+    {
       "collation": "default",
       "compression": "",
       "default": null,
@@ -16362,10 +17402,23 @@
       "identity": "",
       "name": "model_spec_definition_hash",
       "nullable": false,
-      "ordinal": 3,
+      "ordinal": 4,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "factor_serving_plane",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_training_dataset",
+      "type": "jsonb"
     },
     {
       "collation": "default",
@@ -16375,7 +17428,7 @@
       "identity": "",
       "name": "research_profile_artifact_id",
       "nullable": false,
-      "ordinal": 4,
+      "ordinal": 6,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16388,7 +17441,7 @@
       "identity": "",
       "name": "source_slice_id",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 7,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "uuid"
@@ -16401,7 +17454,7 @@
       "identity": "",
       "name": "pit_cutoff",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 8,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "timestamp with time zone"
@@ -16414,7 +17467,7 @@
       "identity": "",
       "name": "source_lineage",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 9,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -16427,7 +17480,7 @@
       "identity": "",
       "name": "feedback_cohort",
       "nullable": true,
-      "ordinal": 8,
+      "ordinal": 10,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "qp_feedback_cohort"
@@ -16440,7 +17493,7 @@
       "identity": "",
       "name": "cohort_manifest",
       "nullable": true,
-      "ordinal": 9,
+      "ordinal": 11,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -16453,7 +17506,7 @@
       "identity": "",
       "name": "window_start",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 12,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "timestamp with time zone"
@@ -16466,7 +17519,7 @@
       "identity": "",
       "name": "window_end",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 13,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "timestamp with time zone"
@@ -16479,7 +17532,7 @@
       "identity": "",
       "name": "status",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 14,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "qp_training_dataset_status"
@@ -16492,7 +17545,7 @@
       "identity": "",
       "name": "purpose",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 15,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "qp_dataset_purpose"
@@ -16504,8 +17557,8 @@
       "generated": "",
       "identity": "",
       "name": "feature_schema_hash",
-      "nullable": true,
-      "ordinal": 14,
+      "nullable": false,
+      "ordinal": 16,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16517,8 +17570,8 @@
       "generated": "",
       "identity": "",
       "name": "factor_schema_hash",
-      "nullable": true,
-      "ordinal": 15,
+      "nullable": false,
+      "ordinal": 17,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16531,7 +17584,7 @@
       "identity": "",
       "name": "label_schema_hash",
       "nullable": true,
-      "ordinal": 16,
+      "ordinal": 18,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16544,7 +17597,7 @@
       "identity": "",
       "name": "dataset_hash",
       "nullable": true,
-      "ordinal": 17,
+      "ordinal": 19,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16557,7 +17610,7 @@
       "identity": "",
       "name": "manifest_hash",
       "nullable": true,
-      "ordinal": 18,
+      "ordinal": 20,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16570,7 +17623,7 @@
       "identity": "",
       "name": "manifest",
       "nullable": true,
-      "ordinal": 19,
+      "ordinal": 21,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -16583,7 +17636,7 @@
       "identity": "",
       "name": "artifact_bytes_hash",
       "nullable": true,
-      "ordinal": 20,
+      "ordinal": 22,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16596,7 +17649,7 @@
       "identity": "",
       "name": "parquet_uri",
       "nullable": true,
-      "ordinal": 21,
+      "ordinal": 23,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "text"
@@ -16609,7 +17662,7 @@
       "identity": "",
       "name": "sample_count",
       "nullable": true,
-      "ordinal": 22,
+      "ordinal": 24,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "bigint"
@@ -16622,7 +17675,7 @@
       "identity": "",
       "name": "knowledge_lag_secs",
       "nullable": false,
-      "ordinal": 23,
+      "ordinal": 25,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "bigint"
@@ -16635,7 +17688,7 @@
       "identity": "",
       "name": "sample_interval_secs",
       "nullable": false,
-      "ordinal": 24,
+      "ordinal": 26,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "bigint"
@@ -16648,7 +17701,7 @@
       "identity": "",
       "name": "horizons_secs",
       "nullable": false,
-      "ordinal": 25,
+      "ordinal": 27,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -16660,8 +17713,8 @@
       "generated": "",
       "identity": "",
       "name": "feature_schema_version",
-      "nullable": true,
-      "ordinal": 26,
+      "nullable": false,
+      "ordinal": 28,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "integer"
@@ -16674,7 +17727,7 @@
       "identity": "",
       "name": "sample_sources",
       "nullable": true,
-      "ordinal": 27,
+      "ordinal": 29,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -16687,7 +17740,7 @@
       "identity": "",
       "name": "coverage",
       "nullable": true,
-      "ordinal": 28,
+      "ordinal": 30,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "jsonb"
@@ -16700,7 +17753,7 @@
       "identity": "",
       "name": "decision_policy_snapshot_id",
       "nullable": false,
-      "ordinal": 29,
+      "ordinal": 31,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "uuid"
@@ -16713,7 +17766,7 @@
       "identity": "",
       "name": "failure_detail",
       "nullable": true,
-      "ordinal": 30,
+      "ordinal": 32,
       "storage": "x",
       "table": "quant_training_dataset",
       "type": "character varying"
@@ -16726,7 +17779,7 @@
       "identity": "",
       "name": "completed_at",
       "nullable": true,
-      "ordinal": 31,
+      "ordinal": 33,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "timestamp with time zone"
@@ -16739,7 +17792,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 32,
+      "ordinal": 34,
       "storage": "p",
       "table": "quant_training_dataset",
       "type": "timestamp with time zone"
@@ -18180,15 +19233,6 @@
     },
     {
       "deferrable": false,
-      "definition": "UNIQUE (bundle_generation)",
-      "initially_deferred": false,
-      "name": "decision_policy_snapshot_bundle_generation_key",
-      "table": "decision_policy_snapshot",
-      "type": "u",
-      "validated": true
-    },
-    {
-      "deferrable": false,
       "definition": "PRIMARY KEY (decision_policy_snapshot_id)",
       "initially_deferred": false,
       "name": "decision_policy_snapshot_pkey",
@@ -18792,6 +19836,33 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((((kind = 'data'::qp_feedback_drift_kind) AND (metric = ANY (ARRAY['population_stability_index'::qp_feedback_drift_metric, 'kolmogorov_smirnov_p_value'::qp_feedback_drift_metric]))) OR ((kind = 'concept'::qp_feedback_drift_kind) AND (metric = 'rank_ic_drop'::qp_feedback_drift_metric)) OR ((kind = 'label'::qp_feedback_drift_kind) AND (metric = 'jensen_shannon_divergence'::qp_feedback_drift_metric))) AND (baseline_window_start < baseline_window_end) AND (baseline_window_end <= evaluation_window_start) AND (evaluation_window_start < evaluation_window_end) AND (evaluation_window_end <= label_cutoff) AND (label_cutoff <= observed_at) AND (observed_at <= created_at) AND (sample_count >= 0) AND (threshold <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND (threshold > (0)::numeric) AND ((metric = 'population_stability_index'::qp_feedback_drift_metric) OR (threshold <= (1)::numeric)) AND ((observed_value IS NULL) OR ((observed_value <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND (observed_value >= (0)::numeric) AND ((metric = 'population_stability_index'::qp_feedback_drift_metric) OR (observed_value <= (1)::numeric)))) AND (((assessment = 'insufficient_evidence'::qp_feedback_drift_assessment) AND (observed_value IS NULL)) OR ((assessment <> 'insufficient_evidence'::qp_feedback_drift_assessment) AND (observed_value IS NOT NULL) AND (sample_count > 0) AND (((metric = 'kolmogorov_smirnov_p_value'::qp_feedback_drift_metric) AND (((assessment = 'threshold_exceeded'::qp_feedback_drift_assessment) AND (observed_value <= threshold)) OR ((assessment = 'within_threshold'::qp_feedback_drift_assessment) AND (observed_value > threshold)))) OR ((metric <> 'kolmogorov_smirnov_p_value'::qp_feedback_drift_metric) AND (((assessment = 'threshold_exceeded'::qp_feedback_drift_assessment) AND (observed_value >= threshold)) OR ((assessment = 'within_threshold'::qp_feedback_drift_assessment) AND (observed_value < threshold))))))) AND ((octet_length(detail_uri) >= 1) AND (octet_length(detail_uri) <= 4096)) AND (detail_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text) AND (detail_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (report_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_drift_report",
+      "table": "quant_drift_report",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (feedback_cycle_id, label_cutoff) REFERENCES quant_feedback_cycle(feedback_cycle_id, label_cutoff)",
+      "initially_deferred": false,
+      "name": "fk_quant_drift_report_cycle",
+      "table": "quant_drift_report",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (drift_report_id)",
+      "initially_deferred": false,
+      "name": "quant_drift_report_pkey",
+      "table": "quant_drift_report",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "PRIMARY KEY (artifact_id)",
       "initially_deferred": false,
       "name": "quant_entry_condition_artifact_pkey",
@@ -18990,7 +20061,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((jsonb_typeof(definition) = 'object'::text) AND ((definition ->> 'name'::text) = name) AND ((definition ->> 'family'::text) = (factor_family)::text) AND (jsonb_typeof((definition -> 'input_features'::text)) = 'array'::text) AND (jsonb_typeof((definition -> 'quality_gates'::text)) = 'array'::text) AND (jsonb_typeof((definition -> 'owner'::text)) = 'string'::text) AND (char_length(btrim((definition ->> 'owner'::text))) >= 1)))",
+      "definition": "CHECK ((validate_factor_definition_document(definition) AND ((definition ->> 'name'::text) = name) AND ((definition ->> 'family'::text) = (factor_family)::text) AND (scope =\nCASE\n    WHEN (factor_family = 'structural'::qp_factor_family) THEN 'structural'::qp_factor_definition_scope\n    WHEN (factor_family = 'domain_crypto'::qp_factor_family) THEN 'domain_crypto'::qp_factor_definition_scope\n    WHEN (factor_family = 'domain_weather'::qp_factor_family) THEN 'domain_weather'::qp_factor_definition_scope\n    ELSE 'generic'::qp_factor_definition_scope\nEND) AND (input_schema_version >= 1) AND (output_schema_version >= 1)))",
       "initially_deferred": false,
       "name": "ck_quant_factor_definition_document",
       "table": "quant_factor_definition",
@@ -19035,9 +20106,18 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((jsonb_typeof(explanation) = 'object'::text) AND (jsonb_typeof((explanation -> 'headline'::text)) = 'string'::text) AND (char_length(btrim((explanation ->> 'headline'::text))) >= 1) AND (jsonb_typeof((explanation -> 'drivers'::text)) = 'array'::text)))",
+      "definition": "CHECK (validate_factor_explanation(explanation))",
       "initially_deferred": false,
       "name": "ck_quant_factor_value_explanation",
+      "table": "quant_factor_value",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((confidence <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND ((confidence >= (0)::numeric) AND (confidence <= (1)::numeric)) AND ((raw_value IS NULL) OR (raw_value <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric]))) AND ((normalized_score IS NULL) OR ((normalized_score <> ALL (ARRAY['NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric])) AND ((normalized_score >= (0)::numeric) AND (normalized_score <= (1)::numeric)))) AND (((value_state = 'scored'::qp_factor_value_state) AND (raw_value IS NOT NULL) AND (normalized_score IS NOT NULL) AND (normalization_source IS NOT NULL) AND (indeterminate_reason IS NULL)) OR ((value_state = ANY (ARRAY['missing_input'::qp_factor_value_state, 'not_applicable'::qp_factor_value_state])) AND (raw_value IS NULL) AND (normalized_score IS NULL) AND (normalization_source IS NULL) AND (indeterminate_reason IS NULL) AND (confidence = (0)::numeric)) OR ((value_state = 'indeterminate'::qp_factor_value_state) AND (normalized_score IS NULL) AND (normalization_source IS NULL) AND (indeterminate_reason IS NOT NULL) AND (confidence = (0)::numeric)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_factor_value_state_tuple",
       "table": "quant_factor_value",
       "type": "c",
       "validated": true
@@ -19085,6 +20165,15 @@
       "name": "quant_factor_value_pkey",
       "table": "quant_factor_value",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (model_run_id, feature_vector_id, factor_definition_id)",
+      "initially_deferred": false,
+      "name": "uq_quant_factor_value_run_vector_definition",
+      "table": "quant_factor_value",
+      "type": "u",
       "validated": true
     },
     {
@@ -19314,6 +20403,159 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(idempotency_key) = 'object'::text) AND (idempotency_key ?& ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family_hash'::text]) AND ((idempotency_key - ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family_hash'::text]) = '{}'::jsonb) AND (((idempotency_key ->> 'format_version'::text))::integer = 1) AND ((idempotency_key ->> 'trigger_family'::text) = (trigger_family)::text) AND ((idempotency_key -> 'profile_ref'::text) = profile_ref) AND ((idempotency_key ->> 'feedback_policy_hash'::text) = feedback_policy_hash) AND (((idempotency_key ->> 'label_cutoff'::text))::timestamp with time zone = label_cutoff) AND ((idempotency_key -> 'capability_registry_hashes'::text) = capability_registry_hashes) AND (((idempotency_key ->> 'champion_model_version_id'::text))::uuid = champion_model_version_id) AND ((idempotency_key ->> 'champion_serving_contract_hash'::text) = champion_serving_contract_hash) AND ((idempotency_key ->> 'candidate_family_hash'::text) = candidate_family_hash) AND (jsonb_typeof(profile_ref) = 'object'::text) AND (profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text]) AND ((profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb) AND ((profile_ref ->> 'id'::text) ~ '^[a-z0-9_]+$'::text) AND (((profile_ref ->> 'version'::text))::bigint > 0) AND ((profile_ref ->> 'content_hash'::text) = profile_hash) AND (research_profile_artifact_id = ((((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || profile_hash)) AND validate_content_hash_array(capability_registry_hashes) AND (idempotency_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (profile_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (feedback_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (candidate_family_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (label_cutoff <= created_at) AND (updated_at >= created_at) AND (generation >= 0)))",
+      "initially_deferred": false,
+      "name": "ck_quant_feedback_cycle_identity",
+      "table": "quant_feedback_cycle",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((lease_owner IS NULL) = (lease_expires_at IS NULL)) AND ((started_at IS NULL) OR (started_at >= created_at)) AND ((lease_expires_at IS NULL) OR ((started_at IS NOT NULL) AND (lease_expires_at > started_at))) AND ((cancel_requested_at IS NULL) OR ((cancel_requested_at >= created_at) AND ((completed_at IS NULL) OR (cancel_requested_at <= completed_at)))) AND ((completed_at IS NULL) OR ((completed_at >= created_at) AND (completed_at <= updated_at) AND ((started_at IS NULL) OR (completed_at >= started_at)))) AND ((terminal_reason_code IS NULL) OR ((terminal_reason_code)::text ~ '^[a-z][a-z0-9_.]{0,127}$'::text)) AND (((status = 'queued'::qp_feedback_cycle_status) AND (decision IS NULL) AND (terminal_reason_code IS NULL) AND (started_at IS NULL) AND (completed_at IS NULL) AND (lease_owner IS NULL)) OR ((status = 'running'::qp_feedback_cycle_status) AND (decision IS NULL) AND (terminal_reason_code IS NULL) AND (started_at IS NOT NULL) AND (completed_at IS NULL) AND (lease_owner IS NOT NULL)) OR ((status = 'succeeded'::qp_feedback_cycle_status) AND (decision IS NOT NULL) AND (terminal_reason_code IS NOT NULL) AND (started_at IS NOT NULL) AND (completed_at IS NOT NULL) AND (lease_owner IS NULL)) OR ((status = 'failed'::qp_feedback_cycle_status) AND (decision IS NULL) AND (terminal_reason_code IS NOT NULL) AND (started_at IS NOT NULL) AND (completed_at IS NOT NULL) AND (lease_owner IS NULL)) OR ((status = 'cancelled'::qp_feedback_cycle_status) AND (decision IS NULL) AND (terminal_reason_code IS NOT NULL) AND (completed_at IS NOT NULL) AND (lease_owner IS NULL)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_feedback_cycle_state",
+      "table": "quant_feedback_cycle",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (champion_model_version_id) REFERENCES quant_model_version(model_version_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_cycle_champion",
+      "table": "quant_feedback_cycle",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_cycle_profile",
+      "table": "quant_feedback_cycle",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (feedback_cycle_id)",
+      "initially_deferred": false,
+      "name": "quant_feedback_cycle_pkey",
+      "table": "quant_feedback_cycle",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (feedback_cycle_id, label_cutoff)",
+      "initially_deferred": false,
+      "name": "uq_quant_feedback_cycle_cutoff",
+      "table": "quant_feedback_cycle",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (feedback_cycle_id, research_profile_artifact_id, label_cutoff, champion_model_version_id, champion_serving_contract_hash, candidate_family_hash)",
+      "initially_deferred": false,
+      "name": "uq_quant_feedback_cycle_evaluation_lineage",
+      "table": "quant_feedback_cycle",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((purpose = 'promotion_comparison'::qp_feedback_evaluation_purpose) AND (dataset_purpose = 'evaluation'::qp_dataset_purpose) AND (jsonb_typeof(profile_ref) = 'object'::text) AND (profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text]) AND ((profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb) AND ((profile_ref ->> 'id'::text) ~ '^[a-z0-9_]+$'::text) AND (((profile_ref ->> 'version'::text))::bigint > 0) AND (research_profile_artifact_id = ((((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || (profile_ref ->> 'content_hash'::text))) AND (evaluation_window_start < evaluation_window_end) AND (evaluation_window_end <= label_cutoff) AND (label_cutoff <= used_at) AND (used_at <= created_at) AND (evaluation_dataset_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (evaluation_artifact_bytes_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (cohort_manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (candidate_family_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (comparison_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (semantic_use_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((octet_length(result_artifact_uri) >= 1) AND (octet_length(result_artifact_uri) <= 4096)) AND (result_artifact_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text) AND (result_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (evaluation_use_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "initially_deferred": false,
+      "name": "ck_quant_feedback_evaluation_use",
+      "table": "quant_feedback_evaluation_use",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (champion_model_version_id) REFERENCES quant_model_version(model_version_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_evaluation_champion",
+      "table": "quant_feedback_evaluation_use",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (feedback_cycle_id, research_profile_artifact_id, label_cutoff, champion_model_version_id, champion_serving_contract_hash, candidate_family_hash) REFERENCES quant_feedback_cycle(feedback_cycle_id, research_profile_artifact_id, label_cutoff, champion_model_version_id, champion_serving_contract_hash, candidate_family_hash)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_evaluation_cycle",
+      "table": "quant_feedback_evaluation_use",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (evaluation_dataset_id, dataset_purpose, evaluation_dataset_hash, evaluation_artifact_bytes_hash) REFERENCES quant_training_dataset(training_dataset_id, purpose, dataset_hash, artifact_bytes_hash)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_evaluation_dataset",
+      "table": "quant_feedback_evaluation_use",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_evaluation_profile",
+      "table": "quant_feedback_evaluation_use",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (feedback_evaluation_use_id)",
+      "initially_deferred": false,
+      "name": "quant_feedback_evaluation_use_pkey",
+      "table": "quant_feedback_evaluation_use",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((event_sequence > 0) AND (occurred_at <= created_at) AND (event_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((evidence_uri IS NULL) AND (evidence_hash IS NULL)) OR ((evidence_uri IS NOT NULL) AND (evidence_hash IS NOT NULL) AND (octet_length(evidence_uri) >= 1) AND (octet_length(evidence_uri) <= 4096) AND (evidence_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text))) AND ((actor IS NULL) OR ((octet_length((actor)::text) >= 1) AND (octet_length((actor)::text) <= 256) AND ((actor)::text = btrim((actor)::text)) AND ((actor)::text !~ '[[:cntrl:]]'::text))) AND ((reason_code IS NULL) OR ((reason_code)::text ~ '^[a-z][a-z0-9_.]{0,127}$'::text)) AND (((event_kind = 'triggered'::qp_feedback_stage_event_kind) AND (stage = 'trigger'::qp_feedback_stage) AND (research_job_id IS NULL) AND (actor IS NOT NULL) AND (reason_code IS NOT NULL)) OR ((event_kind = 'cancellation_requested'::qp_feedback_stage_event_kind) AND (stage <> 'trigger'::qp_feedback_stage) AND (actor IS NOT NULL) AND (reason_code IS NOT NULL)) OR ((event_kind = ANY (ARRAY['job_linked'::qp_feedback_stage_event_kind, 'started'::qp_feedback_stage_event_kind])) AND (stage <> 'trigger'::qp_feedback_stage) AND (research_job_id IS NOT NULL) AND (actor IS NULL) AND (reason_code IS NULL)) OR ((event_kind = 'succeeded'::qp_feedback_stage_event_kind) AND (stage <> 'trigger'::qp_feedback_stage) AND (research_job_id IS NOT NULL) AND (actor IS NULL) AND (reason_code IS NULL) AND (evidence_uri IS NOT NULL)) OR ((event_kind = ANY (ARRAY['failed'::qp_feedback_stage_event_kind, 'cancelled'::qp_feedback_stage_event_kind, 'lease_recovered'::qp_feedback_stage_event_kind])) AND (stage <> 'trigger'::qp_feedback_stage) AND (research_job_id IS NOT NULL) AND (actor IS NULL) AND (reason_code IS NOT NULL)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_feedback_stage_event",
+      "table": "quant_feedback_stage_event",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (feedback_cycle_id) REFERENCES quant_feedback_cycle(feedback_cycle_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_stage_cycle",
+      "table": "quant_feedback_stage_event",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_job_id) REFERENCES quant_research_job(job_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_stage_job",
+      "table": "quant_feedback_stage_event",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (feedback_stage_event_id)",
+      "initially_deferred": false,
+      "name": "quant_feedback_stage_event_pkey",
+      "table": "quant_feedback_stage_event",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK (((jsonb_typeof(outcome) = 'object'::text) AND (((status = 'unresolved'::qp_linkage_status) AND ((outcome ->> 'status'::text) = 'unresolved'::text) AND (jsonb_typeof((outcome -> 'reason'::text)) = 'object'::text) AND ((outcome -> 'reason'::text) ? 'code'::text) AND ((outcome #>> '{reason,code}'::text[]) = ANY (ARRAY['no_deterministic_template'::text, 'candidate_rejected'::text]))) OR ((status = ANY (ARRAY['resolved'::qp_linkage_status, 'overridden'::qp_linkage_status])) AND ((outcome ->> 'status'::text) = 'resolved'::text) AND (jsonb_typeof((outcome -> 'subject'::text)) = 'object'::text) AND (jsonb_typeof((outcome -> 'source_bindings'::text)) = 'array'::text) AND (jsonb_typeof((outcome -> 'grounding'::text)) = 'object'::text)))))",
       "initially_deferred": false,
       "name": "ck_quant_market_linkage_outcome",
@@ -19494,6 +20736,15 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((window_start <= window_end) AND (window_end <= (started_at + '00:00:02'::interval)) AND (started_at IS NOT NULL) AND (input_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((status = 'running'::qp_model_run_status) AND (output_hash IS NULL) AND (error_code IS NULL) AND (error_message IS NULL) AND (finished_at IS NULL)) OR ((status = 'succeeded'::qp_model_run_status) AND (output_hash IS NOT NULL) AND (output_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (error_code IS NULL) AND (error_message IS NULL) AND (finished_at IS NOT NULL) AND (finished_at >= started_at)) OR ((status = 'failed'::qp_model_run_status) AND (output_hash IS NULL) AND (error_code IS NOT NULL) AND (error_code <> 'cancelled_by_operator'::qp_model_run_error_code) AND (error_message IS NOT NULL) AND ((char_length(btrim(error_message)) >= 1) AND (char_length(btrim(error_message)) <= 4096)) AND (finished_at IS NOT NULL) AND (finished_at >= started_at)) OR ((status = 'cancelled'::qp_model_run_status) AND (output_hash IS NULL) AND (error_code = 'cancelled_by_operator'::qp_model_run_error_code) AND (error_message IS NOT NULL) AND ((char_length(btrim(error_message)) >= 1) AND (char_length(btrim(error_message)) <= 4096)) AND (finished_at IS NOT NULL) AND (finished_at >= started_at)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_model_run_terminal",
+      "table": "quant_model_run",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (market_selection_id) REFERENCES quant_market_selection(market_selection_id)",
       "initially_deferred": false,
       "name": "fk-quant_model_run-market_selection_id",
@@ -19575,7 +20826,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((jsonb_typeof(metrics) = 'object'::text) AND ((metrics ->> 'format_version'::text) = '1'::text) AND (jsonb_typeof((metrics -> 'definition'::text)) = 'object'::text) AND (((((metrics -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'in_sample'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'validation'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = ANY (ARRAY['factor_native'::text, 'fitted_feature_matrix'::text]))) OR ((((metrics -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'in_sample'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'validation'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'feature_importances'::text)) = 'array'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = 'fitted_feature_matrix'::text)) OR ((((metrics -> 'definition'::text) ->> 'kind'::text) = 'not_measured'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = 'hand_authored'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'rationale'::text)) = 'string'::text) AND ((char_length(btrim(((metrics -> 'definition'::text) ->> 'rationale'::text))) >= 1) AND (char_length(btrim(((metrics -> 'definition'::text) ->> 'rationale'::text))) <= 2048))))))",
+      "definition": "CHECK (((jsonb_typeof(metrics) = 'object'::text) AND (metrics ?& ARRAY['format_version'::text, 'definition'::text]) AND ((metrics - ARRAY['format_version'::text, 'definition'::text]) = '{}'::jsonb) AND (((metrics ->> 'format_version'::text))::integer = 2) AND (jsonb_typeof((metrics -> 'definition'::text)) = 'object'::text) AND (((((metrics -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text) AND ((metrics -> 'definition'::text) ?& ARRAY['kind'::text, 'in_sample'::text, 'validation'::text, 'artifact_lineage'::text]) AND (((metrics -> 'definition'::text) - ARRAY['kind'::text, 'in_sample'::text, 'validation'::text, 'artifact_lineage'::text]) = '{}'::jsonb) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'in_sample'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'validation'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = 'factor_native'::text)) OR ((((metrics -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text) AND ((metrics -> 'definition'::text) ?& ARRAY['kind'::text, 'model_kind'::text, 'in_sample'::text, 'validation'::text, 'feature_importances'::text, 'artifact_lineage'::text]) AND (((metrics -> 'definition'::text) - ARRAY['kind'::text, 'model_kind'::text, 'in_sample'::text, 'validation'::text, 'feature_importances'::text, 'artifact_lineage'::text]) = '{}'::jsonb) AND (((metrics -> 'definition'::text) ->> 'model_kind'::text) = ((training_objective -> 'definition'::text) ->> 'model_kind'::text)) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'in_sample'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'validation'::text)) = 'object'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'feature_importances'::text)) = 'array'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = 'fitted_feature_matrix'::text)) OR ((((metrics -> 'definition'::text) ->> 'kind'::text) = 'governed_sell_estimator'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = 'governed_sell_estimator'::text) AND ((metrics -> 'definition'::text) ?& ARRAY['kind'::text, 'preparation'::text, 'artifact_lineage'::text]) AND (((metrics -> 'definition'::text) - ARRAY['kind'::text, 'preparation'::text, 'artifact_lineage'::text]) = '{}'::jsonb) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'preparation'::text)) = 'object'::text) AND (((metrics -> 'definition'::text) -> 'preparation'::text) ?& ARRAY['resolved_label_rows'::text, 'position_state_rows'::text, 'fit_status'::text]) AND ((((metrics -> 'definition'::text) -> 'preparation'::text) - ARRAY['resolved_label_rows'::text, 'position_state_rows'::text, 'fit_status'::text]) = '{}'::jsonb) AND (((((metrics -> 'definition'::text) -> 'preparation'::text) ->> 'resolved_label_rows'::text))::numeric >= (0)::numeric) AND (((((metrics -> 'definition'::text) -> 'preparation'::text) ->> 'position_state_rows'::text))::numeric >= (0)::numeric) AND ((((metrics -> 'definition'::text) -> 'preparation'::text) ->> 'fit_status'::text) = ((training_objective -> 'definition'::text) ->> 'fit_status'::text)) AND ((((metrics -> 'definition'::text) -> 'preparation'::text) ->> 'fit_status'::text) = 'oof_predictions_required'::text) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'artifact_lineage'::text)) = 'object'::text) AND ((((metrics -> 'definition'::text) -> 'artifact_lineage'::text) ->> 'kind'::text) = 'factor_native'::text)) OR ((((metrics -> 'definition'::text) ->> 'kind'::text) = 'not_measured'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = 'hand_authored'::text) AND ((metrics -> 'definition'::text) ?& ARRAY['kind'::text, 'rationale'::text]) AND (((metrics -> 'definition'::text) - ARRAY['kind'::text, 'rationale'::text]) = '{}'::jsonb) AND (jsonb_typeof(((metrics -> 'definition'::text) -> 'rationale'::text)) = 'string'::text) AND ((char_length(btrim(((metrics -> 'definition'::text) ->> 'rationale'::text))) >= 1) AND (char_length(btrim(((metrics -> 'definition'::text) ->> 'rationale'::text))) <= 2048))))))",
       "initially_deferred": false,
       "name": "ck_quant_model_version_metrics",
       "table": "quant_model_version",
@@ -19593,7 +20844,16 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((jsonb_typeof(training_objective) = 'object'::text) AND (((training_objective ->> 'format_version'::text))::integer = 1) AND (jsonb_typeof((training_objective -> 'definition'::text)) = 'object'::text) AND (((training_objective -> 'definition'::text) ->> 'kind'::text) = ANY (ARRAY['learning_to_rank'::text, 'classical_pointwise'::text, 'hand_authored'::text]))))",
+      "definition": "CHECK (((jsonb_typeof(serving_contract) = 'object'::text) AND (serving_contract ?& ARRAY['contract_version'::text, 'contract_hash'::text, 'bindings'::text]) AND ((serving_contract - ARRAY['contract_version'::text, 'contract_hash'::text, 'bindings'::text]) = '{}'::jsonb) AND (jsonb_typeof((serving_contract -> 'contract_version'::text)) = 'number'::text) AND (((serving_contract ->> 'contract_version'::text))::numeric = (2)::numeric) AND (jsonb_typeof((serving_contract -> 'contract_hash'::text)) = 'string'::text) AND (jsonb_typeof((serving_contract -> 'bindings'::text)) = 'object'::text) AND (octet_length(serving_contract_hash) = 32) AND ((serving_contract ->> 'contract_hash'::text) = ('blake3:'::text || encode(serving_contract_hash, 'hex'::text)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_model_version_serving_contract",
+      "table": "quant_model_version",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK (((jsonb_typeof(training_objective) = 'object'::text) AND (training_objective ?& ARRAY['format_version'::text, 'definition'::text]) AND ((training_objective - ARRAY['format_version'::text, 'definition'::text]) = '{}'::jsonb) AND (((training_objective ->> 'format_version'::text))::integer = 2) AND (jsonb_typeof((training_objective -> 'definition'::text)) = 'object'::text) AND (((((training_objective -> 'definition'::text) ->> 'kind'::text) = 'learning_to_rank'::text) AND ((training_objective -> 'definition'::text) ?& ARRAY['kind'::text, 'spec'::text]) AND (((training_objective -> 'definition'::text) - ARRAY['kind'::text, 'spec'::text]) = '{}'::jsonb) AND (jsonb_typeof(((training_objective -> 'definition'::text) -> 'spec'::text)) = 'object'::text) AND (((training_objective -> 'definition'::text) -> 'spec'::text) ?& ARRAY['rank_loss'::text, 'optimizer'::text, 'lambda_tail'::text, 'tail_fraction'::text, 'lambda_turnover'::text, 'lambda_l2'::text, 'ndcg_k'::text, 'pseudo_top_n'::text]) AND ((((training_objective -> 'definition'::text) -> 'spec'::text) - ARRAY['rank_loss'::text, 'optimizer'::text, 'lambda_tail'::text, 'tail_fraction'::text, 'lambda_turnover'::text, 'lambda_l2'::text, 'ndcg_k'::text, 'pseudo_top_n'::text]) = '{}'::jsonb)) OR ((((training_objective -> 'definition'::text) ->> 'kind'::text) = 'classical_pointwise'::text) AND ((training_objective -> 'definition'::text) ?& ARRAY['kind'::text, 'model_kind'::text, 'validation_metric'::text]) AND (((training_objective -> 'definition'::text) - ARRAY['kind'::text, 'model_kind'::text, 'validation_metric'::text]) = '{}'::jsonb) AND (jsonb_typeof(((training_objective -> 'definition'::text) -> 'model_kind'::text)) = 'string'::text) AND (((training_objective -> 'definition'::text) ->> 'validation_metric'::text) = 'mean_rolling_fold_rank_ic'::text)) OR ((((training_objective -> 'definition'::text) ->> 'kind'::text) = 'governed_sell_estimator'::text) AND ((training_objective -> 'definition'::text) ?& ARRAY['kind'::text, 'fit_status'::text]) AND (((training_objective -> 'definition'::text) - ARRAY['kind'::text, 'fit_status'::text]) = '{}'::jsonb) AND (((training_objective -> 'definition'::text) ->> 'fit_status'::text) = 'oof_predictions_required'::text)) OR ((((training_objective -> 'definition'::text) ->> 'kind'::text) = 'hand_authored'::text) AND ((training_objective -> 'definition'::text) ?& ARRAY['kind'::text, 'rationale'::text]) AND (((training_objective -> 'definition'::text) - ARRAY['kind'::text, 'rationale'::text]) = '{}'::jsonb) AND (jsonb_typeof(((training_objective -> 'definition'::text) -> 'rationale'::text)) = 'string'::text) AND ((char_length(btrim(((training_objective -> 'definition'::text) ->> 'rationale'::text))) >= 1) AND (char_length(btrim(((training_objective -> 'definition'::text) ->> 'rationale'::text))) <= 2048))))))",
       "initially_deferred": false,
       "name": "ck_quant_model_version_training_objective",
       "table": "quant_model_version",
@@ -21330,7 +22590,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'profile_ref'::text, 'evaluation_track'::text, 'research_program_hash'::text, 'window_start'::text, 'window_end'::text, 'pit_cutoff'::text, 'reader_contract_version'::text, 'schema_contract_version'::text, 'decision_policy_snapshot_id'::text, 'runtime_config_hash'::text, 'dataset_format_version'::text, 'capability_registry_hashes'::text, 'objects'::text]) AND (((manifest ->> 'format_version'::text))::integer = 3) AND ((manifest -> 'profile_ref'::text) = profile_ref) AND ((manifest ->> 'evaluation_track'::text) = (evaluation_track)::text) AND ((manifest ->> 'research_program_hash'::text) = research_program_hash) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND (((manifest ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND ((manifest ->> 'reader_contract_version'::text) = (reader_contract_version)::text) AND ((manifest ->> 'schema_contract_version'::text) = (schema_contract_version)::text) AND (((manifest ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND ((manifest ->> 'runtime_config_hash'::text) = runtime_config_hash) AND (((manifest ->> 'dataset_format_version'::text))::integer = 2) AND (jsonb_typeof((manifest -> 'capability_registry_hashes'::text)) = 'array'::text) AND (jsonb_typeof((manifest -> 'objects'::text)) = 'array'::text) AND (jsonb_array_length((manifest -> 'objects'::text)) > 0))))",
+      "definition": "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'profile_ref'::text, 'evaluation_track'::text, 'research_program_hash'::text, 'window_start'::text, 'window_end'::text, 'pit_cutoff'::text, 'reader_contract_version'::text, 'schema_contract_version'::text, 'decision_policy_snapshot_id'::text, 'runtime_config_hash'::text, 'dataset_format_version'::text, 'capability_registry_hashes'::text, 'objects'::text]) AND (((manifest ->> 'format_version'::text))::integer = 3) AND ((manifest -> 'profile_ref'::text) = profile_ref) AND ((manifest ->> 'evaluation_track'::text) = (evaluation_track)::text) AND ((manifest ->> 'research_program_hash'::text) = research_program_hash) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND (((manifest ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND ((manifest ->> 'reader_contract_version'::text) = (reader_contract_version)::text) AND ((manifest ->> 'schema_contract_version'::text) = (schema_contract_version)::text) AND (((manifest ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND ((manifest ->> 'runtime_config_hash'::text) = runtime_config_hash) AND (((manifest ->> 'dataset_format_version'::text))::integer = 3) AND (jsonb_typeof((manifest -> 'capability_registry_hashes'::text)) = 'array'::text) AND (jsonb_typeof((manifest -> 'objects'::text)) = 'array'::text) AND (jsonb_array_length((manifest -> 'objects'::text)) > 0))))",
       "initially_deferred": false,
       "name": "ck_quant_source_slice_manifest",
       "table": "quant_source_slice",
@@ -21537,7 +22797,16 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK ((((model_spec_definition_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND ((feature_schema_hash IS NULL) OR (feature_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((factor_schema_hash IS NULL) OR (factor_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((label_schema_hash IS NULL) OR (label_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((dataset_hash IS NULL) OR (dataset_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((manifest_hash IS NULL) OR (manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((artifact_bytes_hash IS NULL) OR (artifact_bytes_hash ~ '^blake3:[0-9a-f]{64}$'::text))))",
+      "definition": "CHECK ((validate_factor_serving_plane(factor_serving_plane, feature_schema_hash, feature_schema_version, (model_family)::text) AND ((factor_serving_plane ->> 'factor_schema_hash'::text) = factor_schema_hash)))",
+      "initially_deferred": false,
+      "name": "ck_quant_training_dataset_factor_plane",
+      "table": "quant_training_dataset",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((model_spec_definition_hash)::text ~ '^blake3:[0-9a-f]{64}$'::text) AND (feature_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (factor_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((label_schema_hash IS NULL) OR (label_schema_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((dataset_hash IS NULL) OR (dataset_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((manifest_hash IS NULL) OR (manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((artifact_bytes_hash IS NULL) OR (artifact_bytes_hash ~ '^blake3:[0-9a-f]{64}$'::text))))",
       "initially_deferred": false,
       "name": "ck_quant_training_dataset_hashes",
       "table": "quant_training_dataset",
@@ -21546,7 +22815,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND (knowledge_lag_secs >= 0) AND ((sample_interval_secs > 0) OR ((sample_interval_secs = 0) AND (cohort_manifest IS NOT NULL))) AND (jsonb_typeof(horizons_secs) = 'array'::text) AND (jsonb_array_length(horizons_secs) > 0) AND (jsonb_typeof(source_lineage) = 'object'::text) AND (source_lineage ?& ARRAY['format_version'::text, 'source_slice_id'::text, 'research_profile_artifact_id'::text, 'source_window_start'::text, 'source_window_end'::text, 'pit_cutoff'::text, 'decision_policy_snapshot_id'::text, 'capability_registry_hashes'::text]) AND (((source_lineage ->> 'format_version'::text))::integer = 1) AND (((source_lineage ->> 'source_slice_id'::text))::uuid = source_slice_id) AND ((source_lineage ->> 'research_profile_artifact_id'::text) = research_profile_artifact_id) AND (((source_lineage ->> 'source_window_start'::text))::timestamp with time zone <= window_start) AND (((source_lineage ->> 'source_window_end'::text))::timestamp with time zone >= window_end) AND (((source_lineage ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND (((source_lineage ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND (jsonb_typeof((source_lineage -> 'capability_registry_hashes'::text)) = 'array'::text)))",
+      "definition": "CHECK (((window_start < window_end) AND (window_end <= pit_cutoff) AND (knowledge_lag_secs >= 0) AND (feature_schema_version >= 1) AND ((sample_interval_secs > 0) OR ((sample_interval_secs = 0) AND (cohort_manifest IS NOT NULL))) AND (jsonb_typeof(horizons_secs) = 'array'::text) AND (jsonb_array_length(horizons_secs) > 0) AND (jsonb_typeof(source_lineage) = 'object'::text) AND (source_lineage ?& ARRAY['format_version'::text, 'source_slice_id'::text, 'research_profile_artifact_id'::text, 'source_window_start'::text, 'source_window_end'::text, 'pit_cutoff'::text, 'decision_policy_snapshot_id'::text, 'capability_registry_hashes'::text]) AND (((source_lineage ->> 'format_version'::text))::integer = 1) AND (((source_lineage ->> 'source_slice_id'::text))::uuid = source_slice_id) AND ((source_lineage ->> 'research_profile_artifact_id'::text) = research_profile_artifact_id) AND (((source_lineage ->> 'source_window_start'::text))::timestamp with time zone <= window_start) AND (((source_lineage ->> 'source_window_end'::text))::timestamp with time zone >= window_end) AND (((source_lineage ->> 'pit_cutoff'::text))::timestamp with time zone = pit_cutoff) AND (((source_lineage ->> 'decision_policy_snapshot_id'::text))::uuid = decision_policy_snapshot_id) AND (jsonb_typeof((source_lineage -> 'capability_registry_hashes'::text)) = 'array'::text)))",
       "initially_deferred": false,
       "name": "ck_quant_training_dataset_lineage",
       "table": "quant_training_dataset",
@@ -21555,7 +22824,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'training_dataset_id'::text, 'source_lineage'::text, 'cohort_manifest'::text, 'model_spec_id'::text, 'model_spec_definition_hash'::text, 'window_start'::text, 'window_end'::text, 'purpose'::text, 'knowledge_lag_secs'::text, 'sample_interval_secs'::text, 'horizons_secs'::text, 'feature_schema_hash'::text, 'factor_schema_hash'::text, 'label_schema_hash'::text, 'semantic_dataset_hash'::text, 'sample_count'::text]) AND (((manifest ->> 'format_version'::text))::integer = 2) AND (((manifest ->> 'training_dataset_id'::text))::uuid = training_dataset_id) AND ((manifest -> 'source_lineage'::text) = source_lineage) AND (((cohort_manifest IS NULL) AND ((manifest -> 'cohort_manifest'::text) = 'null'::jsonb)) OR ((cohort_manifest IS NOT NULL) AND ((manifest -> 'cohort_manifest'::text) = cohort_manifest))) AND (((manifest ->> 'model_spec_id'::text))::uuid = model_spec_id) AND ((manifest ->> 'model_spec_definition_hash'::text) = (model_spec_definition_hash)::text) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND ((manifest ->> 'purpose'::text) = (purpose)::text) AND (((manifest ->> 'knowledge_lag_secs'::text))::bigint = knowledge_lag_secs) AND (((manifest ->> 'sample_interval_secs'::text))::bigint = sample_interval_secs) AND ((manifest -> 'horizons_secs'::text) = horizons_secs) AND ((manifest ->> 'feature_schema_hash'::text) = feature_schema_hash) AND ((manifest ->> 'factor_schema_hash'::text) = factor_schema_hash) AND ((manifest ->> 'label_schema_hash'::text) = label_schema_hash) AND ((manifest ->> 'semantic_dataset_hash'::text) = dataset_hash) AND (((manifest ->> 'sample_count'::text))::bigint = sample_count))))",
+      "definition": "CHECK (((manifest IS NULL) OR ((jsonb_typeof(manifest) = 'object'::text) AND (manifest ?& ARRAY['format_version'::text, 'training_dataset_id'::text, 'source_lineage'::text, 'cohort_manifest'::text, 'model_spec_id'::text, 'model_family'::text, 'model_spec_definition_hash'::text, 'trade_policy_artifact_id'::text, 'trade_policy_hash'::text, 'window_start'::text, 'window_end'::text, 'purpose'::text, 'knowledge_lag_secs'::text, 'sample_interval_secs'::text, 'horizons_secs'::text, 'feature_schema_version'::text, 'feature_schema_hash'::text, 'factor_serving_plane'::text, 'label_schema_hash'::text, 'semantic_dataset_hash'::text, 'source_fingerprint'::text, 'sample_count'::text]) AND ((manifest - ARRAY['format_version'::text, 'training_dataset_id'::text, 'source_lineage'::text, 'cohort_manifest'::text, 'model_spec_id'::text, 'model_family'::text, 'model_spec_definition_hash'::text, 'trade_policy_artifact_id'::text, 'trade_policy_hash'::text, 'window_start'::text, 'window_end'::text, 'purpose'::text, 'knowledge_lag_secs'::text, 'sample_interval_secs'::text, 'horizons_secs'::text, 'feature_schema_version'::text, 'feature_schema_hash'::text, 'factor_serving_plane'::text, 'label_schema_hash'::text, 'semantic_dataset_hash'::text, 'source_fingerprint'::text, 'sample_count'::text]) = '{}'::jsonb) AND (((manifest ->> 'format_version'::text))::integer = 3) AND (((manifest ->> 'training_dataset_id'::text))::uuid = training_dataset_id) AND ((manifest -> 'source_lineage'::text) = source_lineage) AND (((cohort_manifest IS NULL) AND ((manifest -> 'cohort_manifest'::text) = 'null'::jsonb)) OR ((cohort_manifest IS NOT NULL) AND ((manifest -> 'cohort_manifest'::text) = cohort_manifest))) AND (((manifest ->> 'model_spec_id'::text))::uuid = model_spec_id) AND ((manifest ->> 'model_family'::text) = (model_family)::text) AND ((manifest ->> 'model_spec_definition_hash'::text) = (model_spec_definition_hash)::text) AND ((((manifest -> 'trade_policy_artifact_id'::text) = 'null'::jsonb) AND ((manifest -> 'trade_policy_hash'::text) = 'null'::jsonb)) OR ((jsonb_typeof((manifest -> 'trade_policy_artifact_id'::text)) = 'string'::text) AND (((manifest ->> 'trade_policy_artifact_id'::text))::uuid IS NOT NULL) AND (jsonb_typeof((manifest -> 'trade_policy_hash'::text)) = 'string'::text) AND ((manifest ->> 'trade_policy_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text))) AND (((manifest ->> 'window_start'::text))::timestamp with time zone = window_start) AND (((manifest ->> 'window_end'::text))::timestamp with time zone = window_end) AND ((manifest ->> 'purpose'::text) = (purpose)::text) AND (((manifest ->> 'knowledge_lag_secs'::text))::bigint = knowledge_lag_secs) AND (((manifest ->> 'sample_interval_secs'::text))::bigint = sample_interval_secs) AND ((manifest -> 'horizons_secs'::text) = horizons_secs) AND (((manifest ->> 'feature_schema_version'::text))::integer = feature_schema_version) AND ((manifest ->> 'feature_schema_hash'::text) = feature_schema_hash) AND ((manifest -> 'factor_serving_plane'::text) = factor_serving_plane) AND ((factor_serving_plane ->> 'factor_schema_hash'::text) = factor_schema_hash) AND ((manifest ->> 'label_schema_hash'::text) = label_schema_hash) AND ((manifest ->> 'semantic_dataset_hash'::text) = dataset_hash) AND ((manifest ->> 'source_fingerprint'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (((manifest ->> 'sample_count'::text))::bigint = sample_count))))",
       "initially_deferred": false,
       "name": "ck_quant_training_dataset_manifest",
       "table": "quant_training_dataset",
@@ -21600,7 +22869,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK ((((status = ANY (ARRAY['planned'::qp_training_dataset_status, 'building'::qp_training_dataset_status])) AND (feature_schema_hash IS NULL) AND (factor_schema_hash IS NULL) AND (label_schema_hash IS NULL) AND (dataset_hash IS NULL) AND (manifest_hash IS NULL) AND (manifest IS NULL) AND (artifact_bytes_hash IS NULL) AND (parquet_uri IS NULL) AND (sample_count IS NULL) AND (coverage IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = ANY (ARRAY['ready'::qp_training_dataset_status, 'expired'::qp_training_dataset_status])) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'insufficient_labels'::qp_training_dataset_status) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL) AND (failure_detail IS NOT NULL) AND ((char_length(btrim((failure_detail)::text)) >= 1) AND (char_length(btrim((failure_detail)::text)) <= 4096)) AND (completed_at IS NOT NULL)) OR ((status = 'failed'::qp_training_dataset_status) AND (failure_detail IS NOT NULL) AND ((char_length(btrim((failure_detail)::text)) >= 1) AND (char_length(btrim((failure_detail)::text)) <= 4096)) AND (completed_at IS NOT NULL) AND (((feature_schema_hash IS NULL) AND (factor_schema_hash IS NULL) AND (label_schema_hash IS NULL) AND (dataset_hash IS NULL) AND (manifest_hash IS NULL) AND (manifest IS NULL) AND (artifact_bytes_hash IS NULL) AND (parquet_uri IS NULL) AND (sample_count IS NULL) AND (coverage IS NULL)) OR ((feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL))))))",
+      "definition": "CHECK ((((status = ANY (ARRAY['planned'::qp_training_dataset_status, 'building'::qp_training_dataset_status])) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NULL) AND (dataset_hash IS NULL) AND (manifest_hash IS NULL) AND (manifest IS NULL) AND (artifact_bytes_hash IS NULL) AND (parquet_uri IS NULL) AND (sample_count IS NULL) AND (coverage IS NULL) AND (failure_detail IS NULL) AND (completed_at IS NULL)) OR ((status = ANY (ARRAY['ready'::qp_training_dataset_status, 'expired'::qp_training_dataset_status])) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL) AND (failure_detail IS NULL) AND (completed_at IS NOT NULL)) OR ((status = 'insufficient_labels'::qp_training_dataset_status) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL) AND (failure_detail IS NOT NULL) AND ((char_length(btrim((failure_detail)::text)) >= 1) AND (char_length(btrim((failure_detail)::text)) <= 4096)) AND (completed_at IS NOT NULL)) OR ((status = 'failed'::qp_training_dataset_status) AND (feature_schema_hash IS NOT NULL) AND (factor_schema_hash IS NOT NULL) AND (failure_detail IS NOT NULL) AND ((char_length(btrim((failure_detail)::text)) >= 1) AND (char_length(btrim((failure_detail)::text)) <= 4096)) AND (completed_at IS NOT NULL) AND (((label_schema_hash IS NULL) AND (dataset_hash IS NULL) AND (manifest_hash IS NULL) AND (manifest IS NULL) AND (artifact_bytes_hash IS NULL) AND (parquet_uri IS NULL) AND (sample_count IS NULL) AND (coverage IS NULL)) OR ((label_schema_hash IS NOT NULL) AND (dataset_hash IS NOT NULL) AND (manifest_hash IS NOT NULL) AND (manifest IS NOT NULL) AND (artifact_bytes_hash IS NOT NULL) AND (parquet_uri IS NOT NULL) AND (sample_count IS NOT NULL) AND (sample_count >= 0) AND (coverage IS NOT NULL))))))",
       "initially_deferred": false,
       "name": "quant_training_dataset_check",
       "table": "quant_training_dataset",
@@ -21614,6 +22883,15 @@
       "name": "quant_training_dataset_pkey",
       "table": "quant_training_dataset",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (training_dataset_id, purpose, dataset_hash, artifact_bytes_hash)",
+      "initially_deferred": false,
+      "name": "uq_quant_training_dataset_evaluation_identity",
+      "table": "quant_training_dataset",
+      "type": "u",
       "validated": true
     },
     {
@@ -22198,6 +23476,91 @@
     },
     {
       "labels": [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "name": "qp_feedback_cycle_status"
+    },
+    {
+      "labels": [
+        "no_action",
+        "challenger_rejected",
+        "candidate_ready",
+        "promoted"
+      ],
+      "name": "qp_feedback_decision"
+    },
+    {
+      "labels": [
+        "within_threshold",
+        "threshold_exceeded",
+        "insufficient_evidence"
+      ],
+      "name": "qp_feedback_drift_assessment"
+    },
+    {
+      "labels": [
+        "data",
+        "concept",
+        "label"
+      ],
+      "name": "qp_feedback_drift_kind"
+    },
+    {
+      "labels": [
+        "population_stability_index",
+        "kolmogorov_smirnov_p_value",
+        "rank_ic_drop",
+        "jensen_shannon_divergence"
+      ],
+      "name": "qp_feedback_drift_metric"
+    },
+    {
+      "labels": [
+        "promotion_comparison"
+      ],
+      "name": "qp_feedback_evaluation_purpose"
+    },
+    {
+      "labels": [
+        "trigger",
+        "coverage",
+        "drift",
+        "dataset_seal",
+        "training",
+        "calibration",
+        "cpcv",
+        "comparison",
+        "shadow_replay",
+        "decision"
+      ],
+      "name": "qp_feedback_stage"
+    },
+    {
+      "labels": [
+        "triggered",
+        "job_linked",
+        "started",
+        "succeeded",
+        "failed",
+        "cancellation_requested",
+        "cancelled",
+        "lease_recovered"
+      ],
+      "name": "qp_feedback_stage_event_kind"
+    },
+    {
+      "labels": [
+        "scheduled",
+        "manual"
+      ],
+      "name": "qp_feedback_trigger_family"
+    },
+    {
+      "labels": [
         "closed",
         "execution_halted",
         "exit_only",
@@ -22470,12 +23833,10 @@
     },
     {
       "labels": [
-        "draft",
         "candidate",
         "shadow",
         "published",
-        "retired",
-        "rejected"
+        "retired"
       ],
       "name": "qp_publication_status"
     },
@@ -22992,6 +24353,56 @@
       "volatility": "v"
     },
     {
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_calibration_artifact()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'calibration-artifact row is immutable; DELETE is not permitted'; END IF; IF (to_jsonb(NEW) - 'active') IS DISTINCT FROM (to_jsonb(OLD) - 'active') THEN RAISE EXCEPTION 'calibration-artifact immutable identity and payload cannot change'; END IF; RETURN NEW; END; $function$\n",
+      "identity_arguments": "",
+      "language": "plpgsql",
+      "name": "trigger_guard_calibration_artifact",
+      "owner": "$schema_owner",
+      "result": "trigger",
+      "security_definer": false,
+      "volatility": "v"
+    },
+    {
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_factor_value()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ DECLARE owning_kind public.qp_model_run_kind; owning_window_start timestamptz; owning_window_end timestamptz; BEGIN IF TG_OP <> 'INSERT' THEN RAISE EXCEPTION 'factor-value ledger is append-only (WORM); % is not permitted', TG_OP; END IF; NEW.created_at = statement_timestamp(); SELECT run_kind, window_start, window_end INTO owning_kind, owning_window_start, owning_window_end FROM public.quant_model_run WHERE model_run_id = NEW.model_run_id AND status = 'running'::public.qp_model_run_status FOR UPDATE; IF NOT FOUND THEN RAISE EXCEPTION 'factor values require an owning Running model run'; END IF; IF ( owning_kind IN ('live_inference'::public.qp_model_run_kind, 'shadow'::public.qp_model_run_kind) AND (owning_window_start <> owning_window_end OR NEW.decision_at <> owning_window_start) ) OR ( owning_kind NOT IN ('live_inference'::public.qp_model_run_kind, 'shadow'::public.qp_model_run_kind) AND NEW.decision_at NOT BETWEEN owning_window_start AND owning_window_end ) THEN RAISE EXCEPTION 'factor value does not match owning model-run decision window'; END IF; PERFORM 1 FROM public.quant_feature_vector WHERE feature_vector_id = NEW.feature_vector_id AND market_id = NEW.market_id AND decision_at = NEW.decision_at FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'factor value does not match feature-vector market/decision lineage'; END IF; IF EXISTS ( SELECT 1 FROM public.quant_factor_value WHERE model_run_id = NEW.model_run_id AND market_id = NEW.market_id AND decision_at = NEW.decision_at AND feature_vector_id <> NEW.feature_vector_id ) THEN RAISE EXCEPTION 'one factor plane cannot bind multiple feature vectors'; END IF; RETURN NEW; END; $function$\n",
+      "identity_arguments": "",
+      "language": "plpgsql",
+      "name": "trigger_guard_factor_value",
+      "owner": "$schema_owner",
+      "result": "trigger",
+      "security_definer": false,
+      "volatility": "v"
+    },
+    {
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_feedback_cycle()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'feedback-cycle row is immutable after terminalization; DELETE is not permitted'; END IF; IF (to_jsonb(NEW) - ARRAY['status', 'decision', 'terminal_reason_code', 'generation', 'lease_owner', 'lease_expires_at', 'cancel_requested_at', 'started_at', 'completed_at', 'updated_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'decision', 'terminal_reason_code', 'generation', 'lease_owner', 'lease_expires_at', 'cancel_requested_at', 'started_at', 'completed_at', 'updated_at']) THEN RAISE EXCEPTION 'feedback-cycle frozen identity cannot change'; END IF; IF OLD.status IN ('succeeded'::public.qp_feedback_cycle_status, 'failed'::public.qp_feedback_cycle_status, 'cancelled'::public.qp_feedback_cycle_status) OR NEW.generation <> OLD.generation + 1 OR NOT ((OLD.status = 'queued'::public.qp_feedback_cycle_status AND NEW.status IN ('running'::public.qp_feedback_cycle_status, 'cancelled'::public.qp_feedback_cycle_status)) OR (OLD.status = 'running'::public.qp_feedback_cycle_status AND NEW.status IN ('running'::public.qp_feedback_cycle_status, 'succeeded'::public.qp_feedback_cycle_status, 'failed'::public.qp_feedback_cycle_status, 'cancelled'::public.qp_feedback_cycle_status))) THEN RAISE EXCEPTION 'illegal feedback-cycle CAS transition from % generation % to % generation %', OLD.status, OLD.generation, NEW.status, NEW.generation; END IF; NEW.updated_at = statement_timestamp(); RETURN NEW; END; $function$\n",
+      "identity_arguments": "",
+      "language": "plpgsql",
+      "name": "trigger_guard_feedback_cycle",
+      "owner": "$schema_owner",
+      "result": "trigger",
+      "security_definer": false,
+      "volatility": "v"
+    },
+    {
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_model_run()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'model-run audit row is immutable; DELETE is not permitted'; END IF; IF OLD.status <> 'running'::public.qp_model_run_status OR NEW.status NOT IN ('succeeded'::public.qp_model_run_status, 'failed'::public.qp_model_run_status, 'cancelled'::public.qp_model_run_status) THEN RAISE EXCEPTION 'illegal model-run transition from % to %', OLD.status, NEW.status; END IF; IF (to_jsonb(NEW) - ARRAY['status', 'model_version_id', 'output_hash', 'error_code', 'error_message', 'finished_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'model_version_id', 'output_hash', 'error_code', 'error_message', 'finished_at']) THEN RAISE EXCEPTION 'model-run immutable lineage cannot change during finalization'; END IF; IF NEW.finished_at IS NULL OR NEW.finished_at < OLD.started_at OR EXISTS ( SELECT 1 FROM public.quant_factor_value WHERE model_run_id = NEW.model_run_id AND created_at > NEW.finished_at ) THEN RAISE EXCEPTION 'model-run finish precedes its lifecycle start or an owned factor value'; END IF; RETURN NEW; END; $function$\n",
+      "identity_arguments": "",
+      "language": "plpgsql",
+      "name": "trigger_guard_model_run",
+      "owner": "$schema_owner",
+      "result": "trigger",
+      "security_definer": false,
+      "volatility": "v"
+    },
+    {
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_model_version()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\nBEGIN\n    IF TG_OP = 'INSERT' THEN\n        IF NEW.publication_status <> 'candidate'::public.qp_publication_status\n           OR NEW.publish_path_set_id IS NOT NULL\n           OR NEW.quality_gate_report IS NOT NULL\n           OR NEW.published_at IS NOT NULL\n           OR NEW.retired_at IS NOT NULL\n        THEN\n            RAISE EXCEPTION 'model-version must be inserted as an ungated Candidate';\n        END IF;\n        RETURN NEW;\n    END IF;\n\n    IF TG_OP = 'DELETE' THEN\n        RAISE EXCEPTION 'model-version row is immutable; DELETE is not permitted';\n    END IF;\n\n    IF (to_jsonb(NEW) - ARRAY[\n        'publish_path_set_id', 'quality_gate_report', 'publication_status',\n        'published_at', 'retired_at'\n    ]) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY[\n        'publish_path_set_id', 'quality_gate_report', 'publication_status',\n        'published_at', 'retired_at'\n    ]) THEN\n        RAISE EXCEPTION 'model-version artifact, serving contract, and lineage are immutable';\n    END IF;\n\n    IF NEW.publication_status IS DISTINCT FROM OLD.publication_status\n       AND NOT (\n           (OLD.publication_status IN (\n               'candidate'::public.qp_publication_status,\n               'shadow'::public.qp_publication_status\n           ) AND NEW.publication_status IN (\n               'shadow'::public.qp_publication_status,\n               'published'::public.qp_publication_status\n           ))\n           OR (OLD.publication_status = 'published'::public.qp_publication_status\n               AND NEW.publication_status = 'retired'::public.qp_publication_status)\n           OR (OLD.publication_status = 'retired'::public.qp_publication_status\n               AND NEW.publication_status = 'published'::public.qp_publication_status)\n       )\n    THEN\n        RAISE EXCEPTION 'illegal model-version publication transition from % to %',\n            OLD.publication_status, NEW.publication_status;\n    END IF;\n\n    IF OLD.publication_status IN (\n           'published'::public.qp_publication_status,\n           'retired'::public.qp_publication_status\n       )\n       AND (\n           NEW.publish_path_set_id IS DISTINCT FROM OLD.publish_path_set_id\n           OR NEW.quality_gate_report IS DISTINCT FROM OLD.quality_gate_report\n       )\n    THEN\n        RAISE EXCEPTION 'published model-version gate evidence is immutable';\n    END IF;\n\n    IF NEW.publication_status = 'published'::public.qp_publication_status\n       AND OLD.publication_status <> 'published'::public.qp_publication_status\n    THEN\n        IF NOT pg_try_advisory_xact_lock(285626433) THEN\n            RAISE EXCEPTION 'model-version publication latch is busy';\n        END IF;\n        IF NEW.published_at IS NULL\n           OR NEW.retired_at IS NOT NULL\n           OR (\n               SELECT state\n               FROM public.quant_feature_parity_state\n               ORDER BY created_at DESC, state_id DESC\n               LIMIT 1\n           ) IS DISTINCT FROM 'clear'::public.qp_feature_parity_latch_state\n           OR NOT EXISTS (\n               SELECT 1\n               FROM public.quant_feature_parity_run AS run\n               INNER JOIN public.quant_feature_parity_subject AS subject\n                   ON subject.run_id = run.run_id\n               WHERE run.kind = 'full'::public.qp_feature_parity_run_kind\n                 AND run.status = 'passed'::public.qp_feature_parity_run_status\n                 AND run.report_id IS NULL\n                 AND run.model_version_id = NEW.model_version_id\n                 AND run.training_dataset_id = NEW.training_dataset_id\n                 AND run.total_count > 0\n                 AND run.compared_count = run.total_count\n                 AND run.matched_count = run.total_count\n                 AND run.mismatched_count = 0\n                 AND run.pending_materialization_count = 0\n                 AND run.feature_contract_hash =\n                     NEW.serving_contract #>> '{bindings,schemas,feature_schema_hash}'\n                 AND run.transform_hash =\n                     NEW.serving_contract #>> '{bindings,transform,input_transform_hash}'\n                 AND run.finished_at >= NEW.created_at\n                 AND subject.subject_kind =\n                     'model_version'::public.qp_parity_subject_kind\n                 AND subject.model_version_id = NEW.model_version_id\n                 AND subject.training_dataset_id = NEW.training_dataset_id\n                 AND subject.subject_generation = NEW.artifact_hash\n           )\n        THEN\n            RAISE EXCEPTION 'model-version publication requires an exact passed full parity proof and clear latch';\n        END IF;\n    ELSIF NEW.publication_status = 'retired'::public.qp_publication_status THEN\n        IF NEW.published_at IS NULL\n           OR NEW.retired_at IS NULL\n           OR NEW.retired_at < NEW.published_at\n        THEN\n            RAISE EXCEPTION 'retired model-version requires ordered publication timestamps';\n        END IF;\n    ELSIF NEW.publication_status IN (\n        'candidate'::public.qp_publication_status,\n        'shadow'::public.qp_publication_status\n    ) AND (NEW.published_at IS NOT NULL OR NEW.retired_at IS NOT NULL) THEN\n        RAISE EXCEPTION 'unpublished model-version cannot carry publication timestamps';\n    END IF;\n\n    IF NEW.publication_status = OLD.publication_status\n       AND (\n           NEW.published_at IS DISTINCT FROM OLD.published_at\n           OR NEW.retired_at IS DISTINCT FROM OLD.retired_at\n       )\n    THEN\n        RAISE EXCEPTION 'model-version lifecycle timestamps require a status transition';\n    END IF;\n\n    RETURN NEW;\nEND;\n$function$\n",
+      "identity_arguments": "",
+      "language": "plpgsql",
+      "name": "trigger_guard_model_version",
+      "owner": "$schema_owner",
+      "result": "trigger",
+      "security_definer": false,
+      "volatility": "v"
+    },
+    {
       "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_source_slice()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'source-slice ledger is immutable; DELETE is not permitted'; END IF; IF (to_jsonb(NEW) - ARRAY['status', 'manifest_uri', 'manifest_hash', 'manifest', 'failure_detail', 'completed_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'manifest_uri', 'manifest_hash', 'manifest', 'failure_detail', 'completed_at']) THEN RAISE EXCEPTION 'source-slice identity is immutable'; END IF; IF OLD.status <> 'materializing'::public.qp_source_slice_status OR NEW.status NOT IN ('ready'::public.qp_source_slice_status, 'failed'::public.qp_source_slice_status) THEN RAISE EXCEPTION 'illegal source-slice transition from % to %', OLD.status, NEW.status; END IF; RETURN NEW; END; $function$\n",
       "identity_arguments": "",
       "language": "plpgsql",
@@ -23002,7 +24413,7 @@
       "volatility": "v"
     },
     {
-      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_training_dataset()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'training-dataset ledger is immutable; DELETE is not permitted'; END IF; IF (to_jsonb(NEW) - ARRAY['status', 'feature_schema_hash', 'factor_schema_hash', 'label_schema_hash', 'dataset_hash', 'manifest_hash', 'manifest', 'artifact_bytes_hash', 'parquet_uri', 'sample_count', 'coverage', 'failure_detail', 'completed_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'feature_schema_hash', 'factor_schema_hash', 'label_schema_hash', 'dataset_hash', 'manifest_hash', 'manifest', 'artifact_bytes_hash', 'parquet_uri', 'sample_count', 'coverage', 'failure_detail', 'completed_at']) THEN RAISE EXCEPTION 'training-dataset plan identity is immutable'; END IF; IF OLD.status = 'planned'::public.qp_training_dataset_status AND NEW.status = 'building'::public.qp_training_dataset_status THEN IF (to_jsonb(NEW) - 'status') IS DISTINCT FROM (to_jsonb(OLD) - 'status') THEN RAISE EXCEPTION 'planned-to-building may only change status'; END IF; ELSIF OLD.status = 'planned'::public.qp_training_dataset_status AND NEW.status = 'failed'::public.qp_training_dataset_status THEN IF (to_jsonb(NEW) - ARRAY['status', 'failure_detail', 'completed_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'failure_detail', 'completed_at']) THEN RAISE EXCEPTION 'planned-to-failed may only add terminal diagnostics'; END IF; ELSIF OLD.status = 'building'::public.qp_training_dataset_status AND NEW.status IN ('ready'::public.qp_training_dataset_status, 'insufficient_labels'::public.qp_training_dataset_status, 'failed'::public.qp_training_dataset_status) THEN NULL; ELSIF OLD.status = 'ready'::public.qp_training_dataset_status AND NEW.status = 'expired'::public.qp_training_dataset_status THEN IF (to_jsonb(NEW) - 'status') IS DISTINCT FROM (to_jsonb(OLD) - 'status') THEN RAISE EXCEPTION 'ready-to-expired may only change status'; END IF; ELSE RAISE EXCEPTION 'illegal training-dataset transition from % to %', OLD.status, NEW.status; END IF; RETURN NEW; END; $function$\n",
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_training_dataset()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'training-dataset ledger is immutable; DELETE is not permitted'; END IF; IF (to_jsonb(NEW) - ARRAY['status', 'label_schema_hash', 'dataset_hash', 'manifest_hash', 'manifest', 'artifact_bytes_hash', 'parquet_uri', 'sample_count', 'coverage', 'failure_detail', 'completed_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'label_schema_hash', 'dataset_hash', 'manifest_hash', 'manifest', 'artifact_bytes_hash', 'parquet_uri', 'sample_count', 'coverage', 'failure_detail', 'completed_at']) THEN RAISE EXCEPTION 'training-dataset plan identity is immutable'; END IF; IF OLD.status = 'planned'::public.qp_training_dataset_status AND NEW.status = 'building'::public.qp_training_dataset_status THEN IF (to_jsonb(NEW) - 'status') IS DISTINCT FROM (to_jsonb(OLD) - 'status') THEN RAISE EXCEPTION 'planned-to-building may only change status'; END IF; ELSIF OLD.status = 'planned'::public.qp_training_dataset_status AND NEW.status = 'failed'::public.qp_training_dataset_status THEN IF (to_jsonb(NEW) - ARRAY['status', 'failure_detail', 'completed_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'failure_detail', 'completed_at']) THEN RAISE EXCEPTION 'planned-to-failed may only add terminal diagnostics'; END IF; ELSIF OLD.status = 'building'::public.qp_training_dataset_status AND NEW.status IN ('ready'::public.qp_training_dataset_status, 'insufficient_labels'::public.qp_training_dataset_status, 'failed'::public.qp_training_dataset_status) THEN NULL; ELSIF OLD.status = 'ready'::public.qp_training_dataset_status AND NEW.status = 'expired'::public.qp_training_dataset_status THEN IF (to_jsonb(NEW) - 'status') IS DISTINCT FROM (to_jsonb(OLD) - 'status') THEN RAISE EXCEPTION 'ready-to-expired may only change status'; END IF; ELSE RAISE EXCEPTION 'illegal training-dataset transition from % to %', OLD.status, NEW.status; END IF; RETURN NEW; END; $function$\n",
       "identity_arguments": "",
       "language": "plpgsql",
       "name": "trigger_guard_training_dataset",
@@ -23020,6 +24431,46 @@
       "result": "trigger",
       "security_definer": false,
       "volatility": "v"
+    },
+    {
+      "definition": "CREATE OR REPLACE FUNCTION public.validate_content_hash_array(document jsonb)\n RETURNS boolean\n LANGUAGE plpgsql\n IMMUTABLE STRICT\nAS $function$\nDECLARE\n    item jsonb;\n    current_hash text;\n    previous_hash text := NULL;\nBEGIN\n    IF jsonb_typeof(document) <> 'array' THEN\n        RETURN FALSE;\n    END IF;\n    FOR item IN SELECT value FROM jsonb_array_elements(document)\n    LOOP\n        IF jsonb_typeof(item) <> 'string' THEN\n            RETURN FALSE;\n        END IF;\n        current_hash := item #>> '{}';\n        IF current_hash !~ '^blake3:[0-9a-f]{64}$'\n           OR previous_hash IS NOT NULL\n              AND previous_hash COLLATE \"C\" >= current_hash COLLATE \"C\"\n        THEN\n            RETURN FALSE;\n        END IF;\n        previous_hash := current_hash;\n    END LOOP;\n    RETURN TRUE;\nEXCEPTION WHEN OTHERS THEN\n    RETURN FALSE;\nEND;\n$function$\n",
+      "identity_arguments": "document jsonb",
+      "language": "plpgsql",
+      "name": "validate_content_hash_array",
+      "owner": "$schema_owner",
+      "result": "boolean",
+      "security_definer": false,
+      "volatility": "i"
+    },
+    {
+      "definition": "CREATE OR REPLACE FUNCTION public.validate_factor_definition_document(document jsonb)\n RETURNS boolean\n LANGUAGE plpgsql\n IMMUTABLE STRICT\nAS $function$\nDECLARE\n    item jsonb;\n    item_name text;\n    previous_name text := NULL;\n    semantic_key text;\nBEGIN\n    IF jsonb_typeof(document) <> 'object'\n       OR NOT document ?& ARRAY[\n           'name', 'family', 'input_features', 'output',\n           'normalization', 'owner', 'required', 'computation'\n       ]\n       OR (document - ARRAY[\n           'name', 'family', 'input_features', 'output',\n           'normalization', 'owner', 'required', 'computation'\n       ]) <> '{}'::jsonb\n       OR jsonb_typeof(document->'name') <> 'string'\n       OR octet_length(document->>'name') NOT BETWEEN 1 AND 256\n       OR (document->>'name') !~ '^[a-z][a-z0-9]*([._][a-z0-9]+)*$'\n       OR jsonb_typeof(document->'family') <> 'string'\n       OR (document->>'family') <> ALL (ARRAY[\n           'liquidity', 'microstructure', 'momentum', 'mean_reversion',\n           'volatility', 'activity', 'resolution', 'data_quality', 'structural',\n           'domain_crypto', 'domain_weather'\n       ])\n       OR jsonb_typeof(document->'input_features') <> 'array'\n       OR jsonb_typeof(document->'output') <> 'object'\n       OR jsonb_typeof(document#>'{output,output_kind}') <> 'string'\n       OR (document#>>'{output,output_kind}')\n          <> ALL (ARRAY['outcome_alpha', 'context', 'diagnostic'])\n       OR (\n           document#>>'{output,output_kind}' = 'outcome_alpha'\n           AND (\n               NOT (document->'output') ?& ARRAY['output_kind', 'orientation']\n               OR ((document->'output') - ARRAY['output_kind', 'orientation']) <> '{}'::jsonb\n               OR jsonb_typeof(document#>'{output,orientation}') <> 'string'\n               OR (document#>>'{output,orientation}')\n                  <> ALL (ARRAY['feature_token', 'canonical_yes'])\n           )\n       )\n       OR (\n           document#>>'{output,output_kind}' = 'context'\n           AND (\n               NOT (document->'output') ?& ARRAY['output_kind', 'effect']\n               OR ((document->'output') - ARRAY['output_kind', 'effect']) <> '{}'::jsonb\n               OR jsonb_typeof(document#>'{output,effect}') <> 'string'\n               OR (document#>>'{output,effect}')\n                  <> ALL (ARRAY['higher_is_supportive', 'lower_is_supportive'])\n           )\n       )\n       OR (\n           document#>>'{output,output_kind}' = 'diagnostic'\n           AND (\n               NOT (document->'output') ? 'output_kind'\n               OR ((document->'output') - 'output_kind') <> '{}'::jsonb\n           )\n       )\n       OR jsonb_typeof(document->'normalization') <> 'string'\n       OR (document->>'normalization') <> ALL (ARRAY['winsorized_zscore', 'rank', 'min_max'])\n       OR jsonb_typeof(document->'owner') <> 'string'\n       OR octet_length(document->>'owner') NOT BETWEEN 1 AND 256\n       OR (document->>'owner') <> btrim(document->>'owner')\n       OR (document->>'owner') ~ '^[[:space:]]|[[:space:]]$'\n       OR jsonb_typeof(document->'required') <> 'boolean'\n       OR jsonb_typeof(document->'computation') <> 'object'\n       OR NOT (document->'computation') ?& ARRAY['semantic_version', 'semantic_key']\n       OR ((document->'computation') - ARRAY['semantic_version', 'semantic_key']) <> '{}'::jsonb\n       OR jsonb_typeof(document#>'{computation,semantic_version}') <> 'number'\n       OR (document#>>'{computation,semantic_version}') !~ '^[1-9][0-9]*$'\n       OR (document#>>'{computation,semantic_version}')::numeric > 4294967295::numeric\n       OR jsonb_typeof(document#>'{computation,semantic_key}') <> 'string'\n    THEN\n        RETURN FALSE;\n    END IF;\n\n    semantic_key := document#>>'{computation,semantic_key}';\n    IF octet_length(semantic_key) NOT BETWEEN 1 AND 4096\n       OR semantic_key <> btrim(semantic_key)\n       OR semantic_key !~ '^[!-~]+$'\n       OR position(chr(34) IN semantic_key) > 0\n       OR position(chr(92) IN semantic_key) > 0\n    THEN\n        RETURN FALSE;\n    END IF;\n\n    FOR item IN SELECT value FROM jsonb_array_elements(document->'input_features')\n    LOOP\n        IF jsonb_typeof(item) <> 'string' THEN\n            RETURN FALSE;\n        END IF;\n        item_name := item #>> '{}';\n        IF octet_length(item_name) NOT BETWEEN 1 AND 256\n           OR item_name !~ '^[a-z][a-z0-9]*([._][a-z0-9]+)*$'\n           OR previous_name IS NOT NULL\n              AND previous_name COLLATE \"C\" >= item_name COLLATE \"C\"\n        THEN\n            RETURN FALSE;\n        END IF;\n        previous_name := item_name;\n    END LOOP;\n\n    RETURN TRUE;\nEXCEPTION WHEN OTHERS THEN\n    RETURN FALSE;\nEND;\n$function$\n",
+      "identity_arguments": "document jsonb",
+      "language": "plpgsql",
+      "name": "validate_factor_definition_document",
+      "owner": "$schema_owner",
+      "result": "boolean",
+      "security_definer": false,
+      "volatility": "i"
+    },
+    {
+      "definition": "CREATE OR REPLACE FUNCTION public.validate_factor_explanation(document jsonb)\n RETURNS boolean\n LANGUAGE plpgsql\n IMMUTABLE STRICT\nAS $function$\nDECLARE\n    item jsonb;\n    feature_name text;\n    previous_name text := NULL;\n    contribution_text text;\n    contribution_value numeric;\nBEGIN\n    IF jsonb_typeof(document) <> 'object'\n       OR NOT document ?& ARRAY['headline', 'drivers']\n       OR (document - ARRAY['headline', 'drivers']) <> '{}'::jsonb\n       OR jsonb_typeof(document->'headline') <> 'string'\n       OR octet_length(document->>'headline') NOT BETWEEN 1 AND 4096\n       OR (document->>'headline') !~ '[^[:space:]]'\n       OR jsonb_typeof(document->'drivers') <> 'array'\n    THEN\n        RETURN FALSE;\n    END IF;\n\n    FOR item IN SELECT value FROM jsonb_array_elements(document->'drivers')\n    LOOP\n        IF jsonb_typeof(item) <> 'object'\n           OR NOT item ?& ARRAY['feature_name', 'contribution']\n           OR (item - ARRAY['feature_name', 'contribution']) <> '{}'::jsonb\n           OR jsonb_typeof(item->'feature_name') <> 'string'\n           OR octet_length(item->>'feature_name') NOT BETWEEN 1 AND 256\n           OR (item->>'feature_name') !~ '^[a-z][a-z0-9]*([._][a-z0-9]+)*$'\n           OR jsonb_typeof(item->'contribution') <> 'string'\n        THEN\n            RETURN FALSE;\n        END IF;\n        feature_name := item->>'feature_name';\n        contribution_text := item->>'contribution';\n        IF previous_name IS NOT NULL\n           AND previous_name COLLATE \"C\" >= feature_name COLLATE \"C\"\n           OR octet_length(contribution_text) NOT BETWEEN 1 AND 128\n           OR contribution_text !~ '^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$'\n        THEN\n            RETURN FALSE;\n        END IF;\n        contribution_value := contribution_text::numeric;\n        IF scale(contribution_value) > 28\n           OR abs(contribution_value)\n              * power(10::numeric, scale(contribution_value))\n              > 79228162514264337593543950335::numeric\n        THEN\n            RETURN FALSE;\n        END IF;\n        previous_name := feature_name;\n    END LOOP;\n    RETURN TRUE;\nEXCEPTION WHEN OTHERS THEN\n    RETURN FALSE;\nEND;\n$function$\n",
+      "identity_arguments": "document jsonb",
+      "language": "plpgsql",
+      "name": "validate_factor_explanation",
+      "owner": "$schema_owner",
+      "result": "boolean",
+      "security_definer": false,
+      "volatility": "i"
+    },
+    {
+      "definition": "CREATE OR REPLACE FUNCTION public.validate_factor_serving_plane(plane jsonb, feature_hash text, feature_version integer, model_family_name text)\n RETURNS boolean\n LANGUAGE plpgsql\n IMMUTABLE STRICT\nAS $function$\nDECLARE\n    item jsonb;\n    definition jsonb;\n    definition_name text;\n    definition_id text;\n    definition_hash text;\n    previous_name text := NULL;\n    seen_ids text[] := ARRAY[]::text[];\n    seen_hashes text[] := ARRAY[]::text[];\n    definition_count integer;\nBEGIN\n    IF jsonb_typeof(plane) <> 'object'\n       OR NOT plane ?& ARRAY['format_version', 'factor_schema_hash', 'definitions']\n       OR (plane - ARRAY['format_version', 'factor_schema_hash', 'definitions']) <> '{}'::jsonb\n       OR jsonb_typeof(plane->'format_version') <> 'number'\n       OR plane->>'format_version' <> '2'\n       OR jsonb_typeof(plane->'factor_schema_hash') <> 'string'\n       OR (plane->>'factor_schema_hash') !~ '^blake3:[0-9a-f]{64}$'\n       OR jsonb_typeof(plane->'definitions') <> 'array'\n       OR feature_hash !~ '^blake3:[0-9a-f]{64}$'\n       OR feature_version < 1\n    THEN\n        RETURN FALSE;\n    END IF;\n\n    definition_count := jsonb_array_length(plane->'definitions');\n    IF model_family_name = ANY (ARRAY[\n           'classical_random_forest', 'classical_extra_trees',\n           'classical_logistic_regression', 'classical_ridge',\n           'classical_lasso', 'classical_elastic_net'\n       ])\n    THEN\n        IF definition_count <> 0 THEN\n            RETURN FALSE;\n        END IF;\n    ELSIF model_family_name = ANY (ARRAY['weighted_factor', 'hold_vs_exit_weighted']) THEN\n        IF definition_count = 0 THEN\n            RETURN FALSE;\n        END IF;\n    ELSE\n        RETURN FALSE;\n    END IF;\n\n    FOR item IN SELECT value FROM jsonb_array_elements(plane->'definitions')\n    LOOP\n        IF jsonb_typeof(item) <> 'object'\n           OR NOT item ?& ARRAY[\n               'revision_version', 'factor_definition_id', 'definition_hash',\n               'feature_contract_hash', 'input_schema_version',\n               'output_schema_version', 'definition'\n           ]\n           OR (item - ARRAY[\n               'revision_version', 'factor_definition_id', 'definition_hash',\n               'feature_contract_hash', 'input_schema_version',\n               'output_schema_version', 'definition'\n           ]) <> '{}'::jsonb\n           OR jsonb_typeof(item->'revision_version') <> 'number'\n           OR item->>'revision_version' <> '2'\n           OR jsonb_typeof(item->'factor_definition_id') <> 'string'\n           OR (item->>'factor_definition_id') !~\n              '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'\n           OR jsonb_typeof(item->'definition_hash') <> 'string'\n           OR (item->>'definition_hash') !~ '^blake3:[0-9a-f]{64}$'\n           OR jsonb_typeof(item->'feature_contract_hash') <> 'string'\n           OR item->>'feature_contract_hash' <> feature_hash\n           OR jsonb_typeof(item->'input_schema_version') <> 'number'\n           OR item->>'input_schema_version' !~ '^[1-9][0-9]*$'\n           OR (item->>'input_schema_version')::integer <> feature_version\n           OR jsonb_typeof(item->'output_schema_version') <> 'number'\n           OR item->>'output_schema_version' !~ '^[1-9][0-9]*$'\n           OR (item->>'output_schema_version')::numeric > 2147483647::numeric\n           OR NOT public.validate_factor_definition_document(item->'definition')\n        THEN\n            RETURN FALSE;\n        END IF;\n\n        definition := item->'definition';\n        definition_name := definition->>'name';\n        definition_id := item->>'factor_definition_id';\n        definition_hash := item->>'definition_hash';\n        IF previous_name IS NOT NULL\n           AND previous_name COLLATE \"C\" >= definition_name COLLATE \"C\"\n           OR definition_id = ANY (seen_ids)\n           OR definition_hash = ANY (seen_hashes)\n        THEN\n            RETURN FALSE;\n        END IF;\n        previous_name := definition_name;\n        seen_ids := array_append(seen_ids, definition_id);\n        seen_hashes := array_append(seen_hashes, definition_hash);\n    END LOOP;\n    RETURN TRUE;\nEXCEPTION WHEN OTHERS THEN\n    RETURN FALSE;\nEND;\n$function$\n",
+      "identity_arguments": "plane jsonb, feature_hash text, feature_version integer, model_family_name text",
+      "language": "plpgsql",
+      "name": "validate_factor_serving_plane",
+      "owner": "$schema_owner",
+      "result": "boolean",
+      "security_definer": false,
+      "volatility": "i"
     }
   ],
   "grants": [
@@ -23028,6 +24479,41 @@
       "grantee": "$schema_owner",
       "object_kind": "function",
       "object_name": "trigger_deny_write()",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "trigger_guard_calibration_artifact()",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "trigger_guard_factor_value()",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "trigger_guard_feedback_cycle()",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "trigger_guard_model_run()",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "trigger_guard_model_version()",
       "privilege": "EXECUTE"
     },
     {
@@ -23049,6 +24535,34 @@
       "grantee": "$schema_owner",
       "object_kind": "function",
       "object_name": "trigger_set_updated_at()",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "validate_content_hash_array(document jsonb)",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "validate_factor_definition_document(document jsonb)",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "validate_factor_explanation(document jsonb)",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "validate_factor_serving_plane(plane jsonb, feature_hash text, f",
       "privilege": "EXECUTE"
     },
     {
@@ -24602,6 +26116,55 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_drift_report",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
       "object_name": "quant_entry_condition_artifact",
       "privilege": "DELETE"
     },
@@ -25380,6 +26943,153 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_feature_vector",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_cycle",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_cycle",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_cycle",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_cycle",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_cycle",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_cycle",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_cycle",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_evaluation_use",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_evaluation_use",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_evaluation_use",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_evaluation_use",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_evaluation_use",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_evaluation_use",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_evaluation_use",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_stage_event",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_stage_event",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_stage_event",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_stage_event",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_stage_event",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_stage_event",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_stage_event",
       "privilege": "UPDATE"
     },
     {
@@ -28163,16 +29873,6 @@
       "valid": true
     },
     {
-      "definition": "CREATE UNIQUE INDEX decision_policy_snapshot_bundle_generation_key ON public.decision_policy_snapshot USING btree (bundle_generation)",
-      "method": "btree",
-      "name": "decision_policy_snapshot_bundle_generation_key",
-      "primary": false,
-      "ready": true,
-      "table": "decision_policy_snapshot",
-      "unique": true,
-      "valid": true
-    },
-    {
       "definition": "CREATE UNIQUE INDEX decision_policy_snapshot_pkey ON public.decision_policy_snapshot USING btree (decision_policy_snapshot_id)",
       "method": "btree",
       "name": "decision_policy_snapshot_pkey",
@@ -28873,6 +30573,36 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_drift_report_latest ON public.quant_drift_report USING btree (kind, observed_at DESC, drift_report_id DESC)",
+      "method": "btree",
+      "name": "idx_quant_drift_report_latest",
+      "primary": false,
+      "ready": true,
+      "table": "quant_drift_report",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_drift_report_pkey ON public.quant_drift_report USING btree (drift_report_id)",
+      "method": "btree",
+      "name": "quant_drift_report_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_drift_report",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_drift_report_cycle_metric ON public.quant_drift_report USING btree (feedback_cycle_id, metric)",
+      "method": "btree",
+      "name": "uq_quant_drift_report_cycle_metric",
+      "primary": false,
+      "ready": true,
+      "table": "quant_drift_report",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE UNIQUE INDEX quant_entry_condition_artifact_pkey ON public.quant_entry_condition_artifact USING btree (artifact_id)",
       "method": "btree",
       "name": "quant_entry_condition_artifact_pkey",
@@ -29153,9 +30883,9 @@
       "valid": true
     },
     {
-      "definition": "CREATE INDEX idx_quant_factor_definition_family_status ON public.quant_factor_definition USING btree (factor_family, status)",
+      "definition": "CREATE INDEX idx_quant_factor_definition_family ON public.quant_factor_definition USING btree (factor_family)",
       "method": "btree",
-      "name": "idx_quant_factor_definition_family_status",
+      "name": "idx_quant_factor_definition_family",
       "primary": false,
       "ready": true,
       "table": "quant_factor_definition",
@@ -29186,16 +30916,6 @@
       "definition": "CREATE UNIQUE INDEX uq_quant_factor_definition_definition_hash ON public.quant_factor_definition USING btree (definition_hash)",
       "method": "btree",
       "name": "uq_quant_factor_definition_definition_hash",
-      "primary": false,
-      "ready": true,
-      "table": "quant_factor_definition",
-      "unique": true,
-      "valid": true
-    },
-    {
-      "definition": "CREATE UNIQUE INDEX uq_quant_factor_definition_published_name ON public.quant_factor_definition USING btree (name) WHERE (status = 'published'::qp_publication_status)",
-      "method": "btree",
-      "name": "uq_quant_factor_definition_published_name",
       "primary": false,
       "ready": true,
       "table": "quant_factor_definition",
@@ -29237,6 +30957,16 @@
       "method": "btree",
       "name": "quant_factor_value_pkey",
       "primary": true,
+      "ready": true,
+      "table": "quant_factor_value",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_factor_value_run_vector_definition ON public.quant_factor_value USING btree (model_run_id, feature_vector_id, factor_definition_id)",
+      "method": "btree",
+      "name": "uq_quant_factor_value_run_vector_definition",
+      "primary": false,
       "ready": true,
       "table": "quant_factor_value",
       "unique": true,
@@ -29429,6 +31159,156 @@
       "primary": true,
       "ready": true,
       "table": "quant_feature_vector",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_feedback_cycle_claim ON public.quant_feedback_cycle USING btree (status, lease_expires_at, created_at) WHERE (status = ANY (ARRAY['queued'::qp_feedback_cycle_status, 'running'::qp_feedback_cycle_status]))",
+      "method": "btree",
+      "name": "idx_quant_feedback_cycle_claim",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_cycle",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_feedback_cycle_profile_status ON public.quant_feedback_cycle USING btree (research_profile_artifact_id, status, label_cutoff DESC, feedback_cycle_id DESC)",
+      "method": "btree",
+      "name": "idx_quant_feedback_cycle_profile_status",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_cycle",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_feedback_cycle_pkey ON public.quant_feedback_cycle USING btree (feedback_cycle_id)",
+      "method": "btree",
+      "name": "quant_feedback_cycle_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_feedback_cycle",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_feedback_cycle_cutoff ON public.quant_feedback_cycle USING btree (feedback_cycle_id, label_cutoff)",
+      "method": "btree",
+      "name": "uq_quant_feedback_cycle_cutoff",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_cycle",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_feedback_cycle_evaluation_lineage ON public.quant_feedback_cycle USING btree (feedback_cycle_id, research_profile_artifact_id, label_cutoff, champion_model_version_id, champion_serving_contract_hash, candidate_family_hash)",
+      "method": "btree",
+      "name": "uq_quant_feedback_cycle_evaluation_lineage",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_cycle",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_feedback_cycle_idempotency ON public.quant_feedback_cycle USING btree (idempotency_hash)",
+      "method": "btree",
+      "name": "uq_quant_feedback_cycle_idempotency",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_cycle",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_feedback_evaluation_cycle ON public.quant_feedback_evaluation_use USING btree (feedback_cycle_id, used_at DESC)",
+      "method": "btree",
+      "name": "idx_quant_feedback_evaluation_cycle",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_evaluation_use",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_feedback_evaluation_use_pkey ON public.quant_feedback_evaluation_use USING btree (feedback_evaluation_use_id)",
+      "method": "btree",
+      "name": "quant_feedback_evaluation_use_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_feedback_evaluation_use",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_feedback_evaluation_dataset ON public.quant_feedback_evaluation_use USING btree (evaluation_dataset_id)",
+      "method": "btree",
+      "name": "uq_quant_feedback_evaluation_dataset",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_evaluation_use",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_feedback_evaluation_semantics ON public.quant_feedback_evaluation_use USING btree (evaluation_dataset_hash, evaluation_artifact_bytes_hash, cohort_manifest_hash)",
+      "method": "btree",
+      "name": "uq_quant_feedback_evaluation_semantics",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_evaluation_use",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_feedback_evaluation_use_hash ON public.quant_feedback_evaluation_use USING btree (semantic_use_hash)",
+      "method": "btree",
+      "name": "uq_quant_feedback_evaluation_use_hash",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_evaluation_use",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_feedback_stage_job ON public.quant_feedback_stage_event USING btree (research_job_id) WHERE (research_job_id IS NOT NULL)",
+      "method": "btree",
+      "name": "idx_quant_feedback_stage_job",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_stage_event",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_feedback_stage_timeline ON public.quant_feedback_stage_event USING btree (feedback_cycle_id, occurred_at, feedback_stage_event_id)",
+      "method": "btree",
+      "name": "idx_quant_feedback_stage_timeline",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_stage_event",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_feedback_stage_event_pkey ON public.quant_feedback_stage_event USING btree (feedback_stage_event_id)",
+      "method": "btree",
+      "name": "quant_feedback_stage_event_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_feedback_stage_event",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_feedback_stage_sequence ON public.quant_feedback_stage_event USING btree (feedback_cycle_id, event_sequence)",
+      "method": "btree",
+      "name": "uq_quant_feedback_stage_sequence",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_stage_event",
       "unique": true,
       "valid": true
     },
@@ -30863,6 +32743,16 @@
       "valid": true
     },
     {
+      "definition": "CREATE UNIQUE INDEX uq_quant_training_dataset_evaluation_identity ON public.quant_training_dataset USING btree (training_dataset_id, purpose, dataset_hash, artifact_bytes_hash)",
+      "method": "btree",
+      "name": "uq_quant_training_dataset_evaluation_identity",
+      "primary": false,
+      "ready": true,
+      "table": "quant_training_dataset",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE UNIQUE INDEX uq_quant_training_dataset_hash ON public.quant_training_dataset USING btree (dataset_hash)",
       "method": "btree",
       "name": "uq_quant_training_dataset_hash",
@@ -31317,6 +33207,13 @@
     },
     {
       "kind": "r",
+      "name": "quant_drift_report",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "quant_entry_condition_artifact",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -31423,6 +33320,27 @@
     {
       "kind": "r",
       "name": "quant_feature_vector",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_feedback_cycle",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_feedback_evaluation_use",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_feedback_stage_event",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -31890,10 +33808,22 @@
       "table": "policy_profile_artifact"
     },
     {
+      "definition": "CREATE TRIGGER trg_quant_backtest_path_set_append_only BEFORE DELETE OR UPDATE ON public.quant_backtest_path_set FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_backtest_path_set_append_only",
+      "table": "quant_backtest_path_set"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_backtest_report_append_only BEFORE DELETE OR UPDATE ON public.quant_backtest_report FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_quant_backtest_report_append_only",
       "table": "quant_backtest_report"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_calibration_artifact_lifecycle_guard BEFORE DELETE OR UPDATE ON public.quant_calibration_artifact FOR EACH ROW EXECUTE FUNCTION trigger_guard_calibration_artifact()",
+      "enabled": "O",
+      "name": "trg_quant_calibration_artifact_lifecycle_guard",
+      "table": "quant_calibration_artifact"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_calibration_artifact_publication_append_only BEFORE DELETE OR UPDATE ON public.quant_calibration_artifact_publication FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
@@ -31930,6 +33860,12 @@
       "enabled": "O",
       "name": "trg_quant_domain_source_expectation_updated_at",
       "table": "quant_domain_source_expectation"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_drift_report_append_only BEFORE DELETE OR UPDATE ON public.quant_drift_report FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_drift_report_append_only",
+      "table": "quant_drift_report"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_entry_condition_artifact_append_only BEFORE DELETE OR UPDATE ON public.quant_entry_condition_artifact FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
@@ -31974,10 +33910,16 @@
       "table": "quant_execution_transaction_ref"
     },
     {
-      "definition": "CREATE TRIGGER trg_quant_factor_definition_updated_at BEFORE UPDATE ON public.quant_factor_definition FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
+      "definition": "CREATE TRIGGER trg_quant_factor_definition_append_only BEFORE DELETE OR UPDATE ON public.quant_factor_definition FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
-      "name": "trg_quant_factor_definition_updated_at",
+      "name": "trg_quant_factor_definition_append_only",
       "table": "quant_factor_definition"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_factor_value_append_only BEFORE INSERT OR DELETE OR UPDATE ON public.quant_factor_value FOR EACH ROW EXECUTE FUNCTION trigger_guard_factor_value()",
+      "enabled": "O",
+      "name": "trg_quant_factor_value_append_only",
+      "table": "quant_factor_value"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_feature_parity_candidate_append_only BEFORE DELETE OR UPDATE ON public.quant_feature_parity_candidate FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
@@ -32004,16 +33946,58 @@
       "table": "quant_feature_parity_subject"
     },
     {
+      "definition": "CREATE TRIGGER trg_quant_feature_vector_append_only BEFORE DELETE OR UPDATE ON public.quant_feature_vector FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_feature_vector_append_only",
+      "table": "quant_feature_vector"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_feedback_cycle_lifecycle_guard BEFORE DELETE OR UPDATE ON public.quant_feedback_cycle FOR EACH ROW EXECUTE FUNCTION trigger_guard_feedback_cycle()",
+      "enabled": "O",
+      "name": "trg_quant_feedback_cycle_lifecycle_guard",
+      "table": "quant_feedback_cycle"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_feedback_evaluation_use_append_only BEFORE DELETE OR UPDATE ON public.quant_feedback_evaluation_use FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_feedback_evaluation_use_append_only",
+      "table": "quant_feedback_evaluation_use"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_feedback_stage_event_append_only BEFORE DELETE OR UPDATE ON public.quant_feedback_stage_event FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_feedback_stage_event_append_only",
+      "table": "quant_feedback_stage_event"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_model_comparison_report_append_only BEFORE DELETE OR UPDATE ON public.quant_model_comparison_report FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
+      "enabled": "O",
+      "name": "trg_quant_model_comparison_report_append_only",
+      "table": "quant_model_comparison_report"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_model_governance_audit_append_only BEFORE DELETE OR UPDATE ON public.quant_model_governance_audit FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_quant_model_governance_audit_append_only",
       "table": "quant_model_governance_audit"
     },
     {
+      "definition": "CREATE TRIGGER trg_quant_model_run_lifecycle_guard BEFORE DELETE OR UPDATE ON public.quant_model_run FOR EACH ROW EXECUTE FUNCTION trigger_guard_model_run()",
+      "enabled": "O",
+      "name": "trg_quant_model_run_lifecycle_guard",
+      "table": "quant_model_run"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_model_spec_append_only BEFORE DELETE OR UPDATE ON public.quant_model_spec FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_quant_model_spec_append_only",
       "table": "quant_model_spec"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_model_version_lifecycle_guard BEFORE INSERT OR DELETE OR UPDATE ON public.quant_model_version FOR EACH ROW EXECUTE FUNCTION trigger_guard_model_version()",
+      "enabled": "O",
+      "name": "trg_quant_model_version_lifecycle_guard",
+      "table": "quant_model_version"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_order_intent_updated_at BEFORE UPDATE ON public.quant_order_intent FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",

@@ -4,35 +4,35 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use quant_pivot_compute::ComputeExecutor;
-use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
         api::{TrainModelRequest, TrainedModelView},
+        governance::DecisionPolicySnapshotInfo,
         ports::ModelTrainingPort,
         quant::{JobProgressSink, ModelVersionInfo},
     },
-    runtime_config::DecisionPolicySnapshot,
-    types::{DecisionPolicySnapshotId, ModelVersionId},
+    types::{
+        DecisionPolicySnapshotId, ModelVersionId, TrainingDatasetId,
+        model_lineage::ModelVersionDerivation,
+    },
 };
 use quant_pivot_repository::traits::{
-    ModelRegistryRepository, ModelRunRepository, PolicyRepository, TrainingDatasetRepository,
+    CalibrationArtifactRepository, FactorRepository, ModelRegistryRepository, ModelRunRepository,
+    PolicyRepository, TrainingDatasetRepository,
 };
-use quant_pivot_research::{
-    artifact::ArtifactStore,
-    model::{LabelSelector, objective::runtime_training_objective},
-    training::LabelName,
-    validation::PurgeConfig,
-};
+use quant_pivot_research::artifact::ArtifactStore;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     app::bundles::ResearchBundle,
     service::{
         frozen_model_parity::FrozenModelParityService,
-        historical_replay::ReplayConfig,
+        model_serving_preimage::ModelServingPreimageService,
         model_training::{
             ModelTrainerConfig, ModelTrainerService, ModelTrainerServiceDeps, TrainModelInput,
         },
+        trade_policy_preimage::TradePolicyPreimageVerifier,
     },
 };
 
@@ -40,11 +40,82 @@ use crate::{
 pub struct CoreModelTrainingPort {
     compute: Arc<ComputeExecutor>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
+    factor_repo: Arc<dyn FactorRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
     model_run_repo: Arc<dyn ModelRunRepository>,
+    calibration_repo: Arc<dyn CalibrationArtifactRepository>,
+    trade_policy_preimages: Arc<TradePolicyPreimageVerifier>,
+    serving_preimages: Arc<ModelServingPreimageService>,
     frozen_model_parity: Arc<FrozenModelParityService>,
     runtime_config: Arc<dyn PolicyRepository>,
+}
+
+struct ModelTrainingRetryIdentity {
+    model_version_id: ModelVersionId,
+    training_dataset_id: TrainingDatasetId,
+}
+
+impl TryFrom<&ModelVersionInfo> for ModelTrainingRetryIdentity {
+    type Error = QuantError;
+
+    fn try_from(existing: &ModelVersionInfo) -> Result<Self, Self::Error> {
+        let derivation = existing.verified_derivation().map_err(|error| {
+            ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "existing model-training retry has invalid derivation lineage: {error}"
+                ),
+            }
+        })?;
+        let serving = existing.verified_serving_contract().map_err(|error| {
+            ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "existing model-training retry has an invalid serving contract: {error}"
+                ),
+            }
+        })?;
+        let Some(training_dataset_id) = existing.training_dataset_id else {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "existing model-training retry {} has no training Dataset",
+                    existing.model_version_id
+                ),
+            }
+            .into());
+        };
+        if !matches!(derivation, ModelVersionDerivation::Training)
+            || serving.bindings().dataset.manifest.training_dataset_id != training_dataset_id
+        {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "existing model-training retry {} is not a canonical root training version",
+                    existing.model_version_id
+                ),
+            }
+            .into());
+        }
+        Ok(Self {
+            model_version_id: existing.model_version_id,
+            training_dataset_id,
+        })
+    }
+}
+
+impl ModelTrainingRetryIdentity {
+    fn verify_request(&self, request: &TrainModelRequest) -> QuantResult<()> {
+        if request.training_dataset_id != self.training_dataset_id {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "model-training retry request Dataset {} differs from existing version {} canonical training Dataset {}",
+                    request.training_dataset_id,
+                    self.model_version_id,
+                    self.training_dataset_id,
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
 }
 
 impl CoreModelTrainingPort {
@@ -57,73 +128,49 @@ impl CoreModelTrainingPort {
         Self {
             compute: Arc::clone(&research.compute),
             dataset_repo: Arc::clone(&research.training_dataset_repo),
+            factor_repo: Arc::clone(&research.factor_repo),
             artifact_store: Arc::clone(&research.artifact_store),
             model_registry_repo: Arc::clone(&research.model_registry_repo),
             model_run_repo: Arc::clone(&research.model_run_repo),
+            calibration_repo: Arc::clone(&research.calibration_artifact_repo),
+            trade_policy_preimages: Arc::clone(&research.trade_policy_preimages),
+            serving_preimages: Arc::clone(&research.serving_preimages),
             frozen_model_parity: Arc::clone(&research.frozen_model_parity),
             runtime_config,
         }
     }
 
-    async fn service_for(
-        &self,
-        decision_policy_snapshot_id: &DecisionPolicySnapshotId,
-    ) -> QuantResult<ModelTrainerService> {
-        let runtime = self
-            .load_runtime_config(decision_policy_snapshot_id)
-            .await?;
-        Ok(ModelTrainerService::new(
+    fn service_for(&self, policy_snapshot: DecisionPolicySnapshotInfo) -> ModelTrainerService {
+        ModelTrainerService::new(
             ModelTrainerServiceDeps {
                 compute: Arc::clone(&self.compute),
                 dataset_repo: Arc::clone(&self.dataset_repo),
+                factor_repo: Arc::clone(&self.factor_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
                 model_registry_repo: Arc::clone(&self.model_registry_repo),
                 model_run_repo: Arc::clone(&self.model_run_repo),
+                calibration_repo: Arc::clone(&self.calibration_repo),
+                trade_policy_preimages: Arc::clone(&self.trade_policy_preimages),
+                serving_preimages: Arc::clone(&self.serving_preimages),
             },
-            ModelTrainerConfig {
-                factors: runtime.profile_artifacts.scoring.definition.clone(),
-                objective: runtime_training_objective(
-                    &runtime.profile_artifacts.research_method.research.training,
-                )?,
-                validation_purge: PurgeConfig {
-                    embargo_pct: runtime
-                        .profile_artifacts
-                        .research_method
-                        .research
-                        .validation
-                        .purge
-                        .embargo_pct
-                        .value,
-                    min_embargo_secs: runtime
-                        .profile_artifacts
-                        .features
-                        .definition
-                        .max_lookback_secs(),
-                },
-            },
-            ReplayConfig {
-                features: runtime.profile_artifacts.features.definition,
-                factors: runtime.profile_artifacts.scoring.definition,
-                domain: runtime.profile_artifacts.domain.definition,
-                data_quality: runtime.recommendation.data_quality,
-                bias_table: None,
-            },
-        ))
+            ModelTrainerConfig { policy_snapshot },
+        )
     }
 
-    async fn load_runtime_config(
+    async fn load_policy_snapshot(
         &self,
         decision_policy_snapshot_id: &DecisionPolicySnapshotId,
-    ) -> QuantResult<DecisionPolicySnapshot> {
-        let version = self
-            .runtime_config
+    ) -> QuantResult<DecisionPolicySnapshotInfo> {
+        self.runtime_config
             .load_snapshot(decision_policy_snapshot_id)
             .await?
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "decision_policy_snapshot",
-                id: decision_policy_snapshot_id.to_string(),
-            })?;
-        Ok(version.snapshot)
+            .ok_or_else(|| {
+                StorageError::NotFound {
+                    entity: "decision_policy_snapshot",
+                    id: decision_policy_snapshot_id.to_string(),
+                }
+                .into()
+            })
     }
 }
 
@@ -142,6 +189,8 @@ impl ModelTrainingPort for CoreModelTrainingPort {
             .await
             .map_err(QuantError::from)?
         {
+            ModelTrainingRetryIdentity::try_from(&existing)?.verify_request(&request)?;
+            self.serving_preimages.load(&existing).await?;
             self.frozen_model_parity
                 .verify_and_record(
                     &existing,
@@ -177,54 +226,34 @@ impl ModelTrainingPort for CoreModelTrainingPort {
             .input_contract
             .validate()
             .map_err(|detail| QuantError::config(format!("invalid input_contract: {detail}")))?;
-        if model_spec.input_contract.inputs.is_empty() {
-            return Err(QuantError::config(
-                "model spec input_contract must contain at least one raw feature",
-            ));
+        let actual_definition_hash = model_spec.definition().content_hash().map_err(|error| {
+            ResearchError::InvalidModelArtifact {
+                detail: format!("persisted model-spec definition cannot be hashed: {error}"),
+            }
+        })?;
+        if actual_definition_hash != model_spec.definition_hash {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "persisted model-spec definition hash mismatch: row {}, recomputed {}",
+                    model_spec.definition_hash, actual_definition_hash
+                ),
+            }
+            .into());
         }
-        let prediction_horizon_secs =
-            u64::try_from(model_spec.prediction_horizon_secs).map_err(|error| {
-                QuantError::config(format!(
-                    "model spec prediction_horizon_secs is invalid: {error}"
-                ))
-            })?;
-        if prediction_horizon_secs == 0 {
-            return Err(QuantError::config(
-                "model spec prediction_horizon_secs must be positive",
-            ));
-        }
-        let runtime = self
-            .load_runtime_config(&dataset.decision_policy_snapshot_id)
+        let policy_snapshot = self
+            .load_policy_snapshot(&dataset.decision_policy_snapshot_id)
             .await?;
-        let service = self
-            .service_for(&dataset.decision_policy_snapshot_id)
-            .await?;
-        let outcome = service
-            .train(
-                TrainModelInput {
-                    model_version_id,
-                    model_spec_id: dataset.model_spec_id,
-                    training_dataset_id: dataset.training_dataset_id,
-                    decision_policy_snapshot_id: dataset.decision_policy_snapshot_id,
-                    model_family: model_spec.model_family,
-                    input_contract: model_spec.input_contract.clone(),
-                    label: LabelSelector {
-                        name: LabelName::new(model_spec.training_contract.target_label_name),
-                        horizon_secs: model_spec.training_contract.target_label_horizon_secs,
-                    },
-                    prediction_horizon_secs,
-                    validation_folds: model_spec.training_contract.validation_folds,
-                    selection_enabled_categories: runtime
-                        .recommendation
-                        .selection
-                        .enabled_categories
-                        .clone(),
-                    category_scope: None,
-                },
-                &*progress,
-                &cancel,
-            )
-            .await?;
+        let service = self.service_for(policy_snapshot);
+        let outcome = Box::pin(service.train(
+            TrainModelInput {
+                model_version_id,
+                model_spec,
+                training_dataset_id: dataset.training_dataset_id,
+            },
+            &*progress,
+            &cancel,
+        ))
+        .await?;
         self.frozen_model_parity
             .verify_and_record(
                 &outcome.version,
@@ -245,5 +274,45 @@ impl ModelTrainingPort for CoreModelTrainingPort {
             .find_model_version(model_version_id)
             .await
             .map_err(QuantError::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_error::{QuantError, research::ResearchError};
+    use quant_pivot_models::{
+        domain::api::TrainModelRequest,
+        types::{ModelVersionId, TrainingDatasetId},
+    };
+
+    use super::ModelTrainingRetryIdentity;
+
+    #[test]
+    fn retry_rejects_dataset_drift() {
+        let training_dataset_id = TrainingDatasetId::from_v7();
+        let identity = ModelTrainingRetryIdentity {
+            model_version_id: ModelVersionId::from_v7(),
+            training_dataset_id,
+        };
+        identity
+            .verify_request(&TrainModelRequest {
+                training_dataset_id,
+                reason: "exact retry".to_owned(),
+            })
+            .expect("exact Dataset retry");
+        let error = identity
+            .verify_request(&TrainModelRequest {
+                training_dataset_id: TrainingDatasetId::from_v7(),
+                reason: "different Dataset".to_owned(),
+            })
+            .expect_err("same version with a different Dataset must fail closed");
+        assert!(
+            matches!(
+                error,
+                QuantError::Research(ResearchError::DatasetBuild { ref detail })
+                    if detail.contains("differs from existing version")
+            ),
+            "retry drift must remain a typed DatasetBuild error: {error}"
+        );
     }
 }

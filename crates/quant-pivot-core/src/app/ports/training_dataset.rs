@@ -24,7 +24,7 @@ use quant_pivot_models::{
         ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
         DatasetSourceLineage, DecisionPolicySnapshotId, ResearchEvaluationTrack,
         ResearchProfileArtifact, SourceSliceManifest, SourceSliceManifestRef, TrainingDatasetId,
-        TrainingSampleSource,
+        TrainingSampleSource, TrainingSampleSources,
     },
 };
 use quant_pivot_repository::traits::{
@@ -71,13 +71,11 @@ pub struct CoreTrainingDatasetPort {
 }
 
 impl CoreTrainingDatasetPort {
-    fn normalize_public_sources(
-        sources: &[TrainingSampleSource],
-    ) -> QuantResult<Vec<TrainingSampleSource>> {
-        let mut sources = sources.to_vec();
-        sources.sort();
-        sources.dedup();
-        if sources.contains(&TrainingSampleSource::RecommendationFeedback) {
+    fn validate_public_sources(sources: &TrainingSampleSources) -> QuantResult<()> {
+        if sources
+            .as_slice()
+            .contains(&TrainingSampleSource::RecommendationFeedback)
+        {
             return Err(ResearchError::DatasetPlan {
                 detail:
                     "recommendation_feedback datasets are internal artifacts of a frozen feedback cycle"
@@ -85,7 +83,7 @@ impl CoreTrainingDatasetPort {
             }
             .into());
         }
-        Ok(sources)
+        Ok(())
     }
 
     /// Assemble the port from an already-wired research bundle + deploy tunables.
@@ -304,7 +302,8 @@ impl CoreTrainingDatasetPort {
         materialize: Option<&CancellationToken>,
         policy_fit: Option<FrozenPolicyFitProgram<'_>>,
     ) -> QuantResult<(DatasetPlanRequest, SourceSliceInfo)> {
-        let sample_sources = Self::normalize_public_sources(&body.sample_sources)?;
+        Self::validate_public_sources(&body.sample_sources)?;
+        let sample_sources = body.sample_sources.clone();
         if body.purpose == DatasetPurpose::Evaluation {
             return Err(ResearchError::DatasetPlan {
                 detail:
@@ -345,7 +344,7 @@ impl CoreTrainingDatasetPort {
             &profile,
             &runtime.snapshot_hash,
             policy_fit,
-            &sample_sources,
+            sample_sources.as_slice(),
         )?;
         let source_slice = self
             .resolve_source_slice(identity, &profile, &frozen_runtime, materialize)
@@ -419,31 +418,24 @@ impl CoreTrainingDatasetPort {
 #[cfg(test)]
 mod authority_tests {
     use quant_pivot_error::{QuantError, research::ResearchError};
-    use quant_pivot_models::types::TrainingSampleSource;
+    use quant_pivot_models::types::{TrainingSampleSource, TrainingSampleSources};
 
     use super::CoreTrainingDatasetPort;
 
     #[test]
     fn public_sources_reject_feedback() {
-        let error = CoreTrainingDatasetPort::normalize_public_sources(&[
+        let sources = TrainingSampleSources::try_from(vec![
             TrainingSampleSource::HistoricalPit,
             TrainingSampleSource::RecommendationFeedback,
         ])
-        .expect_err("public API must not construct a feedback Dataset");
+        .expect("canonical feedback sources");
+        let error = CoreTrainingDatasetPort::validate_public_sources(&sources)
+            .expect_err("public API must not construct a feedback Dataset");
         assert!(matches!(
             error,
             QuantError::Research(ResearchError::DatasetPlan { detail })
                 if detail.contains("internal artifacts of a frozen feedback cycle")
         ));
-
-        assert_eq!(
-            CoreTrainingDatasetPort::normalize_public_sources(&[
-                TrainingSampleSource::HistoricalPit,
-                TrainingSampleSource::HistoricalPit,
-            ])
-            .expect("canonical public sources"),
-            [TrainingSampleSource::HistoricalPit]
-        );
     }
 }
 
@@ -566,7 +558,12 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         Ok(TrainingDatasetPlanView {
             training_dataset_id: plan.training_dataset_id,
             model_spec_id: request.model_spec_id,
+            model_family: plan.model_family,
             model_spec_definition_hash: plan.model_spec_definition_hash,
+            feature_schema_version: plan.request.feature_schema_version,
+            feature_schema_hash: plan.feature_schema_hash,
+            factor_schema_hash: plan.factor_serving_plane.factor_schema_hash(),
+            factor_serving_plane: plan.factor_serving_plane,
             decision_policy_snapshot_id: request.decision_policy_snapshot_id,
             window_start: request.window_start,
             window_end: request.window_end,

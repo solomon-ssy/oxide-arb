@@ -10,8 +10,8 @@ use std::io::Cursor;
 use polars::{
     error::PolarsError,
     prelude::{
-        Column, DataFrame, Int64Chunked, IntoLazy, ParquetReader, ParquetWriter, SerReader,
-        SortMultipleOptions, StringChunked, UInt32Chunked,
+        Column, DataFrame, Int64Chunked, ParquetReader, ParquetWriter, SerReader, StringChunked,
+        UInt32Chunked,
     },
 };
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
@@ -239,7 +239,7 @@ fn decode_rows(columns: &DatasetColumns<'_>) -> QuantResult<DecodedDatasetParque
 
 impl DatasetParquetCodec {
     /// Encode examples into Parquet bytes (sorted by `(market_id, token_id,
-    /// decision_at_ms)` so the byte stream is order-stable).
+    /// decision_at_ms, example_id)` so the byte stream is order-stable).
     ///
     /// # Errors
     ///
@@ -266,18 +266,22 @@ impl DatasetParquetCodec {
         let mut payloads = Vec::with_capacity(row_count);
         let mut manifests = Vec::with_capacity(row_count);
 
-        row_kinds.push(MANIFEST_ROW.to_owned());
-        example_ids.push(None::<String>);
-        market_ids.push(None::<String>);
-        token_ids.push(None::<String>);
-        decision_at_ms.push(None::<i64>);
-        payloads.push(None::<String>);
-        manifests.push(Some(serde_json::to_string(manifest).map_err(|error| {
-            ResearchError::ParquetCodec {
-                detail: format!("dataset manifest serialization failed: {error}"),
-            }
-        })?));
-        for example in examples {
+        let mut ordered = examples.iter().collect::<Vec<_>>();
+        ordered.sort_by(|left, right| {
+            (
+                left.market_id.as_str(),
+                left.token_id.as_str(),
+                left.decision_at(),
+                left.example_id.as_uuid(),
+            )
+                .cmp(&(
+                    right.market_id.as_str(),
+                    right.token_id.as_str(),
+                    right.decision_at(),
+                    right.example_id.as_uuid(),
+                ))
+        });
+        for example in ordered {
             row_kinds.push(EXAMPLE_ROW.to_owned());
             example_ids.push(Some(example.example_id.as_uuid().to_string()));
             market_ids.push(Some(example.market_id.to_string()));
@@ -290,6 +294,17 @@ impl DatasetParquetCodec {
             payloads.push(Some(payload));
             manifests.push(None);
         }
+        row_kinds.push(MANIFEST_ROW.to_owned());
+        example_ids.push(None::<String>);
+        market_ids.push(None::<String>);
+        token_ids.push(None::<String>);
+        decision_at_ms.push(None::<i64>);
+        payloads.push(None::<String>);
+        manifests.push(Some(serde_json::to_string(manifest).map_err(|error| {
+            ResearchError::ParquetCodec {
+                detail: format!("dataset manifest serialization failed: {error}"),
+            }
+        })?));
 
         let columns = vec![
             Column::new("format_version".into(), format_versions),
@@ -301,19 +316,11 @@ impl DatasetParquetCodec {
             Column::new("payload".into(), payloads),
             Column::new("manifest".into(), manifests),
         ];
-        let frame = DataFrame::new(row_count, columns).map_err(ParquetPolarsError::from)?;
-        let mut sorted = frame
-            .lazy()
-            .sort(
-                ["row_kind", "market_id", "token_id", "decision_at_ms"],
-                SortMultipleOptions::default(),
-            )
-            .collect()
-            .map_err(ParquetPolarsError::from)?;
+        let mut frame = DataFrame::new(row_count, columns).map_err(ParquetPolarsError::from)?;
 
         let mut buffer = Vec::new();
         ParquetWriter::new(&mut buffer)
-            .finish(&mut sorted)
+            .finish(&mut frame)
             .map_err(ParquetPolarsError::from)?;
         Ok(buffer)
     }
@@ -349,10 +356,10 @@ mod tests {
     use polars::prelude::{Column, DataFrame, ParquetWriter};
     use quant_pivot_models::{
         domain::data_plane::{DecisionClock, DecisionSource},
-        enums::quant::DatasetPurpose,
+        enums::{model::ModelFamily, quant::DatasetPurpose},
         types::{
             ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest, ModelSpecId,
-            TrainingDatasetId,
+            SchemaVersion, TrainingDatasetId, factor::FactorServingPlane,
         },
     };
     use rust_decimal_macros::dec;
@@ -375,8 +382,9 @@ mod tests {
         let window_start = Utc::now() - Duration::days(1);
         let window_end = Utc::now();
         let feature_hash = hash('1');
-        let factor_hash = hash('2');
         let label_hash = hash('3');
+        let factor_serving_plane =
+            FactorServingPlane::try_empty().expect("canonical factor-free plane");
         let horizons_secs = examples
             .iter()
             .flat_map(|example| example.labels.iter().map(|label| label.horizon_secs))
@@ -386,11 +394,12 @@ mod tests {
         let semantic_dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
             DatasetHashContract {
                 model_spec_id: &model_spec_id,
+                model_family: ModelFamily::ClassicalRandomForest,
                 window_start,
                 window_end,
                 purpose: DatasetPurpose::Training,
                 feature_schema_hash: &feature_hash,
-                factor_schema_hash: &factor_hash,
+                factor_serving_plane: &factor_serving_plane,
                 label_schema_hash: &label_hash,
             },
             examples,
@@ -402,6 +411,7 @@ mod tests {
             source_lineage: source_lineage(window_start, window_end),
             cohort_manifest: None,
             model_spec_id,
+            model_family: ModelFamily::ClassicalRandomForest,
             model_spec_definition_hash: hash('6'),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
@@ -413,8 +423,9 @@ mod tests {
                 .map_or(0, |example| example.decision_boundary.knowledge_lag_secs()),
             sample_interval_secs: 60,
             horizons_secs,
+            feature_schema_version: SchemaVersion::FIRST,
             feature_schema_hash: hash('1'),
-            factor_schema_hash: hash('2'),
+            factor_serving_plane,
             label_schema_hash: hash('3'),
             semantic_dataset_hash,
             source_fingerprint: dataset_source_fingerprint(examples).expect("source fingerprint"),
@@ -422,10 +433,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parquet_dataset_roundtrip() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn parquet_dataset_roundtrip() {
+        tokio::task::yield_now().await;
         let examples = vec![example("bbb", 200), example("aaa", 100)];
-        let bytes = DatasetParquetCodec::encode(&examples, &manifest(&examples)).expect("encode");
+        let manifest = manifest(&examples);
+        let bytes = DatasetParquetCodec::encode(&examples, &manifest).expect("encode");
+        let mut reordered = examples.clone();
+        reordered.reverse();
+        assert_eq!(
+            DatasetParquetCodec::encode(&reordered, &manifest).expect("encode reordered"),
+            bytes
+        );
         let mut decoded = DatasetParquetCodec::decode(&bytes).expect("decode");
         decoded.sort_by(|a, b| a.market_id.as_str().cmp(b.market_id.as_str()));
         let mut expected = examples;

@@ -11,11 +11,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use prometheus::IntCounter;
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::{
-    governance::{BiasTableApplicator, CoreCalibrationArtifactLoader, WeightOverlayApplicator},
     ingest::{book_store::BookStore, data_plane_index::DataPlane, market_registry::MarketRegistry},
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
@@ -28,66 +27,69 @@ use quant_pivot_core::{
         factor_pipeline::FactorPipelineService,
         feature_pipeline::{FeaturePipelineDeps, FeaturePipelineRequest, FeaturePipelineService},
         model_runner::{
-            InferenceAlertSink, ModelRunOutcome, ModelRunRequest, ModelRunner, ModelRunnerDeps,
+            ActiveModelRequirements, ActiveModelRequirementsRequest, InferenceAlertSink,
+            ModelRunOutcome, ModelRunRequest, ModelRunner, ModelRunnerDeps,
         },
+        research_readiness::EvidenceScopeIdentity,
     },
 };
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
         BookL2LedgerRow, BookMicrostructureRow, DomainObservationRow, MarketResolutionRow,
         MidPriceBucketRow, TradeTapeRow,
     },
-    config::TradeTapeOnChainConfig,
+    config::{ArtifactStoreDeployConfig, ClickHouseConfig, TradeTapeOnChainConfig},
     domain::{
         data_plane::{DecisionBoundary, DecisionClock},
+        governance::DecisionPolicySnapshotInfo,
         market::{
             EventRegistryInfo, MarketRegistryInfo, TokenInfo,
             book::{BookLevel, BookSnapshot},
         },
         quant::{NewModelRun, NewModelVersion},
     },
+    entities::quant_model_run::Entity as ModelRunEntity,
     enums::{
         catalog::CatalogFilterReasonSet,
         common::{CategorySet, MarketCategory, TickSize},
         factor::FactorFamily,
         market::{EventStatus, MarketStatus},
         model::ModelFamily,
-        quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus},
+        quant::{
+            DatasetPurpose, ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus,
+        },
+        runtime_config::ConfigResourceKind,
     },
     runtime_config::{
-        DataQualityConfig, DecimalValue, DomainConfig, FactorCrossSectionConfig, FactorWeights,
-        FactorsConfig, FeaturesConfig, ModelConfig, ModelVersionRef,
+        DataQualityConfig, DecimalValue, DecisionPolicySnapshot, DomainConfig, FactorsConfig,
+        FeaturesConfig, ModelConfig, ModelVersionRef,
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, DomainInstrumentKey, EventId, FeatureVectorId,
         MarketId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
-        ModelVersionId, Price, Shares, TokenId, Usd, model_metrics::ModelVersionMetrics,
-        model_training::ModelTrainingObjective,
+        ModelVersionId, Price, SchemaVersion, Shares, TokenId, Usd,
+        model_metrics::ModelVersionMetrics, model_training::ModelTrainingObjective,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgCalibrationArtifactRepository, PgEventRepository, PgFactorRepository,
         PgFeatureRepository, PgMarketRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgShadowComparisonRepository,
+        PgPolicyRepository, PgShadowComparisonRepository,
     },
     traits::{
-        CalibrationArtifactRepository, EventRepository, FactorRepository, FeatureRepository,
-        MarketRepository, ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
+        EventRepository, FactorRepository, FeatureRepository, MarketRepository,
+        ModelRegistryRepository, ModelRunRepository, PolicyRepository, QuantFactReadRepository,
         ShadowComparisonRepository,
     },
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
-    factors::{FactorEngine, FrozenReferenceQuantiles},
+    factors::FactorEngine,
     features::{FeatureSchema, FeatureVector},
     hashing::ResearchHasher,
-    model::{
-        CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, FactorWeight, ModelArtifact,
-        ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
-        WeightedFactorModelArtifact, model_input_contract_hash,
-    },
+    model::ReturnModelSpec,
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
@@ -95,18 +97,26 @@ use quant_pivot_system_tests::{
     postgres::setup_pg,
     support::{
         catalog_fixtures::{make_event, make_market},
-        execution_pg_seed,
         fact_sink::DiscardFactWriter,
-        factor_governance::publish_all_factor_definitions,
+        factor_definitions::register_all_factor_definitions,
+        model_serving_fixtures::{
+            ModelArtifactFixtureSeed, ModelDatasetLedgerFixture, ModelDatasetLedgerSeed,
+            ModelPayloadFixture, ModelVersionFixture, SealedModelFixture,
+        },
+        model_serving_runtime::ModelServingRegistryFixture,
         model_spec_fixtures,
         pit::InMemoryDecisionSnapshotSource,
+        policy_fixtures::{activate_policy_bundle, bootstrap_policy_bundle},
         publish_fresh_book,
         report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
         trade_tape_fixtures::live_tape_cursor_repo,
     },
 };
 use rust_decimal::Decimal;
-use sea_orm::DatabaseConnection;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseConnection, DbBackend,
+    EntityTrait, IntoActiveModel, Statement, TryGetable,
+};
 
 const EVENT_ID: &str = "evt-model-e2e";
 const MARKET_ID: &str = "0xmodele2e";
@@ -342,6 +352,24 @@ fn factors_config() -> FactorsConfig {
     }
 }
 
+async fn seed_runtime_policy(
+    db: &DatabaseConnection,
+    factors: &FactorsConfig,
+    features: &FeaturesConfig,
+) -> DecisionPolicySnapshotId {
+    let mut snapshot = DecisionPolicySnapshot::default();
+    snapshot.profile_artifacts.scoring.definition = factors.clone();
+    snapshot.profile_artifacts.features.definition = features.clone();
+    snapshot.profile_artifacts.domain.definition = DomainConfig::default();
+    bootstrap_policy_bundle(
+        &PgPolicyRepository::new(db.clone()),
+        &snapshot,
+        "model-runtime-system-test",
+        "model runtime immutable serving fixture",
+    )
+    .await
+}
+
 fn selected_market() -> SelectedMarket {
     SelectedMarket {
         market_id: MarketId::new(MARKET_ID),
@@ -386,96 +414,10 @@ fn noop_model_input_writer() -> Arc<ModelInputEventWriter> {
     ))
 }
 
-/// Build + persist feature vectors for the seeded market via the live book.
-async fn build_features(
-    db: &DatabaseConnection,
-) -> (
-    Vec<FeatureVector>,
-    Vec<FeatureVectorId>,
-    FeatureEvidenceCommitment,
-    DecisionBoundary,
-) {
-    let data_plane = Arc::new(DataPlane::new());
-    let registry = Arc::new(MarketRegistry::new(Arc::clone(&data_plane)));
-    let book_store = Arc::new(BookStore::new(data_plane, Arc::new(MetricsHub::new())));
-    let market = registry_market();
-    register_runtime_event(&registry, vec![market.market_id.clone()]);
-    registry.register_market(market);
-    let yes_token = TokenId::new(YES_TOKEN);
-    let timestamp_ms = u64::try_from(Utc::now().timestamp_millis())
-        .expect("test book timestamp must be non-negative");
-    publish_fresh_book(
-        &book_store,
-        &yes_token,
-        BookSnapshot::new(
-            Arc::from([BookLevel::from_decimal_unchecked(
-                Price::new(Decimal::new(47, 2)),
-                Shares::new(Decimal::from(150)),
-            )]),
-            Arc::from([BookLevel::from_decimal_unchecked(
-                Price::new(Decimal::new(53, 2)),
-                Shares::new(Decimal::from(140)),
-            )]),
-            timestamp_ms,
-            1,
-        ),
-        1,
-    );
-    let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
-
-    let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
-    let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
-        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
-        window_provider: FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
-        feature_repo,
-        event_writer: noop_feature_writer(),
-        market_registry: Arc::clone(&registry),
-        block_cursor_repo: live_tape_cursor_repo(),
-        linkage_repo: Arc::new(EmptyLinkageRepo),
-        basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
-        calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
-        trade_tape_on_chain: TradeTapeOnChainConfig::default(),
-    });
-
-    let features = FeaturesConfig::default();
-    let domain = DomainConfig::default();
-    let included = vec![selected_market()];
-    let boundary = DecisionClock::new(0)
-        .boundary(Utc::now())
-        .expect("decision boundary");
-    let result = pipeline
-        .run(FeaturePipelineRequest {
-            included: &included,
-            boundary: boundary.clone(),
-            features: &features,
-            domain: &domain,
-            data_quality: &DataQualityConfig::default(),
-            model_requirements: &ModelFeatureRequirements::default(),
-            pit: &live_pit,
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
-        })
-        .await
-        .expect("feature pipeline");
-
-    assert_eq!(result.accepted.len(), 1, "market must produce a vector");
-    let ids = result
-        .persisted
-        .iter()
-        .map(|info| info.feature_vector_id)
-        .collect();
-    (
-        result.accepted,
-        ids,
-        result.feature_evidence.expect("durable feature evidence"),
-        boundary,
-    )
-}
-
 /// Peer markets forming a real cross-section alongside the primary market, so
 /// the cross-sectional factors (`liquidity_depth` rank, `spread_efficiency`
-/// z-score) are *scored* rather than indeterminate. Overlay-reweighting tests
-/// need a cross-section ≥ `cross_section.min_size` (5) with dispersion.
+/// z-score) are *scored* rather than indeterminate. Immutable-head tests need a
+/// cross-section ≥ `cross_section.min_size` (5) with dispersion.
 const PEER_COUNT: usize = 5;
 
 fn peer_market_id(index: usize) -> String {
@@ -614,6 +556,7 @@ fn apply_book(
 /// yielding a real cross-section (order-aligned `vectors` / `ids` / `selection`).
 async fn build_cross_section_features(
     db: &DatabaseConnection,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
 ) -> (
     Vec<FeatureVector>,
     Vec<FeatureVectorId>,
@@ -691,7 +634,7 @@ async fn build_cross_section_features(
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
             pit: &live_pit,
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            decision_policy_snapshot_id,
             liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
         })
         .await
@@ -728,194 +671,274 @@ async fn publish_weighted_model(
     store: &Arc<dyn ArtifactStore>,
     factors: &FactorsConfig,
     features: &FeaturesConfig,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
 ) -> ModelVersionId {
-    let engine = FactorEngine::new(factors, features, &DomainConfig::default(), None);
-    let factor_set = engine.factor_set();
-    let count = factor_set.definitions.len();
-    assert!(count > 0, "the factor set must be non-empty");
-    let each = Decimal::ONE / Decimal::from(u64::try_from(count).expect("count"));
-    let mut weights: Vec<FactorWeight> = factor_set
-        .definitions
-        .iter()
-        .map(|spec| FactorWeight {
-            factor: spec.name.clone(),
-            weight: each,
-        })
-        .collect();
-    // Make the set sum to exactly 1 by absorbing the rounding into the first weight.
-    let tail: Decimal = weights.iter().skip(1).map(|w| w.weight).sum();
-    weights[0].weight = Decimal::ONE - tail;
+    let engine =
+        FactorEngine::for_model_scope(factors, features, &DomainConfig::default(), None, None);
+    let factor_plane = engine.serving_plane().expect("factor plane");
 
     let model_version_id = ModelVersionId::from_v7();
     let feature_schema_hash =
         ResearchHasher::feature_schema(&FeatureSchema::build(features).expect("feature schema"))
             .expect("feature hash");
-    let factor_schema_hash = engine.factor_schema_hash().expect("factor hash");
     let input_contract = ModelInputContract::single_required("book.mid");
-    let input_contract_hash =
-        model_input_contract_hash(&input_contract).expect("input contract hash");
     let model_spec_id = ModelSpecId::from_v7();
     let spec = model_spec_fixtures::new_model_spec_fixture(
         model_spec_id,
         "weighted-e2e",
         ModelFamily::WeightedFactor,
-        86_400,
+        model_spec_fixtures::pooled_horizon_secs(),
         input_contract.clone(),
         ModelTrainingContract::settlement_default(),
     );
     let model_spec_definition_hash = spec.definition_hash;
-
-    let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
-        header: ModelArtifactHeader {
-            model_version_id,
-            model_spec_definition_hash,
-            profile_ref: execution_pg_seed::fixture_profile_ref(),
-            model_family: ModelFamily::WeightedFactor,
-            feature_schema_hash,
-            factor_schema_hash,
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
-        },
-        training_dataset_hash: factor_schema_hash,
-        training_input_hash: factor_schema_hash,
-        input_contract,
-        input_contract_hash,
-        weights,
-        prediction_horizon_secs: 86_400,
-        multipliers: ScoreMultiplierSpec::conservative(),
-        substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-        return_model: ReturnModelSpec::heuristic_default(),
-        factor_cross_section: FactorCrossSectionConfig::default(),
-        frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
-        objective_report: None,
-        category_scope: None,
-    }));
-    artifact.validate().expect("artifact valid");
-    let artifact_hash = artifact.content_hash().expect("hash");
-    let key = ModelArtifact::artifact_key(&artifact_hash).expect("key");
-    store
-        .put(key, &artifact.to_bytes().expect("bytes"))
-        .await
-        .expect("store artifact");
-
     let registry = PgModelRegistryRepository::new(db.clone());
     registry.create_model_spec(spec).await.expect("create spec");
-    registry
-        .create_model_version(NewModelVersion {
-            model_version_id,
+    let window_end = Utc::now() - ChronoDuration::days(2);
+    let window_start = window_end - ChronoDuration::days(1);
+    let dataset = Box::pin(ModelDatasetLedgerFixture::persist(
+        db,
+        store,
+        ModelDatasetLedgerSeed {
+            scope: format!("model-runtime-{model_version_id}"),
             model_spec_id,
-            version: 1,
-            artifact_hash,
+            model_family: ModelFamily::WeightedFactor,
+            model_spec_definition_hash,
+            factor_serving_plane: factor_plane.clone(),
+            feature_schema_version: SchemaVersion::FIRST,
+            feature_schema_hash,
+            decision_policy_snapshot_id,
+            profile_ref: model_spec_fixtures::pooled_profile_ref(),
+            prediction_horizon_secs: u64::try_from(model_spec_fixtures::pooled_horizon_secs())
+                .expect("pooled horizon"),
+            purpose: DatasetPurpose::Training,
+            window_start,
+            window_end,
+            research_program_hash: ResearchHasher::canonical(&(
+                "model-runtime-program-v1",
+                model_spec_id,
+                model_spec_definition_hash,
+            ))
+            .expect("research program hash"),
+            sample_count: 32,
+            decision_interval_secs: 1,
+            trade_policy: None,
+        },
+    ))
+    .await
+    .expect("persist runtime model dataset");
+    let payload = ModelPayloadFixture::weighted(
+        factor_plane,
+        &factors.factor_head,
+        input_contract,
+        ReturnModelSpec::heuristic_default(),
+        factors.cross_section.clone(),
+    )
+    .expect("runtime weighted payload");
+    let fixture = SealedModelFixture::seal(
+        db,
+        ModelArtifactFixtureSeed {
+            model_version_id,
+            training_dataset_id: dataset.training_dataset_id,
+            payload,
+            training_input_hash: ResearchHasher::canonical(&"model-runtime-training-input")
+                .expect("training input hash"),
             category_scope: None,
-            profile_ref: execution_pg_seed::fixture_profile_ref(),
-            training_dataset_id: None,
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
-            publish_path_set_id: None,
-            derivation: NewModelVersion::training_derivation(),
-            metrics: ModelVersionMetrics::not_measured("test fixture"),
-            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Published,
-            published_at: Some(Utc::now()),
-            retired_at: None,
-        })
-        .await
-        .expect("create version");
+            calibration: None,
+            bias_table: None,
+        },
+    )
+    .await
+    .expect("seal runtime model fixture");
+    fixture.store(store).await.expect("store runtime model");
+    ModelVersionFixture::persist_published(
+        db,
+        model_version_fixture(&fixture, model_spec_id, 1, fixture.artifact_hash()),
+    )
+    .await
+    .expect("publish exact runtime model fixture");
 
     model_version_id
 }
 
-/// Register a sibling candidate with the same weights as `published`, but a
-/// distinct artifact header (content-addressed per version id).
-async fn register_candidate_sibling(
+fn model_version_fixture(
+    fixture: &SealedModelFixture,
+    model_spec_id: ModelSpecId,
+    version: i32,
+    artifact_hash: ContentHash,
+) -> NewModelVersion {
+    let serving_contract = fixture.serving_contract().clone();
+    let bindings = serving_contract.bindings();
+    let category_scope = bindings.model.category_scope;
+    let profile_ref = bindings.model.profile_ref.clone();
+    let training_dataset_id = bindings.dataset.manifest.training_dataset_id;
+    let trade_policy = bindings
+        .trade_policy
+        .as_ref()
+        .map(|binding| (binding.artifact_id, binding.content_hash));
+    NewModelVersion {
+        model_version_id: bindings.model.model_version_id,
+        model_spec_id,
+        version,
+        artifact_hash,
+        serving_contract,
+        category_scope,
+        profile_ref,
+        training_dataset_id: Some(training_dataset_id),
+        trade_policy_artifact_id: trade_policy.map(|binding| binding.0),
+        trade_policy_hash: trade_policy.map(|binding| binding.1),
+        publish_path_set_id: None,
+        derivation: NewModelVersion::training_derivation(),
+        metrics: ModelVersionMetrics::not_measured("test fixture"),
+        training_objective: ModelTrainingObjective::hand_authored("test fixture"),
+        quality_gate_report: None,
+        publication_status: PublicationStatus::Candidate,
+        published_at: None,
+        retired_at: None,
+    }
+}
+
+async fn seal_candidate(
     db: &DatabaseConnection,
-    store: &Arc<dyn ArtifactStore>,
     published_id: &ModelVersionId,
-) -> ModelVersionId {
+    factors: &FactorsConfig,
+) -> (ModelSpecId, i32, SealedModelFixture) {
     let registry = PgModelRegistryRepository::new(db.clone());
     let published = registry
         .find_model_version(published_id)
         .await
         .expect("find published")
         .expect("published row");
-    let key = ModelArtifact::artifact_key(&published.artifact_hash).expect("artifact key");
-    let bytes = store
-        .get_by_key(&key)
-        .await
-        .expect("load published artifact bytes");
-    let mut artifact = ModelArtifact::from_bytes(&bytes).expect("decode artifact");
     let candidate_id = ModelVersionId::from_v7();
-    match &mut artifact {
-        ModelArtifact::WeightedFactor(weighted) => {
-            weighted.header.model_version_id = candidate_id;
-        }
-        ModelArtifact::Classical(classical) => {
-            classical.header.model_version_id = candidate_id;
-        }
-        ModelArtifact::SellScorer(sell) => {
-            sell.header.model_version_id = candidate_id;
-        }
-    }
-    artifact.validate().expect("candidate artifact valid");
-    let artifact_hash = artifact.content_hash().expect("candidate hash");
-    let candidate_key = ModelArtifact::artifact_key(&artifact_hash).expect("candidate key");
-    store
-        .put(
-            candidate_key,
-            &artifact.to_bytes().expect("candidate bytes"),
-        )
+    let contract = published
+        .verified_serving_contract()
+        .expect("published serving contract");
+    let input_contract = registry
+        .find_model_spec(&published.model_spec_id)
+        .await
+        .expect("candidate model spec lookup")
+        .expect("candidate model spec")
+        .input_contract;
+    let plane = contract.bindings().factors.plane.clone();
+    let payload = ModelPayloadFixture::weighted(
+        &plane,
+        &factors.factor_head,
+        input_contract,
+        ReturnModelSpec::heuristic_default(),
+        factors.cross_section.clone(),
+    )
+    .expect("candidate weighted payload");
+    let fixture = SealedModelFixture::seal(
+        db,
+        ModelArtifactFixtureSeed {
+            model_version_id: candidate_id,
+            training_dataset_id: contract.bindings().dataset.manifest.training_dataset_id,
+            payload,
+            training_input_hash: contract.bindings().transform.training_input_hash,
+            category_scope: contract.bindings().model.category_scope,
+            calibration: None,
+            bias_table: contract.bindings().factors.bias_table.clone(),
+        },
+    )
+    .await
+    .expect("seal candidate sibling");
+    (published.model_spec_id, published.version + 1, fixture)
+}
+
+/// Register a correctly sealed sibling candidate with a distinct estimator.
+async fn register_candidate_sibling(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    published_id: &ModelVersionId,
+    factors: &FactorsConfig,
+) -> ModelVersionId {
+    let (model_spec_id, version, fixture) = seal_candidate(db, published_id, factors).await;
+    fixture
+        .store(store)
         .await
         .expect("store candidate artifact");
-    registry
-        .create_model_version(NewModelVersion {
-            model_version_id: candidate_id,
-            model_spec_id: published.model_spec_id,
-            version: published.version + 1,
-            artifact_hash,
-            category_scope: None,
-            profile_ref: published.profile_ref.clone(),
-            training_dataset_id: published.training_dataset_id,
-            trade_policy_artifact_id: published.trade_policy_artifact_id,
-            trade_policy_hash: published.trade_policy_hash,
-            publish_path_set_id: None,
-            derivation: NewModelVersion::training_derivation(),
-            metrics: ModelVersionMetrics::not_measured("test fixture"),
-            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Candidate,
-            published_at: None,
-            retired_at: None,
-        })
+    PgModelRegistryRepository::new(db.clone())
+        .create_model_version(model_version_fixture(
+            &fixture,
+            model_spec_id,
+            version,
+            fixture.artifact_hash(),
+        ))
         .await
         .expect("create candidate sibling");
+    fixture.serving_contract().bindings().model.model_version_id
+}
+
+/// Register a row whose scalar projections are coherent but whose artifact
+/// points at another version's exact bytes.
+async fn register_contract_drift(
+    db: &DatabaseConnection,
+    published_id: &ModelVersionId,
+    factors: &FactorsConfig,
+) -> ModelVersionId {
+    let registry = PgModelRegistryRepository::new(db.clone());
+    let published = registry
+        .find_model_version(published_id)
+        .await
+        .expect("find published model")
+        .expect("published model");
+    let (model_spec_id, version, fixture) = seal_candidate(db, published_id, factors).await;
+    let candidate_id = fixture.serving_contract().bindings().model.model_version_id;
+    registry
+        .create_model_version(model_version_fixture(
+            &fixture,
+            model_spec_id,
+            version,
+            published.artifact_hash,
+        ))
+        .await
+        .expect("create contract-drift candidate");
     candidate_id
 }
 
-/// Build a normalized overlay skewed toward the factor at `lead_index`.
-fn factors_with_overlay_skew(
+/// Build a governed alpha-head seed skewed toward one `OutcomeAlpha` factor.
+fn factors_with_head_skew(
     base: &FactorsConfig,
     features: &FeaturesConfig,
-    lead_index: usize,
+    variant_index: usize,
 ) -> FactorsConfig {
-    let engine = FactorEngine::new(base, features, &DomainConfig::default(), None);
-    let definitions = &engine.factor_set().definitions;
-    assert!(
-        definitions.len() >= 2,
-        "overlay test needs at least two factors"
-    );
-    let lead = Decimal::new(90, 2);
-    let tail = (Decimal::ONE - lead)
-        / Decimal::from(u64::try_from(definitions.len().saturating_sub(1)).expect("count"));
-    let mut weights = FactorWeights::default();
-    for (index, spec) in definitions.iter().enumerate() {
-        let value = if index == lead_index { lead } else { tail };
-        weights
-            .weights
-            .insert(spec.name.to_string(), DecimalValue::new(value));
-    }
+    let engine =
+        FactorEngine::for_model_scope(base, features, &DomainConfig::default(), None, None);
+    let plane = engine.serving_plane().expect("factor plane");
+    let alpha = plane
+        .definitions()
+        .iter()
+        .filter(|revision| revision.definition().is_outcome_alpha())
+        .collect::<Vec<_>>();
     let mut config = base.clone();
-    config.factor_weights = weights;
+    if alpha.len() > 1 {
+        assert!(
+            variant_index < alpha.len(),
+            "head variant must select an exact alpha revision"
+        );
+        let lead = Decimal::new(90, 2);
+        let tail =
+            (Decimal::ONE - lead) / Decimal::from(u64::try_from(alpha.len() - 1).expect("count"));
+        config.factor_head.alpha_seed_weights.clear();
+        for (index, revision) in alpha.into_iter().enumerate() {
+            config.factor_head.alpha_seed_weights.insert(
+                revision.factor_name().to_string(),
+                DecimalValue::new(if index == variant_index { lead } else { tail }),
+            );
+        }
+    } else {
+        assert_eq!(
+            alpha.len(),
+            1,
+            "weighted head fixture requires an OutcomeAlpha revision"
+        );
+        let deadband = match variant_index {
+            0 => Decimal::new(1, 2),
+            1 => Decimal::new(20, 2),
+            other => panic!("unsupported single-alpha head variant {other}"),
+        };
+        config.factor_head.alpha_deadband = DecimalValue::new(deadband);
+    }
     config
 }
 
@@ -929,23 +952,51 @@ fn model_config(active: &ModelVersionId, shadow: Option<&ModelVersionId>) -> Mod
     }
 }
 
-fn build_runner(
+async fn activate_model_config(
+    db: &DatabaseConnection,
+    active: &ModelVersionId,
+    shadow: Option<&ModelVersionId>,
+) -> DecisionPolicySnapshotInfo {
+    let repository = PgPolicyRepository::new(db.clone());
+    let config = model_config(active, shadow);
+    let snapshot_id = activate_policy_bundle(
+        &repository,
+        ConfigResourceKind::ModelRouting,
+        "model-runtime-system-test",
+        "pin exact model serving generation",
+        move |snapshot| snapshot.model_routing.model = config,
+    )
+    .await;
+    repository
+        .load_snapshot(&snapshot_id)
+        .await
+        .expect("load activated model policy")
+        .expect("activated model policy")
+}
+
+async fn resolve_active_model(
+    runner: &ModelRunner,
+    policy: &DecisionPolicySnapshotInfo,
+    boundary: &DecisionBoundary,
+) -> ActiveModelRequirements {
+    runner
+        .active_requirements(ActiveModelRequirementsRequest {
+            policy,
+            decision_at: boundary.decision_at(),
+        })
+        .await
+        .expect("resolve exact active serving route")
+}
+
+async fn build_runner(
     db: &DatabaseConnection,
     store: Arc<dyn ArtifactStore>,
     critical: Arc<AtomicUsize>,
-    weight_overlay: Arc<WeightOverlayApplicator>,
-) -> ModelRunner {
+) -> QuantResult<ModelRunner> {
     let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
-    let calibration_repo = Arc::new(PgCalibrationArtifactRepository::new(db.clone()))
-        as Arc<dyn CalibrationArtifactRepository>;
-    let calibration_loader: Arc<dyn CalibrationArtifactLoader> = Arc::new(
-        CoreCalibrationArtifactLoader::new(Arc::clone(&calibration_repo)),
-    );
-    let bias_table = Arc::new(BiasTableApplicator::new(calibration_repo));
     let factor_pipeline = Arc::new(FactorPipelineService::new(
         factor_repo,
         noop_factor_writer(),
-        Arc::clone(&bias_table),
         Arc::new(ComputeExecutor::new().expect("test compute executor")),
     ));
     let model_run_repo =
@@ -954,32 +1005,40 @@ fn build_runner(
         Arc::new(PgModelRegistryRepository::new(db.clone())) as Arc<dyn ModelRegistryRepository>;
     let shadow_comparison_repo = Arc::new(PgShadowComparisonRepository::new(db.clone()))
         as Arc<dyn ShadowComparisonRepository>;
-    ModelRunner::new(ModelRunnerDeps {
+    let evidence_scope = EvidenceScopeIdentity::from_config(
+        &ClickHouseConfig::default(),
+        &ArtifactStoreDeployConfig::default(),
+    )
+    .expect("model runtime evidence scope");
+    let serving_generations = ModelServingRegistryFixture {
+        db: db.clone(),
+        artifact_store: store,
+        evidence_scope,
+        evidence_attestor: None,
+    }
+    .build_generation()
+    .await?;
+    Ok(ModelRunner::new(ModelRunnerDeps {
         model_run_repo,
         model_registry_repo: registry,
         shadow_comparison_repo,
-        factory_builder: Arc::new(DefaultModelRuntimeFactoryBuilder::new(
-            store,
-            calibration_loader,
-        )),
+        serving_generations,
         factor_pipeline,
         signal_writer: noop_signal_writer(),
         model_input_writer: noop_model_input_writer(),
         alerts: Arc::new(CountingAlertSink { critical }),
-        weight_overlay,
-        bias_table,
-    })
+    }))
 }
 
-async fn publish_enabled_factors(
+async fn register_enabled_factors(
     db: &DatabaseConnection,
     factors: &FactorsConfig,
     features: &FeaturesConfig,
 ) {
     let repo = PgFactorRepository::new(db.clone());
-    publish_all_factor_definitions(&repo, factors, features, &DomainConfig::default())
+    register_all_factor_definitions(&repo, factors, features, &DomainConfig::default())
         .await
-        .expect("publish factor definitions");
+        .expect("register immutable factor definitions");
 }
 
 fn artifact_store() -> Arc<dyn ArtifactStore> {
@@ -999,37 +1058,33 @@ pub async fn online_loop_selection_candidates() {
 
     let factors = factors_config();
     let features = FeaturesConfig::default();
-    let (vectors, ids, selection, evidence, boundary) = build_cross_section_features(&db).await;
-
+    let training_policy_id = seed_runtime_policy(&db, &factors, &features).await;
     let store = artifact_store();
-    let active = publish_weighted_model(&db, &store, &factors, &features).await;
-    publish_enabled_factors(&db, &factors, &features).await;
+    let active = publish_weighted_model(&db, &store, &factors, &features, training_policy_id).await;
+    register_enabled_factors(&db, &factors, &features).await;
+    let policy = activate_model_config(&db, &active, None).await;
+    let (vectors, ids, selection, evidence, boundary) =
+        build_cross_section_features(&db, policy.decision_policy_snapshot_id).await;
 
     let critical = Arc::new(AtomicUsize::new(0));
-    let runner = build_runner(
-        &db,
-        Arc::clone(&store),
-        Arc::clone(&critical),
-        Arc::new(WeightOverlayApplicator::new()),
-    );
-
-    let outcome = runner
-        .run(ModelRunRequest {
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            market_selection_id: None,
-            selection: &selection,
-            feature_vectors: &vectors,
-            feature_vector_ids: &ids,
-            feature_evidence: &evidence,
-            features: &features,
-            factors: &factors,
-            domain: &DomainConfig::default(),
-            model: &model_config(&active, None),
-            top_n: 10,
-            boundary,
-        })
+    let runner = build_runner(&db, Arc::clone(&store), Arc::clone(&critical))
         .await
-        .expect("inference round");
+        .expect("bootstrap serving generation");
+    let active_model = resolve_active_model(&runner, &policy, &boundary).await;
+
+    let outcome = Box::pin(runner.run(ModelRunRequest {
+        decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
+        market_selection_id: None,
+        selection: &selection,
+        feature_vectors: &vectors,
+        feature_vector_ids: &ids,
+        feature_evidence: &evidence,
+        serving: &active_model.serving,
+        top_n: 10,
+        boundary,
+    }))
+    .await
+    .expect("inference round");
 
     assert!(outcome.emitted >= 1, "the market must produce a candidate");
     assert!(
@@ -1064,7 +1119,7 @@ pub async fn online_loop_selection_candidates() {
     assert!(!values.is_empty(), "factor values persisted under the run");
 }
 
-pub async fn inference_failure_keeps_active() {
+pub async fn generation_rejects_bad_shadow() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db).await;
@@ -1072,107 +1127,75 @@ pub async fn inference_failure_keeps_active() {
 
     let factors = factors_config();
     let features = FeaturesConfig::default();
-    let (vectors, ids, selection, evidence, boundary) = build_cross_section_features(&db).await;
-
+    let training_policy_id = seed_runtime_policy(&db, &factors, &features).await;
     let store = artifact_store();
-    let active = publish_weighted_model(&db, &store, &factors, &features).await;
-    publish_enabled_factors(&db, &factors, &features).await;
+    let active = publish_weighted_model(&db, &store, &factors, &features, training_policy_id).await;
+    register_enabled_factors(&db, &factors, &features).await;
 
-    let critical = Arc::new(AtomicUsize::new(0));
-    let runner = build_runner(
-        &db,
-        Arc::clone(&store),
-        Arc::clone(&critical),
-        Arc::new(WeightOverlayApplicator::new()),
-    );
-
-    // Shadow points at a version that does not exist: the shadow path degrades,
-    // the active result is unaffected, and no critical alert fires.
-    let missing_shadow = ModelVersionId::from_v7();
-    let outcome = runner
-        .run(ModelRunRequest {
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            market_selection_id: None,
-            selection: &selection,
-            feature_vectors: &vectors,
-            feature_vector_ids: &ids,
-            feature_evidence: &evidence,
-            features: &features,
-            factors: &factors,
-            domain: &DomainConfig::default(),
-            model: &model_config(&active, Some(&missing_shadow)),
-            top_n: 10,
-            boundary,
-        })
-        .await
-        .expect("active round survives shadow failure");
-
-    assert!(!outcome.accepted.is_empty(), "active candidates produced");
-    let shadow = outcome.shadow.expect("shadow attempted");
-    assert!(shadow.failure.is_some(), "shadow recorded a failure");
+    // The shadow row is internally coherent, but its artifact hash points at
+    // another version's exact bytes. Deep registry verification must reject it
+    // while preparing the complete generation, before any route is published or
+    // model-run side effect can exist.
+    let drifted_shadow = register_contract_drift(&db, &active, &factors).await;
+    let _policy = activate_model_config(&db, &active, Some(&drifted_shadow)).await;
+    let result = build_runner(&db, Arc::clone(&store), Arc::new(AtomicUsize::new(0))).await;
+    let Err(error) = result else {
+        panic!("invalid shadow must reject the complete serving generation");
+    };
     assert!(
-        shadow.model_run_id.is_none(),
-        "early shadow failure before create_run must not expose a phantom run id"
+        error
+            .to_string()
+            .contains("exact persisted serving contract"),
+        "generation must fail on exact contract drift, got: {error}"
     );
-    assert_eq!(
-        critical.load(Ordering::Relaxed),
-        0,
-        "a shadow failure must not raise a critical alert"
+    assert!(
+        ModelRunEntity::find()
+            .all(&db)
+            .await
+            .expect("load model runs after rejected generation")
+            .is_empty(),
+        "a rejected generation must not create active or shadow runs"
     );
 }
 
-struct OverlayRoundInput<'a> {
+struct ModelRoundInput<'a> {
     runner: &'a ModelRunner,
-    overlay: &'a WeightOverlayApplicator,
-    base_factors: &'a FactorsConfig,
-    features: &'a FeaturesConfig,
-    model: &'a ModelConfig,
+    active: &'a ActiveModelRequirements,
     selection: &'a [SelectedMarket],
     vectors: &'a [FeatureVector],
     ids: &'a [FeatureVectorId],
     evidence: &'a FeatureEvidenceCommitment,
     boundary: DecisionBoundary,
-    skew: usize,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
 }
 
-async fn run_overlay_round(input: OverlayRoundInput<'_>) -> ModelRunOutcome {
-    let OverlayRoundInput {
+async fn run_model_round(input: ModelRoundInput<'_>) -> ModelRunOutcome {
+    let ModelRoundInput {
         runner,
-        overlay,
-        base_factors,
-        features,
-        model,
+        active,
         selection,
         vectors,
         ids,
         evidence,
         boundary,
-        skew,
+        decision_policy_snapshot_id,
     } = input;
-    overlay.reload(
-        &factors_with_overlay_skew(base_factors, features, skew),
-        model,
-    );
-    runner
-        .run(ModelRunRequest {
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            market_selection_id: None,
-            selection,
-            feature_vectors: vectors,
-            feature_vector_ids: ids,
-            feature_evidence: evidence,
-            features,
-            factors: base_factors,
-            domain: &DomainConfig::default(),
-            model,
-            top_n: 10,
-            boundary,
-        })
-        .await
-        .expect("overlay round")
+    Box::pin(runner.run(ModelRunRequest {
+        decision_policy_snapshot_id,
+        market_selection_id: None,
+        selection,
+        feature_vectors: vectors,
+        feature_vector_ids: ids,
+        feature_evidence: evidence,
+        serving: &active.serving,
+        top_n: 10,
+        boundary,
+    }))
+    .await
+    .expect("model round")
 }
 
-pub async fn hot_changes_not_artifact() {
+pub async fn cached_planes_stay_stable() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db).await;
@@ -1180,52 +1203,42 @@ pub async fn hot_changes_not_artifact() {
 
     let base_factors = factors_config();
     let features = FeaturesConfig::default();
-    // A real multi-market cross-section: the overlay reweights *scored*
-    // cross-sectional factors, so shadow scores must shift when weights change
-    // (a single-market cross-section would leave them all indeterminate).
-    let (vectors, ids, selection, evidence, boundary) = build_cross_section_features(&db).await;
-
+    let training_policy_id = seed_runtime_policy(&db, &base_factors, &features).await;
     let store = artifact_store();
-    let published = publish_weighted_model(&db, &store, &base_factors, &features).await;
-    publish_enabled_factors(&db, &base_factors, &features).await;
-    let candidate = register_candidate_sibling(&db, &store, &published).await;
-
-    let overlay = Arc::new(WeightOverlayApplicator::new());
+    let published =
+        publish_weighted_model(&db, &store, &base_factors, &features, training_policy_id).await;
+    register_enabled_factors(&db, &base_factors, &features).await;
+    let candidate_factors = factors_with_head_skew(&base_factors, &features, 0);
+    let candidate = register_candidate_sibling(&db, &store, &published, &candidate_factors).await;
+    register_enabled_factors(&db, &candidate_factors, &features).await;
+    let policy = activate_model_config(&db, &published, Some(&candidate)).await;
+    let (vectors, ids, selection, evidence, boundary) =
+        build_cross_section_features(&db, policy.decision_policy_snapshot_id).await;
     let critical = Arc::new(AtomicUsize::new(0));
-    let runner = build_runner(
-        &db,
-        Arc::clone(&store),
-        Arc::clone(&critical),
-        Arc::clone(&overlay),
-    );
-
-    let model = model_config(&published, Some(&candidate));
-    let first = run_overlay_round(OverlayRoundInput {
+    let runner = build_runner(&db, Arc::clone(&store), Arc::clone(&critical))
+        .await
+        .expect("bootstrap active and shadow generation");
+    let active = resolve_active_model(&runner, &policy, &boundary).await;
+    let first = run_model_round(ModelRoundInput {
         runner: &runner,
-        overlay: &overlay,
-        base_factors: &base_factors,
-        features: &features,
-        model: &model,
+        active: &active,
         selection: &selection,
         vectors: &vectors,
         ids: &ids,
         evidence: &evidence,
         boundary: boundary.clone(),
-        skew: 0,
+        decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
     })
     .await;
-    let second = run_overlay_round(OverlayRoundInput {
+    let second = run_model_round(ModelRoundInput {
         runner: &runner,
-        overlay: &overlay,
-        base_factors: &base_factors,
-        features: &features,
-        model: &model,
+        active: &active,
         selection: &selection,
         vectors: &vectors,
         ids: &ids,
         evidence: &evidence,
         boundary,
-        skew: 1,
+        decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
     })
     .await;
 
@@ -1233,7 +1246,7 @@ pub async fn hot_changes_not_artifact() {
     let active_second = second.accepted[0].composite_score.inner();
     assert_eq!(
         active_first, active_second,
-        "published active must ignore config overlay changes"
+        "published active must remain stable after a contract-cache hit"
     );
 
     let shadow_first = first
@@ -1248,9 +1261,9 @@ pub async fn hot_changes_not_artifact() {
         .and_then(|outcome| outcome.diff.as_ref())
         .expect("shadow diff on second round")
         .mean_score_diff;
-    assert_ne!(
+    assert_eq!(
         shadow_first, shadow_second,
-        "candidate shadow scores must shift when overlay weights change"
+        "candidate shadow divergence must remain frozen after a contract-cache hit"
     );
 
     let shadow_run_id = second
@@ -1266,123 +1279,281 @@ pub async fn hot_changes_not_artifact() {
     assert_eq!(shadow_run.run_kind, ModelRunKind::Shadow);
 }
 
-pub async fn inference_rejects_retired_model() {
+pub async fn generation_rejects_retired_model() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db).await;
 
     let factors = factors_config();
     let features = FeaturesConfig::default();
-    let (vectors, ids, evidence, boundary) = build_features(&db).await;
-
+    let training_policy_id = seed_runtime_policy(&db, &factors, &features).await;
     let store = artifact_store();
-    let active = publish_weighted_model(&db, &store, &factors, &features).await;
-    publish_enabled_factors(&db, &factors, &features).await;
+    let active = publish_weighted_model(&db, &store, &factors, &features, training_policy_id).await;
+    register_enabled_factors(&db, &factors, &features).await;
+    let _policy = activate_model_config(&db, &active, None).await;
     PgModelRegistryRepository::new(db.clone())
         .retire_model_version(&active)
         .await
         .expect("retire published version");
 
-    let critical = Arc::new(AtomicUsize::new(0));
-    let runner = build_runner(
-        &db,
-        Arc::clone(&store),
-        Arc::clone(&critical),
-        Arc::new(WeightOverlayApplicator::new()),
-    );
-
-    let selection = [selected_market()];
-    let result = runner
-        .run(ModelRunRequest {
-            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-            market_selection_id: None,
-            selection: &selection,
-            feature_vectors: &vectors,
-            feature_vector_ids: &ids,
-            feature_evidence: &evidence,
-            features: &features,
-            factors: &factors,
-            domain: &DomainConfig::default(),
-            model: &model_config(&active, None),
-            top_n: 10,
-            boundary,
-        })
-        .await;
-    assert!(result.is_err(), "retired active model must fail load");
-    let Err(err) = result else {
-        panic!("retired active model must fail load");
+    let result = build_runner(&db, Arc::clone(&store), Arc::new(AtomicUsize::new(0))).await;
+    let Err(error) = result else {
+        panic!("retired active model must reject serving generation bootstrap");
     };
     assert!(
-        err.to_string().contains("must be published"),
-        "failure must cite publication status: {err}"
+        error.to_string().contains("must be published"),
+        "failure must cite publication status: {error}"
     );
+    assert!(
+        ModelRunEntity::find()
+            .all(&db)
+            .await
+            .expect("load model runs after retired generation")
+            .is_empty(),
+        "retired generation rejection must precede model-run persistence"
+    );
+}
+
+struct ModelRunLifecycleScenario {
+    db: DatabaseConnection,
+    repo: PgModelRunRepository,
+    policy_id: DecisionPolicySnapshotId,
+    input_hash: ContentHash,
+    output_hash: ContentHash,
+}
+
+impl ModelRunLifecycleScenario {
+    async fn initialize(db: DatabaseConnection) -> Self {
+        let factors = factors_config();
+        let features = FeaturesConfig::default();
+        let policy_id = seed_runtime_policy(&db, &factors, &features).await;
+        let repo = PgModelRunRepository::new(db.clone());
+        let input_hash =
+            ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("model input hash");
+        let output_hash =
+            ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("model output hash");
+        Self {
+            db,
+            repo,
+            policy_id,
+            input_hash,
+            output_hash,
+        }
+    }
+
+    fn running(&self, model_run_id: ModelRunId) -> NewModelRun {
+        NewModelRun {
+            model_run_id,
+            run_kind: ModelRunKind::LiveInference,
+            model_version_id: None,
+            decision_policy_snapshot_id: self.policy_id,
+            market_selection_id: None,
+            window_start: Utc::now(),
+            window_end: Utc::now(),
+            input_hash: self.input_hash,
+        }
+    }
+
+    async fn database_timestamp(&self) -> DateTime<Utc> {
+        let row = self
+            .db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT statement_timestamp() AS observed_at",
+            ))
+            .await
+            .expect("query model-run database clock")
+            .expect("model-run database clock row");
+        DateTime::<Utc>::try_get(&row, "", "observed_at").expect("decode model-run database clock")
+    }
+
+    async fn succeed_once(&self) {
+        let model_run_id = ModelRunId::from_v7();
+        let before_create = self.database_timestamp().await;
+        let created = self
+            .repo
+            .create(self.running(model_run_id))
+            .await
+            .expect("create successful model run");
+        let after_create = self.database_timestamp().await;
+        assert_eq!(created.status, ModelRunStatus::Running);
+        assert!(
+            created.started_at >= before_create && created.started_at <= after_create,
+            "run start must be sealed by the PostgreSQL statement clock"
+        );
+        let found = self
+            .repo
+            .find_by_id(&model_run_id)
+            .await
+            .expect("find running model run")
+            .expect("running model run row");
+        assert_eq!(found.status, ModelRunStatus::Running);
+
+        let succeeded = self
+            .repo
+            .succeed(&model_run_id, self.output_hash, None)
+            .await
+            .expect("succeed model run");
+        assert_eq!(succeeded.status, ModelRunStatus::Succeeded);
+        assert_eq!(succeeded.output_hash, Some(self.output_hash));
+        assert!(succeeded.finished_at.is_some());
+        assert!(
+            self.repo
+                .fail(
+                    &model_run_id,
+                    ModelRunErrorCode::ActiveInferenceFailed,
+                    "late active inference failure".to_owned(),
+                )
+                .await
+                .is_err(),
+            "finalizing a terminal run must be rejected"
+        );
+    }
+
+    async fn reject_future_window(&self) {
+        let model_run_id = ModelRunId::from_v7();
+        let mut run = self.running(model_run_id);
+        let future = Utc::now() + ChronoDuration::seconds(3);
+        run.window_start = future;
+        run.window_end = future;
+        assert!(
+            self.repo.create(run).await.is_err(),
+            "a decision window beyond the bounded internal clock skew must fail closed"
+        );
+        assert!(
+            self.repo
+                .find_by_id(&model_run_id)
+                .await
+                .expect("query rejected future-window run")
+                .is_none(),
+            "a rejected future-window run must not leave a row"
+        );
+    }
+
+    async fn fail_once(&self) {
+        let model_run_id = ModelRunId::from_v7();
+        self.repo
+            .create(self.running(model_run_id))
+            .await
+            .expect("create failing model run");
+        let failed = self
+            .repo
+            .fail(
+                &model_run_id,
+                ModelRunErrorCode::ArtifactLoadFailed,
+                "artifact fixture failure".to_owned(),
+            )
+            .await
+            .expect("fail model run");
+        assert_eq!(failed.status, ModelRunStatus::Failed);
+        assert_eq!(
+            failed.error_code,
+            Some(ModelRunErrorCode::ArtifactLoadFailed)
+        );
+    }
+
+    async fn cancel_once(&self) {
+        let model_run_id = ModelRunId::from_v7();
+        self.repo
+            .create(self.running(model_run_id))
+            .await
+            .expect("create cancellable model run");
+        let cancelled = self
+            .repo
+            .cancel(&model_run_id, "operator cancelled fixture".to_owned())
+            .await
+            .expect("cancel model run");
+        assert_eq!(cancelled.status, ModelRunStatus::Cancelled);
+        assert_eq!(
+            cancelled.error_code,
+            Some(ModelRunErrorCode::CancelledByOperator)
+        );
+        assert!(cancelled.finished_at.is_some());
+        assert!(
+            self.repo
+                .fail(
+                    &model_run_id,
+                    ModelRunErrorCode::TrainingFailed,
+                    "late training failure".to_owned(),
+                )
+                .await
+                .is_err(),
+            "cancelled runs must remain terminal"
+        );
+    }
+
+    async fn terminal_race(&self) {
+        let model_run_id = ModelRunId::from_v7();
+        self.repo
+            .create(self.running(model_run_id))
+            .await
+            .expect("create terminal race");
+        let (succeed_result, cancel_result) = tokio::join!(
+            self.repo.succeed(&model_run_id, self.output_hash, None),
+            self.repo
+                .cancel(&model_run_id, "concurrent operator cancellation".to_owned(),),
+        );
+        let winner = match (succeed_result, cancel_result) {
+            (Ok(winner), Err(StorageError::StateConflict { .. }))
+            | (Err(StorageError::StateConflict { .. }), Ok(winner)) => winner,
+            (succeed, cancel) => {
+                panic!("exactly one terminal compare-and-set must win: {succeed:?}, {cancel:?}")
+            }
+        };
+        let durable = self
+            .repo
+            .find_by_id(&model_run_id)
+            .await
+            .expect("reload terminal race")
+            .expect("terminal race row");
+        assert_eq!(durable.model_run_id, winner.model_run_id);
+        assert_eq!(durable.run_kind, winner.run_kind);
+        assert_eq!(durable.model_version_id, winner.model_version_id);
+        assert_eq!(
+            durable.decision_policy_snapshot_id,
+            winner.decision_policy_snapshot_id
+        );
+        assert_eq!(durable.market_selection_id, winner.market_selection_id);
+        assert_eq!(durable.window_start, winner.window_start);
+        assert_eq!(durable.window_end, winner.window_end);
+        assert_eq!(durable.status, winner.status);
+        assert_eq!(durable.input_hash, winner.input_hash);
+        assert_eq!(durable.output_hash, winner.output_hash);
+        assert_eq!(durable.error_code, winner.error_code);
+        assert_eq!(durable.error_message, winner.error_message);
+        assert_eq!(durable.started_at, winner.started_at);
+        assert_eq!(durable.finished_at, winner.finished_at);
+
+        let row = ModelRunEntity::find_by_id(model_run_id)
+            .one(&self.db)
+            .await
+            .expect("load terminal model")
+            .expect("terminal model");
+        let mut tampered = row.into_active_model();
+        tampered.status = Set(ModelRunStatus::Failed);
+        tampered.output_hash = Set(None);
+        tampered.error_code = Set(Some(ModelRunErrorCode::ActiveInferenceFailed));
+        tampered.error_message = Set(Some("late overwrite".to_owned()));
+        assert!(
+            tampered.update(&self.db).await.is_err(),
+            "database lifecycle guard must reject terminal overwrite"
+        );
+        assert!(
+            ModelRunEntity::delete_by_id(model_run_id)
+                .exec(&self.db)
+                .await
+                .is_err(),
+            "database lifecycle guard must reject audit-row deletion"
+        );
+    }
 }
 
 pub async fn model_run_create_fail() {
     let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    let repo = PgModelRunRepository::new(db.clone());
-
-    let zero = ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash");
-    let new_run = |id: &ModelRunId| NewModelRun {
-        model_run_id: *id,
-        run_kind: ModelRunKind::LiveInference,
-        model_version_id: None,
-        decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
-        market_selection_id: None,
-        window_start: Utc::now(),
-        window_end: Utc::now(),
-        status: ModelRunStatus::Running,
-        input_hash: zero,
-        output_hash: None,
-        error_code: None,
-        error_message: None,
-        started_at: Utc::now(),
-        finished_at: None,
-    };
-
-    // create → find → succeed.
-    let ok_id = ModelRunId::from_v7();
-    repo.create(new_run(&ok_id)).await.expect("create");
-    let found = repo.find_by_id(&ok_id).await.expect("find").expect("row");
-    assert_eq!(found.status, ModelRunStatus::Running);
-    let output = ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash");
-    let succeeded = repo
-        .succeed(&ok_id, output, Utc::now(), None)
-        .await
-        .expect("succeed");
-    assert_eq!(succeeded.status, ModelRunStatus::Succeeded);
-    assert_eq!(succeeded.output_hash, Some(output));
-    assert!(succeeded.finished_at.is_some());
-
-    // A second succeed/fail on a terminal run is rejected.
-    assert!(
-        repo.fail(
-            &ok_id,
-            ModelRunErrorCode::ActiveInferenceFailed,
-            "y".to_owned(),
-            Utc::now(),
-        )
-        .await
-        .is_err(),
-        "finalizing a terminal run must be rejected"
-    );
-
-    // create → fail.
-    let fail_id = ModelRunId::from_v7();
-    repo.create(new_run(&fail_id)).await.expect("create");
-    let failed = repo
-        .fail(
-            &fail_id,
-            ModelRunErrorCode::ArtifactLoadFailed,
-            "detail".to_owned(),
-            Utc::now(),
-        )
-        .await
-        .expect("fail");
-    assert_eq!(failed.status, ModelRunStatus::Failed);
-    assert_eq!(
-        failed.error_code,
-        Some(ModelRunErrorCode::ArtifactLoadFailed)
-    );
+    let scenario = ModelRunLifecycleScenario::initialize(pool.connection().clone()).await;
+    scenario.succeed_once().await;
+    scenario.reject_future_window().await;
+    scenario.fail_once().await;
+    scenario.cancel_once().await;
+    scenario.terminal_race().await;
 }

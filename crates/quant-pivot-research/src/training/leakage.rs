@@ -16,11 +16,7 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::{
-    domain::data_plane::DecisionSource,
-    enums::feature::EvidenceSourceKind,
-    types::{MarketId, TokenId},
-};
+use quant_pivot_models::types::{MarketId, TokenId};
 use serde::{Deserialize, Serialize};
 
 use super::TrainingExample;
@@ -88,9 +84,12 @@ pub fn scan_future_leakage(examples: &[TrainingExample]) -> QuantResult<LeakageF
                     .ok_or_else(|| ResearchError::LeakageDetected {
                         detail: "future-leakage evidence count overflow".to_owned(),
                     })?;
-            let cutoff = evidence_decision_source(source.source_kind).map_or(decision_at, |kind| {
-                example.decision_boundary.cutoff_for(kind)
-            });
+            let cutoff = source
+                .source_kind
+                .decision_source()
+                .map_or(decision_at, |kind| {
+                    example.decision_boundary.cutoff_for(kind)
+                });
             if source.effective_at > cutoff {
                 findings.violations.push(LeakageViolation {
                     market_id: example.market_id.clone(),
@@ -160,18 +159,6 @@ pub fn assert_no_future_leakage(examples: &[TrainingExample]) -> QuantResult<()>
         .into());
     }
     Ok(())
-}
-
-const fn evidence_decision_source(source: EvidenceSourceKind) -> Option<DecisionSource> {
-    match source {
-        EvidenceSourceKind::Book => Some(DecisionSource::Book),
-        EvidenceSourceKind::GammaMetadata => Some(DecisionSource::Catalog),
-        EvidenceSourceKind::ClickHouseFact => Some(DecisionSource::Microstructure),
-        EvidenceSourceKind::TradeTape => Some(DecisionSource::TradeTape),
-        EvidenceSourceKind::DomainExternal => Some(DecisionSource::DomainCrypto),
-        EvidenceSourceKind::Linkage => Some(DecisionSource::Linkage),
-        EvidenceSourceKind::Derived => None,
-    }
 }
 
 #[cfg(test)]
@@ -262,6 +249,29 @@ mod tests {
         let findings = scan_future_leakage(&[example(-5), example(-1)]).expect("scan");
         assert!(findings.is_clean());
         assert_eq!(findings.scanned, 2);
+    }
+
+    #[test]
+    fn domain_sources_isolate_cutoffs() {
+        let mut crypto = example(-400);
+        let decision_at = crypto.decision_at();
+        crypto.decision_boundary = DecisionClock::new(0)
+            .serving_boundary(decision_at, 300, 600)
+            .expect("boundary");
+        crypto.source_refs[0].source_kind = EvidenceSourceKind::DomainCrypto;
+        assert!(
+            assert_no_future_leakage(std::slice::from_ref(&crypto)).is_ok(),
+            "crypto evidence at -400s is before its -300s cutoff"
+        );
+
+        let mut weather = crypto;
+        weather.source_refs[0].source_kind = EvidenceSourceKind::DomainWeather;
+        let findings = scan_future_leakage(&[weather]).expect("scan");
+        assert_eq!(findings.violation_count(), 1);
+        assert_eq!(
+            findings.violations[0].cutoff,
+            decision_at - Duration::seconds(600)
+        );
     }
 
     #[test]

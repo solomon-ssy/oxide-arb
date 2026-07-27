@@ -35,7 +35,7 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     artifact::ArtifactStore,
     execution_semantics::PitFeeSchedule,
-    model::{CalibrationArtifactLoader, load_hash_verified_artifact},
+    model::{CalibrationArtifactLoader, ModelArtifact},
     portfolio::AccountSnapshot,
 };
 
@@ -344,7 +344,8 @@ impl AdmissionInputBuilder {
         let return_model_calibrated = match model_version.as_ref() {
             Some(version) => {
                 let artifact =
-                    load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
+                    ModelArtifact::load_verified(self.deps.artifact_store.as_ref(), version)
+                        .await?;
                 // The enum tag alone only proves a calibrator was bound at
                 // publish time; `resolve_return_model_calibration` re-resolves
                 // it now (the same shared deep check publish / report /

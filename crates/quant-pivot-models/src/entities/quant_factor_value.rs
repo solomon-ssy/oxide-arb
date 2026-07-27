@@ -30,8 +30,10 @@ pub struct Model {
     /// Authoritative factor-value state (scored / missing-input / not-applicable
     /// / indeterminate). Orthogonal to `indeterminate_reason`.
     pub value_state: FactorValueState,
+    #[sea_orm(column_type = "Decimal(Some((28, 12)))")]
     pub raw_value: Option<Decimal>,
     /// `None` when the factor was missing-input, not-applicable, or indeterminate.
+    #[sea_orm(column_type = "Decimal(Some((20, 18)))")]
     pub normalized_score: Option<Probability>,
     /// How the score was derived (`None` when not scored).
     pub normalization_source: Option<NormalizationSource>,
@@ -39,6 +41,7 @@ pub struct Model {
     /// `Indeterminate`).
     pub indeterminate_reason: Option<FactorIndeterminateReason>,
     pub direction: FactorDirection,
+    #[sea_orm(column_type = "Decimal(Some((20, 18)))")]
     pub confidence: Probability,
     #[sea_orm(column_type = "JsonBinary")]
     pub explanation: FactorExplanation,

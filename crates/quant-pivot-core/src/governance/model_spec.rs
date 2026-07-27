@@ -104,7 +104,8 @@ const fn source_requirement_wire(source: SourceRequirement) -> &'static str {
         SourceRequirement::MicrostructureWindow => "microstructure_window",
         SourceRequirement::NegRiskSiblingLegs => "neg_risk_sibling_legs",
         SourceRequirement::TradeTapeWindow => "trade_tape_window",
-        SourceRequirement::DomainObservationWindow => "domain_observation_window",
+        SourceRequirement::DomainCryptoObservationWindow => "domain_crypto_observation_window",
+        SourceRequirement::DomainWeatherObservationWindow => "domain_weather_observation_window",
     }
 }
 

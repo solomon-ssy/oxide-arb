@@ -123,6 +123,18 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
+        name: "trg_quant_backtest_path_set_append_only",
+        table: "quant_backtest_path_set",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_calibration_artifact_lifecycle_guard",
+        table: "quant_calibration_artifact",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::GuardCalibrationArtifact,
+    },
+    TriggerSpec {
         name: "trg_quant_calibration_artifact_publication_append_only",
         table: "quant_calibration_artifact_publication",
         events: TriggerEvents::DeleteOrUpdate,
@@ -195,14 +207,50 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
-        name: "trg_quant_factor_definition_updated_at",
+        name: "trg_quant_factor_definition_append_only",
         table: "quant_factor_definition",
-        events: TriggerEvents::Update,
-        program: TriggerProgram::SetUpdatedAt,
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_factor_value_append_only",
+        table: "quant_factor_value",
+        events: TriggerEvents::InsertOrDeleteOrUpdate,
+        program: TriggerProgram::GuardFactorValue,
+    },
+    TriggerSpec {
+        name: "trg_quant_feedback_cycle_lifecycle_guard",
+        table: "quant_feedback_cycle",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::GuardFeedbackCycle,
+    },
+    TriggerSpec {
+        name: "trg_quant_feedback_evaluation_use_append_only",
+        table: "quant_feedback_evaluation_use",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_feedback_stage_event_append_only",
+        table: "quant_feedback_stage_event",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_drift_report_append_only",
+        table: "quant_drift_report",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
         name: "trg_quant_feature_parity_candidate_append_only",
         table: "quant_feature_parity_candidate",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_feature_vector_append_only",
+        table: "quant_feature_vector",
         events: TriggerEvents::DeleteOrUpdate,
         program: TriggerProgram::DenyWrite,
     },
@@ -231,10 +279,28 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
+        name: "trg_quant_model_comparison_report_append_only",
+        table: "quant_model_comparison_report",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_model_run_lifecycle_guard",
+        table: "quant_model_run",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::GuardModelRun,
+    },
+    TriggerSpec {
         name: "trg_quant_model_spec_append_only",
         table: "quant_model_spec",
         events: TriggerEvents::DeleteOrUpdate,
         program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_model_version_lifecycle_guard",
+        table: "quant_model_version",
+        events: TriggerEvents::InsertOrDeleteOrUpdate,
+        program: TriggerProgram::GuardModelVersion,
     },
     TriggerSpec {
         name: "trg_quant_order_intent_updated_at",
@@ -412,4 +478,112 @@ pub async fn apply(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
         v1::create_trigger(manager, *spec).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TRIGGERS, TriggerEvents, TriggerProgram};
+
+    #[test]
+    fn factor_values_are_worm() {
+        let trigger = TRIGGERS
+            .iter()
+            .find(|trigger| trigger.name == "trg_quant_factor_value_append_only")
+            .expect("factor-value append-only trigger");
+        assert_eq!(trigger.table, "quant_factor_value");
+        assert_eq!(trigger.events, TriggerEvents::InsertOrDeleteOrUpdate);
+        assert_eq!(trigger.program, TriggerProgram::GuardFactorValue);
+    }
+
+    #[test]
+    fn factor_definitions_are_worm() {
+        let trigger = TRIGGERS
+            .iter()
+            .find(|trigger| trigger.name == "trg_quant_factor_definition_append_only")
+            .expect("factor-definition append-only trigger");
+        assert_eq!(trigger.table, "quant_factor_definition");
+        assert_eq!(trigger.events, TriggerEvents::DeleteOrUpdate);
+        assert_eq!(trigger.program, TriggerProgram::DenyWrite);
+    }
+
+    #[test]
+    fn backtest_sets_are_worm() {
+        let trigger = TRIGGERS
+            .iter()
+            .find(|trigger| trigger.name == "trg_quant_backtest_path_set_append_only")
+            .expect("backtest-path-set append-only trigger");
+        assert_eq!(trigger.table, "quant_backtest_path_set");
+        assert_eq!(trigger.events, TriggerEvents::DeleteOrUpdate);
+        assert_eq!(trigger.program, TriggerProgram::DenyWrite);
+    }
+
+    #[test]
+    fn research_reports_are_worm() {
+        for name in [
+            "trg_quant_backtest_report_append_only",
+            "trg_quant_model_comparison_report_append_only",
+        ] {
+            let trigger = TRIGGERS
+                .iter()
+                .find(|trigger| trigger.name == name)
+                .expect("research report append-only trigger");
+            assert_eq!(trigger.events, TriggerEvents::DeleteOrUpdate);
+            assert_eq!(trigger.program, TriggerProgram::DenyWrite);
+        }
+    }
+
+    #[test]
+    fn calibration_mutates_only_active() {
+        let trigger = TRIGGERS
+            .iter()
+            .find(|trigger| trigger.name == "trg_quant_calibration_artifact_lifecycle_guard")
+            .expect("calibration-artifact lifecycle trigger");
+        assert_eq!(trigger.table, "quant_calibration_artifact");
+        assert_eq!(trigger.events, TriggerEvents::DeleteOrUpdate);
+        assert_eq!(trigger.program, TriggerProgram::GuardCalibrationArtifact);
+    }
+
+    #[test]
+    fn feature_vectors_are_worm() {
+        let trigger = TRIGGERS
+            .iter()
+            .find(|trigger| trigger.name == "trg_quant_feature_vector_append_only")
+            .expect("feature-vector append-only trigger");
+        assert_eq!(trigger.table, "quant_feature_vector");
+        assert_eq!(trigger.events, TriggerEvents::DeleteOrUpdate);
+        assert_eq!(trigger.program, TriggerProgram::DenyWrite);
+    }
+
+    #[test]
+    fn model_contract_is_worm() {
+        let trigger = TRIGGERS
+            .iter()
+            .find(|trigger| trigger.name == "trg_quant_model_version_lifecycle_guard")
+            .expect("model-version lifecycle trigger");
+        assert_eq!(trigger.table, "quant_model_version");
+        assert_eq!(trigger.events, TriggerEvents::InsertOrDeleteOrUpdate);
+        assert_eq!(trigger.program, TriggerProgram::GuardModelVersion);
+    }
+
+    #[test]
+    fn feedback_evidence_is_worm() {
+        for name in [
+            "trg_quant_feedback_evaluation_use_append_only",
+            "trg_quant_feedback_stage_event_append_only",
+            "trg_quant_drift_report_append_only",
+        ] {
+            let trigger = TRIGGERS
+                .iter()
+                .find(|trigger| trigger.name == name)
+                .expect("feedback evidence append-only trigger");
+            assert_eq!(trigger.events, TriggerEvents::DeleteOrUpdate);
+            assert_eq!(trigger.program, TriggerProgram::DenyWrite);
+        }
+        let cycle = TRIGGERS
+            .iter()
+            .find(|trigger| trigger.name == "trg_quant_feedback_cycle_lifecycle_guard")
+            .expect("feedback-cycle lifecycle trigger");
+        assert_eq!(cycle.events, TriggerEvents::DeleteOrUpdate);
+        assert_eq!(cycle.program, TriggerProgram::GuardFeedbackCycle);
+    }
 }

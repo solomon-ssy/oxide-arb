@@ -32,36 +32,33 @@ use quant_pivot_models::{
     clickhouse::{QuantModelInputEventRow, QuantSignalCandidateEventRow},
     domain::{
         data_plane::DecisionBoundary,
+        governance::DecisionPolicySnapshotInfo,
         quant::{ModelVersionInfo, NewModelRun, NewShadowComparison},
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource, MarketCategory},
         model::ModelFamily,
-        quant::{ModelRunKind, ModelRunStatus, ModelWeightSource, OutcomeSide, PublicationStatus},
+        quant::{ModelRunKind, ModelWeightSource, OutcomeSide, PublicationStatus},
     },
-    runtime_config::{
-        DomainConfig, FactorCrossSectionConfig, FactorsConfig, FeaturesConfig, ModelConfig,
-        ModelVersionRef,
-    },
+    runtime_config::BuyModelRoute,
     types::{
         ContentHash, DecisionPolicySnapshotId, FeatureVectorId, MarketId, MarketSelectionId,
         ModelRunId, ModelVersionId, Probability, SignalCandidateId, TokenId,
-        shadow::ShadowComparison, stable_name::FeatureName,
+        shadow::ShadowComparison,
     },
 };
 use quant_pivot_repository::traits::{
     ModelRegistryRepository, ModelRunRepository, ShadowComparisonRepository,
 };
 use quant_pivot_research::{
-    factors::{FactorEngine, FrozenReferenceQuantiles, MarketFactorOutcome},
-    features::{FeatureSchema, FeatureVector},
+    factors::{FrozenReferenceQuantiles, MarketFactorOutcome},
+    features::FeatureVector,
     governance::shadow::{ShadowComparisonRequest, compute_shadow_comparison},
     hashing::ResearchHasher,
     model::{
-        ActiveSchemaBinding, InferenceStage, ModelInputAuditRow, ModelRuntimeFactory,
-        ModelRuntimeFactoryBuilder, ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput,
-        QuantModelRuntime, SignalCandidate, WeightOverlay, annotate,
-        canonical_business_prediction_hash, signal_candidate_event,
+        InferenceStage, ModelInputAuditRow, ModelRuntimeInput, ModelRuntimeOutput,
+        QuantModelRuntime, SignalCandidate, annotate, canonical_business_prediction_hash,
+        signal_candidate_event,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
@@ -69,7 +66,6 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 
 use crate::{
-    governance::{BiasTableApplicator, WeightOverlayApplicator, active_load_ok, shadow_load_ok},
     observability::{
         alert_dispatcher::{Alert, AlertDispatcher},
         model_input_fact_writer::ModelInputEventWriter,
@@ -77,7 +73,13 @@ use crate::{
         signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
     projection::inference_batch::build_runtime_input,
-    service::factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
+    service::{
+        factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
+        model_serving_generation::{
+            ModelServingGenerationRequest, ModelServingGenerationStore, ModelServingRouteSnapshot,
+        },
+        model_serving_registry::LoadedModelServingRuntime,
+    },
 };
 
 /// Decimal places shadow-diff aggregates are rounded to.
@@ -137,14 +139,8 @@ pub struct ModelRunRequest<'a> {
     /// Durable commitment for the exact feature-cell rows backing
     /// `feature_vector_ids`.
     pub feature_evidence: &'a FeatureEvidenceCommitment,
-    /// Frozen feature config.
-    pub features: &'a FeaturesConfig,
-    /// Frozen factor config.
-    pub factors: &'a FactorsConfig,
-    /// Frozen domain config (category-routed domain factor plane).
-    pub domain: &'a DomainConfig,
-    /// Frozen model config (active / shadow refs, floors, horizon).
-    pub model: &'a ModelConfig,
+    /// Exact route/runtime generation pinned before market selection.
+    pub serving: &'a ModelServingRouteSnapshot,
     /// `TopN` bound for the shadow comparison overlap (the report's resolved `TopN`).
     pub top_n: usize,
     /// Sole decision/cutoff contract for this inference round.
@@ -154,27 +150,25 @@ pub struct ModelRunRequest<'a> {
 /// Frozen inputs required to resolve active model feature requirements before
 /// market selection.
 pub struct ActiveModelRequirementsRequest<'a> {
-    /// Frozen feature config.
-    pub features: &'a FeaturesConfig,
-    /// Frozen factor config.
-    pub factors: &'a FactorsConfig,
-    /// Frozen domain config (category-routed domain factor plane).
-    pub domain: &'a DomainConfig,
-    /// Frozen model config.
-    pub model: &'a ModelConfig,
+    /// Frozen durable policy identity and document.
+    pub policy: &'a DecisionPolicySnapshotInfo,
     /// Frozen decision time used by load-time governance checks.
     pub decision_at: DateTime<Utc>,
 }
 
 /// Active model metadata and selector-facing feature requirements.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ActiveModelRequirements {
+    /// Exact report/model route.
+    pub route: BuyModelRoute,
     /// Active production model version.
     pub model_version_id: ModelVersionId,
     /// Registry row loaded and quality-gate checked.
     pub version: ModelVersionInfo,
     /// Feature availability required before a market enters selection.
     pub model_requirements: ModelFeatureRequirements,
+    /// Exact active/shadow runtime generation retained through inference.
+    pub serving: ModelServingRouteSnapshot,
 }
 
 /// Shadow vs active divergence over the markets both models scored.
@@ -205,6 +199,8 @@ pub struct ShadowRunOutcome {
 pub struct ModelRunOutcome {
     /// The active run id.
     pub model_run_id: ModelRunId,
+    /// Exact single route represented by the durable model-run row.
+    pub model_version_id: ModelVersionId,
     /// Accepted candidates (score + confidence above the configured floors),
     /// ranked, ready for the portfolio planner.
     pub accepted: Vec<SignalCandidate>,
@@ -243,23 +239,12 @@ struct ActiveResult {
     model_input_rows: Vec<QuantModelInputEventRow>,
 }
 
-struct LoadedRoutes {
-    generic_version_id: ModelVersionId,
-    category_routes: HashMap<MarketCategory, ModelVersionId>,
-    runtimes: HashMap<ModelVersionId, Box<dyn QuantModelRuntime>>,
-}
-
 pub(crate) struct AlignedFeatureCrossSection {
     pub(crate) markets: Vec<SelectedMarket>,
     pub(crate) vectors: Arc<[FeatureVector]>,
     pub(crate) vector_ids: Vec<FeatureVectorId>,
 }
 
-struct RoutedFeatureBatch {
-    markets: Vec<SelectedMarket>,
-    vectors: Arc<[FeatureVector]>,
-    vector_ids: Vec<FeatureVectorId>,
-}
 /// Boot-time dependencies for the [`ModelRunner`].
 pub struct ModelRunnerDeps {
     /// Model-run ledger (create / finalize live + shadow runs).
@@ -268,8 +253,8 @@ pub struct ModelRunnerDeps {
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     /// Shadow-comparison ledger (signal-layer divergence persistence).
     pub shadow_comparison_repo: Arc<dyn ShadowComparisonRepository>,
-    /// Schema-bound runtime factory builder (loads model artifacts).
-    pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
+    /// Sole atomic owner of validated active/shadow/category generations.
+    pub serving_generations: Arc<ModelServingGenerationStore>,
     /// Online factor build pipeline.
     pub factor_pipeline: Arc<FactorPipelineService>,
     /// `ClickHouse` signal-candidate fact writer.
@@ -278,10 +263,6 @@ pub struct ModelRunnerDeps {
     pub model_input_writer: Arc<ModelInputEventWriter>,
     /// Operator alert sink for inference degradation.
     pub alerts: Arc<dyn InferenceAlertSink>,
-    /// Hot-reloadable factor-weight overlay for non-published candidate / shadow.
-    pub weight_overlay: Arc<WeightOverlayApplicator>,
-    /// Hot-reloadable favorite-longshot bias table (provenance + factor plane).
-    pub bias_table: Arc<BiasTableApplicator>,
 }
 
 /// Online inference orchestrator.
@@ -289,15 +270,11 @@ pub struct ModelRunner {
     model_run_repo: Arc<dyn ModelRunRepository>,
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
     shadow_comparison_repo: Arc<dyn ShadowComparisonRepository>,
-    factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
+    serving_generations: Arc<ModelServingGenerationStore>,
     factor_pipeline: Arc<FactorPipelineService>,
     signal_writer: Arc<SignalCandidateEventWriter>,
     model_input_writer: Arc<ModelInputEventWriter>,
     alerts: Arc<dyn InferenceAlertSink>,
-    /// Hot-reloadable factor-weight overlay for non-published candidate / shadow.
-    weight_overlay: Arc<WeightOverlayApplicator>,
-    /// Hot-reloadable favorite-longshot bias table (provenance audit).
-    bias_table: Arc<BiasTableApplicator>,
     /// Consecutive classical-shadow inference failures (reset on any success).
     shadow_classical_failures: AtomicU32,
 }
@@ -310,13 +287,11 @@ impl ModelRunner {
             model_run_repo: deps.model_run_repo,
             model_registry_repo: deps.model_registry_repo,
             shadow_comparison_repo: deps.shadow_comparison_repo,
-            factory_builder: deps.factory_builder,
+            serving_generations: deps.serving_generations,
             factor_pipeline: deps.factor_pipeline,
             signal_writer: deps.signal_writer,
             model_input_writer: deps.model_input_writer,
             alerts: deps.alerts,
-            weight_overlay: deps.weight_overlay,
-            bias_table: deps.bias_table,
             shadow_classical_failures: AtomicU32::new(0),
         }
     }
@@ -329,49 +304,33 @@ impl ModelRunner {
     /// is raised, and the error is returned. A shadow failure is isolated and
     /// reported in [`ModelRunOutcome::shadow`], never as an error.
     pub async fn run(&self, request: ModelRunRequest<'_>) -> QuantResult<ModelRunOutcome> {
-        let factor_schema_hash =
-            FactorEngine::new(request.factors, request.features, request.domain, None)
-                .factor_schema_hash()?;
-        let feature_schema_hash =
-            ResearchHasher::feature_schema(&FeatureSchema::build(request.features)?)?;
-        let bias_table_hash = self.bias_table.current_content_hash();
-        let binding = ActiveSchemaBinding {
-            feature_schema_hash,
-            factor_schema_hash,
-            bias_table_hash,
-        };
-
-        let active_version_id = request
-            .model
-            .active_model_version_id
-            .as_ref()
-            .map(|reference| reference.id);
+        request
+            .serving
+            .ensure_policy(request.decision_policy_snapshot_id)?;
+        request
+            .serving
+            .validate_active(request.boundary.decision_at())?;
+        ensure_route_membership(request.serving.route(), request.selection)?;
+        let run_version_id = request.serving.active_model_version_id();
+        let run_serving = request.serving.active_runtime();
 
         let model_run_id = ModelRunId::from_v7();
         let input_hash = input_hash(
             &request,
             "live_inference",
-            &factor_schema_hash,
-            bias_table_hash.as_ref(),
-            active_version_id.as_ref(),
+            &run_serving.contract_hash(),
+            Some(&run_version_id),
         )?;
         self.create_run(
             &model_run_id,
             ModelRunKind::LiveInference,
-            active_version_id,
+            Some(run_version_id),
             &request,
             input_hash,
         )
         .await?;
 
-        match self
-            .run_active(
-                &model_run_id,
-                &request,
-                &binding,
-                active_version_id.as_ref(),
-            )
-            .await
+        match Box::pin(self.run_active(&model_run_id, &request, run_serving, &run_version_id)).await
         {
             Ok(mut active) => {
                 let model_input_rows = mem::take(&mut active.model_input_rows);
@@ -395,19 +354,13 @@ impl ModelRunner {
                     .await);
                 }
                 self.model_run_repo
-                    .succeed(
-                        &model_run_id,
-                        active.output_hash,
-                        Utc::now(),
-                        active_version_id,
-                    )
+                    .succeed(&model_run_id, active.output_hash, Some(run_version_id))
                     .await?;
-                let shadow = self
-                    .run_shadow(&request, &binding, &factor_schema_hash, &active)
-                    .await;
+                let shadow = Box::pin(self.run_shadow(&request, &active)).await;
                 self.signal_writer.write_batch(active.ch_rows);
                 Ok(ModelRunOutcome {
                     model_run_id,
+                    model_version_id: run_version_id,
                     accepted: active.accepted,
                     emitted: active.emitted,
                     decisions: active.decisions,
@@ -434,142 +387,36 @@ impl ModelRunner {
         &self,
         request: ActiveModelRequirementsRequest<'_>,
     ) -> QuantResult<ActiveModelRequirements> {
-        let version_id = request
-            .model
-            .active_model_version_id
-            .as_ref()
-            .ok_or_else(|| QuantError::config("model.active_model_version_id is not configured"))
-            .map(|reference| reference.id)?;
-        let version = self
-            .model_registry_repo
-            .find_model_version(&version_id)
-            .await
-            .map_err(QuantError::from)?
-            .ok_or_else(|| {
-                QuantError::from(ResearchError::InvalidModelArtifact {
-                    detail: format!("active model version {version_id} not found"),
-                })
-            })?;
-        if let Err(reason) = active_load_ok(
-            &version,
-            request.model.min_quality_gate_age_secs,
-            request.decision_at,
-        ) {
-            return Err(QuantError::config(format!(
-                "active model {version_id} load denied: {reason}"
-            )));
-        }
-
-        let binding = ActiveSchemaBinding {
-            feature_schema_hash: ResearchHasher::feature_schema(&FeatureSchema::build(
-                request.features,
-            )?)?,
-            factor_schema_hash: FactorEngine::new(
-                request.factors,
-                request.features,
-                request.domain,
-                None,
-            )
-            .factor_schema_hash()?,
-            bias_table_hash: self.bias_table.current_content_hash(),
-        };
-        let factory = self.factory_builder.build(binding);
-        let runtime = factory
-            .load(&version, self.resolve_overlay(&version))
+        let serving = self
+            .serving_generations
+            .resolve_route(ModelServingGenerationRequest::from(request.policy))
             .await?;
-        ensure_buy_runtime(runtime.as_ref())?;
-
-        let mut by_category = HashMap::new();
-        for (category, reference) in &request.model.category_model_pointers {
-            let features = self
-                .resolve_category_requirements(*category, reference, &factory, &request)
-                .await?;
-            by_category.insert(*category, features);
-        }
+        serving.validate_active(request.decision_at)?;
+        let route = serving.route();
+        let version = serving.active_version().clone();
+        let model_requirements = serving.model_requirements();
 
         Ok(ActiveModelRequirements {
-            model_version_id: version_id,
+            route,
+            model_version_id: version.model_version_id,
             version,
-            model_requirements: ModelFeatureRequirements {
-                generic: runtime.required_features(),
-                by_category: by_category.into_iter().collect(),
-            },
+            model_requirements,
+            serving,
         })
     }
 
-    /// Resolve one category pointer's required features for selection
-    /// eligibility, enforcing the same governance a live routed inference
-    /// would: the pointer must parse, resolve to a
-    /// registered version that passes the active-load gate; the loaded
-    /// artifact's `category_scope` must be
-    /// exactly this category. Any configured-pointer failure aborts selection;
-    /// substituting the generic model would silently change governed behavior.
-    async fn resolve_category_requirements(
-        &self,
-        category: MarketCategory,
-        reference: &ModelVersionRef,
-        factory: &Arc<dyn ModelRuntimeFactory>,
-        request: &ActiveModelRequirementsRequest<'_>,
-    ) -> QuantResult<Vec<FeatureName>> {
-        let version_id = reference.id;
-        let version = self
-            .model_registry_repo
-            .find_model_version(&version_id)
-            .await
-            .map_err(QuantError::from)?
-            .ok_or_else(|| ResearchError::InvalidModelArtifact {
-                detail: format!("category pointer {category} model version {version_id} not found"),
-            })?;
-        if let Err(reason) = active_load_ok(
-            &version,
-            request.model.min_quality_gate_age_secs,
-            request.decision_at,
-        ) {
-            return Err(QuantError::config(format!(
-                "category pointer {category} model {version_id} load denied: {reason}"
-            )));
-        }
-        let runtime = factory
-            .load(&version, self.resolve_overlay(&version))
-            .await?;
-        ensure_buy_runtime(runtime.as_ref())?;
-        if runtime.category_scope() != Some(category) {
-            return Err(ResearchError::InvalidModelArtifact {
-                detail: format!(
-                    "category pointer {category} model {version_id} has category_scope {:?}",
-                    runtime.category_scope()
-                ),
-            }
-            .into());
-        }
-        Ok(runtime.required_features())
-    }
-
-    /// The active path: load every route → family dispatch → infer → emit.
+    /// The active path: exact route → family dispatch → infer → emit.
     async fn run_active(
         &self,
         model_run_id: &ModelRunId,
         request: &ModelRunRequest<'_>,
-        binding: &ActiveSchemaBinding,
-        active_version_id: Option<&ModelVersionId>,
+        loaded: &LoadedModelServingRuntime,
+        run_version_id: &ModelVersionId,
     ) -> Result<ActiveResult, (InferenceStage, QuantError)> {
-        let version_id = active_version_id.ok_or_else(|| {
-            (
-                InferenceStage::ActiveLoad,
-                QuantError::config("model.active_model_version_id is not configured"),
-            )
-        })?;
-        let factory = self.factory_builder.build(binding.clone());
-        // All configured routes are hash/schema/scope validated before the
-        // first factor or estimator operation. A category route can never fail
-        // after another route has already emitted partial business output.
-        let routes = self
-            .load_active_routes(version_id, request, &factory)
-            .await?;
         let aligned = align_feature_cross_section(request)
             .map_err(|error| (InferenceStage::ActiveInference, error))?;
         let mut output = self
-            .infer_loaded_routes(model_run_id, request, &routes, &aligned)
+            .infer_active(model_run_id, request, loaded, &aligned)
             .await?;
         finalize_candidate_batch(&mut output.candidates)
             .map_err(|error| (InferenceStage::ActiveInference, error))?;
@@ -587,8 +434,8 @@ impl ModelRunner {
             })
             .collect();
 
-        let floor = request.model.candidate_score_floor.value;
-        let min_confidence = request.model.min_model_confidence.value;
+        let floor = request.serving.candidate_score_floor();
+        let min_confidence = request.serving.min_model_confidence();
         let event_time = Utc::now().timestamp_millis();
         let model_input_rows = project_model_input_rows(
             model_run_id,
@@ -616,7 +463,7 @@ impl ModelRunner {
             accepted,
             emitted,
             decisions,
-            active_version_id: *version_id,
+            active_version_id: *run_version_id,
             active_index,
             active_candidates,
             ch_rows: rows,
@@ -628,19 +475,30 @@ impl ModelRunner {
     async fn run_shadow(
         &self,
         request: &ModelRunRequest<'_>,
-        binding: &ActiveSchemaBinding,
-        factor_schema_hash: &ContentHash,
         active: &ActiveResult,
     ) -> Option<ShadowRunOutcome> {
-        let reference = request.model.shadow_model_version_id.as_ref()?;
-        let shadow_version_id = reference.id;
+        let (shadow_version, loaded) = request.serving.shadow()?;
+        let shadow_version_id = shadow_version.model_version_id;
+        if let Err(error) = request
+            .serving
+            .validate_shadow(shadow_version, request.boundary.decision_at())
+        {
+            return Some(
+                finalize_shadow_failure(
+                    &self.model_run_repo,
+                    None,
+                    InferenceStage::ShadowLoad,
+                    error,
+                )
+                .await,
+            );
+        }
 
         let model_run_id = ModelRunId::from_v7();
         let input_hash = match input_hash(
             request,
             "shadow",
-            factor_schema_hash,
-            binding.bias_table_hash.as_ref(),
+            &loaded.contract_hash(),
             Some(&shadow_version_id),
         ) {
             Ok(hash) => hash,
@@ -678,7 +536,7 @@ impl ModelRunner {
         }
 
         match self
-            .run_shadow_inference(&model_run_id, request, binding, &shadow_version_id, active)
+            .run_shadow_inference(&model_run_id, request, &shadow_version_id, loaded, active)
             .await
         {
             Ok(outcome) => Some(outcome),
@@ -694,22 +552,20 @@ impl ModelRunner {
         &self,
         model_run_id: &ModelRunId,
         request: &ModelRunRequest<'_>,
-        binding: &ActiveSchemaBinding,
         shadow_version_id: &ModelVersionId,
+        loaded: &LoadedModelServingRuntime,
         active: &ActiveResult,
     ) -> Result<ShadowRunOutcome, (InferenceStage, QuantError)> {
-        let runtime = self
-            .load_shadow_runtime(request, binding, shadow_version_id)
-            .await?;
+        let runtime = loaded.runtime();
         let (aligned, mut output) = self
-            .score_shadow_cross_section(runtime.as_ref(), model_run_id, request)
+            .score_shadow_cross_section(loaded, model_run_id, request)
             .await?;
         finalize_candidate_batch(&mut output.candidates)
             .map_err(|error| (InferenceStage::ShadowInference, error))?;
 
         let output_hash = canonical_business_prediction_hash(&output.candidates)
             .map_err(|error| (InferenceStage::ShadowInference, error))?;
-        let threshold = request.model.shadow_diff_threshold.value;
+        let threshold = request.serving.shadow_diff_threshold();
         let diff = shadow_diff(&active.active_index, &output.candidates, threshold);
 
         let event_time = Utc::now().timestamp_millis();
@@ -746,12 +602,7 @@ impl ModelRunner {
             .await
             .map_err(|error| (InferenceStage::ShadowInference, error))?;
         self.model_run_repo
-            .succeed(
-                model_run_id,
-                output_hash,
-                Utc::now(),
-                Some(*shadow_version_id),
-            )
+            .succeed(model_run_id, output_hash, Some(*shadow_version_id))
             .await
             .map_err(|error| (InferenceStage::ShadowInference, QuantError::from(error)))?;
         self.signal_writer.write_batch(rows);
@@ -778,64 +629,30 @@ impl ModelRunner {
         })
     }
 
-    async fn load_shadow_runtime(
-        &self,
-        request: &ModelRunRequest<'_>,
-        binding: &ActiveSchemaBinding,
-        shadow_version_id: &ModelVersionId,
-    ) -> Result<Box<dyn QuantModelRuntime>, (InferenceStage, QuantError)> {
-        let registry_entry = self
-            .model_registry_repo
-            .find_model_version(shadow_version_id)
-            .await
-            .map_err(QuantError::from)
-            .and_then(|row| {
-                row.ok_or_else(|| {
-                    ResearchError::InvalidModelArtifact {
-                        detail: format!("shadow model version {shadow_version_id} not found"),
-                    }
-                    .into()
-                })
-            })
-            .map_err(|error| (InferenceStage::ShadowLoad, error))?;
-        if let Err(reason) = shadow_load_ok(
-            &registry_entry,
-            request.model.min_quality_gate_age_secs,
-            request.boundary.decision_at(),
-        ) {
-            return Err((
-                InferenceStage::ShadowLoad,
-                QuantError::config(format!(
-                    "shadow model {shadow_version_id} load denied: {reason}"
-                )),
-            ));
-        }
-
-        let factory = self.factory_builder.build(binding.clone());
-        let overlay = self.resolve_overlay(&registry_entry);
-        let runtime = factory
-            .load(&registry_entry, overlay)
-            .await
-            .map_err(|error| (InferenceStage::ShadowLoad, error))?;
-        ensure_buy_runtime_family(runtime.as_ref())
-            .map_err(|error| (InferenceStage::ShadowLoad, error))?;
-        Ok(runtime)
-    }
-
     async fn score_shadow_cross_section(
         &self,
-        runtime: &dyn QuantModelRuntime,
+        loaded: &LoadedModelServingRuntime,
         model_run_id: &ModelRunId,
         request: &ModelRunRequest<'_>,
     ) -> Result<(AlignedFeatureCrossSection, ModelRuntimeOutput), (InferenceStage, QuantError)>
     {
+        let runtime = loaded.runtime();
         let aligned = align_feature_cross_section(request)
             .map_err(|error| (InferenceStage::ShadowInference, error))?;
         let outcomes = if runtime.model_family() == ModelFamily::WeightedFactor {
-            let (cross_section, references) = weighted_factor_contract(runtime)
+            let references = weighted_references(runtime.as_ref())
                 .map_err(|error| (InferenceStage::ShadowLoad, error))?;
-            let mut factors = request.factors.clone();
-            factors.cross_section = cross_section.clone();
+            let factor_execution = loaded.factor_execution().ok_or_else(|| {
+                (
+                    InferenceStage::ShadowLoad,
+                    QuantError::from(ResearchError::InvalidModelArtifact {
+                        detail: format!(
+                            "weighted runtime {} has no verified factor execution plane",
+                            runtime.model_version_id()
+                        ),
+                    }),
+                )
+            })?;
             let result = self
                 .factor_pipeline
                 .run_with_references(
@@ -843,9 +660,7 @@ impl ModelRunner {
                         model_run_id,
                         vectors: Arc::clone(&aligned.vectors),
                         feature_vector_ids: &aligned.vector_ids,
-                        factors: &factors,
-                        features: request.features,
-                        domain: request.domain,
+                        factor_execution,
                     },
                     references,
                 )
@@ -857,7 +672,7 @@ impl ModelRunner {
             Vec::new()
         };
         let input = build_runtime_input(
-            runtime,
+            runtime.as_ref(),
             model_run_id,
             request.boundary.decision_at(),
             &aligned.markets,
@@ -865,7 +680,11 @@ impl ModelRunner {
             &outcomes,
         );
         let output = self
-            .score_shadow(runtime, input, runtime.model_family().is_classical())
+            .score_shadow(
+                runtime.as_ref(),
+                input,
+                runtime.model_family().is_classical(),
+            )
             .await?;
         Ok((aligned, output))
     }
@@ -902,123 +721,28 @@ impl ModelRunner {
         }
     }
 
-    /// Resolve and load the generic model plus every configured category route
-    /// before computation. Loaded runtimes are retained for the full round so
-    /// no route can change or fail between validation and inference.
-    async fn load_active_routes(
-        &self,
-        generic_version_id: &ModelVersionId,
-        request: &ModelRunRequest<'_>,
-        factory: &Arc<dyn ModelRuntimeFactory>,
-    ) -> Result<LoadedRoutes, (InferenceStage, QuantError)> {
-        let generic_version = self
-            .resolve_active_version(generic_version_id, request)
-            .await?;
-        let generic_runtime = factory
-            .load(&generic_version, self.resolve_overlay(&generic_version))
-            .await
-            .map_err(|error| (InferenceStage::ActiveLoad, error))?;
-        if generic_runtime.category_scope().is_some() {
-            return Err((
-                InferenceStage::ActiveLoad,
-                ResearchError::InvalidModelArtifact {
-                    detail: format!(
-                        "generic active model {generic_version_id} must not have category_scope {:?}",
-                        generic_runtime.category_scope()
-                    ),
-                }
-                .into(),
-            ));
-        }
-        ensure_buy_runtime(generic_runtime.as_ref())
-            .map_err(|error| (InferenceStage::ActiveLoad, error))?;
-
-        let mut category_routes = HashMap::new();
-        let mut runtimes = HashMap::from([(*generic_version_id, generic_runtime)]);
-        for (category, reference) in &request.model.category_model_pointers {
-            let version_id = reference.id;
-            let version = self.resolve_active_version(&version_id, request).await?;
-            let runtime = factory
-                .load(&version, self.resolve_overlay(&version))
-                .await
-                .map_err(|error| (InferenceStage::ActiveLoad, error))?;
-            if runtime.category_scope() != Some(*category) {
-                return Err((
-                    InferenceStage::ActiveLoad,
-                    ResearchError::InvalidModelArtifact {
-                        detail: format!(
-                            "category pointer {category} model {version_id} has category_scope {:?}",
-                            runtime.category_scope()
-                        ),
-                    }
-                    .into(),
-                ));
-            }
-            ensure_buy_runtime(runtime.as_ref())
-                .map_err(|error| (InferenceStage::ActiveLoad, error))?;
-            if runtimes.insert(version_id, runtime).is_some() {
-                return Err((
-                    InferenceStage::ActiveLoad,
-                    ResearchError::InvalidModelArtifact {
-                        detail: format!(
-                            "model version {version_id} is configured for multiple route scopes"
-                        ),
-                    }
-                    .into(),
-                ));
-            }
-            category_routes.insert(*category, version_id);
-        }
-        Ok(LoadedRoutes {
-            generic_version_id: *generic_version_id,
-            category_routes,
-            runtimes,
-        })
-    }
-
-    /// Partition the immutable cross-section by loaded route. Only weighted
-    /// partitions enter the factor plane; classical partitions consume frozen
-    /// feature transforms directly.
-    async fn infer_loaded_routes(
+    async fn infer_active(
         &self,
         model_run_id: &ModelRunId,
         request: &ModelRunRequest<'_>,
-        routes: &LoadedRoutes,
+        loaded: &LoadedModelServingRuntime,
         batch: &AlignedFeatureCrossSection,
     ) -> Result<ModelRuntimeOutput, (InferenceStage, QuantError)> {
-        let mut merged = empty_runtime_output();
-        for (version_id, indices) in ordered_route_groups(routes, batch) {
-            let runtime = routes.runtimes.get(&version_id).ok_or_else(|| {
+        let runtime = loaded.runtime();
+        let outcomes = if runtime.model_family() == ModelFamily::WeightedFactor {
+            let references = weighted_references(runtime.as_ref())
+                .map_err(|error| (InferenceStage::ActiveLoad, error))?;
+            let factor_execution = loaded.factor_execution().ok_or_else(|| {
                 (
                     InferenceStage::ActiveLoad,
                     QuantError::from(ResearchError::InvalidModelArtifact {
-                        detail: format!("loaded route {version_id} has no runtime"),
+                        detail: format!(
+                            "weighted runtime {} has no verified factor execution plane",
+                            runtime.model_version_id()
+                        ),
                     }),
                 )
             })?;
-            let routed_batch = routed_feature_batch(batch, &indices)
-                .map_err(|error| (InferenceStage::ActiveInference, error))?;
-            let output = self
-                .infer_route(model_run_id, request, runtime.as_ref(), &routed_batch)
-                .await?;
-            merge_runtime_output(&mut merged, output)
-                .map_err(|error| (InferenceStage::ActiveInference, error))?;
-        }
-        Ok(merged)
-    }
-
-    async fn infer_route(
-        &self,
-        model_run_id: &ModelRunId,
-        request: &ModelRunRequest<'_>,
-        runtime: &dyn QuantModelRuntime,
-        batch: &RoutedFeatureBatch,
-    ) -> Result<ModelRuntimeOutput, (InferenceStage, QuantError)> {
-        let outcomes = if runtime.model_family() == ModelFamily::WeightedFactor {
-            let (cross_section, references) = weighted_factor_contract(runtime)
-                .map_err(|error| (InferenceStage::ActiveLoad, error))?;
-            let mut factors = request.factors.clone();
-            factors.cross_section = cross_section.clone();
             let result = self
                 .factor_pipeline
                 .run_with_references(
@@ -1026,9 +750,7 @@ impl ModelRunner {
                         model_run_id,
                         vectors: Arc::clone(&batch.vectors),
                         feature_vector_ids: &batch.vector_ids,
-                        factors: &factors,
-                        features: request.features,
-                        domain: request.domain,
+                        factor_execution,
                     },
                     references,
                 )
@@ -1040,7 +762,7 @@ impl ModelRunner {
             Vec::new()
         };
         let input = build_runtime_input(
-            runtime,
+            runtime.as_ref(),
             model_run_id,
             request.boundary.decision_at(),
             &batch.markets,
@@ -1053,48 +775,6 @@ impl ModelRunner {
             .map_err(|error| (InferenceStage::ActiveInference, error))
     }
 
-    async fn resolve_active_version(
-        &self,
-        version_id: &ModelVersionId,
-        request: &ModelRunRequest<'_>,
-    ) -> Result<ModelVersionInfo, (InferenceStage, QuantError)> {
-        let version = self
-            .model_registry_repo
-            .find_model_version(version_id)
-            .await
-            .map_err(QuantError::from)
-            .and_then(|row| {
-                row.ok_or_else(|| {
-                    ResearchError::InvalidModelArtifact {
-                        detail: format!("active model version {version_id} not found"),
-                    }
-                    .into()
-                })
-            })
-            .map_err(|error| (InferenceStage::ActiveLoad, error))?;
-        if let Err(reason) = active_load_ok(
-            &version,
-            request.model.min_quality_gate_age_secs,
-            request.boundary.decision_at(),
-        ) {
-            return Err((
-                InferenceStage::ActiveLoad,
-                QuantError::config(format!("active model {version_id} load denied: {reason}")),
-            ));
-        }
-        Ok(version)
-    }
-
-    /// Resolve the factor-weight overlay for a version: non-published candidate /
-    /// shadow versions may carry a config overlay; a `Published` version always
-    /// scores on its frozen artifact weights (overlay forbidden).
-    fn resolve_overlay(&self, version: &ModelVersionInfo) -> Option<WeightOverlay> {
-        if version.publication_status == PublicationStatus::Published {
-            return None;
-        }
-        self.weight_overlay.overlay_for(&version.model_version_id)
-    }
-
     /// Compute + persist the signal-layer [`ShadowComparison`], alerting on a hard
     /// divergence.
     async fn persist_shadow_comparison(
@@ -1105,7 +785,7 @@ impl ModelRunner {
         weight_source: ModelWeightSource,
         shadow_candidates: &[SignalCandidate],
     ) {
-        let threshold = request.model.shadow_diff_threshold.value;
+        let threshold = request.serving.shadow_diff_threshold();
         let comparison = match compute_shadow_comparison(&ShadowComparisonRequest {
             active_model_version_id: active.active_version_id,
             shadow_model_version_id: *shadow_version_id,
@@ -1179,7 +859,6 @@ impl ModelRunner {
         request: &ModelRunRequest<'_>,
         input_hash: ContentHash,
     ) -> QuantResult<()> {
-        let now = Utc::now();
         let run = NewModelRun {
             model_run_id: *model_run_id,
             run_kind,
@@ -1188,13 +867,7 @@ impl ModelRunner {
             market_selection_id: request.market_selection_id,
             window_start: request.boundary.decision_at(),
             window_end: request.boundary.decision_at(),
-            status: ModelRunStatus::Running,
             input_hash,
-            output_hash: None,
-            error_code: None,
-            error_message: None,
-            started_at: now,
-            finished_at: None,
         };
         self.model_run_repo
             .create(run)
@@ -1212,12 +885,7 @@ async fn finalize_active_failure(
     error: QuantError,
 ) -> QuantError {
     let _ = model_run_repo
-        .fail(
-            model_run_id,
-            stage.active_error_code(),
-            error.to_string(),
-            Utc::now(),
-        )
+        .fail(model_run_id, stage.active_error_code(), error.to_string())
         .await;
     alerts.critical(
         format!("active model inference failed for run {model_run_id}"),
@@ -1235,12 +903,7 @@ async fn finalize_shadow_failure(
 ) -> ShadowRunOutcome {
     if let Some(run_id) = model_run_id {
         let _ = model_run_repo
-            .fail(
-                run_id,
-                stage.shadow_error_code(),
-                error.to_string(),
-                Utc::now(),
-            )
+            .fail(run_id, stage.shadow_error_code(), error.to_string())
             .await;
     }
     tracing::warn!(%error, ?stage, "shadow inference failed; keeping active result");
@@ -1390,9 +1053,7 @@ fn partition_candidates(
     (rows, accepted, decisions)
 }
 
-/// Establish the one global pre-portfolio order after all category routes have
-/// been merged. Runtime-local ranks are not business ranks and must never enter
-/// serving evidence or parity hashes.
+/// Establish the pre-portfolio order for one exact report route.
 fn finalize_candidate_batch(candidates: &mut [SignalCandidate]) -> QuantResult<()> {
     candidates.sort_by(|left, right| {
         right
@@ -1430,8 +1091,8 @@ fn rejection_reason(
 }
 
 /// Align accepted feature vectors with the immutable selection without using
-/// factor output as the join spine. This is what lets classical routes bypass
-/// the factor plane entirely while retaining the exact same market snapshot.
+/// factor output as the join spine. This lets a classical runtime bypass the
+/// factor plane while retaining the exact same market snapshot.
 fn align_feature_cross_section(
     request: &ModelRunRequest<'_>,
 ) -> QuantResult<AlignedFeatureCrossSection> {
@@ -1488,101 +1149,26 @@ fn align_feature_cross_section(
     })
 }
 
-fn ordered_route_groups(
-    routes: &LoadedRoutes,
-    batch: &AlignedFeatureCrossSection,
-) -> Vec<(ModelVersionId, Vec<usize>)> {
-    let mut groups: HashMap<ModelVersionId, Vec<usize>> = HashMap::new();
-    for (index, market) in batch.markets.iter().enumerate() {
-        let version_id = *routes
-            .category_routes
-            .get(&market.category)
-            .unwrap_or(&routes.generic_version_id);
-        groups.entry(version_id).or_default().push(index);
-    }
-    let mut ordered = groups.into_iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|(version_id, _)| version_id.to_string());
-    ordered
-}
-
-fn routed_feature_batch(
-    batch: &AlignedFeatureCrossSection,
-    indices: &[usize],
-) -> QuantResult<RoutedFeatureBatch> {
-    let mut markets = Vec::with_capacity(indices.len());
-    let mut vectors = Vec::with_capacity(indices.len());
-    let mut vector_ids = Vec::with_capacity(indices.len());
-    for &index in indices {
-        let missing = |column: &str| {
-            QuantError::from(ResearchError::Inference {
-                detail: format!("route index {index} is outside aligned {column} cross-section"),
-            })
+fn ensure_route_membership(route: BuyModelRoute, selection: &[SelectedMarket]) -> QuantResult<()> {
+    for market in selection {
+        let scope_matches = match route {
+            BuyModelRoute::Pooled => !matches!(
+                market.category,
+                MarketCategory::Crypto | MarketCategory::Weather
+            ),
+            BuyModelRoute::Crypto => market.category == MarketCategory::Crypto,
+            BuyModelRoute::Weather => market.category == MarketCategory::Weather,
         };
-        markets.push(
-            batch
-                .markets
-                .get(index)
-                .ok_or_else(|| missing("market"))?
-                .clone(),
-        );
-        vectors.push(
-            batch
-                .vectors
-                .get(index)
-                .ok_or_else(|| missing("feature"))?
-                .clone(),
-        );
-        vector_ids.push(
-            *batch
-                .vector_ids
-                .get(index)
-                .ok_or_else(|| missing("feature-vector id"))?,
-        );
+        if !scope_matches {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "selected market {} category {} is outside exact route {route:?}",
+                    market.market_id, market.category
+                ),
+            }
+            .into());
+        }
     }
-    Ok(RoutedFeatureBatch {
-        markets,
-        vectors: Arc::from(vectors),
-        vector_ids,
-    })
-}
-
-const fn empty_runtime_output() -> ModelRuntimeOutput {
-    ModelRuntimeOutput {
-        candidates: Vec::new(),
-        runtime_metrics: ModelRuntimeMetrics {
-            markets_scored: 0,
-            candidates_emitted: 0,
-            inference_duration_ms: 0,
-        },
-        input_audit: Vec::new(),
-    }
-}
-
-fn merge_runtime_output(
-    merged: &mut ModelRuntimeOutput,
-    output: ModelRuntimeOutput,
-) -> QuantResult<()> {
-    let overflow = |field: &str| {
-        QuantError::from(ResearchError::Inference {
-            detail: format!("routed model {field} count overflow"),
-        })
-    };
-    merged.runtime_metrics.markets_scored = merged
-        .runtime_metrics
-        .markets_scored
-        .checked_add(output.runtime_metrics.markets_scored)
-        .ok_or_else(|| overflow("markets_scored"))?;
-    merged.runtime_metrics.candidates_emitted = merged
-        .runtime_metrics
-        .candidates_emitted
-        .checked_add(output.runtime_metrics.candidates_emitted)
-        .ok_or_else(|| overflow("candidates_emitted"))?;
-    merged.runtime_metrics.inference_duration_ms = merged
-        .runtime_metrics
-        .inference_duration_ms
-        .max(output.runtime_metrics.inference_duration_ms);
-    merged.input_audit.extend(output.input_audit);
-    merged.candidates.extend(output.candidates);
     Ok(())
 }
 
@@ -1626,53 +1212,15 @@ fn order_factor_outcomes(
     Ok(ordered)
 }
 
-fn ensure_buy_runtime_family(runtime: &dyn QuantModelRuntime) -> QuantResult<()> {
-    let family = runtime.model_family();
-    if family == ModelFamily::WeightedFactor || family.is_classical() {
-        return Ok(());
-    }
-    Err(ResearchError::InvalidModelArtifact {
-        detail: format!("buy-side model runner cannot dispatch family {family}"),
-    }
-    .into())
-}
-
-fn ensure_buy_runtime(runtime: &dyn QuantModelRuntime) -> QuantResult<()> {
-    let family = runtime.model_family();
-    if family == ModelFamily::WeightedFactor {
-        return Ok(());
-    }
-    let detail = if family.is_classical() {
-        format!(
-            "classical family {family} is ShadowOnly until an independently validated probability-to-return/downside calibration is frozen into its artifact"
-        )
-    } else {
-        format!("buy-side model runner cannot dispatch family {family}")
-    };
-    Err(ResearchError::InvalidModelArtifact { detail }.into())
-}
-
-fn weighted_factor_contract(
-    runtime: &dyn QuantModelRuntime,
-) -> QuantResult<(&FactorCrossSectionConfig, &FrozenReferenceQuantiles)> {
-    let cross_section =
-        runtime
-            .factor_cross_section()
-            .ok_or_else(|| ResearchError::InvalidModelArtifact {
-                detail: format!(
-                    "weighted runtime {} has no frozen cross-section policy",
-                    runtime.model_version_id()
-                ),
-            })?;
-    let references = runtime.frozen_reference_quantiles().ok_or_else(|| {
-        ResearchError::InvalidModelArtifact {
+fn weighted_references(runtime: &dyn QuantModelRuntime) -> QuantResult<&FrozenReferenceQuantiles> {
+    runtime.frozen_reference_quantiles().ok_or_else(|| {
+        QuantError::from(ResearchError::InvalidModelArtifact {
             detail: format!(
                 "weighted runtime {} has no frozen reference distribution contract",
                 runtime.model_version_id()
             ),
-        }
-    })?;
-    Ok((cross_section, references))
+        })
+    })
 }
 
 /// Shadow vs active divergence over the markets both models scored.
@@ -1731,8 +1279,7 @@ const fn new_shadow_comparison(comparison: &ShadowComparison) -> NewShadowCompar
 fn input_hash(
     request: &ModelRunRequest<'_>,
     run_kind: &str,
-    factor_schema_hash: &ContentHash,
-    bias_table_hash: Option<&ContentHash>,
+    serving_contract_hash: &ContentHash,
     model_version_id: Option<&ModelVersionId>,
 ) -> QuantResult<ContentHash> {
     #[derive(Serialize)]
@@ -1740,8 +1287,7 @@ fn input_hash(
         run_kind: &'a str,
         market_selection_id: Option<&'a MarketSelectionId>,
         feature_vector_ids: &'a [FeatureVectorId],
-        factor_schema_hash: &'a ContentHash,
-        bias_table_hash: Option<&'a ContentHash>,
+        serving_contract_hash: &'a ContentHash,
         model_version_id: Option<&'a ModelVersionId>,
         boundary: &'a DecisionBoundary,
     }
@@ -1749,8 +1295,7 @@ fn input_hash(
         run_kind,
         market_selection_id: request.market_selection_id.as_ref(),
         feature_vector_ids: request.feature_vector_ids,
-        factor_schema_hash,
-        bias_table_hash,
+        serving_contract_hash,
         model_version_id,
         boundary: &request.boundary,
     })
@@ -1764,36 +1309,38 @@ mod tests {
     use quant_pivot_models::{
         domain::{data_plane::DecisionClock, quant::ModelVersionInfo},
         enums::{
+            common::MarketCategory,
             model::ModelFamily,
             quant::{DataQualityStatus, PublicationStatus},
         },
+        runtime_config::BuyModelRoute,
         types::{
-            ContentHash, FeatureVectorId, MarketId, ModelRunId, ModelSpecId, ModelVersionId,
-            SchemaVersion,
-            model_metrics::ModelVersionMetrics,
+            ContentHash, EventId, FeatureVectorId, MarketId, ModelRunId, ModelVersionId,
+            SchemaVersion, TokenId,
             model_quality::{
                 GateIntent, GateSubject, QUALITY_GATE_REPORT_FORMAT_VERSION, QualityGateReport,
             },
-            model_training::ModelTrainingObjective,
         },
     };
     use quant_pivot_research::{
         features::FeatureVector,
         model::{ModelInputAuditRow, ModelInputAuditState},
+        selection::SelectedMarket,
     };
 
-    use super::{AlignedFeatureCrossSection, project_model_input_rows};
+    use super::{AlignedFeatureCrossSection, ensure_route_membership, project_model_input_rows};
     use crate::{
         governance::quality_gate_staleness_ok,
-        test_fixtures::{
-            execution_pg_seed::fixture_profile_ref, model_spec_fixtures::model_spec_lineage_fixture,
-        },
+        service::model_serving_test_support::{model_artifact, model_version},
     };
 
-    fn gate_report(evaluated_at: DateTime<Utc>) -> QualityGateReport {
+    fn gate_report(
+        model_version_id: ModelVersionId,
+        evaluated_at: DateTime<Utc>,
+    ) -> QualityGateReport {
         QualityGateReport {
             format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
-            subject: GateSubject::ModelVersion(ModelVersionId::from_v7()),
+            subject: GateSubject::ModelVersion(model_version_id),
             intent: GateIntent::Candidate,
             evaluated_at,
             gates: Vec::new(),
@@ -1806,37 +1353,47 @@ mod tests {
 
     fn version(
         status: PublicationStatus,
-        quality_gate_report: Option<QualityGateReport>,
+        gate_evaluated_at: Option<DateTime<Utc>>,
     ) -> ModelVersionInfo {
-        let (model_spec_thesis, model_spec_definition_hash) =
-            model_spec_lineage_fixture("model-runner-test-spec");
-        ModelVersionInfo {
-            model_version_id: ModelVersionId::from_v7(),
-            model_spec_id: ModelSpecId::from_v7(),
-            model_spec_name: "model-runner-test-spec".to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            model_spec_thesis,
-            model_spec_definition_hash,
-            version: 1,
-            artifact_hash: ContentHash::parse(&format!("blake3:{}", "0".repeat(64))).expect("hash"),
-            category_scope: None,
-            profile_ref: fixture_profile_ref(),
-            training_dataset_id: None,
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
-            publish_path_set_id: None,
-            derivation_kind: ModelVersionInfo::training_derivation_kind(),
-            parent_model_version_id: None,
-            calibration_artifact_id: None,
-            derivation_evidence_hash: None,
-            metrics: ModelVersionMetrics::not_measured("test fixture"),
-            training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-            quality_gate_report,
-            publication_status: status,
-            published_at: None,
-            retired_at: None,
-            created_at: Utc::now(),
-        }
+        let artifact = model_artifact(None);
+        let quality_gate_report = gate_evaluated_at
+            .map(|evaluated_at| gate_report(artifact.header().model_version_id(), evaluated_at));
+        model_version(&artifact, status, quality_gate_report)
+    }
+
+    #[test]
+    fn route_authority_rejects_mismatch() {
+        let selected_market = |category| SelectedMarket {
+            market_id: MarketId::new(format!("route-{category}")),
+            event_id: EventId::new("route-event"),
+            category,
+            primary_token_id: TokenId::new("route-yes"),
+            secondary_token_id: Some(TokenId::new("route-no")),
+            liquidity_usd: None,
+            volume_24h_usd: None,
+            source_refs: Vec::new(),
+        };
+        assert!(
+            ensure_route_membership(
+                BuyModelRoute::Weather,
+                &[selected_market(MarketCategory::Sports)],
+            )
+            .is_err()
+        );
+        assert!(
+            ensure_route_membership(
+                BuyModelRoute::Pooled,
+                &[selected_market(MarketCategory::Weather)],
+            )
+            .is_err()
+        );
+        assert!(
+            ensure_route_membership(
+                BuyModelRoute::Weather,
+                &[selected_market(MarketCategory::Weather)],
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1915,7 +1472,7 @@ mod tests {
         let now = Utc::now();
         assert!(
             quality_gate_staleness_ok(
-                &version(PublicationStatus::Candidate, Some(gate_report(now))),
+                &version(PublicationStatus::Candidate, Some(now)),
                 86_400,
                 now,
             )
@@ -1929,7 +1486,7 @@ mod tests {
         let stale = now - Duration::seconds(90_000);
         assert!(
             quality_gate_staleness_ok(
-                &version(PublicationStatus::Candidate, Some(gate_report(stale))),
+                &version(PublicationStatus::Candidate, Some(stale)),
                 86_400,
                 now,
             )
@@ -1943,7 +1500,7 @@ mod tests {
         let stale = now - Duration::seconds(90_000);
         assert!(
             quality_gate_staleness_ok(
-                &version(PublicationStatus::Published, Some(gate_report(stale))),
+                &version(PublicationStatus::Published, Some(stale)),
                 86_400,
                 now,
             )
@@ -1956,12 +1513,8 @@ mod tests {
         let now = Utc::now();
         let stale = now - Duration::days(365);
         assert!(
-            quality_gate_staleness_ok(
-                &version(PublicationStatus::Candidate, Some(gate_report(stale))),
-                0,
-                now,
-            )
-            .is_ok()
+            quality_gate_staleness_ok(&version(PublicationStatus::Candidate, Some(stale)), 0, now,)
+                .is_ok()
         );
     }
 

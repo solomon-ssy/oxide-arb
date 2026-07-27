@@ -313,7 +313,6 @@ pub struct RecordPolicyApproval {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionPolicySnapshotInfo {
-    pub bundle_generation: PolicyBundleGeneration,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub snapshot_hash: ContentHash,
     pub snapshot: DecisionPolicySnapshot,
@@ -339,7 +338,6 @@ pub struct DecisionPolicySnapshotInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel)]
 #[sea_orm(entity = "crate::entities::decision_policy_snapshot::Entity")]
 pub struct DecisionPolicySnapshotOptionInfo {
-    pub bundle_generation: PolicyBundleGeneration,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub snapshot_hash: ContentHash,
     pub recommendation_policy_revision_id: PolicyRevisionId,
@@ -355,7 +353,6 @@ pub struct DecisionPolicySnapshotOptionInfo {
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::decision_policy_snapshot::ActiveModel")]
 pub struct NewDecisionPolicySnapshot {
-    pub bundle_generation: PolicyBundleGeneration,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub snapshot_hash: ContentHash,
     pub snapshot: DecisionPolicySnapshotDocument,

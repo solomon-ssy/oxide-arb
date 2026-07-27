@@ -2,12 +2,60 @@
 
 use quant_pivot_models::{
     domain::quant::NewModelSpec,
-    enums::model::ModelFamily,
+    enums::{common::MarketCategory, model::ModelFamily},
     types::{
-        ContentHash, ModelInputContract, ModelSpecId, ModelTrainingContract, SchemaVersion,
+        CRYPTO_PRICE_15M_HORIZON_SECS, ContentHash, ModelInputContract, ModelSpecId,
+        ModelTrainingContract, POOLED_1H_HORIZON_SECS, ResearchProfileRef, SchemaVersion,
+        WEATHER_FORECAST_24H_HORIZON_SECS, builtin_research_profiles,
         model_spec::{ModelSpecDefinition, ModelSpecThesis},
     },
 };
+
+/// Exact built-in Crypto `ResearchProfile` horizon in the persisted `i64` shape.
+#[must_use]
+pub fn crypto_horizon_secs() -> i64 {
+    i64::try_from(CRYPTO_PRICE_15M_HORIZON_SECS).expect("Crypto profile horizon fits i64")
+}
+
+/// Exact built-in pooled `ResearchProfile` horizon in the persisted `i64` shape.
+#[must_use]
+pub fn pooled_horizon_secs() -> i64 {
+    i64::try_from(POOLED_1H_HORIZON_SECS).expect("pooled profile horizon fits i64")
+}
+
+/// Exact built-in Weather `ResearchProfile` horizon in the persisted `i64` shape.
+#[must_use]
+pub fn weather_horizon_secs() -> i64 {
+    i64::try_from(WEATHER_FORECAST_24H_HORIZON_SECS).expect("weather profile horizon fits i64")
+}
+
+/// Exact built-in Crypto `ResearchProfile` reference.
+#[must_use]
+pub fn crypto_profile_ref() -> ResearchProfileRef {
+    builtin_research_profiles()
+        .expect("built-in ResearchProfiles")
+        .into_iter()
+        .find(|profile| {
+            profile.spec.category == Some(MarketCategory::Crypto)
+                && profile.spec.target_horizon_secs == CRYPTO_PRICE_15M_HORIZON_SECS
+        })
+        .expect("Crypto ResearchProfile")
+        .profile_ref
+}
+
+/// Exact built-in pooled `ResearchProfile` reference.
+#[must_use]
+pub fn pooled_profile_ref() -> ResearchProfileRef {
+    builtin_research_profiles()
+        .expect("built-in ResearchProfiles")
+        .into_iter()
+        .find(|profile| {
+            profile.spec.category.is_none()
+                && profile.spec.target_horizon_secs == POOLED_1H_HORIZON_SECS
+        })
+        .expect("pooled ResearchProfile")
+        .profile_ref
+}
 
 /// Build valid typed spec lineage for tests that only need an enriched
 /// `ModelVersionInfo` projection rather than a persisted spec row.
@@ -17,7 +65,7 @@ pub fn model_spec_lineage_fixture(name: &str) -> (ModelSpecThesis, ContentHash) 
         ModelSpecId::from_v7(),
         name,
         ModelFamily::WeightedFactor,
-        86_400,
+        pooled_horizon_secs(),
         ModelInputContract::single_required("book.mid"),
         ModelTrainingContract::settlement_default(),
     );

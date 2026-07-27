@@ -1,4 +1,4 @@
-//! Runtime-config activation applicator — minimal propagation.
+//! Runtime-config activation applicator with prepared, governed publication.
 
 use std::sync::Arc;
 
@@ -13,11 +13,12 @@ use quant_pivot_models::{
 use super::store::{DecisionPolicyStore, PublishedPolicyBundle};
 use crate::{
     execution::breaker::ExecutionBreaker,
-    governance::{BiasTableApplicator, CategoryPointerGuard, WeightOverlayApplicator},
+    governance::BiasTableApplicator,
     ingest::{
         data_quality::BookDataQualityService, market_cache::MarketCache,
         market_filter::MarketFilter,
     },
+    service::model_serving_generation::ModelServingGenerationStore,
 };
 
 #[derive(Clone)]
@@ -25,16 +26,10 @@ pub struct PolicySnapshotSubscribers {
     pub market_filter: Arc<MarketFilter>,
     pub market_cache: Arc<MarketCache>,
     pub data_quality: Arc<BookDataQualityService>,
-    /// Candidate / shadow factor-weight overlay snapshot.
-    pub weight_overlay: Arc<WeightOverlayApplicator>,
     /// Favorite-longshot bias-table snapshot bound to the factor plane.
     /// Reloaded (and content-hash verified) on activation; a bad ref fails the
     /// activation closed.
     pub bias_table: Arc<BiasTableApplicator>,
-    /// Config-apply-time validator for `model.category_model_pointers`: a
-    /// dangling or mis-scoped pointer fails the activation
-    /// closed rather than surfacing only as a runtime fallback.
-    pub category_pointer_guard: Arc<CategoryPointerGuard>,
 }
 
 pub struct PolicySnapshotApplicator {
@@ -45,6 +40,9 @@ pub struct PolicySnapshotApplicator {
     /// [`Self::attach_execution_breaker`] is called. Activations hot-swap its
     /// venue-health / daily-loss thresholds without a restart.
     execution_breaker: Mutex<Option<Arc<ExecutionBreaker>>>,
+    /// Complete active/shadow/category generation owner. It is assembled after
+    /// the research-plane registry, then attached before the reconciler starts.
+    model_serving: Mutex<Option<Arc<ModelServingGenerationStore>>>,
 }
 
 impl PolicySnapshotApplicator {
@@ -57,6 +55,7 @@ impl PolicySnapshotApplicator {
             store,
             subscribers,
             execution_breaker: Mutex::new(None),
+            model_serving: Mutex::new(None),
         }
     }
 
@@ -65,8 +64,30 @@ impl PolicySnapshotApplicator {
         *self.execution_breaker.lock() = Some(breaker);
     }
 
+    /// Bind the sole atomic serving-generation owner before policy
+    /// reconciliation begins.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a second owner instead of silently replacing the live
+    /// publication target.
+    pub fn attach_model_serving(
+        &self,
+        generations: Arc<ModelServingGenerationStore>,
+    ) -> Result<(), ControlError> {
+        let mut current = self.model_serving.lock();
+        if current.is_some() {
+            return Err(ControlError::Precondition(
+                "model serving generation owner is already attached".to_owned(),
+            ));
+        }
+        *current = Some(generations);
+        drop(current);
+        Ok(())
+    }
+
     #[must_use]
-    pub fn current_bundle(&self) -> Option<PublishedPolicyBundle> {
+    pub(crate) fn current_bundle(&self) -> Option<PublishedPolicyBundle> {
         self.store.current_bundle()
     }
 
@@ -85,10 +106,6 @@ impl PolicySnapshotApplicator {
         subs.market_cache.rebuild();
         subs.data_quality
             .reload(&config.recommendation.data_quality);
-        subs.weight_overlay.reload(
-            &config.profile_artifacts.scoring.definition,
-            &config.model_routing.model,
-        );
     }
 }
 
@@ -104,6 +121,9 @@ impl PolicySnapshotPort for PolicySnapshotApplicator {
     ) -> Result<PreparedPolicySnapshot, ControlError> {
         Self::preflight_internal(&config)?;
         let arc = Arc::new(config);
+        let generations = self.model_serving.lock().clone().ok_or_else(|| {
+            ControlError::Precondition("model serving generation owner is not attached".to_owned())
+        })?;
         let bias_table = self
             .subscribers
             .bias_table
@@ -116,13 +136,7 @@ impl PolicySnapshotPort for PolicySnapshotApplicator {
             )
             .await?;
 
-        // Validate every category pointer before mutating the live snapshot:
-        // a dangling or mis-scoped pointer must fail the activation closed,
-        // never rely solely on the router's runtime fallback.
-        self.subscribers
-            .category_pointer_guard
-            .validate(&arc.model_routing.model)
-            .await?;
+        let serving_generation = generations.prepare(&arc).await?;
 
         let breaker = self.execution_breaker.lock().clone();
         let breaker_thresholds = breaker
@@ -132,26 +146,30 @@ impl PolicySnapshotPort for PolicySnapshotApplicator {
             .map_err(ControlError::from)?;
         let store = Arc::clone(&self.store);
         let subscribers = self.subscribers.clone();
-        let publish_config = Arc::clone(&arc);
         Ok(PreparedPolicySnapshot::new_governed(
             arc,
             move |committed_bundle| {
-                let publish_dependencies = |config: &Arc<DecisionPolicySnapshot>| {
-                    subscribers.bias_table.publish(bias_table);
-                    if let (Some(breaker), Some(thresholds)) = (breaker, breaker_thresholds) {
-                        breaker.publish_reload(thresholds);
-                    }
-                    Self::propagate(&subscribers, config);
+                let bundle = committed_bundle.ok_or_else(|| {
+                    ControlError::Precondition(
+                        "runtime policy publication requires a durable committed bundle".to_owned(),
+                    )
+                })?;
+                let serving_bundle = PublishedPolicyBundle {
+                    generation: bundle.generation,
+                    decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
+                    snapshot_hash: bundle.snapshot_hash,
                 };
-                if let Some(bundle) = committed_bundle {
-                    store
-                        .publish_committed(bundle, publish_dependencies)
-                        .map(|_outcome| ())
-                } else {
-                    publish_dependencies(&publish_config);
-                    store.swap(publish_config);
-                    Ok(())
-                }
+                store
+                    .publish_committed(bundle, move |config| {
+                        generations.publish_committed(serving_generation, &serving_bundle)?;
+                        subscribers.bias_table.publish(bias_table);
+                        if let (Some(breaker), Some(thresholds)) = (breaker, breaker_thresholds) {
+                            breaker.publish_reload(thresholds);
+                        }
+                        Self::propagate(&subscribers, config);
+                        Ok(())
+                    })
+                    .map(|_outcome| ())
             },
         ))
     }

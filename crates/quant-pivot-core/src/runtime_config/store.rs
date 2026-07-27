@@ -17,6 +17,16 @@ pub struct PublishedPolicyBundle {
     pub snapshot_hash: ContentHash,
 }
 
+impl From<&ActivePolicyBundle> for PublishedPolicyBundle {
+    fn from(bundle: &ActivePolicyBundle) -> Self {
+        Self {
+            generation: bundle.generation,
+            decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
+            snapshot_hash: bundle.snapshot_hash,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyBundlePublication {
     Published,
@@ -47,11 +57,7 @@ impl DecisionPolicyStore {
 
     #[must_use]
     pub fn new_active(bundle: ActivePolicyBundle) -> Self {
-        let metadata = PublishedPolicyBundle {
-            generation: bundle.generation,
-            decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
-            snapshot_hash: bundle.snapshot_hash,
-        };
+        let metadata = PublishedPolicyBundle::from(&bundle);
         Self {
             inner: ArcSwap::from_pointee(bundle.snapshot),
             publication: Mutex::new(Some(metadata)),
@@ -73,26 +79,34 @@ impl DecisionPolicyStore {
     }
 
     #[must_use]
-    pub fn current_bundle(&self) -> Option<PublishedPolicyBundle> {
+    pub(crate) fn current_bundle(&self) -> Option<PublishedPolicyBundle> {
         self.publication.lock().clone()
     }
 
-    /// Install a new active snapshot (used by policy-snapshot port implementations).
-    pub fn replace(&self, config: DecisionPolicySnapshot) {
-        let mut publication = self.publication.lock();
-        self.inner.store(Arc::new(config));
-        *publication = None;
-    }
-
-    /// Swap the active snapshot. Crate-private: only the applicator writes.
-    pub(crate) fn swap(&self, config: Arc<DecisionPolicySnapshot>) {
-        self.inner.store(config);
+    /// Reconstruct the exact current durable bundle while holding the
+    /// publication lock, so bootstrap cannot combine metadata and a snapshot
+    /// from different generations.
+    #[must_use]
+    pub(crate) fn active_bundle(&self) -> Option<ActivePolicyBundle> {
+        let publication = self.publication.lock();
+        let snapshot = self.inner.load_full();
+        let published = publication.as_ref()?;
+        let generation = published.generation;
+        let snapshot_id = published.decision_policy_snapshot_id;
+        let snapshot_hash = published.snapshot_hash;
+        drop(publication);
+        Some(ActivePolicyBundle::from_parts(
+            generation,
+            snapshot_id,
+            snapshot_hash,
+            snapshot.as_ref().clone(),
+        ))
     }
 
     pub(crate) fn publish_committed(
         &self,
         bundle: ActivePolicyBundle,
-        before_store: impl FnOnce(&Arc<DecisionPolicySnapshot>),
+        before_store: impl FnOnce(&Arc<DecisionPolicySnapshot>) -> Result<(), ControlError>,
     ) -> Result<PolicyBundlePublication, ControlError> {
         let mut current = self.publication.lock();
         if let Some(published) = current.as_ref() {
@@ -111,14 +125,11 @@ impl DecisionPolicyStore {
                 ));
             }
         }
+        let metadata = PublishedPolicyBundle::from(&bundle);
         let snapshot = Arc::new(bundle.snapshot);
-        before_store(&snapshot);
+        before_store(&snapshot)?;
         self.inner.store(Arc::clone(&snapshot));
-        *current = Some(PublishedPolicyBundle {
-            generation: bundle.generation,
-            decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
-            snapshot_hash: bundle.snapshot_hash,
-        });
+        *current = Some(metadata);
         drop(current);
         Ok(PolicyBundlePublication::Published)
     }
@@ -168,6 +179,7 @@ mod tests {
             store
                 .publish_committed(committed.clone(), |_| {
                     propagated.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
                 })
                 .expect("publish committed generation"),
             PolicyBundlePublication::Published
@@ -186,6 +198,7 @@ mod tests {
             store
                 .publish_committed(committed.clone(), |_| {
                     propagated.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
                 })
                 .expect("replay exact committed generation"),
             PolicyBundlePublication::AlreadyCurrent
@@ -194,6 +207,7 @@ mod tests {
             store
                 .publish_committed(base, |_| {
                     propagated.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
                 })
                 .expect("ignore older committed generation"),
             PolicyBundlePublication::OlderIgnored
@@ -204,6 +218,7 @@ mod tests {
         let error = store
             .publish_committed(fork, |_| {
                 propagated.fetch_add(1, Ordering::SeqCst);
+                Ok(())
             })
             .expect_err("same generation with different identity must fail closed");
         assert!(error.to_string().contains("same policy bundle generation"));
@@ -227,13 +242,13 @@ mod tests {
         let delayed_two = DecisionPolicyStore::new_active(base);
         assert_eq!(
             delayed_one
-                .publish_committed(committed.clone(), |_| {})
+                .publish_committed(committed.clone(), |_| Ok(()))
                 .expect("reconcile first delayed instance"),
             PolicyBundlePublication::Published
         );
         assert_eq!(
             delayed_two
-                .publish_committed(committed.clone(), |_| {})
+                .publish_committed(committed.clone(), |_| Ok(()))
                 .expect("reconcile second delayed instance"),
             PolicyBundlePublication::Published
         );

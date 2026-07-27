@@ -259,7 +259,6 @@ async fn load_research_readiness(
             state
                 .research_catalog
                 .list_factors(FactorDefinitionListQuery {
-                    status: Some(PublicationStatus::Published),
                     page: PageRequest::new(1, 1),
                     ..FactorDefinitionListQuery::default()
                 }),

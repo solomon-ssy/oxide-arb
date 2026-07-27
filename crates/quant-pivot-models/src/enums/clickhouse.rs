@@ -338,8 +338,9 @@ pub enum ChFeatureSourceKind {
     ClickHouseFact = 3,
     TradeTape = 4,
     Derived = 5,
-    DomainExternal = 6,
+    DomainCrypto = 6,
     Linkage = 7,
+    DomainWeather = 8,
 }
 
 impl ChFeatureSourceKind {
@@ -351,8 +352,9 @@ impl ChFeatureSourceKind {
             Self::ClickHouseFact => "clickhouse_fact",
             Self::TradeTape => "trade_tape",
             Self::Derived => "derived",
-            Self::DomainExternal => "domain_external",
+            Self::DomainCrypto => "domain_crypto",
             Self::Linkage => "linkage",
+            Self::DomainWeather => "domain_weather",
         }
     }
 
@@ -365,8 +367,9 @@ impl ChFeatureSourceKind {
             "clickhouse_fact" => Some(Self::ClickHouseFact),
             "trade_tape" => Some(Self::TradeTape),
             "derived" => Some(Self::Derived),
-            "domain_external" => Some(Self::DomainExternal),
+            "domain_crypto" => Some(Self::DomainCrypto),
             "linkage" => Some(Self::Linkage),
+            "domain_weather" => Some(Self::DomainWeather),
             _ => None,
         }
     }
@@ -403,6 +406,16 @@ mod tests {
         assert_eq!(
             ChFeatureSourceKind::from_wire("linkage"),
             Some(ChFeatureSourceKind::Linkage)
+        );
+        assert_eq!(ChFeatureSourceKind::DomainCrypto as i8, 6);
+        assert_eq!(ChFeatureSourceKind::DomainWeather as i8, 8);
+        assert_eq!(
+            ChFeatureSourceKind::from_wire("domain_crypto"),
+            Some(ChFeatureSourceKind::DomainCrypto)
+        );
+        assert_eq!(
+            ChFeatureSourceKind::from_wire("domain_weather"),
+            Some(ChFeatureSourceKind::DomainWeather)
         );
     }
 

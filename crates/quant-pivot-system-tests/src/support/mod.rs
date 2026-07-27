@@ -8,10 +8,13 @@ use quant_pivot_models::{
     types::TokenId,
 };
 
+pub mod artifact_store;
 pub mod catalog_fixtures;
 pub mod execution_pg_seed;
 pub mod fact_sink;
-pub mod factor_governance;
+pub mod factor_definitions;
+pub mod model_serving_fixtures;
+pub mod model_serving_runtime;
 pub mod model_spec_fixtures;
 pub mod pit;
 pub mod policy_fixtures;
@@ -21,6 +24,7 @@ pub mod report_pipeline_harness;
 pub mod research_browser_seed;
 pub mod research_fixtures;
 pub mod storage;
+pub mod trade_policy_fixtures;
 pub mod trade_tape_fixtures;
 pub mod ws;
 

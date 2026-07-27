@@ -14,7 +14,7 @@
 //! ```
 
 mod applicator;
-mod store;
+pub(crate) mod store;
 
 pub use applicator::{PolicySnapshotApplicator, PolicySnapshotSubscribers};
 pub use store::DecisionPolicyStore;

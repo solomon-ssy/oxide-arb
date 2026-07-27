@@ -399,12 +399,42 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "quant_factor_definition",
+        table: "quant_factor_value",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_cycle",
+        column: "status",
+        value: DefaultValue::PostgresLiteral("'queued'::qp_feedback_cycle_status"),
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_cycle",
+        column: "generation",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_cycle",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_cycle",
         column: "updated_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "quant_factor_value",
+        table: "quant_feedback_evaluation_use",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_stage_event",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_drift_report",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },
@@ -491,6 +521,16 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     ColumnDefaultSpec {
         table: "quant_model_governance_audit",
         column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_model_run",
+        column: "status",
+        value: DefaultValue::PostgresLiteral("'running'::qp_model_run_status"),
+    },
+    ColumnDefaultSpec {
+        table: "quant_model_run",
+        column: "started_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
