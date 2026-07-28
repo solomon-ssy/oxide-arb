@@ -6,10 +6,10 @@ use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::domain::{
     governance::NewOperationLog,
     ports::{
-        CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
-        FeatureIntegrityPort, MarketLinkageGovernancePort, ModelCalibrationFitPort,
-        OrderIntentPort, PolicySnapshotPort, ReconciliationPort, ResearchJobPort,
-        ResearchReadinessPort, TradePolicyPort, TrainingDatasetPort,
+        CatalogStatusPort, CommittedPolicyApplyPort, DataQualityPort, ExecutionReadPort,
+        ExecutionRecoveryPort, FeatureIntegrityPort, MarketLinkageGovernancePort,
+        ModelCalibrationFitPort, OrderIntentPort, PolicySnapshotPort, ReconciliationPort,
+        ResearchJobPort, ResearchReadinessPort, TradePolicyPort, TrainingDatasetPort,
         settlement_control::SettlementControlPort,
     },
 };
@@ -153,6 +153,8 @@ async fn build_app_state(
     Ok(AppState {
         deploy: Arc::clone(&ctx.config),
         runtime_config_apply: Arc::clone(&ctx.governance.applicator) as Arc<dyn PolicySnapshotPort>,
+        committed_policy_apply: Arc::clone(&ctx.governance.committed_policy)
+            as Arc<dyn CommittedPolicyApplyPort>,
         jwt: auth.jwt,
         jwt_blacklist: Arc::clone(&ctx.infra.jwt_blacklist),
         users: Arc::clone(&repos.user) as Arc<dyn UserRepository>,
@@ -184,6 +186,7 @@ async fn build_app_state(
             ctx.infra.pg.connection().clone(),
             Arc::clone(&ctx.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
             Some(Arc::clone(&ctx.data.catalog) as Arc<dyn CatalogStatusPort>),
+            Arc::clone(&ctx.governance.committed_policy) as Arc<dyn CommittedPolicyApplyPort>,
         )),
         training_datasets: Arc::clone(&research_ports.training_datasets)
             as Arc<dyn TrainingDatasetPort>,

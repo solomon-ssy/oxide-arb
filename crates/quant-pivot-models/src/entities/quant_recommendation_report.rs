@@ -27,6 +27,7 @@ pub struct Model {
     pub report_kind: ReportKind,
     pub decision_at: DateTime<Utc>,
     pub horizon_secs: i64,
+    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
     pub runtime_mode: QuantRuntimeMode,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub model_run_id: Option<ModelRunId>,

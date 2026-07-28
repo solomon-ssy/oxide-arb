@@ -97,6 +97,8 @@ pub mod entity {
     pub const QUANT_DRIFT_REPORT: &str = "quant_drift_report";
     /// `quant_feedback_evaluation_use`.
     pub const QUANT_FEEDBACK_EVALUATION_USE: &str = "quant_feedback_evaluation_use";
+    /// `quant_feedback_promotion_permit`.
+    pub const QUANT_FEEDBACK_PROMOTION_PERMIT: &str = "quant_feedback_promotion_permit";
     /// `quant_feature_parity_run`.
     pub const QUANT_FEATURE_PARITY_RUN: &str = "quant_feature_parity_run";
     /// `quant_feature_parity_state`.

@@ -82,6 +82,8 @@ mod model_registry;
 mod policy_governance;
 #[path = "repository/accounting/portfolio_optimizer.rs"]
 mod portfolio_optimizer;
+#[path = "repository/governance/promotion_permit.rs"]
+mod promotion_permit;
 #[path = "repository/accounting/recommendation_execution_outcome.rs"]
 mod recommendation_execution_outcome;
 #[path = "repository/accounting/recommendation_resolution_outcome.rs"]
@@ -408,6 +410,24 @@ async fn feedback_boot_schema_contracts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn promotion_permit_schema_contracts() {
+    Box::pin(with_postgres_suite(
+        promotion_permit::schema_roundtrip_revoke(),
+    ))
+    .await
+    .expect("start promotion-permit schema PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn promotion_permit_service_contracts() {
+    Box::pin(with_postgres_suite(
+        promotion_permit::governed_service_contracts(),
+    ))
+    .await
+    .expect("start governed promotion-permit PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn feedback_cycle_repository_contracts() {
     Box::pin(with_postgres_suite(async {
         run_scenarios!(
@@ -474,9 +494,15 @@ async fn feedback_shadow_stage_contracts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn feedback_decision_stage_contracts() {
-    Box::pin(with_postgres_suite(
-        feedback_decision_stage::terminal_restart_tamper(),
-    ))
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(
+            feedback_decision_stage::terminal_restart_tamper,
+            feedback_decision_stage::promotion_preflight_contracts,
+            feedback_decision_stage::model_route_promotion_contracts,
+            feedback_decision_stage::promotion_runtime_apply_contracts,
+            feedback_decision_stage::promotion_fault_matrix_contracts,
+        );
+    }))
     .await
     .expect("start feedback-decision stage PostgreSQL suite");
 }

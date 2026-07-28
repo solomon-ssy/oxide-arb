@@ -27,6 +27,10 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub reason: String,
     pub occurred_at: DateTimeWithTimeZone,
+    pub promotion_permit_id: Option<Uuid>,
+    #[sea_orm(column_type = "Text")]
+    pub promotion_transaction_hash: Option<String>,
+    pub model_governance_audit_id: Option<Uuid>,
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeWithTimeZone,
     #[sea_orm(

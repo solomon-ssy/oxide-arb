@@ -17,6 +17,7 @@ pub struct Model {
     pub report_kind: QpReportKind,
     pub decision_at: DateTimeWithTimeZone,
     pub horizon_secs: i64,
+    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
     pub runtime_mode: QpQuantRuntimeMode,
     pub decision_policy_snapshot_id: Uuid,
     pub model_run_id: Option<Uuid>,

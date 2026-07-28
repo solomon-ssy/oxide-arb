@@ -98,6 +98,7 @@ pub fn run() -> Result<()> {
     )?);
     violations.extend(validate_phase_ledger(&metadata.workspace_root)?);
     violations.extend(validate_attribution_removal(&metadata.workspace_root)?);
+    violations.extend(validate_phase_allocation_removal(&metadata.workspace_root)?);
     violations.extend(validate_factor_publication_removal(
         &metadata.workspace_root,
     )?);
@@ -410,6 +411,64 @@ fn validate_attribution_removal(workspace_root: &Path) -> Result<Vec<String>> {
             "{} retains the removed recommendation status value `attributed`",
             postgres_manifest.display()
         ));
+    }
+
+    Ok(violations)
+}
+
+fn validate_phase_allocation_removal(workspace_root: &Path) -> Result<Vec<String>> {
+    const REMOVED_PATHS: &[&str] = &[
+        "crates/quant-pivot-core/src/service/profile_allocation.rs",
+        "crates/quant-pivot-models/src/domain/quant/profile_allocation.rs",
+        "crates/quant-pivot-models/src/entities/quant_profile_allocation.rs",
+        "crates/quant-pivot-repository/src/postgres/quant/profile_allocation.rs",
+        "crates/quant-pivot-repository/src/traits/quant/profile_allocation.rs",
+        "crates/quant-pivot-web/src/routes/profile_allocations.rs",
+        "ui/apps/web-antdv-next/src/views/quant/research/profile-allocation.vue",
+    ];
+    const REMOVED_TOKENS: &[&str] = &[
+        "ProfileAllocation",
+        "profile_allocation",
+        "profile-allocation",
+    ];
+
+    let mut violations = Vec::new();
+    for relative in REMOVED_PATHS {
+        let path = workspace_root.join(relative);
+        if path.exists() {
+            violations.push(format!(
+                "{} retains a removed Phase 11.9 profile-allocation source path",
+                path.display()
+            ));
+        }
+    }
+
+    let mut source_paths = Vec::new();
+    for relative in [
+        "crates",
+        "schema",
+        "config",
+        "ui/apps/web-antdv-next/src",
+        "ui/packages/types/src",
+    ] {
+        collect_contract_sources(&workspace_root.join(relative), &mut source_paths)?;
+    }
+    source_paths.sort();
+    let gate_source = workspace_root.join("crates/quant-pivot-xtask/src/architecture.rs");
+    for path in source_paths {
+        if path == gate_source {
+            continue;
+        }
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        for token in REMOVED_TOKENS {
+            if source.contains(token) {
+                violations.push(format!(
+                    "{} retains removed Phase 11.9 profile-allocation contract `{token}`",
+                    path.display()
+                ));
+            }
+        }
     }
 
     Ok(violations)
@@ -3062,16 +3121,18 @@ fn validate_phase_ledger(workspace_root: &Path) -> Result<Vec<String>> {
 fn validate_ledger_source(source: &str) -> Vec<String> {
     let mut violations = Vec::new();
     let Some((before_implementation, implementation_and_after)) =
-        source.split_once("## 11. Implementation Ledger")
+        split_markdown_heading(source, "## 11. Implementation Ledger")
     else {
         return vec!["missing `## 11. Implementation Ledger`".to_owned()];
     };
     let Some((implementation, evidence_and_after)) =
-        implementation_and_after.split_once("## 12. Evidence Ledger")
+        split_markdown_heading(implementation_and_after, "## 12. Evidence Ledger")
     else {
         return vec!["missing `## 12. Evidence Ledger`".to_owned()];
     };
-    let Some((evidence, _decisions)) = evidence_and_after.split_once("## 13. 决策账本") else {
+    let Some((evidence, _decisions)) =
+        split_markdown_heading(evidence_and_after, "## 13. 决策账本")
+    else {
         return vec!["missing `## 13. 决策账本`".to_owned()];
     };
 
@@ -3202,6 +3263,10 @@ fn validate_ledger_source(source: &str) -> Vec<String> {
     }
 
     violations
+}
+
+fn split_markdown_heading<'a>(source: &'a str, heading: &str) -> Option<(&'a str, &'a str)> {
+    source.split_once(&format!("\n{heading}\n"))
 }
 
 fn markdown_cells(line: &str) -> Option<Vec<&str>> {
@@ -3412,6 +3477,22 @@ mod tests {
 | W4-E01 | TODO | W2-A* | exit | tests |
 ",
             "| 2026-07-24 | W1-01 | PASS | verified |",
+        );
+
+        assert!(validate_ledger_source(&source).is_empty());
+    }
+
+    #[test]
+    fn ledger_ignores_heading_text() {
+        let source = phase_11_9_fixture(
+            r"
+| ID | 状态 | 依赖 | 任务 | 完成证据 |
+|---|---|---|---|---|
+| W1-01 | DONE | 无 | baseline | tests |
+| W2-00 | IN_PROGRESS | W1-01 | ledger | tests |
+",
+            r"| 2026-07-24 | W2-00 | FAIL | mentions `## 13. 决策账本` without opening a section |
+| 2026-07-24 | W1-01 | PASS（recovery） | verified |",
         );
 
         assert!(validate_ledger_source(&source).is_empty());

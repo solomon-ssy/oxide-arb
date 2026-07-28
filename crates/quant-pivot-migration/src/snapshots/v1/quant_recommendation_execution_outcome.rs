@@ -22,6 +22,7 @@ pub struct Model {
     pub market_id: String,
     #[sea_orm(column_type = "Text")]
     pub token_id: String,
+    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
     pub runtime_mode: QpQuantRuntimeMode,
     pub terminal_state: QpRecommendationExecutionTerminalState,
     pub no_fill_reason: Option<QpRecommendationExecutionNoFillReason>,

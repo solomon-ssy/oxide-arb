@@ -34,6 +34,7 @@ pub struct Model {
     pub execution_account_id: ExecutionAccountId,
     pub market_id: MarketId,
     pub token_id: TokenId,
+    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
     pub runtime_mode: QuantRuntimeMode,
     pub terminal_state: RecommendationExecutionTerminalState,
     pub no_fill_reason: Option<RecommendationExecutionNoFillReason>,

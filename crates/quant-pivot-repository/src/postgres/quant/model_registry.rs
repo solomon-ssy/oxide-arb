@@ -31,7 +31,10 @@ use quant_pivot_models::{
             Model as QuantModelRunModel,
         },
         quant_model_spec::{Column, Entity as QuantModelSpecEntity, Model as QuantModelSpecModel},
-        quant_model_version::{Column as QuantModelVersionColumn, Entity, Model, Relation},
+        quant_model_version::{
+            ActiveModel as QuantModelVersionActiveModel, Column as QuantModelVersionColumn, Entity,
+            Model, Relation,
+        },
         quant_training_dataset::Entity as QuantTrainingDatasetEntity,
         research_profile_artifact::Column as ResearchProfileArtifactColumn,
     },
@@ -156,7 +159,7 @@ impl PgModelRegistryRepository {
 }
 
 impl PgModelRegistryRepository {
-    async fn require_version_info(
+    pub(crate) async fn require_version_info(
         db: &impl ConnectionTrait,
         model_version_id: &ModelVersionId,
     ) -> Result<ModelVersionInfo, StorageError> {
@@ -198,13 +201,12 @@ impl PgModelRegistryRepository {
         version.version = next_model_version(max_version.flatten())?;
         let duplicate_key = format!("{}:v{}", version.model_spec_id, version.version);
         let model_version_id = version.model_version_id;
-        let active =
-            version
-                .try_into_active_model()
-                .map_err(|error| StorageError::InvariantViolation {
-                    entity: Some(QUANT_MODEL_VERSION),
-                    detail: error.to_string(),
-                })?;
+        let active = QuantModelVersionActiveModel::try_from(version).map_err(|error| {
+            StorageError::InvariantViolation {
+                entity: Some(QUANT_MODEL_VERSION),
+                detail: error.to_string(),
+            }
+        })?;
         Entity::insert(active)
             .exec_with_returning(db)
             .await
@@ -1205,11 +1207,11 @@ fn next_model_version(current: Option<i32>) -> Result<i32, StorageError> {
 }
 
 impl PgModelRegistryRepository {
-    async fn verify_parity_permit(
+    pub(crate) async fn verify_parity_permit(
         txn: &DatabaseTransaction,
         run_id: &FeatureParityRunId,
         model: &Model,
-    ) -> Result<(), StorageError> {
+    ) -> Result<ContentHash, StorageError> {
         verify_model_version_row(model)?;
         let contract = model.serving_contract.bindings();
         let model_version_id = &model.model_version_id;
@@ -1321,7 +1323,7 @@ impl PgModelRegistryRepository {
                 "full model parity WORM subject no longer matches the exact model/dataset artifacts",
             ));
         }
-        Ok(())
+        Ok(subject.evidence_hash)
     }
 }
 

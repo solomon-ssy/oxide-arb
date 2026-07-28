@@ -7,8 +7,9 @@ use super::{decision_policy_snapshot, policy_approval, policy_revision, user};
 use crate::{
     enums::runtime_config::{ConfigResourceKind, PolicyActivationKind, PolicyActorKind},
     types::{
-        AuditEventId, ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyApprovalId,
-        PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId, UserId,
+        AuditEventId, ContentHash, DecisionPolicySnapshotId, ModelGovernanceAuditId,
+        PolicyActivationId, PolicyApprovalId, PolicyBundleGeneration, PolicyIdempotencyKey,
+        PolicyRevisionId, PromotionPermitId, UserId,
     },
 };
 
@@ -43,6 +44,12 @@ pub struct Model {
     pub idempotency_key: PolicyIdempotencyKey,
     pub activation_request_hash: ContentHash,
     pub audit_event_id: AuditEventId,
+    #[sea_orm(unique)]
+    pub promotion_permit_id: Option<PromotionPermitId>,
+    #[sea_orm(unique)]
+    pub promotion_transaction_hash: Option<ContentHash>,
+    #[sea_orm(unique)]
+    pub model_governance_audit_id: Option<ModelGovernanceAuditId>,
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTime<Utc>,
 

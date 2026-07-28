@@ -22,6 +22,10 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub detail: Json,
     pub audit_event_id: Uuid,
+    #[sea_orm(unique)]
+    pub promotion_permit_id: Option<Uuid>,
+    #[sea_orm(column_type = "Text", unique)]
+    pub promotion_transaction_hash: Option<String>,
     pub created_at: DateTimeWithTimeZone,
     #[sea_orm(
         belongs_to,
@@ -39,6 +43,15 @@ pub struct Model {
         on_delete = "NoAction"
     )]
     pub quant_training_dataset: BelongsTo<Option<super::quant_training_dataset::Entity>>,
+    #[sea_orm(
+        belongs_to,
+        from = "promotion_permit_id",
+        to = "promotion_permit_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub quant_feedback_promotion_permit:
+        BelongsTo<Option<super::quant_feedback_promotion_permit::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

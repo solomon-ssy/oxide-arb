@@ -63,6 +63,7 @@ pub mod quant_feature_vector;
 pub mod quant_feedback_cycle;
 pub mod quant_feedback_evaluation_use;
 pub mod quant_feedback_event_outbox;
+pub mod quant_feedback_promotion_permit;
 pub mod quant_feedback_stage_event;
 pub mod quant_market_linkage;
 #[cfg_attr(not(feature = "persistence-entities"), allow(dead_code))]

@@ -10,6 +10,7 @@ use super::sea_orm_active_enums::{QpKillSwitchState, QpQuantRuntimeMode, QpSettl
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: i32,
+    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
     pub quant_runtime_mode: QpQuantRuntimeMode,
     pub settlement_write_policy: QpSettlementWritePolicy,
     pub kill_switch_state: QpKillSwitchState,

@@ -28,9 +28,9 @@ use crate::{
         PolicyProfileDocument, PolicyValidationEvidence, PolicyValidationSubject,
     },
     types::{
-        AuditEventId, ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyApprovalId,
-        PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId, ProfileArtifactId,
-        SchemaVersion, UserId,
+        AuditEventId, ContentHash, DecisionPolicySnapshotId, ModelGovernanceAuditId,
+        PolicyActivationId, PolicyApprovalId, PolicyBundleGeneration, PolicyIdempotencyKey,
+        PolicyRevisionId, ProfileArtifactId, PromotionPermitId, SchemaVersion, UserId,
     },
 };
 
@@ -438,6 +438,9 @@ pub struct PolicyActivationInfo {
     pub idempotency_key: PolicyIdempotencyKey,
     pub activation_request_hash: ContentHash,
     pub audit_event_id: AuditEventId,
+    pub promotion_permit_id: Option<PromotionPermitId>,
+    pub promotion_transaction_hash: Option<ContentHash>,
+    pub model_governance_audit_id: Option<ModelGovernanceAuditId>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -448,7 +451,8 @@ info_from_model!(PolicyActivationInfo, policy_activation::Model, {
     policy_approval_id, activated_at, activated_by_kind, activated_by_user_id,
     activated_by_label, reason, activation_kind,
     expected_active_revision_id, previous_policy_revision_id, rollback_target_revision_id,
-    preflight_token_hash, idempotency_key, activation_request_hash, audit_event_id, created_at,
+    preflight_token_hash, idempotency_key, activation_request_hash, audit_event_id,
+    promotion_permit_id, promotion_transaction_hash, model_governance_audit_id, created_at,
 });
 
 /// Latest activation and exact immutable revision for one policy resource.
@@ -499,6 +503,81 @@ pub struct NewPolicyActivation {
     pub idempotency_key: PolicyIdempotencyKey,
     pub activation_request_hash: ContentHash,
     pub audit_event_id: AuditEventId,
+}
+
+/// Insert payload for one model-route promotion activation.
+///
+/// The subtype bindings are required here even though the shared table stores
+/// them as nullable columns for non-promotion activation kinds.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::policy_activation::ActiveModel")]
+pub struct NewModelPromotionActivation {
+    pub bundle_generation: PolicyBundleGeneration,
+    pub expected_bundle_generation: PolicyBundleGeneration,
+    pub policy_activation_id: PolicyActivationId,
+    pub resource_kind: ConfigResourceKind,
+    pub policy_revision_id: PolicyRevisionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub policy_approval_id: PolicyApprovalId,
+    pub activated_by_kind: PolicyActorKind,
+    pub activated_by_user_id: UserId,
+    pub activated_by_label: String,
+    pub reason: String,
+    pub activation_kind: PolicyActivationKind,
+    pub expected_active_revision_id: PolicyRevisionId,
+    pub previous_policy_revision_id: PolicyRevisionId,
+    pub rollback_target_revision_id: Option<PolicyRevisionId>,
+    pub preflight_token_hash: ContentHash,
+    pub idempotency_key: PolicyIdempotencyKey,
+    pub activation_request_hash: ContentHash,
+    pub audit_event_id: AuditEventId,
+    pub promotion_permit_id: PromotionPermitId,
+    pub promotion_transaction_hash: ContentHash,
+    pub model_governance_audit_id: ModelGovernanceAuditId,
+}
+
+/// Exact audit projection inserted from a committed activation row.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(
+    active_model = "crate::entities::policy_activation_audit::ActiveModel",
+    exhaustive
+)]
+pub struct NewPolicyActivationAudit {
+    pub audit_event_id: AuditEventId,
+    pub policy_activation_id: PolicyActivationId,
+    pub bundle_generation: PolicyBundleGeneration,
+    pub resource_kind: ConfigResourceKind,
+    pub policy_revision_id: PolicyRevisionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub snapshot_hash: ContentHash,
+    pub activation_request_hash: ContentHash,
+    pub actor_kind: PolicyActorKind,
+    pub actor_user_id: Option<UserId>,
+    pub actor_label: String,
+    pub reason: String,
+    pub occurred_at: DateTime<Utc>,
+    pub promotion_permit_id: Option<PromotionPermitId>,
+    pub promotion_transaction_hash: Option<ContentHash>,
+    pub model_governance_audit_id: Option<ModelGovernanceAuditId>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Exact durable-outbox projection inserted from a committed activation row.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(
+    active_model = "crate::entities::policy_activation_event_outbox::ActiveModel",
+    exhaustive
+)]
+pub struct NewPolicyActivationEventOutbox {
+    pub audit_event_id: AuditEventId,
+    pub policy_activation_id: PolicyActivationId,
+    pub bundle_generation: PolicyBundleGeneration,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub snapshot_hash: ContentHash,
+    pub promotion_permit_id: Option<PromotionPermitId>,
+    pub promotion_transaction_hash: Option<ContentHash>,
+    pub model_governance_audit_id: Option<ModelGovernanceAuditId>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Outcome of an atomic policy activation transaction.

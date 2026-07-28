@@ -237,6 +237,12 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::GuardFeedbackOutbox,
     },
     TriggerSpec {
+        name: "trg_quant_feedback_promotion_permit_guard",
+        table: "quant_feedback_promotion_permit",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::GuardPromotionPermit,
+    },
+    TriggerSpec {
         name: "trg_quant_feedback_stage_event_append_only",
         table: "quant_feedback_stage_event",
         events: TriggerEvents::DeleteOrUpdate,
@@ -597,5 +603,15 @@ mod tests {
             .expect("feedback-cycle lifecycle trigger");
         assert_eq!(cycle.events, TriggerEvents::DeleteOrUpdate);
         assert_eq!(cycle.program, TriggerProgram::GuardFeedbackCycle);
+    }
+
+    #[test]
+    fn promotion_permit_revoke_guarded() {
+        let permit = TRIGGERS
+            .iter()
+            .find(|trigger| trigger.name == "trg_quant_feedback_promotion_permit_guard")
+            .expect("promotion-permit lifecycle guard");
+        assert_eq!(permit.events, TriggerEvents::DeleteOrUpdate);
+        assert_eq!(permit.program, TriggerProgram::GuardPromotionPermit);
     }
 }

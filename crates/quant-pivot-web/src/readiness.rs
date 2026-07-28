@@ -1,15 +1,16 @@
 //! `PostgreSQL` + Redis readiness probes for `GET /ready`.
 //!
 //! The web tier requires both stores before it can authenticate requests (JWT
-//! blacklist) or serve RBAC-backed handlers, so readiness fails closed when
-//! either dependency is unreachable.
+//! blacklist) or serve RBAC-backed handlers. It also requires the complete
+//! runtime generation to match durable policy truth, so readiness fails closed
+//! when any required dependency or generation is degraded.
 
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use quant_pivot_models::domain::{
     api::{DependencyCheck, ReadinessReport},
-    ports::{CatalogState, CatalogStatusPort, ReadinessPort},
+    ports::{CatalogState, CatalogStatusPort, CommittedPolicyApplyPort, ReadinessPort},
 };
 use sea_orm::DatabaseConnection;
 use tracing::warn;
@@ -18,14 +19,15 @@ use crate::jwt::TokenBlacklist;
 
 /// Readiness probe over the web tier's mandatory dependencies.
 ///
-/// Postgres and Redis gate `ready` (the web tier cannot authenticate without
-/// them). The market-catalog check is **informational only**: the control
-/// plane must stay routable during catalog warmup, so a `Warming` catalog is
-/// reported in `checks` but never flips `ready` to false.
+/// Postgres, Redis, and committed-policy convergence gate `ready`. The
+/// market-catalog check is **informational only**: the control plane must stay
+/// routable during catalog warmup, so a `Warming` catalog is reported in
+/// `checks` but never flips `ready` to false.
 pub struct PgRedisReadiness {
     db: DatabaseConnection,
     blacklist: Arc<dyn TokenBlacklist>,
     catalog: Option<Arc<dyn CatalogStatusPort>>,
+    policy_apply: Arc<dyn CommittedPolicyApplyPort>,
 }
 
 impl PgRedisReadiness {
@@ -36,11 +38,13 @@ impl PgRedisReadiness {
         db: DatabaseConnection,
         blacklist: Arc<dyn TokenBlacklist>,
         catalog: Option<Arc<dyn CatalogStatusPort>>,
+        policy_apply: Arc<dyn CommittedPolicyApplyPort>,
     ) -> Self {
         Self {
             db,
             blacklist,
             catalog,
+            policy_apply,
         }
     }
 
@@ -98,13 +102,18 @@ impl PgRedisReadiness {
             },
         })
     }
+
+    fn check_policy(&self) -> DependencyCheck {
+        self.policy_apply.readiness().into()
+    }
 }
 
 #[async_trait]
 impl ReadinessPort for PgRedisReadiness {
     async fn check(&self) -> ReadinessReport {
         let (postgres, redis) = tokio::join!(self.check_postgres(), self.check_redis());
-        let mut checks = vec![postgres, redis];
+        let policy = self.check_policy();
+        let mut checks = vec![postgres, redis, policy];
         // `ready` is computed over the required dependencies only — the
         // catalog check below is informational (warmup must not stop traffic).
         let ready = checks.iter().all(|check| check.ok);

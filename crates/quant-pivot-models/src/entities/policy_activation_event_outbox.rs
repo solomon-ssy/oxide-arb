@@ -5,7 +5,8 @@ use sea_orm::entity::prelude::*;
 
 use super::{decision_policy_snapshot, policy_activation, policy_activation_audit};
 use crate::types::{
-    AuditEventId, ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyBundleGeneration,
+    AuditEventId, ContentHash, DecisionPolicySnapshotId, ModelGovernanceAuditId,
+    PolicyActivationId, PolicyBundleGeneration, PromotionPermitId,
 };
 
 #[sea_orm::model]
@@ -19,6 +20,9 @@ pub struct Model {
     pub bundle_generation: PolicyBundleGeneration,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub snapshot_hash: ContentHash,
+    pub promotion_permit_id: Option<PromotionPermitId>,
+    pub promotion_transaction_hash: Option<ContentHash>,
+    pub model_governance_audit_id: Option<ModelGovernanceAuditId>,
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTime<Utc>,
 

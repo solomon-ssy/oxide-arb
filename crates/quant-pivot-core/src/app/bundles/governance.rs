@@ -9,8 +9,8 @@ use quant_pivot_models::{
     domain::{
         governance::{RuntimeControlSnapshot, SystemStatus},
         ports::{
-            DataQualityPort, KillSwitchPort, PolicySnapshotPort, RuntimeControlPort,
-            SystemCapabilityPort,
+            CommittedPolicyApplyPort, DataQualityPort, KillSwitchPort, PolicySnapshotPort,
+            RuntimeControlPort, SystemCapabilityPort,
         },
         runtime::CoreEventPublisher,
     },
@@ -18,8 +18,9 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CapitalAllocationRepository, ModelRegistryRepository,
-    ModelRunRepository, PolicyRepository, RecommendationReportRepository, ReconciliationRepository,
-    RuntimeControlRepository, ShadowComparisonRepository,
+    ModelRunRepository, PolicyRepository, PromotionPermitRepository,
+    RecommendationReportRepository, ReconciliationRepository, RuntimeControlRepository,
+    ShadowComparisonRepository,
 };
 use tokio::{task::JoinHandle, time::MissedTickBehavior};
 
@@ -28,13 +29,17 @@ use crate::{
     execution::ExitMonitorHealthHandle,
     governance::{
         BiasTableApplicator, DefaultModePreflight, DefaultModeTransitionGate, ModePreflightDeps,
-        RuntimeControlsHandle, SystemCapabilityService, SystemStatusPublisher,
+        PromotionPermitService, RuntimeControlsHandle, SystemCapabilityService,
+        SystemStatusPublisher,
         execution_recovery::{ExecutionRecoveryCoordinator, ExecutionRecoveryHandle},
         runtime_control::{QuantRuntimeControl, QuantRuntimeControlDeps},
     },
     infra::health_checker::{HealthChecker, HealthCheckerDeps},
     observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
-    runtime_config::{DecisionPolicyStore, PolicySnapshotApplicator, PolicySnapshotSubscribers},
+    runtime_config::{
+        CommittedPolicyApplicator, DecisionPolicyStore, PolicySnapshotApplicator,
+        PolicySnapshotSubscribers,
+    },
 };
 
 /// Active runtime config, mode, kill-switch, and notification wiring loaded from Postgres.
@@ -78,6 +83,8 @@ pub struct GovernanceBundleDeps<'a> {
 pub struct GovernanceBundle {
     pub runtime_config: Arc<DecisionPolicyStore>,
     pub applicator: Arc<PolicySnapshotApplicator>,
+    /// Sole durable-bundle convergence and desired/applied readiness owner.
+    pub committed_policy: Arc<CommittedPolicyApplicator>,
     pub runtime_controls: RuntimeControlsHandle,
     pub alerts: Arc<AlertDispatcher>,
     pub health_checker: Arc<HealthChecker>,
@@ -89,6 +96,8 @@ pub struct GovernanceBundle {
     /// Favorite-longshot bias-table snapshot bound to the factor plane,
     /// reloaded + content-hash verified on activation.
     pub bias_table: Arc<BiasTableApplicator>,
+    /// Server-authorized model-route promotion permits.
+    pub promotion_permits: Arc<PromotionPermitService>,
     /// Exit-monitor health: shared with the execution bundle's worker and
     /// read by admission `#20` + the auto-execution mode preflight.
     pub exit_monitor_health: ExitMonitorHealthHandle,
@@ -124,11 +133,24 @@ impl GovernanceBundle {
             &infra.repos.calibration_artifact,
         )
             as Arc<dyn CalibrationArtifactRepository>));
+        let promotion_permits = Arc::new(PromotionPermitService::new(Arc::clone(
+            &infra.repos.promotion_permit,
+        )
+            as Arc<dyn PromotionPermitRepository>));
         let applicator = build_runtime_config_applicator(PolicySnapshotApplicatorDeps {
             runtime_config: &runtime_config,
             bias_table: &bias_table,
             data,
         });
+        let initial_policy = runtime_config.current_bundle().ok_or_else(|| {
+            QuantError::config(
+                "active policy identity is unavailable during committed-applicator bootstrap",
+            )
+        })?;
+        let committed_policy = Arc::new(CommittedPolicyApplicator::new(
+            Arc::clone(&applicator) as Arc<dyn PolicySnapshotPort>,
+            initial_policy,
+        ));
         let capabilities: Arc<dyn SystemCapabilityPort> = Arc::new(SystemCapabilityService::new(
             Arc::clone(&applicator) as Arc<dyn PolicySnapshotPort>,
             Arc::clone(&infra.repos.model_run) as Arc<dyn ModelRunRepository>,
@@ -161,6 +183,7 @@ impl GovernanceBundle {
         Ok(Self {
             runtime_config,
             applicator,
+            committed_policy,
             runtime_controls,
             alerts,
             health_checker,
@@ -168,6 +191,7 @@ impl GovernanceBundle {
             capabilities,
             kill_switch,
             bias_table,
+            promotion_permits,
             exit_monitor_health,
             execution_recovery,
             status_publisher,
@@ -192,7 +216,7 @@ impl GovernanceBundle {
         }
         self.policy_bundle_reconciler = Some(spawn_policy_bundle_reconciler(
             repository,
-            Arc::clone(&self.applicator),
+            Arc::clone(&self.committed_policy),
         ));
         Ok(())
     }
@@ -227,7 +251,7 @@ impl GovernanceBundle {
 
 fn spawn_policy_bundle_reconciler(
     repository: Arc<dyn PolicyRepository>,
-    applicator: Arc<PolicySnapshotApplicator>,
+    applicator: Arc<CommittedPolicyApplicator>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
@@ -242,34 +266,11 @@ fn spawn_policy_bundle_reconciler(
                     continue;
                 }
             };
-            let local = applicator.current_bundle();
-            if local.as_ref().is_some_and(|published| {
-                published.generation == bundle.generation
-                    && published.decision_policy_snapshot_id == bundle.decision_policy_snapshot_id
-                    && published.snapshot_hash == bundle.snapshot_hash
-            }) {
-                continue;
-            }
-            if local
-                .as_ref()
-                .is_some_and(|published| published.generation > bundle.generation)
-            {
+            if let Err(error) = applicator.apply_committed(bundle).await {
                 tracing::error!(
-                    local_generation = %local.as_ref().map_or(bundle.generation, |value| value.generation),
-                    durable_generation = %bundle.generation,
-                    "local policy bundle is newer than the database guard; refusing rollback"
+                    error = %error,
+                    "durable policy bundle failed runtime convergence"
                 );
-                continue;
-            }
-            match applicator.prepare(bundle.snapshot.clone()).await {
-                Ok(prepared) => {
-                    if let Err(error) = prepared.publish_bundle(bundle) {
-                        tracing::error!(error = %error, "policy bundle reconciliation publish failed");
-                    }
-                }
-                Err(error) => {
-                    tracing::error!(error = %error, "durable policy bundle failed consumer preparation");
-                }
             }
         }
     })

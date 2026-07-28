@@ -1,12 +1,13 @@
 //! F09-to-F10 contracts against real `PostgreSQL` and object-store adapters.
 
-use std::{env, fs, path::PathBuf, sync::Arc};
+use std::{env, fs, path::PathBuf, sync::Arc, time::Duration as StdDuration};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::service::{
     feedback_shadow::{FeedbackShadowExecutionDeps, FeedbackShadowExecutionService},
     feedback_shadow_stage::{FeedbackShadowStageAdapter, FeedbackShadowStageDeps},
-    model_serving_generation::ModelServingGenerationStore,
+    model_serving_generation::{ModelServingGenerationStore, PublishedShadowRouteIdentity},
+    model_serving_registry::ModelServingRuntimeRegistry,
     research_readiness::EvidenceScopeIdentity,
 };
 use quant_pivot_models::{
@@ -25,7 +26,9 @@ use quant_pivot_models::{
             ResearchJobResultRef,
         },
     },
+    entities::quant_shadow_comparison::Entity as ShadowComparisonEntity,
     enums::{
+        common::MarketCategory,
         model::ModelFamily,
         quant::{
             DatasetPurpose, FeedbackStage, FeedbackStageEventKind, FeedbackTriggerFamily,
@@ -34,13 +37,16 @@ use quant_pivot_models::{
         },
         runtime_config::ConfigResourceKind,
     },
-    runtime_config::{BuyModelRoute, FactorCrossSectionConfig, FactorHeadConfig, ModelVersionRef},
+    runtime_config::{
+        BuyModelRoute, DecisionPolicySnapshot, FactorCrossSectionConfig, FactorHeadConfig,
+        ModelVersionRef,
+    },
     types::{
         ArtifactUri, BacktestPathSetId, BacktestReportId, Bps, ContentHash,
         DecisionPolicySnapshotId, FeedbackComparisonArtifactId, FeedbackLearningStageArtifactId,
         ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        Probability, ResearchJobId, ResearchJobParams, RoleCode, SchemaVersion, ShadowComparisonId,
-        Usd, WorkerId,
+        Probability, ResearchJobId, ResearchJobParams, ResearchProfileRef, RoleCode, SchemaVersion,
+        ShadowComparisonId, Usd, WorkerId,
         factor::FactorServingPlane,
         model_metrics::ModelVersionMetrics,
         model_training::ModelTrainingObjective,
@@ -82,18 +88,23 @@ use quant_pivot_system_tests::{
         },
         model_serving_runtime::ModelServingRegistryFixture,
         model_spec_fixtures,
-        policy_fixtures::{activate_policy_bundle, bootstrap_default_policy_bundle},
+        policy_fixtures::{
+            activate_policy_bundle, bootstrap_default_policy_bundle, bootstrap_policy_bundle,
+        },
     },
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
 use tokio_util::sync::CancellationToken;
 
-use super::feedback_boot_schema::{FeedbackSchemaFixture, content_hash, prepare_fixture};
+use super::feedback_boot_schema::{
+    FeedbackSchemaFixture, content_hash, prepare_fixture, prepare_profile_fixture,
+};
 
 const JOB_LEASE_SECS: i64 = 90;
 const OBSERVATION_COUNT: usize = 500;
+const SHADOW_OBSERVATION_COUNT: usize = 1_000;
 
 pub struct ArtifactRoot {
     pub path: PathBuf,
@@ -162,6 +173,9 @@ struct ModelSealContext<'a> {
     feature_schema_hash: ContentHash,
     factor_head: &'a FactorHeadConfig,
     cross_section: &'a FactorCrossSectionConfig,
+    profile_ref: ResearchProfileRef,
+    category_scope: Option<MarketCategory>,
+    prediction_horizon_secs: u64,
 }
 
 impl ModelSealContext<'_> {
@@ -180,9 +194,8 @@ impl ModelSealContext<'_> {
                 feature_schema_version: SchemaVersion::FIRST,
                 feature_schema_hash: self.feature_schema_hash,
                 decision_policy_snapshot_id: self.policy_id,
-                profile_ref: model_spec_fixtures::pooled_profile_ref(),
-                prediction_horizon_secs: u64::try_from(model_spec_fixtures::pooled_horizon_secs())
-                    .expect("pooled horizon"),
+                profile_ref: self.profile_ref.clone(),
+                prediction_horizon_secs: self.prediction_horizon_secs,
                 purpose: DatasetPurpose::Training,
                 window_start: window_end - Duration::days(1),
                 window_end,
@@ -219,7 +232,7 @@ impl ModelSealContext<'_> {
                     model_version_id,
                 ))
                 .expect("F10 training-input hash"),
-                category_scope: None,
+                category_scope: self.category_scope,
                 calibration: None,
                 bias_table: None,
             },
@@ -237,14 +250,15 @@ impl ModelSealContext<'_> {
     }
 }
 
-pub async fn build_models(db: &DatabaseConnection, store: &Arc<dyn ArtifactStore>) -> ShadowModels {
+async fn build_scoped_models(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    policy_id: DecisionPolicySnapshotId,
+    profile_ref: ResearchProfileRef,
+    category_scope: Option<MarketCategory>,
+    prediction_horizon_secs: i64,
+) -> ShadowModels {
     let policy_repo = PgPolicyRepository::new(db.clone());
-    let policy_id = bootstrap_default_policy_bundle(
-        db,
-        "f10-shadow-stage",
-        "bootstrap exact F10 serving dependencies",
-    )
-    .await;
     let policy = policy_repo
         .load_snapshot(&policy_id)
         .await
@@ -255,7 +269,7 @@ pub async fn build_models(db: &DatabaseConnection, store: &Arc<dyn ArtifactStore
         &profiles.scoring.definition,
         &profiles.features.definition,
         &profiles.domain.definition,
-        None,
+        category_scope,
         None,
     )
     .serving_plane()
@@ -270,7 +284,7 @@ pub async fn build_models(db: &DatabaseConnection, store: &Arc<dyn ArtifactStore
         model_spec_id,
         "f10-shadow-generation",
         ModelFamily::WeightedFactor,
-        model_spec_fixtures::pooled_horizon_secs(),
+        prediction_horizon_secs,
         ModelInputContract::single_required("book.mid"),
         ModelTrainingContract::settlement_default(),
     );
@@ -290,6 +304,10 @@ pub async fn build_models(db: &DatabaseConnection, store: &Arc<dyn ArtifactStore
         feature_schema_hash,
         factor_head: &profiles.scoring.definition.factor_head,
         cross_section: &profiles.scoring.definition.cross_section,
+        profile_ref,
+        category_scope,
+        prediction_horizon_secs: u64::try_from(prediction_horizon_secs)
+            .expect("positive F10 prediction horizon"),
     };
     let (champion, champion_id) = seal.seal("champion", 1).await;
     let champion = ModelVersionFixture::persist_published(db, champion)
@@ -310,6 +328,94 @@ pub async fn build_models(db: &DatabaseConnection, store: &Arc<dyn ArtifactStore
     ShadowModels {
         champion,
         candidate,
+    }
+}
+
+pub async fn build_models(db: &DatabaseConnection, store: &Arc<dyn ArtifactStore>) -> ShadowModels {
+    let policy_id = bootstrap_default_policy_bundle(
+        db,
+        "f10-shadow-stage",
+        "bootstrap exact F10 serving dependencies",
+    )
+    .await;
+    Box::pin(build_scoped_models(
+        db,
+        store,
+        policy_id,
+        model_spec_fixtures::pooled_profile_ref(),
+        None,
+        model_spec_fixtures::pooled_horizon_secs(),
+    ))
+    .await
+}
+
+pub async fn build_crypto_models(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+) -> ShadowModels {
+    let mut policy = DecisionPolicySnapshot::default();
+    policy
+        .profile_artifacts
+        .research_method
+        .model_promotion
+        .required_shadow_window_secs = 1;
+    let policy_id = bootstrap_policy_bundle(
+        &PgPolicyRepository::new(db.clone()),
+        &policy,
+        "p03-promotion-preflight",
+        "bootstrap exact category shadow window",
+    )
+    .await;
+    Box::pin(build_scoped_models(
+        db,
+        store,
+        policy_id,
+        model_spec_fixtures::crypto_profile_ref(),
+        Some(MarketCategory::Crypto),
+        model_spec_fixtures::crypto_horizon_secs(),
+    ))
+    .await
+}
+
+pub struct ActivatedServing {
+    pub runtime_registry: Arc<ModelServingRuntimeRegistry>,
+    pub generations: Arc<ModelServingGenerationStore>,
+}
+
+async fn build_serving(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+) -> ActivatedServing {
+    let evidence_scope = EvidenceScopeIdentity::from_config(
+        &ClickHouseConfig::default(),
+        &ArtifactStoreDeployConfig::default(),
+    )
+    .expect("F10 serving evidence scope");
+    let runtime_registry = ModelServingRegistryFixture {
+        db: db.clone(),
+        artifact_store: Arc::clone(store),
+        evidence_scope,
+        evidence_attestor: None,
+    }
+    .build();
+    let bundle = PgPolicyRepository::new(db.clone())
+        .load_current_bundle()
+        .await
+        .expect("load activated F10 bundle")
+        .expect("activated F10 bundle");
+    let generations = Arc::new(
+        ModelServingGenerationStore::bootstrap(
+            Arc::new(PgModelRegistryRepository::new(db.clone()))
+                as Arc<dyn ModelRegistryRepository>,
+            Arc::clone(&runtime_registry),
+            bundle,
+        )
+        .await
+        .expect("bootstrap published F10 serving generation"),
+    );
+    ActivatedServing {
+        runtime_registry,
+        generations,
     }
 }
 
@@ -340,27 +446,47 @@ pub async fn activate_generation(
         .expect("load activated F10 bundle")
         .expect("activated F10 bundle");
     assert_eq!(bundle.decision_policy_snapshot_id, snapshot_id);
-    let evidence_scope = EvidenceScopeIdentity::from_config(
-        &ClickHouseConfig::default(),
-        &ArtifactStoreDeployConfig::default(),
-    )
-    .expect("F10 serving evidence scope");
-    ModelServingRegistryFixture {
-        db: db.clone(),
-        artifact_store: Arc::clone(store),
-        evidence_scope,
-        evidence_attestor: None,
-    }
-    .build_generation()
-    .await
-    .expect("bootstrap published F10 serving generation")
+    build_serving(db, store).await.generations
 }
 
-pub async fn record_cycle(
+pub async fn activate_crypto_generation(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    models: &ShadowModels,
+) -> ActivatedServing {
+    let policy_repo = PgPolicyRepository::new(db.clone());
+    let champion_id = models.champion.model_version_id;
+    let candidate_id = models.candidate.model_version_id;
+    let snapshot_id = activate_policy_bundle(
+        &policy_repo,
+        ConfigResourceKind::ModelRouting,
+        "p03-promotion-preflight",
+        "publish exact Crypto champion and global shadow",
+        move |snapshot| {
+            snapshot
+                .model_routing
+                .model
+                .category_model_pointers
+                .insert(MarketCategory::Crypto, ModelVersionRef::new(champion_id));
+            snapshot.model_routing.model.shadow_model_version_id =
+                Some(ModelVersionRef::new(candidate_id));
+        },
+    )
+    .await;
+    let bundle = policy_repo
+        .load_current_bundle()
+        .await
+        .expect("load activated P03 bundle")
+        .expect("activated P03 bundle");
+    assert_eq!(bundle.decision_policy_snapshot_id, snapshot_id);
+    build_serving(db, store).await
+}
+
+async fn record_prepared_cycle(
     db: &DatabaseConnection,
     models: &ShadowModels,
+    schema: FeedbackSchemaFixture,
 ) -> (FeedbackSchemaFixture, FeedbackCycleClaim) {
-    let schema = Box::pin(prepare_fixture(db)).await;
     assert_eq!(schema.profile_ref, models.champion.profile_ref);
     let profile = schema
         .profile_ref
@@ -417,6 +543,27 @@ pub async fn record_cycle(
         .expect("queued F10 cycle");
     assert_eq!(claim.cycle.feedback_cycle_id, cycle_id);
     (schema, claim)
+}
+
+pub async fn record_cycle(
+    db: &DatabaseConnection,
+    models: &ShadowModels,
+) -> (FeedbackSchemaFixture, FeedbackCycleClaim) {
+    let schema = Box::pin(prepare_fixture(db)).await;
+    record_prepared_cycle(db, models, schema).await
+}
+
+pub async fn record_crypto_cycle(
+    db: &DatabaseConnection,
+    models: &ShadowModels,
+) -> (FeedbackSchemaFixture, FeedbackCycleClaim) {
+    let schema = Box::pin(prepare_profile_fixture(
+        db,
+        model_spec_fixtures::crypto_profile_ref(),
+        model_spec_fixtures::crypto_horizon_secs(),
+    ))
+    .await;
+    record_prepared_cycle(db, models, schema).await
 }
 
 pub async fn comparison_params(
@@ -692,37 +839,86 @@ pub async fn insert_observation(
         .expect("published F10 shadow identity");
     let decision_at = cycles.database_time().await.expect("F10 decision clock");
     PgShadowComparisonRepository::new(db.clone())
-        .create(NewShadowComparison {
-            shadow_comparison_id: ShadowComparisonId::from_v7(),
-            active_model_version_id: identity.active_model_version_id,
-            shadow_model_version_id: identity.shadow_model_version_id,
-            active_serving_contract_hash: identity.active_serving_contract_hash,
-            shadow_serving_contract_hash: identity.shadow_serving_contract_hash,
-            research_profile_artifact_id: identity.research_profile_artifact_id,
-            category_scope: identity.category_scope,
-            decision_policy_snapshot_id: identity.decision_policy_snapshot_id,
-            decision_policy_snapshot_hash: identity.decision_policy_snapshot_hash,
-            policy_bundle_generation: identity.policy_bundle_generation,
-            weight_source: ModelWeightSource::Artifact,
+        .create(shadow_observation(
+            &identity,
             decision_at,
-            topn_overlap: Probability::new(dec!(0.90)),
-            rank_delta_json: ShadowRankDelta {
-                mean_abs_rank_delta: dec!(0.1),
-                max_rank_delta: 1,
-                spearman: dec!(0.95),
-                common_markets: 10,
-            },
-            score_delta_json: ShadowScoreDelta {
-                mean_abs_score_delta: dec!(0.01),
-                max_score_delta: dec!(0.02),
-                side_disagreement_rate: Decimal::ZERO,
-            },
-            matured_outcome_json: None,
-            hard_divergence: false,
-            comparison_hash: content_hash('6'),
-        })
+            content_hash('6'),
+        ))
         .await
         .expect("persist exact production shadow observation");
+}
+
+fn shadow_observation(
+    identity: &PublishedShadowRouteIdentity,
+    decision_at: DateTime<Utc>,
+    comparison_hash: ContentHash,
+) -> NewShadowComparison {
+    NewShadowComparison {
+        shadow_comparison_id: ShadowComparisonId::from_v7(),
+        active_model_version_id: identity.active_model_version_id,
+        shadow_model_version_id: identity.shadow_model_version_id,
+        active_serving_contract_hash: identity.active_serving_contract_hash,
+        shadow_serving_contract_hash: identity.shadow_serving_contract_hash,
+        research_profile_artifact_id: identity.research_profile_artifact_id.clone(),
+        category_scope: identity.category_scope,
+        decision_policy_snapshot_id: identity.decision_policy_snapshot_id,
+        decision_policy_snapshot_hash: identity.decision_policy_snapshot_hash,
+        policy_bundle_generation: identity.policy_bundle_generation,
+        weight_source: ModelWeightSource::Artifact,
+        decision_at,
+        topn_overlap: Probability::new(dec!(0.90)),
+        rank_delta_json: ShadowRankDelta {
+            mean_abs_rank_delta: dec!(0.1),
+            max_rank_delta: 1,
+            spearman: dec!(0.95),
+            common_markets: 10,
+        },
+        score_delta_json: ShadowScoreDelta {
+            mean_abs_score_delta: dec!(0.01),
+            max_score_delta: dec!(0.02),
+            side_disagreement_rate: Decimal::ZERO,
+        },
+        matured_outcome_json: None,
+        hard_divergence: false,
+        comparison_hash,
+    }
+}
+
+pub async fn insert_stable_observations(
+    db: &DatabaseConnection,
+    generations: &Arc<ModelServingGenerationStore>,
+    window_start: DateTime<Utc>,
+) {
+    let identity = generations
+        .current_route(BuyModelRoute::Crypto)
+        .expect("current Crypto route")
+        .published_shadow_identity()
+        .expect("published P03 shadow identity");
+    let profile = identity
+        .research_profile_artifact_id
+        .profile_ref()
+        .resolve_builtin_research_profile()
+        .expect("resolve P03 shadow profile");
+    assert_eq!(
+        profile.spec.feedback_policy.shadow_minimum_observations,
+        u64::try_from(SHADOW_OBSERVATION_COUNT).expect("shadow observation count")
+    );
+    let rows = (0..SHADOW_OBSERVATION_COUNT).map(|index| {
+        let decision_at =
+            window_start + Duration::milliseconds(i64::try_from(index).expect("shadow index") * 2);
+        let comparison_hash = ResearchHasher::canonical(&(
+            "p03-stable-published-shadow-v1",
+            identity.policy_bundle_generation,
+            index,
+        ))
+        .expect("P03 stable comparison hash");
+        shadow_observation(&identity, decision_at, comparison_hash).into_active_model()
+    });
+    tokio::time::sleep(StdDuration::from_millis(2_100)).await;
+    ShadowComparisonEntity::insert_many(rows)
+        .exec(db)
+        .await
+        .expect("persist complete P03 production shadow window");
 }
 
 pub async fn terminal_restart_tamper() {

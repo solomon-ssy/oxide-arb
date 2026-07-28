@@ -17,7 +17,9 @@ use quant_pivot_error::{QuantError, QuantResult, control::ControlError, research
 use quant_pivot_models::{
     domain::{governance::DecisionPolicySnapshotInfo, quant::ModelVersionInfo},
     enums::{common::MarketCategory, model::ModelFamily},
-    runtime_config::{ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot},
+    runtime_config::{
+        ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, PolicyBundleIdentity,
+    },
     types::{
         ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration, Probability,
         ResearchProfileArtifactId,
@@ -29,7 +31,6 @@ use rust_decimal::Decimal;
 
 use crate::{
     governance::{active_load_ok, shadow_load_ok},
-    runtime_config::store::PublishedPolicyBundle,
     service::model_serving_registry::{LoadedModelServingRuntime, ModelServingRuntimeRegistry},
 };
 
@@ -483,7 +484,7 @@ impl PreparedModelServingGeneration {
 /// generation.
 pub struct ModelServingGenerationStore {
     current: ArcSwap<ModelServingGeneration>,
-    publication: Mutex<PublishedPolicyBundle>,
+    publication: Mutex<PolicyBundleIdentity>,
     pointer_resolver: Arc<dyn ModelServingPointerResolver>,
 }
 
@@ -514,7 +515,7 @@ impl ModelServingGenerationStore {
         bundle: ActivePolicyBundle,
         pointer_resolver: Arc<dyn ModelServingPointerResolver>,
     ) -> QuantResult<Self> {
-        let published = PublishedPolicyBundle::from(&bundle);
+        let published = PolicyBundleIdentity::from(&bundle);
         let prepared = Self::prepare_with_resolver(pointer_resolver.as_ref(), &bundle.snapshot)
             .await
             .map_err(QuantError::from)?;
@@ -724,7 +725,7 @@ impl ModelServingGenerationStore {
     pub(crate) fn publish_committed(
         &self,
         prepared: PreparedModelServingGeneration,
-        bundle: &PublishedPolicyBundle,
+        bundle: &PolicyBundleIdentity,
     ) -> Result<(), ControlError> {
         let mut current = self.publication.lock();
         if bundle.generation < current.generation {
@@ -747,7 +748,7 @@ impl ModelServingGenerationStore {
             ModelServingGenerationAuthority::Published(bundle.generation),
         )?;
         self.current.store(Arc::new(generation));
-        *current = bundle.clone();
+        *current = *bundle;
         drop(current);
         Ok(())
     }
@@ -837,9 +838,15 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use parking_lot::Mutex;
-    use quant_pivot_error::{QuantResult, control::ControlError};
+    use quant_pivot_error::{
+        QuantResult,
+        control::{ControlError, RuntimeApplyStage},
+    };
     use quant_pivot_models::{
-        domain::quant::ModelVersionInfo,
+        domain::{
+            ports::{CommittedPolicyApplyPort, PolicySnapshotPort, PreparedPolicySnapshot},
+            quant::ModelVersionInfo,
+        },
         enums::{
             common::MarketCategory,
             model::ModelFamily,
@@ -847,7 +854,7 @@ mod tests {
         },
         runtime_config::{
             ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, FactorCrossSectionConfig,
-            ModelVersionRef,
+            ModelVersionRef, PolicyApplyDegradedCause, PolicyApplyReadiness, PolicyBundleIdentity,
         },
         types::{
             ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration,
@@ -865,7 +872,7 @@ mod tests {
         ServingModel, ServingPointer, ServingRole,
     };
     use crate::{
-        runtime_config::store::PublishedPolicyBundle,
+        runtime_config::{CommittedPolicyApplicator, DecisionPolicyStore},
         service::{
             model_serving_registry::LoadedModelServingRuntime,
             model_serving_test_support::{model_artifact, model_version},
@@ -1115,6 +1122,43 @@ mod tests {
         )
     }
 
+    struct ServingPolicyPort {
+        policies: Arc<DecisionPolicyStore>,
+        generations: Arc<ModelServingGenerationStore>,
+    }
+
+    #[async_trait]
+    impl PolicySnapshotPort for ServingPolicyPort {
+        fn current(&self) -> Arc<DecisionPolicySnapshot> {
+            self.policies.current()
+        }
+
+        async fn prepare(
+            &self,
+            config: DecisionPolicySnapshot,
+        ) -> Result<PreparedPolicySnapshot, ControlError> {
+            let prepared = self.generations.prepare(&config).await?;
+            let policies = Arc::clone(&self.policies);
+            let generations = Arc::clone(&self.generations);
+            Ok(PreparedPolicySnapshot::new_governed(
+                Arc::new(config),
+                move |bundle| {
+                    let bundle = bundle.ok_or_else(|| {
+                        ControlError::Precondition(
+                            "serving test publication requires committed identity".to_owned(),
+                        )
+                    })?;
+                    let identity = PolicyBundleIdentity::from(&bundle);
+                    policies
+                        .publish_committed(bundle, move |_config| {
+                            generations.publish_committed(prepared, &identity)
+                        })
+                        .map(|_outcome| ())
+                },
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn inventory_loads_concurrently() {
         let versions = VersionInventory::fixture();
@@ -1302,12 +1346,23 @@ mod tests {
             PolicyBundleGeneration::FIRST,
             policy(&old, old.shadow.model_version_id),
         );
-        let store = ModelServingGenerationStore::bootstrap_with_resolver(
-            old_bundle.clone(),
-            Arc::clone(&resolver) as Arc<dyn ModelServingPointerResolver>,
-        )
-        .await
-        .expect("old generation");
+        let store = Arc::new(
+            ModelServingGenerationStore::bootstrap_with_resolver(
+                old_bundle.clone(),
+                Arc::clone(&resolver) as Arc<dyn ModelServingPointerResolver>,
+            )
+            .await
+            .expect("old generation"),
+        );
+        let policies = Arc::new(DecisionPolicyStore::new_active(old_bundle.clone()));
+        let raw = Arc::new(ServingPolicyPort {
+            policies,
+            generations: Arc::clone(&store),
+        });
+        let applicator = CommittedPolicyApplicator::new(
+            raw as Arc<dyn PolicySnapshotPort>,
+            PolicyBundleIdentity::from(&old_bundle),
+        );
         let old_route = store
             .resolve_route(ModelServingGenerationRequest {
                 decision_policy_snapshot_id: old_bundle.decision_policy_snapshot_id,
@@ -1323,24 +1378,41 @@ mod tests {
             policy(&new, new.shadow.model_version_id),
         );
         resolver.fail(new.weather.model_version_id);
-        assert!(
-            store.prepare(&new_bundle.snapshot).await.is_err(),
-            "one failed route must reject the complete prepared generation"
-        );
+        let error = applicator
+            .apply_committed(new_bundle.clone())
+            .await
+            .expect_err("one failed route must reject the complete prepared generation");
+        assert!(matches!(
+            error,
+            ControlError::CommittedGenerationApply {
+                stage: RuntimeApplyStage::Prepare,
+                ..
+            }
+        ));
         assert_eq!(
             store.current().active_contract_hash(BuyModelRoute::Pooled),
             Some(old.pooled.serving_contract_hash),
             "failed preparation must retain every old route"
         );
+        assert_eq!(
+            applicator.readiness(),
+            PolicyApplyReadiness::Degraded {
+                desired: PolicyBundleIdentity::from(&new_bundle),
+                applied: PolicyBundleIdentity::from(&old_bundle),
+                cause: PolicyApplyDegradedCause::PrepareFailed,
+            }
+        );
 
         resolver.recover(&new.weather.model_version_id);
-        let prepared = store
-            .prepare(&new_bundle.snapshot)
-            .await
-            .expect("prepare complete successor");
-        store
-            .publish_committed(prepared, &PublishedPolicyBundle::from(&new_bundle))
-            .expect("publish successor");
+        assert_eq!(
+            applicator
+                .apply_committed(new_bundle.clone())
+                .await
+                .expect("publish complete successor"),
+            PolicyApplyReadiness::Ready {
+                applied: PolicyBundleIdentity::from(&new_bundle),
+            }
+        );
         let current = store.current();
         assert_eq!(
             current.active_contract_hash(BuyModelRoute::Pooled),

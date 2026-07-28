@@ -554,7 +554,11 @@ impl FeedbackCyclePairSeed {
     }
 }
 
-pub async fn prepare_fixture(db: &DatabaseConnection) -> FeedbackSchemaFixture {
+pub async fn prepare_profile_fixture(
+    db: &DatabaseConnection,
+    expected_profile_ref: ResearchProfileRef,
+    prediction_horizon_secs: i64,
+) -> FeedbackSchemaFixture {
     bootstrap_default_policy_bundle(db, "pg-feedback-schema", "feedback boot-schema contract")
         .await;
     let registry = PgModelRegistryRepository::new(db.clone());
@@ -564,7 +568,7 @@ pub async fn prepare_fixture(db: &DatabaseConnection) -> FeedbackSchemaFixture {
             model_spec_id,
             "pg-feedback-schema",
             ModelFamily::WeightedFactor,
-            model_spec_fixtures::pooled_horizon_secs(),
+            prediction_horizon_secs,
             ModelInputContract::single_required("book.mid"),
             ModelTrainingContract::settlement_default(),
         ))
@@ -587,6 +591,10 @@ pub async fn prepare_fixture(db: &DatabaseConnection) -> FeedbackSchemaFixture {
         )
         .await
         .expect("persist feedback-schema model version");
+    assert_eq!(
+        model_version.profile_ref, expected_profile_ref,
+        "feedback-schema model must bind the requested exact ResearchProfile"
+    );
     let training_dataset_id = model_version
         .training_dataset_id
         .expect("feedback-schema model has Training Dataset");
@@ -699,6 +707,15 @@ pub async fn prepare_fixture(db: &DatabaseConnection) -> FeedbackSchemaFixture {
         label_cutoff,
         observed_at,
     }
+}
+
+pub async fn prepare_fixture(db: &DatabaseConnection) -> FeedbackSchemaFixture {
+    Box::pin(prepare_profile_fixture(
+        db,
+        model_spec_fixtures::pooled_profile_ref(),
+        model_spec_fixtures::pooled_horizon_secs(),
+    ))
+    .await
 }
 
 pub async fn feedback_schema_rejects_drift() {

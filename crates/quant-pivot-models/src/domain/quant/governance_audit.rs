@@ -4,12 +4,14 @@ use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 
+use super::promotion_permit::ModelRoutePromotionRecord;
 use crate::{
     entities::quant_model_governance_audit,
     enums::quant::{ModelGovernanceAction, PublicationStatus},
     types::{
         AuditEventId, BacktestPathSetId, CalibrationArtifactId, ContentHash, FeatureParityStateId,
-        ModelGovernanceAuditId, ModelVersionId, Probability, RoleCode, TrainingDatasetId, UserId,
+        ModelGovernanceAuditId, ModelVersionId, Probability, PromotionPermitId, RoleCode,
+        TrainingDatasetId, UserId,
     },
 };
 
@@ -37,6 +39,9 @@ pub enum ModelGovernanceAuditDetail {
         shadow_mean_overlap: Probability,
         feature_parity_state_id: FeatureParityStateId,
         required_shadow_window_secs: i64,
+    },
+    PromoteRoute {
+        record: Box<ModelRoutePromotionRecord>,
     },
     BindCalibration {
         source_version_id: ModelVersionId,
@@ -121,6 +126,29 @@ pub struct NewModelGovernanceAudit {
     pub after_status: PublicationStatus,
     pub detail: ModelGovernanceAuditDetail,
     pub audit_event_id: AuditEventId,
+}
+
+/// Insert payload for the only model-route promotion audit subtype.
+///
+/// The normalized permit/hash columns are required by the schema only for
+/// `PromoteRoute`; other governance DTOs omit them and therefore insert NULL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::quant_model_governance_audit::ActiveModel")]
+pub struct NewRoutePromotionAudit {
+    pub audit_id: ModelGovernanceAuditId,
+    pub model_version_id: Option<ModelVersionId>,
+    pub training_dataset_id: Option<TrainingDatasetId>,
+    pub action: ModelGovernanceAction,
+    pub actor_user_id: Option<UserId>,
+    pub actor_username: String,
+    pub actor_role: Option<RoleCode>,
+    pub reason: String,
+    pub before_status: PublicationStatus,
+    pub after_status: PublicationStatus,
+    pub detail: ModelGovernanceAuditDetail,
+    pub audit_event_id: AuditEventId,
+    pub promotion_permit_id: PromotionPermitId,
+    pub promotion_transaction_hash: ContentHash,
 }
 
 #[cfg(test)]

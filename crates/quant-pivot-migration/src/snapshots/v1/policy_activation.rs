@@ -38,6 +38,12 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub activation_request_hash: String,
     pub audit_event_id: Uuid,
+    #[sea_orm(unique)]
+    pub promotion_permit_id: Option<Uuid>,
+    #[sea_orm(column_type = "Text", unique)]
+    pub promotion_transaction_hash: Option<String>,
+    #[sea_orm(unique)]
+    pub model_governance_audit_id: Option<Uuid>,
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeWithTimeZone,
     #[sea_orm(

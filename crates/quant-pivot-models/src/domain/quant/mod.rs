@@ -36,6 +36,7 @@ mod model;
 mod outcome_reconciliation;
 mod portfolio;
 mod position;
+mod promotion_permit;
 mod recommendation;
 mod recommendation_execution_outcome;
 #[allow(clippy::needless_update)] // Insert DTO omits DB-managed created_at.
@@ -131,6 +132,7 @@ pub use feedback_cycle::{
 };
 pub use governance_audit::{
     ModelGovernanceAuditDetail, ModelGovernanceAuditInfo, NewModelGovernanceAudit,
+    NewRoutePromotionAudit,
 };
 pub use linkage::{
     CryptoSubject, GroundingField, GroundingKind, GroundingProof, GroundingSpan, LinkageOutcome,
@@ -140,8 +142,8 @@ pub use linkage::{
     ResolvedSourceBinding, WeatherDecisionGroupKey, WeatherSubject,
 };
 pub use model::{
-    ModelRunInfo, ModelSpecInfo, ModelVersionInfo, NewModelRun, NewModelSpec, NewModelVersion,
-    PublishedModelCatalogInfo, QuantModelRunModel,
+    ModelRunInfo, ModelSpecInfo, ModelVersionInfo, ModelVersionPersistenceError, NewModelRun,
+    NewModelSpec, NewModelVersion, PublishedModelCatalogInfo, QuantModelRunModel,
 };
 pub use outcome_reconciliation::{
     ExecutionOutcomeDeferredReason, ExecutionOutcomeDerivation,
@@ -151,6 +153,15 @@ pub use outcome_reconciliation::{
 };
 pub use portfolio::{NewPortfolioPlan, PortfolioPlanInfo};
 pub use position::{NewPosition, PositionExit, PositionFill, PositionInfo};
+pub use promotion_permit::{
+    CommitModelRoutePromotion, IssuePromotionPermit, ModelRoutePromotionPolicy,
+    ModelRoutePromotionRecord, ModelRoutePromotionRecordInput, ModelRoutePromotionRoute,
+    NewPromotionPermit, PromoteModelRoute, PromotionPermitActor, PromotionPermitInfo,
+    PromotionPermitIssueInput, PromotionPermitRevocation, PromotionPermitRevocationCheck,
+    PromotionPermitScope, PromotionPermitScopeInput, PromotionPermitStatus,
+    PromotionPolicyProjection, PromotionPreflight, PromotionPreflightInput,
+    PromotionServingConstraints, PromotionServingConstraintsInput, RevokePromotionPermit,
+};
 pub use recommendation::{
     NewRecommendation, NewRecommendationReport, RecommendationInfo, RecommendationReportInfo,
 };

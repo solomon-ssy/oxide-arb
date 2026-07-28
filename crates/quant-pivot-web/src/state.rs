@@ -13,13 +13,14 @@ use quant_pivot_models::{
     domain::{
         ports::{
             AccountReadPort, BacktestPort, CalibrationArtifactFitPort, CatalogStatusPort,
-            CpcvBacktestPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
-            FeatureIntegrityPort, KillSwitchPort, MarketDataPort, MarketLinkageGovernancePort,
-            MetricsScrapePort, ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort,
-            ModelTrainingPort, OrderIntentPort, PolicySnapshotPort, QuantReportPort, ReadinessPort,
-            ReconciliationPort, ResearchCatalogPort, ResearchJobPort, ResearchReadinessPort,
-            RuntimeControlPort, StructuralMonitorPort, SystemCapabilityPort, TradePolicyPort,
-            TrainingDatasetPort, settlement_control::SettlementControlPort,
+            CommittedPolicyApplyPort, CpcvBacktestPort, DataQualityPort, ExecutionReadPort,
+            ExecutionRecoveryPort, FeatureIntegrityPort, KillSwitchPort, MarketDataPort,
+            MarketLinkageGovernancePort, MetricsScrapePort, ModelCalibrationFitPort,
+            ModelGovernancePort, ModelSpecPort, ModelTrainingPort, OrderIntentPort,
+            PolicySnapshotPort, QuantReportPort, ReadinessPort, ReconciliationPort,
+            ResearchCatalogPort, ResearchJobPort, ResearchReadinessPort, RuntimeControlPort,
+            StructuralMonitorPort, SystemCapabilityPort, TradePolicyPort, TrainingDatasetPort,
+            settlement_control::SettlementControlPort,
         },
         runtime::{
             CoreEvent, CoreEventPublisher, MaterializationRunEvent, MaterializationRunKind,
@@ -39,6 +40,7 @@ use quant_pivot_repository::traits::{
 pub struct AppState {
     pub deploy: Arc<DeployConfig>,
     pub runtime_config_apply: Arc<dyn PolicySnapshotPort>,
+    pub committed_policy_apply: Arc<dyn CommittedPolicyApplyPort>,
     pub jwt: Arc<JwtService>,
     pub jwt_blacklist: Arc<RedisTokenBlacklist>,
     pub users: Arc<dyn UserRepository>,

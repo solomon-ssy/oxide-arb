@@ -14,6 +14,10 @@ pub struct Model {
     pub decision_policy_snapshot_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub snapshot_hash: String,
+    pub promotion_permit_id: Option<Uuid>,
+    #[sea_orm(column_type = "Text")]
+    pub promotion_transaction_hash: Option<String>,
+    pub model_governance_audit_id: Option<Uuid>,
     #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeWithTimeZone,
     #[sea_orm(

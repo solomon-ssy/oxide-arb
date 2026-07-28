@@ -56,7 +56,7 @@ use config::ConfigError;
 use config_validation::{ConfigValidationError, ConfigValidationReport};
 use control::ControlError;
 use execution::ExecutionError;
-use feedback::FeedbackError;
+use feedback::{FeedbackError, PromotionCommitError, PromotionPermitCommandError};
 use governance::GovernanceError;
 use hashing::CanonicalDigestError;
 use infra::InfraError;
@@ -216,6 +216,25 @@ impl From<TransactionError<Self>> for QuantError {
         match e {
             TransactionError::Connection(db_err) => Self::Storage(StorageError::Database(db_err)),
             TransactionError::Transaction(oxide_err) => oxide_err,
+        }
+    }
+}
+
+impl From<PromotionPermitCommandError> for QuantError {
+    fn from(error: PromotionPermitCommandError) -> Self {
+        match error {
+            PromotionPermitCommandError::Contract(error) => Self::Feedback(error),
+            PromotionPermitCommandError::Authorization(error) => Self::Rbac(error),
+            PromotionPermitCommandError::Storage(error) => Self::Storage(error),
+        }
+    }
+}
+
+impl From<PromotionCommitError> for QuantError {
+    fn from(error: PromotionCommitError) -> Self {
+        match error {
+            PromotionCommitError::Contract(error) => Self::Feedback(error),
+            PromotionCommitError::Storage(error) => Self::Storage(error),
         }
     }
 }

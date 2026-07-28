@@ -720,9 +720,19 @@ impl FeedbackEvaluationUseId {
         Self::new(uuid_v5_for_content(&NAMESPACE, semantic_use_hash))
     }
 }
-/// One governed cross-profile allocation proposal.
+
+/// One governed, content-addressed model-route promotion permit.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ProfileAllocationId(Uuid);
+pub struct PromotionPermitId(Uuid);
+
+impl PromotionPermitId {
+    /// Project the complete immutable issuance hash into its stable UUID domain.
+    #[must_use]
+    pub fn from_issuance_hash(issuance_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f20f);
+        Self::new(uuid_v5_for_content(&NAMESPACE, issuance_hash))
+    }
+}
 
 /// Basis-cross-check exceedance alert row identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -1383,19 +1383,17 @@ impl ModelVersionFixture {
         })
     }
 
-    /// Persist and publish a prepared Candidate through the exact frozen
-    /// model/dataset parity proof and atomic global-latch transaction.
-    pub fn persist_published<'a>(
+    /// Persist an exact passed full-parity WORM proof without changing the
+    /// candidate's publication lifecycle.
+    pub fn persist_parity_proof<'a>(
         db: &'a DatabaseConnection,
-        version: NewModelVersion,
-    ) -> Pin<Box<dyn Future<Output = QuantResult<ModelVersionInfo>> + Send + 'a>> {
+        candidate: &'a ModelVersionInfo,
+    ) -> Pin<Box<dyn Future<Output = QuantResult<FeatureParityRunId>> + Send + 'a>> {
         Box::pin(async move {
-            let registry = PgModelRegistryRepository::new(db.clone());
-            let candidate = registry.create_model_version(version).await?;
             let contract = candidate.verified_serving_contract().map_err(|error| {
                 ResearchError::InvalidModelArtifact {
                     detail: format!(
-                        "published model fixture has an invalid persisted serving contract: {error}"
+                        "model parity fixture has an invalid persisted serving contract: {error}"
                     ),
                 }
             })?;
@@ -1403,7 +1401,7 @@ impl ModelVersionFixture {
                 StorageError::invariant_violation(
                     Some("quant_model_version"),
                     format!(
-                        "published model fixture {} has no training dataset",
+                        "model parity fixture {} has no training dataset",
                         candidate.model_version_id
                     ),
                 )
@@ -1418,7 +1416,7 @@ impl ModelVersionFixture {
                 StorageError::state_conflict(
                     "quant_training_dataset",
                     Some(&training_dataset_id),
-                    "published model fixture dataset has no complete materialization",
+                    "model parity fixture dataset has no complete materialization",
                 )
             })?;
             let run_id = FeatureParityRunId::from_v7();
@@ -1491,6 +1489,21 @@ impl ModelVersionFixture {
                     },
                 )
                 .await?;
+            Ok(run_id)
+        })
+    }
+
+    /// Persist and publish a prepared Candidate through the exact frozen
+    /// model/dataset parity proof and atomic global-latch transaction.
+    pub fn persist_published<'a>(
+        db: &'a DatabaseConnection,
+        version: NewModelVersion,
+    ) -> Pin<Box<dyn Future<Output = QuantResult<ModelVersionInfo>> + Send + 'a>> {
+        Box::pin(async move {
+            let registry = PgModelRegistryRepository::new(db.clone());
+            let candidate = registry.create_model_version(version).await?;
+            let run_id = Self::persist_parity_proof(db, &candidate).await?;
+            let parity = PgFeatureParityRepository::new(db.clone());
             let feature_parity_permit = match parity.current_state().await? {
                 Some(state) => PublishFeatureParityPermit::ExistingGeneration(state.state_id),
                 None => PublishFeatureParityPermit::InitializeFromProof {

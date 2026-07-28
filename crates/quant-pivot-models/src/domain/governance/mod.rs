@@ -20,7 +20,8 @@ pub use runtime_control::{
 pub use system::{
     ActivePolicyResourceInfo, ConfigActivityInfo, ConfigResourceInventoryInfo,
     ConfigResourceInventoryRow, DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo,
-    HealthReport, NewDecisionPolicySnapshot, NewPolicyActivation, NewPolicyApproval,
+    HealthReport, NewDecisionPolicySnapshot, NewModelPromotionActivation, NewPolicyActivation,
+    NewPolicyActivationAudit, NewPolicyActivationEventOutbox, NewPolicyApproval,
     NewPolicyProfileArtifact, NewPolicyRevision, PolicyActivationCommit, PolicyActivationInfo,
     PolicyActivationOutcome, PolicyApprovalInfo, PolicyProfileArtifactInfo, PolicyRevisionInfo,
     RecordPolicyApproval, ShutdownProgress, SubsystemCheckStatus, SubsystemHealth, SystemStatus,

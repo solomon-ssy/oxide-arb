@@ -5,27 +5,9 @@ use std::sync::Arc;
 use arc_swap::{ArcSwap, Guard};
 use parking_lot::Mutex;
 use quant_pivot_error::control::ControlError;
-use quant_pivot_models::{
-    runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
-    types::{ContentHash, DecisionPolicySnapshotId, PolicyBundleGeneration},
+use quant_pivot_models::runtime_config::{
+    ActivePolicyBundle, DecisionPolicySnapshot, PolicyBundleIdentity,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublishedPolicyBundle {
-    pub generation: PolicyBundleGeneration,
-    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    pub snapshot_hash: ContentHash,
-}
-
-impl From<&ActivePolicyBundle> for PublishedPolicyBundle {
-    fn from(bundle: &ActivePolicyBundle) -> Self {
-        Self {
-            generation: bundle.generation,
-            decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
-            snapshot_hash: bundle.snapshot_hash,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyBundlePublication {
@@ -43,7 +25,7 @@ pub enum PolicyBundlePublication {
 /// durable, audited activation.
 pub struct DecisionPolicyStore {
     inner: ArcSwap<DecisionPolicySnapshot>,
-    publication: Mutex<Option<PublishedPolicyBundle>>,
+    publication: Mutex<Option<PolicyBundleIdentity>>,
 }
 
 impl DecisionPolicyStore {
@@ -57,7 +39,7 @@ impl DecisionPolicyStore {
 
     #[must_use]
     pub fn new_active(bundle: ActivePolicyBundle) -> Self {
-        let metadata = PublishedPolicyBundle::from(&bundle);
+        let metadata = PolicyBundleIdentity::from(&bundle);
         Self {
             inner: ArcSwap::from_pointee(bundle.snapshot),
             publication: Mutex::new(Some(metadata)),
@@ -79,8 +61,8 @@ impl DecisionPolicyStore {
     }
 
     #[must_use]
-    pub(crate) fn current_bundle(&self) -> Option<PublishedPolicyBundle> {
-        self.publication.lock().clone()
+    pub(crate) fn current_bundle(&self) -> Option<PolicyBundleIdentity> {
+        *self.publication.lock()
     }
 
     /// Reconstruct the exact current durable bundle while holding the
@@ -125,7 +107,7 @@ impl DecisionPolicyStore {
                 ));
             }
         }
-        let metadata = PublishedPolicyBundle::from(&bundle);
+        let metadata = PolicyBundleIdentity::from(&bundle);
         let snapshot = Arc::new(bundle.snapshot);
         before_store(&snapshot)?;
         self.inner.store(Arc::clone(&snapshot));
@@ -140,11 +122,11 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use quant_pivot_models::{
-        runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
+        runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot, PolicyBundleIdentity},
         types::{DecisionPolicySnapshotId, PolicyBundleGeneration},
     };
 
-    use super::{DecisionPolicyStore, PolicyBundlePublication, PublishedPolicyBundle};
+    use super::{DecisionPolicyStore, PolicyBundlePublication};
 
     fn bundle(generation: i64, book_age_increment: u64) -> ActivePolicyBundle {
         let mut snapshot = DecisionPolicySnapshot::default();
@@ -158,14 +140,6 @@ mod tests {
             snapshot_hash,
             snapshot,
         )
-    }
-
-    fn metadata(bundle: &ActivePolicyBundle) -> PublishedPolicyBundle {
-        PublishedPolicyBundle {
-            generation: bundle.generation,
-            decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
-            snapshot_hash: bundle.snapshot_hash,
-        }
     }
 
     #[test]
@@ -184,7 +158,10 @@ mod tests {
                 .expect("publish committed generation"),
             PolicyBundlePublication::Published
         );
-        assert_eq!(store.current_bundle(), Some(metadata(&committed)));
+        assert_eq!(
+            store.current_bundle(),
+            Some(PolicyBundleIdentity::from(&committed))
+        );
         assert_eq!(
             store.current().recommendation.data_quality.max_book_age_ms,
             committed
@@ -222,7 +199,10 @@ mod tests {
             })
             .expect_err("same generation with different identity must fail closed");
         assert!(error.to_string().contains("same policy bundle generation"));
-        assert_eq!(store.current_bundle(), Some(metadata(&committed)));
+        assert_eq!(
+            store.current_bundle(),
+            Some(PolicyBundleIdentity::from(&committed))
+        );
         assert_eq!(propagated.load(Ordering::SeqCst), 1);
     }
 
@@ -234,7 +214,10 @@ mod tests {
         // Instance A committed to the database and exited before publishing.
         // Restart bootstraps directly from the DB-authoritative committed bundle.
         let restarted = DecisionPolicyStore::new_active(committed.clone());
-        assert_eq!(restarted.current_bundle(), Some(metadata(&committed)));
+        assert_eq!(
+            restarted.current_bundle(),
+            Some(PolicyBundleIdentity::from(&committed))
+        );
 
         // Two other processes still hold the previous generation. A later
         // reconciler read of the same durable bundle converges both stores.
@@ -252,8 +235,14 @@ mod tests {
                 .expect("reconcile second delayed instance"),
             PolicyBundlePublication::Published
         );
-        assert_eq!(delayed_one.current_bundle(), Some(metadata(&committed)));
-        assert_eq!(delayed_two.current_bundle(), Some(metadata(&committed)));
+        assert_eq!(
+            delayed_one.current_bundle(),
+            Some(PolicyBundleIdentity::from(&committed))
+        );
+        assert_eq!(
+            delayed_two.current_bundle(),
+            Some(PolicyBundleIdentity::from(&committed))
+        );
         assert_eq!(delayed_one.current(), delayed_two.current());
     }
 }

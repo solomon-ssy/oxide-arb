@@ -1207,6 +1207,64 @@ const INDEXES: &[IndexSpec] = &[
         predicate: Some("(published_at IS NULL)"),
     },
     IndexSpec {
+        name: "uq_quant_feedback_permit_idempotency",
+        table: "quant_feedback_promotion_permit",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "idempotency_key",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_feedback_permit_scope",
+        table: "quant_feedback_promotion_permit",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "scope_hash",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_feedback_permit_issuance",
+        table: "quant_feedback_promotion_permit",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "issuance_hash",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_feedback_permit_active_scope",
+        table: "quant_feedback_promotion_permit",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "research_profile_artifact_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "category",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "expires_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "promotion_permit_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some("(revoked_at IS NULL)"),
+    },
+    IndexSpec {
         name: "uq_quant_feedback_stage_sequence",
         table: "quant_feedback_stage_event",
         method: IndexMethod::BTree,
@@ -3316,5 +3374,16 @@ mod tests {
         assert_eq!(semantics.columns[1].name, "evaluation_artifact_bytes_hash");
         assert_eq!(semantics.columns[2].name, "cohort_manifest_hash");
         assert!(index("uq_quant_feedback_evaluation_use_hash").unique);
+    }
+
+    #[test]
+    fn promotion_permit_indexes_semantic() {
+        assert!(index("uq_quant_feedback_permit_idempotency").unique);
+        assert!(index("uq_quant_feedback_permit_scope").unique);
+        assert!(index("uq_quant_feedback_permit_issuance").unique);
+        let active = index("idx_quant_feedback_permit_active_scope");
+        assert!(!active.unique);
+        assert_eq!(active.predicate, Some("(revoked_at IS NULL)"));
+        assert_eq!(active.columns.len(), 4);
     }
 }

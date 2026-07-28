@@ -261,6 +261,7 @@ pg_enum! {
     pub enum PolicyActivationKind {
         Initial => "initial",
         Promote => "promote",
+        ModelPromotion => "model_promotion",
         Rollback => "rollback",
     }
 }

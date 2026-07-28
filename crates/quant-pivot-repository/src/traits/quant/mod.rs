@@ -27,9 +27,11 @@ mod governance_audit;
 mod market_linkage;
 mod model;
 mod model_registry;
+mod model_route_promotion;
 mod order_intent;
 mod portfolio_plan;
 mod position;
+mod promotion_permit;
 mod recommendation;
 mod recommendation_execution_outcome;
 mod recommendation_report;
@@ -84,9 +86,15 @@ pub use model_registry::{
     BindPublishPathSetCommit, ModelRegistryRepository, PublishFeatureParityPermit,
     PublishModelVersionCommit, PublishModelVersionResult,
 };
+pub use model_route_promotion::{
+    ModelRoutePromotionCommit, ModelRoutePromotionOutcome, ModelRoutePromotionRepository,
+};
 pub use order_intent::OrderIntentRepository;
 pub use portfolio_plan::PortfolioPlanRepository;
 pub use position::PositionRepository;
+pub use promotion_permit::{
+    PromotionPermitIssueOutcome, PromotionPermitRepository, PromotionPermitRevokeOutcome,
+};
 pub use recommendation::RecommendationRepository;
 pub use recommendation_execution_outcome::RecommendationExecutionOutcomeRepository;
 pub use recommendation_report::RecommendationReportRepository;

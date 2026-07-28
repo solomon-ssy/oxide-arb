@@ -1436,7 +1436,7 @@ impl PgFeatureParityRepository {
 }
 
 impl PgFeatureParityRepository {
-    pub(super) async fn verify_clear_latch_generation(
+    pub(crate) async fn verify_clear_latch_generation(
         txn: &DatabaseTransaction,
         expected_state_id: &FeatureParityStateId,
     ) -> Result<(), StorageError> {

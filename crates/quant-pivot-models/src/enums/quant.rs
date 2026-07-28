@@ -552,6 +552,9 @@ pg_enum! {
     pub enum ModelGovernanceAction {
         /// A candidate / shadow version was published (gated).
         Publish => "publish",
+        /// A shadow candidate and one exact category route were promoted in
+        /// the same policy-generation transaction.
+        PromoteRoute => "promote_route",
         /// A published version was retired.
         Retire => "retire",
         /// A candidate model version bound a calibrated return model.

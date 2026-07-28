@@ -6,9 +6,10 @@ use quant_pivot_models::{
     domain::governance::{
         ActivePolicyResourceInfo, ConfigActivityInfo, ConfigResourceInventoryInfo,
         DecisionPolicySnapshotInfo, DecisionPolicySnapshotOptionInfo, NewDecisionPolicySnapshot,
-        NewPolicyActivation, NewPolicyApproval, NewPolicyProfileArtifact, NewPolicyRevision,
-        PolicyActivationCommit, PolicyActivationInfo, PolicyActivationOutcome, PolicyApprovalInfo,
-        PolicyRevisionInfo, RecordPolicyApproval,
+        NewPolicyActivation, NewPolicyActivationAudit, NewPolicyActivationEventOutbox,
+        NewPolicyApproval, NewPolicyProfileArtifact, NewPolicyRevision, PolicyActivationCommit,
+        PolicyActivationInfo, PolicyActivationOutcome, PolicyApprovalInfo, PolicyRevisionInfo,
+        RecordPolicyApproval,
     },
     entities::{
         decision_policy_snapshot::{
@@ -17,12 +18,8 @@ use quant_pivot_models::{
         policy_activation::{
             Column as ActivationColumn, Entity as ActivationEntity, Model as ActivationModel,
         },
-        policy_activation_audit::{
-            ActiveModel as ActivationAuditActiveModel, Entity as ActivationAuditEntity,
-        },
-        policy_activation_event_outbox::{
-            ActiveModel as ActivationOutboxActiveModel, Entity as ActivationOutboxEntity,
-        },
+        policy_activation_audit::Entity as ActivationAuditEntity,
+        policy_activation_event_outbox::Entity as ActivationOutboxEntity,
         policy_activation_guard::{
             Column as ActivationGuardColumn, Entity as ActivationGuardEntity,
             Model as ActivationGuardModel,
@@ -112,38 +109,50 @@ impl PgPolicyRepository {
 }
 
 impl PgPolicyRepository {
-    async fn insert_activation_ledger(
+    pub(crate) async fn insert_activation_ledger(
         db: &impl ConnectionTrait,
         inserted: &ActivationModel,
         snapshot: &NewDecisionPolicySnapshot,
     ) -> Result<(), StorageError> {
-        ActivationAuditEntity::insert(ActivationAuditActiveModel {
-            audit_event_id: Set(inserted.audit_event_id),
-            policy_activation_id: Set(inserted.policy_activation_id),
-            bundle_generation: Set(inserted.bundle_generation),
-            resource_kind: Set(inserted.resource_kind),
-            policy_revision_id: Set(inserted.policy_revision_id),
-            decision_policy_snapshot_id: Set(inserted.decision_policy_snapshot_id),
-            snapshot_hash: Set(snapshot.snapshot_hash),
-            activation_request_hash: Set(inserted.activation_request_hash),
-            actor_kind: Set(inserted.activated_by_kind),
-            actor_user_id: Set(inserted.activated_by_user_id),
-            actor_label: Set(inserted.activated_by_label.clone()),
-            reason: Set(inserted.reason.clone()),
-            occurred_at: Set(inserted.activated_at),
-            created_at: Set(inserted.created_at),
-        })
+        ActivationAuditEntity::insert(
+            NewPolicyActivationAudit {
+                audit_event_id: inserted.audit_event_id,
+                policy_activation_id: inserted.policy_activation_id,
+                bundle_generation: inserted.bundle_generation,
+                resource_kind: inserted.resource_kind,
+                policy_revision_id: inserted.policy_revision_id,
+                decision_policy_snapshot_id: inserted.decision_policy_snapshot_id,
+                snapshot_hash: snapshot.snapshot_hash,
+                activation_request_hash: inserted.activation_request_hash,
+                actor_kind: inserted.activated_by_kind,
+                actor_user_id: inserted.activated_by_user_id,
+                actor_label: inserted.activated_by_label.clone(),
+                reason: inserted.reason.clone(),
+                occurred_at: inserted.activated_at,
+                promotion_permit_id: inserted.promotion_permit_id,
+                promotion_transaction_hash: inserted.promotion_transaction_hash,
+                model_governance_audit_id: inserted.model_governance_audit_id,
+                created_at: inserted.created_at,
+            }
+            .into_active_model(),
+        )
         .exec(db)
         .await
         .map_err(StorageError::from)?;
-        ActivationOutboxEntity::insert(ActivationOutboxActiveModel {
-            audit_event_id: Set(inserted.audit_event_id),
-            policy_activation_id: Set(inserted.policy_activation_id),
-            bundle_generation: Set(inserted.bundle_generation),
-            decision_policy_snapshot_id: Set(inserted.decision_policy_snapshot_id),
-            snapshot_hash: Set(snapshot.snapshot_hash),
-            created_at: Set(inserted.created_at),
-        })
+        ActivationOutboxEntity::insert(
+            NewPolicyActivationEventOutbox {
+                audit_event_id: inserted.audit_event_id,
+                policy_activation_id: inserted.policy_activation_id,
+                bundle_generation: inserted.bundle_generation,
+                decision_policy_snapshot_id: inserted.decision_policy_snapshot_id,
+                snapshot_hash: snapshot.snapshot_hash,
+                promotion_permit_id: inserted.promotion_permit_id,
+                promotion_transaction_hash: inserted.promotion_transaction_hash,
+                model_governance_audit_id: inserted.model_governance_audit_id,
+                created_at: inserted.created_at,
+            }
+            .into_active_model(),
+        )
         .exec(db)
         .await
         .map_err(StorageError::from)?;
@@ -259,7 +268,7 @@ impl PgPolicyRepository {
 }
 
 impl PgPolicyRepository {
-    async fn resolve_snapshot_model(
+    pub(crate) async fn resolve_snapshot_model(
         db: &impl ConnectionTrait,
         model: SnapshotModel,
     ) -> Result<DecisionPolicySnapshotInfo, StorageError> {
@@ -426,7 +435,7 @@ impl PgPolicyRepository {
 }
 
 impl PgPolicyRepository {
-    async fn load_current_bundle_from(
+    pub(crate) async fn load_current_bundle_from(
         db: &impl ConnectionTrait,
     ) -> Result<Option<ActivePolicyBundle>, StorageError> {
         let row = ActivationGuardEntity::find_by_id(POLICY_ACTIVATION_GUARD_ID)
@@ -475,7 +484,7 @@ fn verify_guard_snapshot(
 }
 
 impl PgPolicyRepository {
-    async fn insert_snapshot_if_absent(
+    pub(crate) async fn insert_snapshot_if_absent(
         db: &impl ConnectionTrait,
         snapshot: NewDecisionPolicySnapshot,
     ) -> Result<(), StorageError> {

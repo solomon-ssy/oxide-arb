@@ -14,6 +14,7 @@ use crate::enums::{
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: i32,
+    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
     pub quant_runtime_mode: QuantRuntimeMode,
     pub settlement_write_policy: SettlementWritePolicy,
     pub kill_switch_state: KillSwitchState,

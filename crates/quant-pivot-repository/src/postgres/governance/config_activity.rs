@@ -17,8 +17,9 @@ use quant_pivot_models::{
     },
     runtime_config::{PolicyDocument, PolicyValidationEvidence, PolicyValidationSubject},
     types::{
-        AuditEventId, ContentHash, DecisionPolicySnapshotId, PolicyActivationId, PolicyApprovalId,
-        PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId, SchemaVersion, UserId,
+        AuditEventId, ContentHash, DecisionPolicySnapshotId, ModelGovernanceAuditId,
+        PolicyActivationId, PolicyApprovalId, PolicyBundleGeneration, PolicyIdempotencyKey,
+        PolicyRevisionId, PromotionPermitId, SchemaVersion, UserId,
     },
 };
 use sea_orm::{
@@ -107,6 +108,9 @@ enum ActivityColumn {
     IdempotencyKey,
     ActivationRequestHash,
     AuditEventId,
+    PromotionPermitId,
+    PromotionTransactionHash,
+    ModelGovernanceAuditId,
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -144,6 +148,9 @@ struct ActivityRow {
     idempotency_key: Option<PolicyIdempotencyKey>,
     activation_request_hash: Option<ContentHash>,
     audit_event_id: Option<AuditEventId>,
+    promotion_permit_id: Option<PromotionPermitId>,
+    promotion_transaction_hash: Option<ContentHash>,
+    model_governance_audit_id: Option<ModelGovernanceAuditId>,
 }
 
 impl TryFrom<ActivityRow> for ConfigActivityInfo {
@@ -225,6 +232,9 @@ impl TryFrom<ActivityRow> for ConfigActivityInfo {
                     "activation_request_hash",
                 )?,
                 audit_event_id: required(row.audit_event_id, kind, "audit_event_id")?,
+                promotion_permit_id: row.promotion_permit_id,
+                promotion_transaction_hash: row.promotion_transaction_hash,
+                model_governance_audit_id: row.model_governance_audit_id,
                 created_at: row.created_at,
             })),
         }
@@ -302,6 +312,8 @@ fn revision_query() -> SelectStatement {
     let null_revision_id = || Expr::value(Option::<PolicyRevisionId>::None);
     let null_approval_id = || Expr::value(Option::<PolicyApprovalId>::None);
     let null_audit_id = || Expr::value(Option::<AuditEventId>::None);
+    let null_model_audit_id = || Expr::value(Option::<ModelGovernanceAuditId>::None);
+    let null_permit_id = || Expr::value(Option::<PromotionPermitId>::None);
     let null_content_hash = || Expr::value(Option::<ContentHash>::None);
     let null_idempotency_key = || Expr::value(Option::<PolicyIdempotencyKey>::None);
     let null_validation_subject = || Expr::value(Option::<PolicyValidationSubject>::None);
@@ -361,6 +373,15 @@ fn revision_query() -> SelectStatement {
         .expr_as(null_idempotency_key(), ActivityColumn::IdempotencyKey)
         .expr_as(null_content_hash(), ActivityColumn::ActivationRequestHash)
         .expr_as(null_audit_id(), ActivityColumn::AuditEventId)
+        .expr_as(null_permit_id(), ActivityColumn::PromotionPermitId)
+        .expr_as(
+            null_content_hash(),
+            ActivityColumn::PromotionTransactionHash,
+        )
+        .expr_as(
+            null_model_audit_id(),
+            ActivityColumn::ModelGovernanceAuditId,
+        )
         .from(Entity)
         .to_owned()
 }
@@ -372,6 +393,8 @@ fn approval_query() -> SelectStatement {
     let null_timestamp = || Expr::value(Option::<DateTime<Utc>>::None);
     let null_revision_id = || Expr::value(Option::<PolicyRevisionId>::None);
     let null_audit_id = || Expr::value(Option::<AuditEventId>::None);
+    let null_model_audit_id = || Expr::value(Option::<ModelGovernanceAuditId>::None);
+    let null_permit_id = || Expr::value(Option::<PromotionPermitId>::None);
     let null_schema_version = || Expr::value(Option::<SchemaVersion>::None);
     let null_document = || Expr::value(Option::<PolicyDocument>::None);
     let null_validation_evidence = || Expr::value(Option::<PolicyValidationEvidence>::None);
@@ -477,6 +500,15 @@ fn approval_query() -> SelectStatement {
         .expr_as(null_idempotency_key(), ActivityColumn::IdempotencyKey)
         .expr_as(null_content_hash(), ActivityColumn::ActivationRequestHash)
         .expr_as(null_audit_id(), ActivityColumn::AuditEventId)
+        .expr_as(null_permit_id(), ActivityColumn::PromotionPermitId)
+        .expr_as(
+            null_content_hash(),
+            ActivityColumn::PromotionTransactionHash,
+        )
+        .expr_as(
+            null_model_audit_id(),
+            ActivityColumn::ModelGovernanceAuditId,
+        )
         .from(PolicyApprovalEntity)
         .to_owned()
 }
@@ -669,6 +701,27 @@ fn activation_query() -> SelectStatement {
         .expr_as(
             Expr::col((PolicyActivationEntity, PolicyActivationColumn::AuditEventId)),
             ActivityColumn::AuditEventId,
+        )
+        .expr_as(
+            Expr::col((
+                PolicyActivationEntity,
+                PolicyActivationColumn::PromotionPermitId,
+            )),
+            ActivityColumn::PromotionPermitId,
+        )
+        .expr_as(
+            Expr::col((
+                PolicyActivationEntity,
+                PolicyActivationColumn::PromotionTransactionHash,
+            )),
+            ActivityColumn::PromotionTransactionHash,
+        )
+        .expr_as(
+            Expr::col((
+                PolicyActivationEntity,
+                PolicyActivationColumn::ModelGovernanceAuditId,
+            )),
+            ActivityColumn::ModelGovernanceAuditId,
         )
         .from(PolicyActivationEntity)
         .to_owned()

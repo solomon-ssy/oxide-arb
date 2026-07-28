@@ -18,7 +18,7 @@ use crate::{
     snapshots::v1::{
         ARTIFACTS, ENUMS, MODULE_PREFIX, TABLES,
         policy_activation_guard::{ActiveModel, Entity},
-        sea_orm_active_enums::{QpCatalogFilterReason, QpMarketCategory},
+        sea_orm_active_enums::{QpCatalogFilterReason, QpMarketCategory, QpQuantRuntimeMode},
     },
 };
 
@@ -69,6 +69,7 @@ impl MigrationTrait for Migration {
         for enum_statement in [
             schema.create_enum_from_active_enum::<QpCatalogFilterReason>(),
             schema.create_enum_from_active_enum::<QpMarketCategory>(),
+            schema.create_enum_from_active_enum::<QpQuantRuntimeMode>(),
         ] {
             manager
                 .create_type(enum_statement.ok_or_else(|| {

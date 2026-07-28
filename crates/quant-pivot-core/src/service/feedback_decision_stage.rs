@@ -7,7 +7,8 @@ use quant_pivot_models::{
     domain::{
         ports::{
             FeedbackComparisonArtifactRef, FeedbackDecisionJobInput, FeedbackDecisionJobParams,
-            FeedbackDriftArtifactRef, FeedbackShadowReplayArtifactRef,
+            FeedbackDriftArtifactRef, FeedbackShadowContract, FeedbackShadowReplayArtifactRef,
+            FeedbackShadowSubject,
         },
         quant::{
             FeedbackCycleInfo, FeedbackStageEventInfo, FeedbackStageJobIdentity, NewResearchJob,
@@ -15,10 +16,13 @@ use quant_pivot_models::{
         },
     },
     enums::quant::{
-        FeedbackStage, FeedbackStageEventKind, ResearchJobKind, ResearchJobResultKind,
-        ResearchJobStatus,
+        FeedbackCycleStatus, FeedbackDecision, FeedbackStage, FeedbackStageEventKind,
+        ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
     },
-    types::{ResearchJobParams, RoleCode},
+    types::{
+        ContentHash, FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackShadowReplayArtifactId,
+        ResearchJobParams, RoleCode,
+    },
 };
 use quant_pivot_repository::traits::{
     FeedbackCycleLeaseGuard, FeedbackCycleRepository, ResearchJobRepository,
@@ -27,8 +31,10 @@ use quant_pivot_research::{
     artifact::ArtifactStore,
     feedback::{DriftGateOutcome, FeedbackDriftArtifact, FeedbackDriftCodec},
     feedback_comparison::{FeedbackComparisonArtifact, FeedbackComparisonCodec},
-    feedback_decision::FeedbackDecisionCodec,
-    feedback_shadow::{FeedbackShadowReplayArtifact, FeedbackShadowReplayCodec},
+    feedback_decision::{FeedbackDecisionArtifact, FeedbackDecisionCodec, FeedbackDecisionOutcome},
+    feedback_shadow::{
+        FeedbackShadowOutcome, FeedbackShadowReplayArtifact, FeedbackShadowReplayCodec,
+    },
 };
 
 use crate::service::feedback_coordinator::FeedbackStageSuccess;
@@ -52,6 +58,32 @@ struct VerifiedDecisionInputs {
     drift: VerifiedDrift,
     comparison: VerifiedComparison,
     shadow: VerifiedShadow,
+}
+
+struct VerifiedDecision {
+    artifact_ref: ResearchJobArtifactRef,
+    artifact: FeedbackDecisionArtifact,
+    inputs: VerifiedDecisionInputs,
+    job_input_hash: ContentHash,
+}
+
+/// Fully re-read F11 `CandidateReady` evidence accepted as a promotion input.
+///
+/// Every field is derived from the durable cycle/job/event timeline and
+/// canonical artifact bytes; callers cannot supply candidate, champion,
+/// generation, or artifact identities.
+#[derive(Debug, Clone)]
+pub struct PromotionDecisionEvidence {
+    pub cycle: FeedbackCycleInfo,
+    pub decision_artifact_id: FeedbackDecisionArtifactId,
+    pub decision_artifact_hash: ContentHash,
+    pub decision_object_hash: ContentHash,
+    pub decision_job_input_hash: ContentHash,
+    pub shadow_artifact_id: FeedbackShadowReplayArtifactId,
+    pub shadow_artifact_hash: ContentHash,
+    pub shadow_object_hash: ContentHash,
+    pub candidate_recipe_hash: ContentHash,
+    pub shadow_contract: FeedbackShadowContract,
 }
 
 /// Dependencies for [`FeedbackDecisionStageAdapter`].
@@ -123,6 +155,93 @@ impl FeedbackDecisionStageAdapter {
         cycle: &FeedbackCycleInfo,
         job: &ResearchJobInfo,
     ) -> QuantResult<FeedbackStageSuccess> {
+        let verified = self.verify_decision(cycle, job, None).await?;
+        FeedbackStageSuccess::try_complete(
+            verified.artifact_ref.uri,
+            verified.artifact_ref.content_hash,
+            verified.artifact.outcome().decision(),
+            verified.artifact.outcome().reason().to_owned(),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Re-read a terminal `CandidateReady` cycle and every F06/F09/F10/F11
+    /// object before exposing its immutable promotion evidence.
+    pub async fn promotion_evidence(
+        &self,
+        cycle_id: &FeedbackCycleId,
+    ) -> QuantResult<PromotionDecisionEvidence> {
+        let cycle = self
+            .cycles
+            .find_cycle(cycle_id)
+            .await?
+            .ok_or_else(|| StorageError::not_found("quant_feedback_cycle", cycle_id))?;
+        cycle.validate()?;
+        if cycle.status != FeedbackCycleStatus::Succeeded
+            || cycle.decision != Some(FeedbackDecision::CandidateReady)
+        {
+            return Err(Self::promotion_invalid(
+                "promotion requires one terminal CandidateReady feedback cycle",
+            ));
+        }
+        let events = self.cycles.list_stage_events(cycle_id).await?;
+        let (event, job) = self
+            .load_stage_job(&cycle, &events, FeedbackStage::Decision)
+            .await?;
+        let verified = self.verify_decision(&cycle, &job, Some(&event)).await?;
+        if cycle.terminal_reason_code.as_deref() != Some(verified.artifact.outcome().reason()) {
+            return Err(Self::promotion_invalid(
+                "cycle terminal reason differs from its exact F11 artifact",
+            ));
+        }
+        let FeedbackDecisionOutcome::CandidateReady { evidence } = verified.artifact.outcome()
+        else {
+            return Err(Self::promotion_invalid(
+                "F11 artifact is not CandidateReady",
+            ));
+        };
+        let FeedbackShadowSubject::Candidate {
+            candidate_recipe_hash,
+            contract,
+        } = verified.inputs.shadow.artifact.subject()
+        else {
+            return Err(Self::promotion_invalid(
+                "F10 artifact has no exact candidate subject",
+            ));
+        };
+        if !matches!(
+            verified.inputs.shadow.artifact.outcome(),
+            FeedbackShadowOutcome::Stable { .. }
+        ) || evidence.candidate.comparison.candidate_recipe_hash != *candidate_recipe_hash
+            || evidence.candidate.replay.candidate_recipe_hash != *candidate_recipe_hash
+            || evidence.candidate.replay.model_version_id != contract.candidate_model_version_id()
+            || evidence.candidate.replay.serving_contract_hash
+                != contract.candidate_serving_contract_hash()
+        {
+            return Err(Self::promotion_invalid(
+                "F09/F10/F11 candidate, contract, or stability evidence differs",
+            ));
+        }
+        Ok(PromotionDecisionEvidence {
+            cycle,
+            decision_artifact_id: verified.artifact.artifact_id(),
+            decision_artifact_hash: verified.artifact.artifact_hash(),
+            decision_object_hash: verified.artifact_ref.content_hash,
+            decision_job_input_hash: verified.job_input_hash,
+            shadow_artifact_id: verified.inputs.shadow.artifact.artifact_id(),
+            shadow_artifact_hash: verified.inputs.shadow.artifact.artifact_hash(),
+            shadow_object_hash: verified.inputs.shadow.reference.artifact.content_hash,
+            candidate_recipe_hash: *candidate_recipe_hash,
+            shadow_contract: contract.as_ref().clone(),
+        })
+    }
+
+    async fn verify_decision(
+        &self,
+        cycle: &FeedbackCycleInfo,
+        job: &ResearchJobInfo,
+        event: Option<&FeedbackStageEventInfo>,
+    ) -> QuantResult<VerifiedDecision> {
         let ResearchJobParams::FeedbackDecision(params) = &job.params_json else {
             return Err(Self::invalid("Decision job lost its typed parameters"));
         };
@@ -142,6 +261,14 @@ impl FeedbackDecisionStageAdapter {
         {
             return Err(Self::invalid(
                 "Decision job has invalid cycle, kind, status, or result lineage",
+            ));
+        }
+        if event.is_some_and(|event| {
+            event.evidence_uri.as_ref() != Some(&artifact_ref.uri)
+                || event.evidence_hash != Some(artifact_ref.content_hash)
+        }) {
+            return Err(Self::invalid(
+                "Decision job result and WORM success event differ",
             ));
         }
         let inputs = self.load_inputs(cycle).await?;
@@ -166,13 +293,12 @@ impl FeedbackDecisionStageAdapter {
             &inputs.comparison.artifact,
             &inputs.shadow.artifact,
         )?;
-        FeedbackStageSuccess::try_complete(
-            artifact_ref.uri,
-            artifact_ref.content_hash,
-            artifact.outcome().decision(),
-            artifact.outcome().reason().to_owned(),
-        )
-        .map_err(Into::into)
+        Ok(VerifiedDecision {
+            artifact_ref,
+            artifact,
+            inputs,
+            job_input_hash: params.input_hash()?,
+        })
     }
 
     async fn load_inputs(&self, cycle: &FeedbackCycleInfo) -> QuantResult<VerifiedDecisionInputs> {
@@ -462,6 +588,13 @@ impl FeedbackDecisionStageAdapter {
 
     fn invalid(detail: impl Into<String>) -> QuantError {
         FeedbackError::InvalidJobContract {
+            detail: detail.into(),
+        }
+        .into()
+    }
+
+    fn promotion_invalid(detail: impl Into<String>) -> QuantError {
+        FeedbackError::InvalidPromotionPreflight {
             detail: detail.into(),
         }
         .into()

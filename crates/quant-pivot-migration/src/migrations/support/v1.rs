@@ -362,6 +362,29 @@ const FEEDBACK_CYCLE_GUARD_SQL: &str = "CREATE FUNCTION \
     'updated_at']) THEN \
     RAISE EXCEPTION 'feedback-cycle frozen identity cannot change'; \
     END IF; \
+    IF OLD.status = 'succeeded'::public.qp_feedback_cycle_status \
+    AND OLD.decision = 'candidate_ready'::public.qp_feedback_decision \
+    AND NEW.status = 'succeeded'::public.qp_feedback_cycle_status \
+    AND NEW.decision = 'promoted'::public.qp_feedback_decision THEN \
+    IF NEW.generation <> OLD.generation + 1 \
+    OR NEW.terminal_reason_code IS DISTINCT FROM OLD.terminal_reason_code \
+    OR NEW.lease_owner IS DISTINCT FROM OLD.lease_owner \
+    OR NEW.lease_expires_at IS DISTINCT FROM OLD.lease_expires_at \
+    OR NEW.cancel_requested_at IS DISTINCT FROM OLD.cancel_requested_at \
+    OR NEW.started_at IS DISTINCT FROM OLD.started_at \
+    OR NEW.completed_at IS DISTINCT FROM OLD.completed_at \
+    OR NOT EXISTS (SELECT 1 FROM public.policy_activation AS activation \
+    INNER JOIN public.quant_model_governance_audit AS audit \
+    ON audit.audit_id = activation.model_governance_audit_id \
+    AND audit.promotion_permit_id = activation.promotion_permit_id \
+    AND audit.promotion_transaction_hash = activation.promotion_transaction_hash \
+    WHERE activation.activation_kind = 'model_promotion'::public.qp_policy_activation_kind \
+    AND ((audit.detail #>> '{record,preflight,feedback_cycle_id}')::uuid) = OLD.feedback_cycle_id) \
+    THEN RAISE EXCEPTION 'CandidateReady-to-Promoted requires one exact committed promotion graph'; \
+    END IF; \
+    NEW.updated_at = statement_timestamp(); \
+    RETURN NEW; \
+    END IF; \
     IF OLD.status IN ('succeeded'::public.qp_feedback_cycle_status, \
     'failed'::public.qp_feedback_cycle_status, 'cancelled'::public.qp_feedback_cycle_status) \
     OR NEW.generation <> OLD.generation + 1 \
@@ -394,6 +417,43 @@ const FEEDBACK_OUTBOX_GUARD_SQL: &str = "CREATE FUNCTION \
     RAISE EXCEPTION 'feedback outbox immutable identity or delivery lifecycle changed illegally'; \
     END IF; \
     NEW.updated_at = statement_timestamp(); \
+    RETURN NEW; END; $function$";
+
+const PROMOTION_PERMIT_GUARD_SQL: &str = "CREATE FUNCTION \
+    public.trigger_guard_promotion_permit() RETURNS trigger LANGUAGE plpgsql AS \
+    $function$ BEGIN \
+    IF TG_OP = 'DELETE' THEN \
+    RAISE EXCEPTION 'promotion permit is durable; DELETE is not permitted'; \
+    END IF; \
+    IF NEW IS NOT DISTINCT FROM OLD THEN \
+    RETURN OLD; \
+    END IF; \
+    IF (to_jsonb(NEW) - ARRAY['revoked_by_user_id', 'revoked_by_username', \
+    'revoked_by_role', 'revocation_reason', 'revoked_at', 'revision', 'updated_at']) \
+    IS DISTINCT FROM \
+    (to_jsonb(OLD) - ARRAY['revoked_by_user_id', 'revoked_by_username', \
+    'revoked_by_role', 'revocation_reason', 'revoked_at', 'revision', 'updated_at']) THEN \
+    RAISE EXCEPTION 'promotion-permit immutable issuance cannot change'; \
+    END IF; \
+    IF OLD.revoked_by_user_id IS NOT NULL \
+    OR OLD.revoked_by_username IS NOT NULL \
+    OR OLD.revoked_by_role IS NOT NULL \
+    OR OLD.revocation_reason IS NOT NULL \
+    OR OLD.revoked_at IS NOT NULL \
+    OR OLD.revision <> 0 THEN \
+    RAISE EXCEPTION 'promotion permit is already revoked'; \
+    END IF; \
+    IF NEW.revoked_by_user_id IS NULL \
+    OR NEW.revoked_by_username IS NULL \
+    OR NEW.revoked_by_role IS NULL \
+    OR NEW.revocation_reason IS NULL \
+    OR NEW.revoked_at IS NOT NULL \
+    OR NEW.revision <> OLD.revision + 1 \
+    OR NEW.updated_at IS DISTINCT FROM OLD.updated_at THEN \
+    RAISE EXCEPTION 'promotion permit revoke requires one complete DB-clock-owned CAS tuple'; \
+    END IF; \
+    NEW.revoked_at = statement_timestamp(); \
+    NEW.updated_at = NEW.revoked_at; \
     RETURN NEW; END; $function$";
 
 const DENY_WRITE_TRIGGER_SQL: &str = "CREATE FUNCTION public.trigger_deny_write() RETURNS trigger \
@@ -615,6 +675,7 @@ pub(in crate::migrations) enum TriggerProgram {
     GuardCalibrationArtifact,
     GuardFeedbackCycle,
     GuardFeedbackOutbox,
+    GuardPromotionPermit,
     GuardFactorValue,
     GuardModelRun,
     GuardModelVersion,
@@ -631,6 +692,7 @@ impl TriggerProgram {
             Self::GuardCalibrationArtifact => "trigger_guard_calibration_artifact",
             Self::GuardFeedbackCycle => "trigger_guard_feedback_cycle",
             Self::GuardFeedbackOutbox => "trigger_guard_feedback_outbox",
+            Self::GuardPromotionPermit => "trigger_guard_promotion_permit",
             Self::GuardFactorValue => "trigger_guard_factor_value",
             Self::GuardModelRun => "trigger_guard_model_run",
             Self::GuardModelVersion => "trigger_guard_model_version",
@@ -722,6 +784,7 @@ pub(in crate::migrations) async fn create_trigger_programs(
         CALIBRATION_ARTIFACT_GUARD_SQL,
         FEEDBACK_CYCLE_GUARD_SQL,
         FEEDBACK_OUTBOX_GUARD_SQL,
+        PROMOTION_PERMIT_GUARD_SQL,
         RESEARCH_JOB_GUARD_SQL,
         "CREATE FUNCTION public.trigger_guard_factor_value() RETURNS trigger LANGUAGE plpgsql AS \
          $function$ DECLARE \
@@ -868,6 +931,7 @@ pub(in crate::migrations) async fn drop_trigger_programs(
         "trigger_guard_model_run",
         "trigger_guard_research_job",
         "trigger_guard_factor_value",
+        "trigger_guard_promotion_permit",
         "trigger_guard_feedback_outbox",
         "trigger_guard_feedback_cycle",
         "trigger_guard_calibration_artifact",

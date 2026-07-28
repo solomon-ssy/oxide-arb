@@ -449,6 +449,21 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
+        table: "quant_feedback_promotion_permit",
+        column: "revision",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_promotion_permit",
+        column: "issued_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_promotion_permit",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
         table: "quant_feedback_stage_event",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
@@ -983,5 +998,22 @@ mod tests {
                 assert!(!value.contains(';'));
             }
         }
+    }
+
+    #[test]
+    fn promotion_permit_defaults_owned() {
+        let defaults = COLUMN_DEFAULTS
+            .iter()
+            .filter(|spec| spec.table == "quant_feedback_promotion_permit")
+            .map(|spec| (spec.column, spec.value))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            defaults,
+            vec![
+                ("revision", DefaultValue::Integer(0)),
+                ("issued_at", DefaultValue::StatementTimestamp),
+                ("updated_at", DefaultValue::StatementTimestamp),
+            ]
+        );
     }
 }

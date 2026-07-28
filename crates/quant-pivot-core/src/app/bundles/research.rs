@@ -7,7 +7,9 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
     config::DeployConfig,
-    domain::ports::{CalibrationArtifactFitPort, ModelGovernancePort, ModelSpecPort},
+    domain::ports::{
+        CalibrationArtifactFitPort, CommittedPolicyApplyPort, ModelGovernancePort, ModelSpecPort,
+    },
 };
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
@@ -15,11 +17,13 @@ use quant_pivot_repository::{
         BacktestPathSetRepository, BacktestReportRepository, BasisAlertRepository,
         CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
         FactWriter, FactorRepository, FeatureParityRepository, FeatureRepository,
-        MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
-        ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
-        ModelRunRepository, PolicyRepository, PositionRepository, QuantFactReadRepository,
-        ResearchReadinessEvidenceRepository, ShadowComparisonRepository, SourceSliceRepository,
-        TradePolicyRepository, TradeTapeBlockCursorRepository, TrainingDatasetRepository,
+        FeedbackCycleRepository, MarketLinkageRepository, MarketRepository,
+        MarketSelectionRepository, ModelComparisonReportRepository, ModelGovernanceAuditRepository,
+        ModelRegistryRepository, ModelRoutePromotionRepository, ModelRunRepository,
+        PolicyRepository, PositionRepository, PromotionPermitRepository, QuantFactReadRepository,
+        ResearchJobRepository, ResearchReadinessEvidenceRepository, RuntimeControlRepository,
+        ShadowComparisonRepository, SourceSliceRepository, TradePolicyRepository,
+        TradeTapeBlockCursorRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -41,11 +45,14 @@ use crate::{
         factor_pipeline::FactorPipelineService,
         feature_integrity::RepositoryFeatureParityGate,
         feature_pipeline::{FeaturePipelineDeps, FeaturePipelineService},
+        feedback_decision_stage::{FeedbackDecisionStageAdapter, FeedbackDecisionStageDeps},
         frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
+        model_route_promotion::{ModelRoutePromotionService, ModelRoutePromotionServiceDeps},
         model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
         model_serving_generation::ModelServingGenerationStore,
         model_serving_preimage::{ModelServingPreimageDeps, ModelServingPreimageService},
         model_serving_registry::ModelServingRuntimeRegistry,
+        promotion_preflight::{PromotionPreflightService, PromotionPreflightServiceDeps},
         research_readiness::{
             EvidenceAttestor, EvidenceScopeIdentity, ResearchReadinessEvidenceService,
         },
@@ -114,6 +121,10 @@ pub struct ResearchBundle {
     /// Sole atomic owner of complete active/shadow/category serving
     /// generations.
     pub serving_generations: Arc<ModelServingGenerationStore>,
+    /// Read-only server-derived permit and promotion preflight boundary.
+    pub promotion_preflight: Arc<PromotionPreflightService>,
+    /// Governed owner of the exact preflight-to-transaction handoff.
+    pub model_route_promotion: Arc<ModelRoutePromotionService>,
     /// Process-wide verifier for signed operational readiness evidence.
     pub research_readiness: Arc<ResearchReadinessEvidenceService>,
     /// Canonical resolver for immutable trade-policy evidence graphs.
@@ -194,6 +205,15 @@ struct ModelGovernanceAssembly<'a, 'b> {
     calibration_loader: &'a Arc<dyn CalibrationArtifactLoader>,
     frozen_model_parity: &'a Arc<FrozenModelParityService>,
     serving_preimages: &'a Arc<ModelServingPreimageService>,
+}
+
+#[derive(Clone, Copy)]
+struct PromotionPreflightAssembly<'a, 'b> {
+    deps: &'a ResearchBundleDeps<'b>,
+    artifact_store: &'a Arc<dyn ArtifactStore>,
+    model_registry_repo: &'a Arc<dyn ModelRegistryRepository>,
+    runtime_registry: &'a Arc<ModelServingRuntimeRegistry>,
+    serving_generations: &'a Arc<ModelServingGenerationStore>,
 }
 
 fn assemble_research_pipelines(
@@ -320,23 +340,26 @@ impl ResearchBundle {
             deps.deploy.research.model_serving_registry,
             Arc::clone(&serving_preimages),
         )?);
-        let active_bundle = deps
-            .governance
-            .runtime_config
-            .active_bundle()
-            .ok_or_else(|| {
-                QuantError::config(
-                    "active policy bundle metadata is unavailable during serving bootstrap",
-                )
-            })?;
-        let serving_generations = Arc::new(
-            ModelServingGenerationStore::bootstrap(
-                Arc::clone(&model_registry_repo),
-                Arc::clone(&runtime_registry),
-                active_bundle,
-            )
-            .await?,
-        );
+        let serving_generations =
+            Self::assemble_serving_generations(deps, &model_registry_repo, &runtime_registry)
+                .await?;
+        let promotion_preflight = Self::assemble_promotion_preflight(PromotionPreflightAssembly {
+            deps,
+            artifact_store: &artifact_store,
+            model_registry_repo: &model_registry_repo,
+            runtime_registry: &runtime_registry,
+            serving_generations: &serving_generations,
+        })?;
+        let model_route_promotion = Arc::new(ModelRoutePromotionService::new(
+            ModelRoutePromotionServiceDeps {
+                preflight: Arc::clone(&promotion_preflight),
+                repository: Arc::clone(&repos.model_route_promotion)
+                    as Arc<dyn ModelRoutePromotionRepository>,
+                policies: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
+                policy_apply: Arc::clone(&deps.governance.committed_policy)
+                    as Arc<dyn CommittedPolicyApplyPort>,
+            },
+        ));
         deps.governance
             .applicator
             .attach_model_serving(Arc::clone(&serving_generations))?;
@@ -390,6 +413,8 @@ impl ResearchBundle {
             serving_preimages,
             runtime_registry,
             serving_generations,
+            promotion_preflight,
+            model_route_promotion,
             research_readiness: evidence.readiness,
             trade_policy_evidence: evidence.trade_policy,
             trade_policy_preimages,
@@ -483,6 +508,68 @@ impl ResearchBundle {
             governance_audit: Arc::clone(&repos.governance_audit)
                 as Arc<dyn ModelGovernanceAuditRepository>,
         }
+    }
+
+    fn assemble_promotion_preflight(
+        assembly: PromotionPreflightAssembly<'_, '_>,
+    ) -> QuantResult<Arc<PromotionPreflightService>> {
+        let PromotionPreflightAssembly {
+            deps,
+            artifact_store,
+            model_registry_repo,
+            runtime_registry,
+            serving_generations,
+        } = assembly;
+        let repos = &deps.infra.repos;
+        let decisions = Arc::new(FeedbackDecisionStageAdapter::try_new(
+            FeedbackDecisionStageDeps {
+                cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
+                jobs: Arc::clone(&repos.research_job) as Arc<dyn ResearchJobRepository>,
+                artifacts: Arc::clone(artifact_store),
+                max_recovery_attempts: deps.deploy.quant.research_jobs.max_recovery_attempts,
+            },
+        )?);
+        Ok(Arc::new(PromotionPreflightService::new(
+            PromotionPreflightServiceDeps {
+                permits: Arc::clone(&repos.promotion_permit) as Arc<dyn PromotionPermitRepository>,
+                cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
+                decisions,
+                policies: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
+                durable_runtime: Arc::clone(&repos.runtime_control)
+                    as Arc<dyn RuntimeControlRepository>,
+                runtime_controls: deps.governance.runtime_controls.clone(),
+                policy_store: Arc::clone(&deps.governance.runtime_config),
+                models: Arc::clone(model_registry_repo),
+                feature_parity: Arc::clone(&repos.feature_parity)
+                    as Arc<dyn FeatureParityRepository>,
+                runtime_registry: Arc::clone(runtime_registry),
+                serving_generations: Arc::clone(serving_generations),
+            },
+        )))
+    }
+
+    async fn assemble_serving_generations(
+        deps: &ResearchBundleDeps<'_>,
+        model_registry_repo: &Arc<dyn ModelRegistryRepository>,
+        runtime_registry: &Arc<ModelServingRuntimeRegistry>,
+    ) -> QuantResult<Arc<ModelServingGenerationStore>> {
+        let active_bundle = deps
+            .governance
+            .runtime_config
+            .active_bundle()
+            .ok_or_else(|| {
+                QuantError::config(
+                    "active policy bundle metadata is unavailable during serving bootstrap",
+                )
+            })?;
+        Ok(Arc::new(
+            ModelServingGenerationStore::bootstrap(
+                Arc::clone(model_registry_repo),
+                Arc::clone(runtime_registry),
+                active_bundle,
+            )
+            .await?,
+        ))
     }
 
     /// Wire offline publish / rollback / dataset-promotion governance.

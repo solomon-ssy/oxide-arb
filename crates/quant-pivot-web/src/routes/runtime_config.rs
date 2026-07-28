@@ -48,8 +48,8 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     runtime_config::{
-        DecisionPolicySnapshot, POLICY_RESOURCE_SCHEMA_VERSION, PolicyDocument,
-        PolicyPreflightResult, PolicyRevisionBundle, PolicyValidationEvidence,
+        DecisionPolicySnapshot, POLICY_RESOURCE_SCHEMA_VERSION, PolicyBundleIdentity,
+        PolicyDocument, PolicyPreflightResult, PolicyRevisionBundle, PolicyValidationEvidence,
         PolicyValidationIssue, PolicyValidationSubject, preview_fire_times,
     },
     types::{
@@ -895,6 +895,11 @@ async fn transition_revision(
             PolicyActivationKind::Initial | PolicyActivationKind::Promote => {
                 DecisionPolicySnapshotSource::Activation
             }
+            PolicyActivationKind::ModelPromotion => {
+                return Err(WebError::BadRequest(
+                    "model promotion is not accepted by generic policy activation".to_owned(),
+                ));
+            }
         },
     )?;
     let snapshot_id = snapshot.decision_policy_snapshot_id;
@@ -996,22 +1001,39 @@ async fn publish_activation_bundle(
     prepared: PreparedPolicySnapshot,
     commit: &PolicyActivationCommit,
 ) -> Result<(), WebError> {
-    match commit.outcome {
-        PolicyActivationOutcome::Committed => prepared.publish_bundle(commit.bundle.clone())?,
-        PolicyActivationOutcome::ExactReplay => {
-            if state
-                .runtime_config
-                .load_current_bundle()
-                .await?
-                .is_some_and(|bundle| bundle.generation == commit.bundle.generation)
-            {
-                state
-                    .runtime_config_apply
-                    .prepare(commit.bundle.snapshot.clone())
-                    .await?
-                    .publish_bundle(commit.bundle.clone())?;
-            }
-        }
+    let current = state
+        .runtime_config
+        .load_current_bundle()
+        .await?
+        .ok_or_else(|| {
+            WebError::Conflict(
+                "committed policy bundle disappeared before runtime apply".to_owned(),
+            )
+        })?;
+    let committed_identity = PolicyBundleIdentity::from(&commit.bundle);
+    let current_identity = PolicyBundleIdentity::from(&current);
+    if current.generation < commit.bundle.generation {
+        return Err(WebError::Conflict(format!(
+            "durable generation {} is older than activation generation {}",
+            current.generation, commit.bundle.generation
+        )));
+    }
+    if current.generation == commit.bundle.generation && current_identity != committed_identity {
+        return Err(WebError::Conflict(
+            "activation generation resolved to a different durable snapshot identity".to_owned(),
+        ));
+    }
+    if commit.outcome == PolicyActivationOutcome::Committed
+        && current_identity == committed_identity
+    {
+        state
+            .committed_policy_apply
+            .publish_prepared(prepared, current)?;
+    } else {
+        state
+            .committed_policy_apply
+            .apply_committed(current)
+            .await?;
     }
     Ok(())
 }

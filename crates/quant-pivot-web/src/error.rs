@@ -13,7 +13,8 @@
 //! - [`StorageError`] — `NotFound` → 404, duplicate/state/transition → 409,
 //!   `InvariantViolation` → 400, transport/timeout failures → 503, everything
 //!   else → 500 (details are logged, not leaked).
-//! - [`RbacError`] — structural assignment / permission parsing → 400.
+//! - [`RbacError`] — governed denial → 403; structural assignment / permission
+//!   parsing → 400.
 
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use quant_pivot_error::{
@@ -180,6 +181,7 @@ impl From<StorageError> for WebError {
 impl From<RbacError> for WebError {
     fn from(error: RbacError) -> Self {
         match error {
+            RbacError::PermissionDenied { .. } => Self::Forbidden,
             RbacError::UnknownPermission { .. } | RbacError::InvalidAssignment { .. } => {
                 Self::BadRequest(error.to_string())
             }
@@ -199,6 +201,9 @@ impl From<ControlError> for WebError {
         match error {
             ControlError::Precondition(_) => Self::Conflict(error.to_string()),
             ControlError::Engine(_) => Self::Internal(error.to_string()),
+            ControlError::CommittedGenerationApply { .. } => {
+                Self::ServiceUnavailable("committed runtime generation is not ready".to_owned())
+            }
         }
     }
 }
@@ -298,7 +303,9 @@ mod tests {
     use actix_web::http::StatusCode;
     use quant_pivot_error::{
         QuantError,
+        control::{ControlError, RuntimeApplyStage},
         execution::ExecutionError,
+        rbac::RbacError,
         research::ResearchError,
         storage::{
             StorageError,
@@ -324,6 +331,19 @@ mod tests {
     }
 
     #[test]
+    fn rbac_denial_maps_403() {
+        let error = RbacError::PermissionDenied {
+            actor_user_id: "0198d9f6-f3f7-7000-8000-000000000001".to_owned(),
+            acting_role: "risk_owner".to_owned(),
+            resource: "publication",
+            operation: "publish",
+        };
+        let web = WebError::from(QuantError::from(error));
+        assert_eq!(web.status(), StatusCode::FORBIDDEN);
+        assert_eq!(web.client_message(), "forbidden");
+    }
+
+    #[test]
     fn execution_conflict_maps_409() {
         let web = WebError::from(QuantError::from(ExecutionError::AdmissionDenied {
             reason: "spread too wide".to_owned(),
@@ -343,6 +363,21 @@ mod tests {
             reason: "allocation invariant broken".to_owned(),
         }));
         assert_eq!(web.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn committed_apply_maps_503() {
+        let web = WebError::from(QuantError::from(ControlError::CommittedGenerationApply {
+            desired_generation: 12,
+            applied_generation: 11,
+            stage: RuntimeApplyStage::Prepare,
+            detail: "private artifact location".to_owned(),
+        }));
+        assert_eq!(web.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            web.client_message(),
+            "committed runtime generation is not ready"
+        );
     }
 
     #[test]

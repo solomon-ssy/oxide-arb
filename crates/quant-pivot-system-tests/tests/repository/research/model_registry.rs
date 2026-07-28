@@ -13,7 +13,9 @@ use quant_pivot_models::{
     },
     entities::{
         quant_model_spec::Entity as ModelSpecEntity,
-        quant_model_version::Entity as ModelVersionEntity,
+        quant_model_version::{
+            ActiveModel as ModelVersionActiveModel, Entity as ModelVersionEntity,
+        },
     },
     enums::{
         common::MarketCategory,
@@ -793,8 +795,8 @@ impl ModelVersionBoundaryFixture {
         let mut raw_published = new_version(&self.db, self.version.model_spec_id, 'n').await;
         let raw_published_id = raw_published.model_version_id;
         raw_published.version = 2;
-        let mut active = raw_published
-            .try_into_active_model()
+        let mut active: ModelVersionActiveModel = raw_published
+            .try_into()
             .expect("prepare valid raw Candidate row");
         active.publication_status = ActiveValue::Set(PublicationStatus::Published);
         active.published_at = ActiveValue::Set(Some(Utc::now()));

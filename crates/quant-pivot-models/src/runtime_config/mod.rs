@@ -5,7 +5,10 @@ pub mod sections;
 pub mod validation;
 pub mod wire;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::{Display, Formatter, Result as FmtResult},
+};
 
 use quant_pivot_error::{
     QuantError,
@@ -877,6 +880,101 @@ impl DecisionPolicySnapshotDocument {
     }
 }
 
+/// Immutable identity of one database-committed policy bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyBundleIdentity {
+    pub generation: PolicyBundleGeneration,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub snapshot_hash: ContentHash,
+}
+
+/// Typed reason that the process cannot serve the latest committed bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyApplyDegradedCause {
+    Applying,
+    PrepareFailed,
+    PublishFailed,
+    GenerationMismatch,
+}
+
+impl Display for PolicyApplyDegradedCause {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        formatter.write_str(match self {
+            Self::Applying => "applying",
+            Self::PrepareFailed => "prepare_failed",
+            Self::PublishFailed => "publish_failed",
+            Self::GenerationMismatch => "generation_mismatch",
+        })
+    }
+}
+
+/// Process-local projection of durable desired and atomically applied policy
+/// generations.
+///
+/// This is observability only. `PostgreSQL` remains the sole desired state
+/// authority, and the live stores remain the sole applied state owners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyApplyReadiness {
+    Ready {
+        applied: PolicyBundleIdentity,
+    },
+    Degraded {
+        desired: PolicyBundleIdentity,
+        applied: PolicyBundleIdentity,
+        cause: PolicyApplyDegradedCause,
+    },
+}
+
+impl PolicyApplyReadiness {
+    #[must_use]
+    pub const fn is_ready(self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+
+    #[must_use]
+    pub const fn desired(self) -> PolicyBundleIdentity {
+        match self {
+            Self::Ready { applied } => applied,
+            Self::Degraded { desired, .. } => desired,
+        }
+    }
+
+    #[must_use]
+    pub const fn applied(self) -> PolicyBundleIdentity {
+        match self {
+            Self::Ready { applied } | Self::Degraded { applied, .. } => applied,
+        }
+    }
+}
+
+impl Display for PolicyApplyReadiness {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Ready { applied } => write!(
+                formatter,
+                "ready generation={} snapshot_id={} snapshot_hash={}",
+                applied.generation, applied.decision_policy_snapshot_id, applied.snapshot_hash
+            ),
+            Self::Degraded {
+                desired,
+                applied,
+                cause,
+            } => write!(
+                formatter,
+                "degraded cause={cause} desired_generation={} desired_snapshot_id={} \
+                 desired_snapshot_hash={} applied_generation={} applied_snapshot_id={} \
+                 applied_snapshot_hash={}",
+                desired.generation,
+                desired.decision_policy_snapshot_id,
+                desired.snapshot_hash,
+                applied.generation,
+                applied.decision_policy_snapshot_id,
+                applied.snapshot_hash,
+            ),
+        }
+    }
+}
+
 /// Database-authoritative identity and contents of one committed policy bundle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -904,6 +1002,16 @@ impl ActivePolicyBundle {
             snapshot_hash,
             revision_vector,
             snapshot,
+        }
+    }
+}
+
+impl From<&ActivePolicyBundle> for PolicyBundleIdentity {
+    fn from(bundle: &ActivePolicyBundle) -> Self {
+        Self {
+            generation: bundle.generation,
+            decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
+            snapshot_hash: bundle.snapshot_hash,
         }
     }
 }

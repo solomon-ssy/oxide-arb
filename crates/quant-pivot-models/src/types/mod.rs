@@ -121,7 +121,7 @@ pub use ids::{
     MarketId, MarketLinkageId, MarketSelectionId, MenuId, ModelComparisonReportId,
     ModelGovernanceAuditId, ModelRunId, ModelSpecId, ModelVersionId, OperationAction,
     OperationLogId, OrderId, OrderIntentId, PolicyActivationId, PolicyApprovalId, PolicyRevisionId,
-    PortfolioPlanId, PositionId, PreproductionResetNonce, ProfileAllocationId, ProfileArtifactId,
+    PortfolioPlanId, PositionId, PreproductionResetNonce, ProfileArtifactId, PromotionPermitId,
     RecommendationId, RecommendationReportId, ReconciliationId, ReportDataQualitySnapshotId,
     ReportRunId, ReportScheduleGapId, ReportScheduleId, ResearchJobId, ResearchProfileId,
     ResearchReadinessEvidenceId, RoleCode, RoleId, RuntimeControlTransitionId,

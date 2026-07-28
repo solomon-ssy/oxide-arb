@@ -249,6 +249,103 @@ const DRIFT_REPORT_CHECK: &str = r"CHECK (
     AND detail_hash ~ '^blake3:[0-9a-f]{64}$'::text
     AND report_hash ~ '^blake3:[0-9a-f]{64}$'::text
 )";
+const PROMOTION_PERMIT_CHECK: &str = r"CHECK (
+    octet_length(idempotency_key) >= 8
+    AND octet_length(idempotency_key) <= 128
+    AND idempotency_key ~ '^[!-~]+$'::text
+    AND scope_hash ~ '^blake3:[0-9a-f]{64}$'::text
+    AND issuance_hash ~ '^blake3:[0-9a-f]{64}$'::text
+    AND jsonb_typeof(profile_ref) = 'object'::text
+    AND profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text]
+    AND profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text] = '{}'::jsonb
+    AND profile_ref ->> 'id'::text ~ '^[a-z0-9_]+$'::text
+    AND (profile_ref ->> 'version'::text)::bigint > 0
+    AND profile_ref ->> 'content_hash'::text = profile_hash
+    AND research_profile_artifact_id =
+        'rpa:'::text
+        || (profile_ref ->> 'id'::text)
+        || ':'::text
+        || (profile_ref ->> 'version'::text)
+        || ':'::text
+        || profile_hash
+    AND (
+        (
+            category = 'crypto'::qp_market_category
+            AND profile_ref ->> 'id'::text = 'crypto_price_15m'::text
+        )
+        OR (
+            category = 'weather'::qp_market_category
+            AND profile_ref ->> 'id'::text = 'weather_forecast_24h'::text
+        )
+    )
+    AND expected_policy_generation > 0
+    AND profile_hash ~ '^blake3:[0-9a-f]{64}$'::text
+    AND expected_snapshot_hash ~ '^blake3:[0-9a-f]{64}$'::text
+    AND champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text
+    AND non_route_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text
+    AND serving_constraints_hash ~ '^blake3:[0-9a-f]{64}$'::text
+    AND preflight_hash ~ '^blake3:[0-9a-f]{64}$'::text
+    AND (
+        allowed_runtime_modes = ARRAY['report_only'::qp_quant_runtime_mode]
+        OR allowed_runtime_modes = ARRAY['semi_auto'::qp_quant_runtime_mode]
+        OR allowed_runtime_modes = ARRAY['auto_execution'::qp_quant_runtime_mode]
+        OR allowed_runtime_modes = ARRAY[
+            'report_only'::qp_quant_runtime_mode,
+            'semi_auto'::qp_quant_runtime_mode
+        ]
+        OR allowed_runtime_modes = ARRAY[
+            'report_only'::qp_quant_runtime_mode,
+            'auto_execution'::qp_quant_runtime_mode
+        ]
+        OR allowed_runtime_modes = ARRAY[
+            'semi_auto'::qp_quant_runtime_mode,
+            'auto_execution'::qp_quant_runtime_mode
+        ]
+        OR allowed_runtime_modes = ARRAY[
+            'report_only'::qp_quant_runtime_mode,
+            'semi_auto'::qp_quant_runtime_mode,
+            'auto_execution'::qp_quant_runtime_mode
+        ]
+    )
+    AND octet_length(issued_by_username) >= 1
+    AND octet_length(issued_by_username) <= 256
+    AND issued_by_username = btrim(issued_by_username)
+    AND issued_by_username !~ '[[:cntrl:]]'::text
+    AND issued_by_role ~ '^[a-z0-9_]{1,64}$'::text
+    AND octet_length(issuance_reason) >= 1
+    AND octet_length(issuance_reason) <= 2048
+    AND issuance_reason = btrim(issuance_reason)
+    AND issuance_reason !~ '[[:cntrl:]]'::text
+    AND expires_at > issued_at
+    AND (
+        (
+            revoked_by_user_id IS NULL
+            AND revoked_by_username IS NULL
+            AND revoked_by_role IS NULL
+            AND revocation_reason IS NULL
+            AND revoked_at IS NULL
+            AND revision = 0
+            AND updated_at = issued_at
+        )
+        OR (
+            revoked_by_user_id IS NOT NULL
+            AND revoked_by_username IS NOT NULL
+            AND octet_length(revoked_by_username) >= 1
+            AND octet_length(revoked_by_username) <= 256
+            AND revoked_by_username = btrim(revoked_by_username)
+            AND revoked_by_username !~ '[[:cntrl:]]'::text
+            AND revoked_by_role ~ '^[a-z0-9_]{1,64}$'::text
+            AND revocation_reason IS NOT NULL
+            AND octet_length(revocation_reason) >= 1
+            AND octet_length(revocation_reason) <= 2048
+            AND revocation_reason = btrim(revocation_reason)
+            AND revocation_reason !~ '[[:cntrl:]]'::text
+            AND revoked_at >= issued_at
+            AND revision = 1
+            AND updated_at = revoked_at
+        )
+    )
+)";
 const CONSTRAINTS: &[ConstraintSpec] = &[
     ConstraintSpec {
         name: "catalog_event_object_schema_version_check",
@@ -425,6 +522,42 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "CHECK ((revision > 0 AND publish_attempts >= 0 AND created_at <= updated_at AND ((claim_owner IS NULL) = (lease_expires_at IS NULL)) AND (published_at IS NULL OR (published_at >= created_at AND claim_owner IS NULL AND lease_expires_at IS NULL AND last_error IS NULL)) AND (last_error IS NULL OR (octet_length(last_error) >= 1 AND octet_length(last_error) <= 2048 AND last_error = btrim(last_error) AND last_error !~ '[[:cntrl:]]'::text))))",
     },
     ConstraintSpec {
+        name: "ck_quant_feedback_promotion_permit",
+        table: "quant_feedback_promotion_permit",
+        kind: ConstraintKind::Check,
+        definition: PROMOTION_PERMIT_CHECK,
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_permit_profile",
+        table: "quant_feedback_promotion_permit",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (research_profile_artifact_id) REFERENCES public.research_profile_artifact(research_profile_artifact_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_permit_snapshot",
+        table: "quant_feedback_promotion_permit",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (expected_decision_policy_snapshot_id) REFERENCES public.decision_policy_snapshot(decision_policy_snapshot_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_permit_champion",
+        table: "quant_feedback_promotion_permit",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (champion_model_version_id) REFERENCES public.quant_model_version(model_version_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_permit_issuer",
+        table: "quant_feedback_promotion_permit",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (issued_by_user_id) REFERENCES public.user(id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_permit_revoker",
+        table: "quant_feedback_promotion_permit",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (revoked_by_user_id) REFERENCES public.user(id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
         name: "ck_quant_drift_report",
         table: "quant_drift_report",
         kind: ConstraintKind::Check,
@@ -521,10 +654,64 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "CHECK (((jsonb_typeof(detail) = 'object'::text) AND (pg_column_size(detail) <= 65536)))",
     },
     ConstraintSpec {
+        name: "ck_policy_activation_model_promotion",
+        table: "policy_activation",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((((activation_kind = 'model_promotion'::qp_policy_activation_kind) AND (promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (model_governance_audit_id IS NOT NULL)) OR ((activation_kind <> 'model_promotion'::qp_policy_activation_kind) AND (promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NULL))))",
+    },
+    ConstraintSpec {
+        name: "ck_policy_activation_audit_promotion",
+        table: "policy_activation_audit",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((((promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NULL)) OR ((promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (model_governance_audit_id IS NOT NULL))))",
+    },
+    ConstraintSpec {
+        name: "ck_policy_activation_outbox_promotion",
+        table: "policy_activation_event_outbox",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((((promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NULL)) OR ((promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (model_governance_audit_id IS NOT NULL))))",
+    },
+    ConstraintSpec {
+        name: "uq_policy_activation_promotion_binding",
+        table: "policy_activation",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (policy_activation_id, promotion_permit_id, promotion_transaction_hash, model_governance_audit_id)",
+    },
+    ConstraintSpec {
+        name: "uq_quant_model_governance_audit_promotion",
+        table: "quant_model_governance_audit",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (audit_id, promotion_permit_id, promotion_transaction_hash)",
+    },
+    ConstraintSpec {
+        name: "fk_policy_activation_audit_promotion",
+        table: "policy_activation_audit",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (policy_activation_id, promotion_permit_id, promotion_transaction_hash, model_governance_audit_id) REFERENCES policy_activation(policy_activation_id, promotion_permit_id, promotion_transaction_hash, model_governance_audit_id)",
+    },
+    ConstraintSpec {
+        name: "fk_policy_activation_outbox_promotion",
+        table: "policy_activation_event_outbox",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (policy_activation_id, promotion_permit_id, promotion_transaction_hash, model_governance_audit_id) REFERENCES policy_activation(policy_activation_id, promotion_permit_id, promotion_transaction_hash, model_governance_audit_id)",
+    },
+    ConstraintSpec {
+        name: "fk_policy_activation_promotion_audit",
+        table: "policy_activation",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (model_governance_audit_id, promotion_permit_id, promotion_transaction_hash) REFERENCES quant_model_governance_audit(audit_id, promotion_permit_id, promotion_transaction_hash)",
+    },
+    ConstraintSpec {
         name: "ck_quant_model_governance_audit_detail_action",
         table: "quant_model_governance_audit",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((jsonb_typeof(detail) = 'object'::text) AND ((detail ->> 'action'::text) = (action)::text)))",
+        definition: "CHECK (((jsonb_typeof(detail) = 'object'::text) AND ((detail ->> 'action'::text) = (action)::text) AND (pg_column_size(detail) <= 65536)))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_model_governance_audit_promotion",
+        table: "quant_model_governance_audit",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((((action = 'promote_route'::qp_model_governance_action) AND (promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (((detail #>> '{record,promotion_permit_id}'::text[]))::uuid = promotion_permit_id) AND ((detail #>> '{record,transaction_hash}'::text[]) = (promotion_transaction_hash)::text)) OR ((action <> 'promote_route'::qp_model_governance_action) AND (promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL))))",
     },
     ConstraintSpec {
         name: "ck_quant_model_run_terminal",
@@ -1613,6 +1800,47 @@ mod tests {
                 "missing model-metrics persistence binding {binding}"
             );
         }
+    }
+
+    #[test]
+    fn promotion_permit_schema_relational() {
+        let permit = constraint("ck_quant_feedback_promotion_permit").definition;
+        for binding in [
+            "category = 'crypto'",
+            "category = 'weather'",
+            "crypto_price_15m",
+            "weather_forecast_24h",
+            "expected_policy_generation > 0",
+            "allowed_runtime_modes =",
+            "revoked_by_user_id IS NULL",
+            "revoked_by_user_id IS NOT NULL",
+            "revision = 0",
+            "revision = 1",
+            "updated_at = revoked_at",
+        ] {
+            assert!(permit.contains(binding), "missing permit binding {binding}");
+        }
+
+        for name in [
+            "fk_quant_feedback_permit_profile",
+            "fk_quant_feedback_permit_snapshot",
+            "fk_quant_feedback_permit_champion",
+            "fk_quant_feedback_permit_issuer",
+            "fk_quant_feedback_permit_revoker",
+        ] {
+            let definition = constraint(name).definition;
+            assert!(definition.contains("ON UPDATE NO ACTION"));
+            assert!(definition.contains("ON DELETE NO ACTION"));
+            assert!(!definition.contains("CASCADE"));
+        }
+    }
+
+    #[test]
+    fn permit_check_dump_stable() {
+        let permit = constraint("ck_quant_feedback_promotion_permit").definition;
+        assert!(!permit.contains(" BETWEEN "));
+        assert!(!permit.contains("allowed_runtime_modes IN"));
+        assert_eq!(permit.matches("allowed_runtime_modes =").count(), 7);
     }
 
     #[test]

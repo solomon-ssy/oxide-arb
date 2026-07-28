@@ -308,38 +308,43 @@ impl NewModelVersion {
         }
         Ok(self.serving_contract.contract_hash())
     }
+}
 
-    /// Decompose typed derivation evidence into FK-backed persistence columns.
-    pub fn try_into_active_model(self) -> Result<ActiveModel, ModelVersionPersistenceError> {
-        let serving_contract_hash = self.serving_contract_hash()?;
-        let derivation_evidence_hash = self.derivation.evidence_hash()?;
-        let derivation_kind = self.derivation.kind();
-        let parent_model_version_id = self.derivation.parent_model_version_id().copied();
-        let calibration_artifact_id = self.derivation.calibration_artifact_id().copied();
+impl TryFrom<NewModelVersion> for ActiveModel {
+    type Error = ModelVersionPersistenceError;
 
-        Ok(ActiveModel {
-            model_version_id: Set(self.model_version_id),
-            model_spec_id: Set(self.model_spec_id),
-            version: Set(self.version),
-            artifact_hash: Set(self.artifact_hash),
-            serving_contract: Set(self.serving_contract),
+    /// Decompose validated serving and derivation contracts into FK-backed
+    /// persistence columns.
+    fn try_from(version: NewModelVersion) -> Result<Self, Self::Error> {
+        let serving_contract_hash = version.serving_contract_hash()?;
+        let derivation_evidence_hash = version.derivation.evidence_hash()?;
+        let derivation_kind = version.derivation.kind();
+        let parent_model_version_id = version.derivation.parent_model_version_id().copied();
+        let calibration_artifact_id = version.derivation.calibration_artifact_id().copied();
+
+        Ok(Self {
+            model_version_id: Set(version.model_version_id),
+            model_spec_id: Set(version.model_spec_id),
+            version: Set(version.version),
+            artifact_hash: Set(version.artifact_hash),
+            serving_contract: Set(version.serving_contract),
             serving_contract_hash: Set(serving_contract_hash.as_bytes().to_vec()),
-            category_scope: Set(self.category_scope),
-            research_profile_artifact_id: Set(self.profile_ref.artifact_id()),
-            training_dataset_id: Set(self.training_dataset_id),
-            trade_policy_artifact_id: Set(self.trade_policy_artifact_id),
-            trade_policy_hash: Set(self.trade_policy_hash),
-            publish_path_set_id: Set(self.publish_path_set_id),
+            category_scope: Set(version.category_scope),
+            research_profile_artifact_id: Set(version.profile_ref.artifact_id()),
+            training_dataset_id: Set(version.training_dataset_id),
+            trade_policy_artifact_id: Set(version.trade_policy_artifact_id),
+            trade_policy_hash: Set(version.trade_policy_hash),
+            publish_path_set_id: Set(version.publish_path_set_id),
             derivation_kind: Set(derivation_kind),
             parent_model_version_id: Set(parent_model_version_id),
             calibration_artifact_id: Set(calibration_artifact_id),
             derivation_evidence_hash: Set(derivation_evidence_hash),
-            metrics: Set(self.metrics),
-            training_objective: Set(self.training_objective),
-            quality_gate_report: Set(self.quality_gate_report),
-            publication_status: Set(self.publication_status),
-            published_at: Set(self.published_at),
-            retired_at: Set(self.retired_at),
+            metrics: Set(version.metrics),
+            training_objective: Set(version.training_objective),
+            quality_gate_report: Set(version.quality_gate_report),
+            publication_status: Set(version.publication_status),
+            published_at: Set(version.published_at),
+            retired_at: Set(version.retired_at),
             created_at: ActiveValue::NotSet,
         })
     }

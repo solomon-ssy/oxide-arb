@@ -16,5 +16,7 @@
 mod applicator;
 pub(crate) mod store;
 
-pub use applicator::{PolicySnapshotApplicator, PolicySnapshotSubscribers};
+pub use applicator::{
+    CommittedPolicyApplicator, PolicySnapshotApplicator, PolicySnapshotSubscribers,
+};
 pub use store::DecisionPolicyStore;

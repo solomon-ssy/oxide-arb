@@ -35,7 +35,9 @@ use quant_pivot_models::{
             NewBacktestReport, NewModelRun, NewModelVersion, NewShadowComparison,
         },
     },
-    entities::quant_model_version::Entity as ModelVersionEntity,
+    entities::quant_model_version::{
+        ActiveModel as ModelVersionActiveModel, Entity as ModelVersionEntity,
+    },
     enums::{
         common::MarketCategory,
         factor::FactorFamily,
@@ -773,8 +775,8 @@ async fn persist_dataset_projection(
                 .expect("model version");
         }
         DatasetProjection::Missing => {
-            let mut active = source_version
-                .try_into_active_model()
+            let mut active: ModelVersionActiveModel = source_version
+                .try_into()
                 .expect("exact model version fixture");
             active.training_dataset_id = Set(None);
             active

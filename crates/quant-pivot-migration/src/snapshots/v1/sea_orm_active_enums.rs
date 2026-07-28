@@ -737,6 +737,8 @@ pub enum QpModelFamily {
 pub enum QpModelGovernanceAction {
     #[sea_orm(string_value = "publish")]
     Publish,
+    #[sea_orm(string_value = "promote_route")]
+    PromoteRoute,
     #[sea_orm(string_value = "retire")]
     Retire,
     #[sea_orm(string_value = "rollback")]
@@ -995,6 +997,8 @@ pub enum QpPolicyActivationKind {
     Initial,
     #[sea_orm(string_value = "promote")]
     Promote,
+    #[sea_orm(string_value = "model_promotion")]
+    ModelPromotion,
     #[sea_orm(string_value = "rollback")]
     Rollback,
 }

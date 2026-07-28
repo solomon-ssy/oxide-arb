@@ -23,7 +23,7 @@ use crate::{
     enums::{
         execution::KillSwitchState, quant::QuantRuntimeMode, settlement::SettlementWritePolicy,
     },
-    runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot},
+    runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot, PolicyApplyReadiness},
     types::TokenId,
 };
 
@@ -144,6 +144,28 @@ pub trait PolicySnapshotPort: Send + Sync {
         &self,
         config: DecisionPolicySnapshot,
     ) -> Result<PreparedPolicySnapshot, ControlError>;
+}
+
+/// Sole process-local convergence boundary from a durable committed bundle to
+/// the complete runtime generation.
+#[async_trait]
+pub trait CommittedPolicyApplyPort: Send + Sync {
+    /// Prepare and apply a bundle that the caller re-read as current durable
+    /// truth.
+    async fn apply_committed(
+        &self,
+        bundle: ActivePolicyBundle,
+    ) -> Result<PolicyApplyReadiness, ControlError>;
+
+    /// Publish a pre-prepared snapshot only after its matching durable commit.
+    fn publish_prepared(
+        &self,
+        prepared: PreparedPolicySnapshot,
+        bundle: ActivePolicyBundle,
+    ) -> Result<PolicyApplyReadiness, ControlError>;
+
+    /// Current desired/applied generation projection.
+    fn readiness(&self) -> PolicyApplyReadiness;
 }
 
 /// One-shot, fully validated runtime snapshot publication command.

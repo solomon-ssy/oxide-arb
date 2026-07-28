@@ -2343,12 +2343,51 @@
     {
       "collation": null,
       "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "promotion_permit_id",
+      "nullable": true,
+      "ordinal": 21,
+      "storage": "p",
+      "table": "policy_activation",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "promotion_transaction_hash",
+      "nullable": true,
+      "ordinal": 22,
+      "storage": "x",
+      "table": "policy_activation",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "model_governance_audit_id",
+      "nullable": true,
+      "ordinal": 23,
+      "storage": "p",
+      "table": "policy_activation",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
       "default": "CURRENT_TIMESTAMP",
       "generated": "",
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 21,
+      "ordinal": 24,
       "storage": "p",
       "table": "policy_activation",
       "type": "timestamp with time zone"
@@ -2525,12 +2564,51 @@
     {
       "collation": null,
       "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "promotion_permit_id",
+      "nullable": true,
+      "ordinal": 14,
+      "storage": "p",
+      "table": "policy_activation_audit",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "promotion_transaction_hash",
+      "nullable": true,
+      "ordinal": 15,
+      "storage": "x",
+      "table": "policy_activation_audit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "model_governance_audit_id",
+      "nullable": true,
+      "ordinal": 16,
+      "storage": "p",
+      "table": "policy_activation_audit",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
       "default": "CURRENT_TIMESTAMP",
       "generated": "",
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 17,
       "storage": "p",
       "table": "policy_activation_audit",
       "type": "timestamp with time zone"
@@ -2603,12 +2681,51 @@
     {
       "collation": null,
       "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "promotion_permit_id",
+      "nullable": true,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "policy_activation_event_outbox",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "promotion_transaction_hash",
+      "nullable": true,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "policy_activation_event_outbox",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "model_governance_audit_id",
+      "nullable": true,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "policy_activation_event_outbox",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
       "default": "CURRENT_TIMESTAMP",
       "generated": "",
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 9,
       "storage": "p",
       "table": "policy_activation_event_outbox",
       "type": "timestamp with time zone"
@@ -8638,6 +8755,396 @@
       "default": null,
       "generated": "",
       "identity": "",
+      "name": "promotion_permit_id",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_feedback_promotion_permit",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "idempotency_key",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "scope_hash",
+      "nullable": false,
+      "ordinal": 3,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "issuance_hash",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "profile_ref",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_profile_artifact_id",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "profile_hash",
+      "nullable": false,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "category",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_feedback_promotion_permit",
+      "type": "qp_market_category"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "expected_policy_generation",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_feedback_promotion_permit",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "expected_decision_policy_snapshot_id",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_feedback_promotion_permit",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "expected_snapshot_hash",
+      "nullable": false,
+      "ordinal": 11,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "champion_model_version_id",
+      "nullable": false,
+      "ordinal": 12,
+      "storage": "p",
+      "table": "quant_feedback_promotion_permit",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "champion_serving_contract_hash",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "allowed_runtime_modes",
+      "nullable": false,
+      "ordinal": 14,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "qp_quant_runtime_mode[]"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "non_route_policy_hash",
+      "nullable": false,
+      "ordinal": 15,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "serving_constraints_hash",
+      "nullable": false,
+      "ordinal": 16,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "preflight_hash",
+      "nullable": false,
+      "ordinal": 17,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "issued_by_user_id",
+      "nullable": false,
+      "ordinal": 18,
+      "storage": "p",
+      "table": "quant_feedback_promotion_permit",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "issued_by_username",
+      "nullable": false,
+      "ordinal": 19,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "issued_by_role",
+      "nullable": false,
+      "ordinal": 20,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "issuance_reason",
+      "nullable": false,
+      "ordinal": 21,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "expires_at",
+      "nullable": false,
+      "ordinal": 22,
+      "storage": "p",
+      "table": "quant_feedback_promotion_permit",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "revoked_by_user_id",
+      "nullable": true,
+      "ordinal": 23,
+      "storage": "p",
+      "table": "quant_feedback_promotion_permit",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "revoked_by_username",
+      "nullable": true,
+      "ordinal": 24,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "revoked_by_role",
+      "nullable": true,
+      "ordinal": 25,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "revocation_reason",
+      "nullable": true,
+      "ordinal": 26,
+      "storage": "x",
+      "table": "quant_feedback_promotion_permit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "revoked_at",
+      "nullable": true,
+      "ordinal": 27,
+      "storage": "p",
+      "table": "quant_feedback_promotion_permit",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "name": "revision",
+      "nullable": false,
+      "ordinal": 28,
+      "storage": "p",
+      "table": "quant_feedback_promotion_permit",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "issued_at",
+      "nullable": false,
+      "ordinal": 29,
+      "storage": "p",
+      "table": "quant_feedback_promotion_permit",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "updated_at",
+      "nullable": false,
+      "ordinal": 30,
+      "storage": "p",
+      "table": "quant_feedback_promotion_permit",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
       "name": "feedback_stage_event_id",
       "nullable": false,
       "ordinal": 1,
@@ -9649,12 +10156,38 @@
     {
       "collation": null,
       "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "promotion_permit_id",
+      "nullable": true,
+      "ordinal": 13,
+      "storage": "p",
+      "table": "quant_model_governance_audit",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "promotion_transaction_hash",
+      "nullable": true,
+      "ordinal": 14,
+      "storage": "x",
+      "table": "quant_model_governance_audit",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
       "default": "statement_timestamp()",
       "generated": "",
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 15,
       "storage": "p",
       "table": "quant_model_governance_audit",
       "type": "timestamp with time zone"
@@ -19596,6 +20129,15 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK ((((activation_kind = 'model_promotion'::qp_policy_activation_kind) AND (promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (model_governance_audit_id IS NOT NULL)) OR ((activation_kind <> 'model_promotion'::qp_policy_activation_kind) AND (promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NULL))))",
+      "initially_deferred": false,
+      "name": "ck_policy_activation_model_promotion",
+      "table": "policy_activation",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (activated_by_user_id) REFERENCES \"user\"(id)",
       "initially_deferred": false,
       "name": "fk-policy_activation-activated_by_user_id",
@@ -19632,9 +20174,27 @@
     },
     {
       "deferrable": false,
+      "definition": "FOREIGN KEY (model_governance_audit_id, promotion_permit_id, promotion_transaction_hash) REFERENCES quant_model_governance_audit(audit_id, promotion_permit_id, promotion_transaction_hash)",
+      "initially_deferred": false,
+      "name": "fk_policy_activation_promotion_audit",
+      "table": "policy_activation",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "UNIQUE (idempotency_key)",
       "initially_deferred": false,
       "name": "policy_activation_idempotency_key_key",
+      "table": "policy_activation",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (model_governance_audit_id)",
+      "initially_deferred": false,
+      "name": "policy_activation_model_governance_audit_id_key",
       "table": "policy_activation",
       "type": "u",
       "validated": true
@@ -19655,6 +20215,42 @@
       "name": "policy_activation_policy_approval_id_key",
       "table": "policy_activation",
       "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (promotion_permit_id)",
+      "initially_deferred": false,
+      "name": "policy_activation_promotion_permit_id_key",
+      "table": "policy_activation",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (promotion_transaction_hash)",
+      "initially_deferred": false,
+      "name": "policy_activation_promotion_transaction_hash_key",
+      "table": "policy_activation",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (policy_activation_id, promotion_permit_id, promotion_transaction_hash, model_governance_audit_id)",
+      "initially_deferred": false,
+      "name": "uq_policy_activation_promotion_binding",
+      "table": "policy_activation",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NULL)) OR ((promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (model_governance_audit_id IS NOT NULL))))",
+      "initially_deferred": false,
+      "name": "ck_policy_activation_audit_promotion",
+      "table": "policy_activation_audit",
+      "type": "c",
       "validated": true
     },
     {
@@ -19686,6 +20282,15 @@
     },
     {
       "deferrable": false,
+      "definition": "FOREIGN KEY (policy_activation_id, promotion_permit_id, promotion_transaction_hash, model_governance_audit_id) REFERENCES policy_activation(policy_activation_id, promotion_permit_id, promotion_transaction_hash, model_governance_audit_id)",
+      "initially_deferred": false,
+      "name": "fk_policy_activation_audit_promotion",
+      "table": "policy_activation_audit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "PRIMARY KEY (audit_event_id)",
       "initially_deferred": false,
       "name": "policy_activation_audit_pkey",
@@ -19700,6 +20305,15 @@
       "name": "policy_activation_audit_policy_activation_id_key",
       "table": "policy_activation_audit",
       "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NULL)) OR ((promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (model_governance_audit_id IS NOT NULL))))",
+      "initially_deferred": false,
+      "name": "ck_policy_activation_outbox_promotion",
+      "table": "policy_activation_event_outbox",
+      "type": "c",
       "validated": true
     },
     {
@@ -19725,6 +20339,15 @@
       "definition": "FOREIGN KEY (policy_activation_id) REFERENCES policy_activation(policy_activation_id)",
       "initially_deferred": false,
       "name": "fk-policy_activation_event_outbox-policy_activation_id",
+      "table": "policy_activation_event_outbox",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (policy_activation_id, promotion_permit_id, promotion_transaction_hash, model_governance_audit_id) REFERENCES policy_activation(policy_activation_id, promotion_permit_id, promotion_transaction_hash, model_governance_audit_id)",
+      "initially_deferred": false,
+      "name": "fk_policy_activation_outbox_promotion",
       "table": "policy_activation_event_outbox",
       "type": "f",
       "validated": true
@@ -20829,6 +21452,114 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((octet_length(idempotency_key) >= 8) AND (octet_length(idempotency_key) <= 128) AND (idempotency_key ~ '^[!-~]+$'::text) AND (scope_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (issuance_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (jsonb_typeof(profile_ref) = 'object'::text) AND (profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text]) AND ((profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb) AND ((profile_ref ->> 'id'::text) ~ '^[a-z0-9_]+$'::text) AND (((profile_ref ->> 'version'::text))::bigint > 0) AND ((profile_ref ->> 'content_hash'::text) = profile_hash) AND (research_profile_artifact_id = ((((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || profile_hash)) AND (((category = 'crypto'::qp_market_category) AND ((profile_ref ->> 'id'::text) = 'crypto_price_15m'::text)) OR ((category = 'weather'::qp_market_category) AND ((profile_ref ->> 'id'::text) = 'weather_forecast_24h'::text))) AND (expected_policy_generation > 0) AND (profile_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (expected_snapshot_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (non_route_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (serving_constraints_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (preflight_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((allowed_runtime_modes = ARRAY['report_only'::qp_quant_runtime_mode]) OR (allowed_runtime_modes = ARRAY['semi_auto'::qp_quant_runtime_mode]) OR (allowed_runtime_modes = ARRAY['auto_execution'::qp_quant_runtime_mode]) OR (allowed_runtime_modes = ARRAY['report_only'::qp_quant_runtime_mode, 'semi_auto'::qp_quant_runtime_mode]) OR (allowed_runtime_modes = ARRAY['report_only'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode]) OR (allowed_runtime_modes = ARRAY['semi_auto'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode]) OR (allowed_runtime_modes = ARRAY['report_only'::qp_quant_runtime_mode, 'semi_auto'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode])) AND (octet_length(issued_by_username) >= 1) AND (octet_length(issued_by_username) <= 256) AND (issued_by_username = btrim(issued_by_username)) AND (issued_by_username !~ '[[:cntrl:]]'::text) AND (issued_by_role ~ '^[a-z0-9_]{1,64}$'::text) AND (octet_length(issuance_reason) >= 1) AND (octet_length(issuance_reason) <= 2048) AND (issuance_reason = btrim(issuance_reason)) AND (issuance_reason !~ '[[:cntrl:]]'::text) AND (expires_at > issued_at) AND (((revoked_by_user_id IS NULL) AND (revoked_by_username IS NULL) AND (revoked_by_role IS NULL) AND (revocation_reason IS NULL) AND (revoked_at IS NULL) AND (revision = 0) AND (updated_at = issued_at)) OR ((revoked_by_user_id IS NOT NULL) AND (revoked_by_username IS NOT NULL) AND (octet_length(revoked_by_username) >= 1) AND (octet_length(revoked_by_username) <= 256) AND (revoked_by_username = btrim(revoked_by_username)) AND (revoked_by_username !~ '[[:cntrl:]]'::text) AND (revoked_by_role ~ '^[a-z0-9_]{1,64}$'::text) AND (revocation_reason IS NOT NULL) AND (octet_length(revocation_reason) >= 1) AND (octet_length(revocation_reason) <= 2048) AND (revocation_reason = btrim(revocation_reason)) AND (revocation_reason !~ '[[:cntrl:]]'::text) AND (revoked_at >= issued_at) AND (revision = 1) AND (updated_at = revoked_at)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_feedback_promotion_permit",
+      "table": "quant_feedback_promotion_permit",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (champion_model_version_id) REFERENCES quant_model_version(model_version_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_feedback_promotion_permit-champion_model_version_id",
+      "table": "quant_feedback_promotion_permit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (expected_decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_feedback_promotion_permit-expected_decision_policy_sna",
+      "table": "quant_feedback_promotion_permit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (issued_by_user_id) REFERENCES \"user\"(id)",
+      "initially_deferred": false,
+      "name": "fk-quant_feedback_promotion_permit-issued_by_user_id",
+      "table": "quant_feedback_promotion_permit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_feedback_promotion_permit-research_profile_artifact_id",
+      "table": "quant_feedback_promotion_permit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (revoked_by_user_id) REFERENCES \"user\"(id)",
+      "initially_deferred": false,
+      "name": "fk-quant_feedback_promotion_permit-revoked_by_user_id",
+      "table": "quant_feedback_promotion_permit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (champion_model_version_id) REFERENCES quant_model_version(model_version_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_permit_champion",
+      "table": "quant_feedback_promotion_permit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (issued_by_user_id) REFERENCES \"user\"(id)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_permit_issuer",
+      "table": "quant_feedback_promotion_permit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_permit_profile",
+      "table": "quant_feedback_promotion_permit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (revoked_by_user_id) REFERENCES \"user\"(id)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_permit_revoker",
+      "table": "quant_feedback_promotion_permit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (expected_decision_policy_snapshot_id) REFERENCES decision_policy_snapshot(decision_policy_snapshot_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_feedback_permit_snapshot",
+      "table": "quant_feedback_promotion_permit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (promotion_permit_id)",
+      "initially_deferred": false,
+      "name": "quant_feedback_promotion_permit_pkey",
+      "table": "quant_feedback_promotion_permit",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK (((event_sequence > 0) AND (occurred_at <= created_at) AND (event_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((evidence_uri IS NULL) AND (evidence_hash IS NULL)) OR ((evidence_uri IS NOT NULL) AND (evidence_hash IS NOT NULL) AND (octet_length(evidence_uri) >= 1) AND (octet_length(evidence_uri) <= 4096) AND (evidence_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text))) AND ((actor IS NULL) OR ((octet_length((actor)::text) >= 1) AND (octet_length((actor)::text) <= 256) AND ((actor)::text = btrim((actor)::text)) AND ((actor)::text !~ '[[:cntrl:]]'::text))) AND ((reason_code IS NULL) OR ((reason_code)::text ~ '^[a-z][a-z0-9_.]{0,127}$'::text)) AND (((event_kind = 'triggered'::qp_feedback_stage_event_kind) AND (stage = 'trigger'::qp_feedback_stage) AND (research_job_id IS NULL) AND (actor IS NOT NULL) AND (reason_code IS NOT NULL)) OR ((event_kind = 'cancellation_requested'::qp_feedback_stage_event_kind) AND (stage <> 'trigger'::qp_feedback_stage) AND (actor IS NOT NULL) AND (reason_code IS NOT NULL)) OR ((event_kind = ANY (ARRAY['job_linked'::qp_feedback_stage_event_kind, 'started'::qp_feedback_stage_event_kind])) AND (stage <> 'trigger'::qp_feedback_stage) AND (research_job_id IS NOT NULL) AND (actor IS NULL) AND (reason_code IS NULL)) OR ((event_kind = 'succeeded'::qp_feedback_stage_event_kind) AND (stage <> 'trigger'::qp_feedback_stage) AND (research_job_id IS NOT NULL) AND (actor IS NULL) AND (reason_code IS NULL) AND (evidence_uri IS NOT NULL)) OR ((event_kind = ANY (ARRAY['failed'::qp_feedback_stage_event_kind, 'cancelled'::qp_feedback_stage_event_kind, 'lease_recovered'::qp_feedback_stage_event_kind])) AND (stage <> 'trigger'::qp_feedback_stage) AND (research_job_id IS NOT NULL) AND (actor IS NULL) AND (reason_code IS NOT NULL)))))",
       "initially_deferred": false,
       "name": "ck_quant_feedback_stage_event",
@@ -21009,9 +21740,18 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((jsonb_typeof(detail) = 'object'::text) AND ((detail ->> 'action'::text) = (action)::text)))",
+      "definition": "CHECK (((jsonb_typeof(detail) = 'object'::text) AND ((detail ->> 'action'::text) = (action)::text) AND (pg_column_size(detail) <= 65536)))",
       "initially_deferred": false,
       "name": "ck_quant_model_governance_audit_detail_action",
+      "table": "quant_model_governance_audit",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((action = 'promote_route'::qp_model_governance_action) AND (promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (((detail #>> '{record,promotion_permit_id}'::text[]))::uuid = promotion_permit_id) AND ((detail #>> '{record,transaction_hash}'::text[]) = promotion_transaction_hash)) OR ((action <> 'promote_route'::qp_model_governance_action) AND (promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL))))",
+      "initially_deferred": false,
+      "name": "ck_quant_model_governance_audit_promotion",
       "table": "quant_model_governance_audit",
       "type": "c",
       "validated": true
@@ -21021,6 +21761,15 @@
       "definition": "FOREIGN KEY (model_version_id) REFERENCES quant_model_version(model_version_id)",
       "initially_deferred": false,
       "name": "fk-quant_model_governance_audit-model_version_id",
+      "table": "quant_model_governance_audit",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (promotion_permit_id) REFERENCES quant_feedback_promotion_permit(promotion_permit_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_model_governance_audit-promotion_permit_id",
       "table": "quant_model_governance_audit",
       "type": "f",
       "validated": true
@@ -21041,6 +21790,33 @@
       "name": "quant_model_governance_audit_pkey",
       "table": "quant_model_governance_audit",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (promotion_permit_id)",
+      "initially_deferred": false,
+      "name": "quant_model_governance_audit_promotion_permit_id_key",
+      "table": "quant_model_governance_audit",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (promotion_transaction_hash)",
+      "initially_deferred": false,
+      "name": "quant_model_governance_audit_promotion_transaction_hash_key",
+      "table": "quant_model_governance_audit",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (audit_id, promotion_permit_id, promotion_transaction_hash)",
+      "initially_deferred": false,
+      "name": "uq_quant_model_governance_audit_promotion",
+      "table": "quant_model_governance_audit",
+      "type": "u",
       "validated": true
     },
     {
@@ -24018,6 +24794,7 @@
     {
       "labels": [
         "publish",
+        "promote_route",
         "retire",
         "rollback",
         "bind_calibration",
@@ -24169,6 +24946,7 @@
       "labels": [
         "initial",
         "promote",
+        "model_promotion",
         "rollback"
       ],
       "name": "qp_policy_activation_kind"
@@ -24769,7 +25547,7 @@
       "volatility": "v"
     },
     {
-      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_feedback_cycle()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'feedback-cycle row is immutable after terminalization; DELETE is not permitted'; END IF; IF (to_jsonb(NEW) - ARRAY['status', 'decision', 'terminal_reason_code', 'generation', 'lease_owner', 'lease_expires_at', 'cancel_requested_at', 'started_at', 'completed_at', 'updated_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'decision', 'terminal_reason_code', 'generation', 'lease_owner', 'lease_expires_at', 'cancel_requested_at', 'started_at', 'completed_at', 'updated_at']) THEN RAISE EXCEPTION 'feedback-cycle frozen identity cannot change'; END IF; IF OLD.status IN ('succeeded'::public.qp_feedback_cycle_status, 'failed'::public.qp_feedback_cycle_status, 'cancelled'::public.qp_feedback_cycle_status) OR NEW.generation <> OLD.generation + 1 OR NOT ((OLD.status = 'queued'::public.qp_feedback_cycle_status AND NEW.status IN ('running'::public.qp_feedback_cycle_status, 'cancelled'::public.qp_feedback_cycle_status)) OR (OLD.status = 'running'::public.qp_feedback_cycle_status AND NEW.status IN ('running'::public.qp_feedback_cycle_status, 'succeeded'::public.qp_feedback_cycle_status, 'failed'::public.qp_feedback_cycle_status, 'cancelled'::public.qp_feedback_cycle_status))) THEN RAISE EXCEPTION 'illegal feedback-cycle CAS transition from % generation % to % generation %', OLD.status, OLD.generation, NEW.status, NEW.generation; END IF; NEW.updated_at = statement_timestamp(); RETURN NEW; END; $function$\n",
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_feedback_cycle()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'feedback-cycle row is immutable after terminalization; DELETE is not permitted'; END IF; IF (to_jsonb(NEW) - ARRAY['status', 'decision', 'terminal_reason_code', 'generation', 'lease_owner', 'lease_expires_at', 'cancel_requested_at', 'started_at', 'completed_at', 'updated_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'decision', 'terminal_reason_code', 'generation', 'lease_owner', 'lease_expires_at', 'cancel_requested_at', 'started_at', 'completed_at', 'updated_at']) THEN RAISE EXCEPTION 'feedback-cycle frozen identity cannot change'; END IF; IF OLD.status = 'succeeded'::public.qp_feedback_cycle_status AND OLD.decision = 'candidate_ready'::public.qp_feedback_decision AND NEW.status = 'succeeded'::public.qp_feedback_cycle_status AND NEW.decision = 'promoted'::public.qp_feedback_decision THEN IF NEW.generation <> OLD.generation + 1 OR NEW.terminal_reason_code IS DISTINCT FROM OLD.terminal_reason_code OR NEW.lease_owner IS DISTINCT FROM OLD.lease_owner OR NEW.lease_expires_at IS DISTINCT FROM OLD.lease_expires_at OR NEW.cancel_requested_at IS DISTINCT FROM OLD.cancel_requested_at OR NEW.started_at IS DISTINCT FROM OLD.started_at OR NEW.completed_at IS DISTINCT FROM OLD.completed_at OR NOT EXISTS (SELECT 1 FROM public.policy_activation AS activation INNER JOIN public.quant_model_governance_audit AS audit ON audit.audit_id = activation.model_governance_audit_id AND audit.promotion_permit_id = activation.promotion_permit_id AND audit.promotion_transaction_hash = activation.promotion_transaction_hash WHERE activation.activation_kind = 'model_promotion'::public.qp_policy_activation_kind AND ((audit.detail #>> '{record,preflight,feedback_cycle_id}')::uuid) = OLD.feedback_cycle_id) THEN RAISE EXCEPTION 'CandidateReady-to-Promoted requires one exact committed promotion graph'; END IF; NEW.updated_at = statement_timestamp(); RETURN NEW; END IF; IF OLD.status IN ('succeeded'::public.qp_feedback_cycle_status, 'failed'::public.qp_feedback_cycle_status, 'cancelled'::public.qp_feedback_cycle_status) OR NEW.generation <> OLD.generation + 1 OR NOT ((OLD.status = 'queued'::public.qp_feedback_cycle_status AND NEW.status IN ('running'::public.qp_feedback_cycle_status, 'cancelled'::public.qp_feedback_cycle_status)) OR (OLD.status = 'running'::public.qp_feedback_cycle_status AND NEW.status IN ('running'::public.qp_feedback_cycle_status, 'succeeded'::public.qp_feedback_cycle_status, 'failed'::public.qp_feedback_cycle_status, 'cancelled'::public.qp_feedback_cycle_status))) THEN RAISE EXCEPTION 'illegal feedback-cycle CAS transition from % generation % to % generation %', OLD.status, OLD.generation, NEW.status, NEW.generation; END IF; NEW.updated_at = statement_timestamp(); RETURN NEW; END; $function$\n",
       "identity_arguments": "",
       "language": "plpgsql",
       "name": "trigger_guard_feedback_cycle",
@@ -24803,6 +25581,16 @@
       "identity_arguments": "",
       "language": "plpgsql",
       "name": "trigger_guard_model_version",
+      "owner": "$schema_owner",
+      "result": "trigger",
+      "security_definer": false,
+      "volatility": "v"
+    },
+    {
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_promotion_permit()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'promotion permit is durable; DELETE is not permitted'; END IF; IF NEW IS NOT DISTINCT FROM OLD THEN RETURN OLD; END IF; IF (to_jsonb(NEW) - ARRAY['revoked_by_user_id', 'revoked_by_username', 'revoked_by_role', 'revocation_reason', 'revoked_at', 'revision', 'updated_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['revoked_by_user_id', 'revoked_by_username', 'revoked_by_role', 'revocation_reason', 'revoked_at', 'revision', 'updated_at']) THEN RAISE EXCEPTION 'promotion-permit immutable issuance cannot change'; END IF; IF OLD.revoked_by_user_id IS NOT NULL OR OLD.revoked_by_username IS NOT NULL OR OLD.revoked_by_role IS NOT NULL OR OLD.revocation_reason IS NOT NULL OR OLD.revoked_at IS NOT NULL OR OLD.revision <> 0 THEN RAISE EXCEPTION 'promotion permit is already revoked'; END IF; IF NEW.revoked_by_user_id IS NULL OR NEW.revoked_by_username IS NULL OR NEW.revoked_by_role IS NULL OR NEW.revocation_reason IS NULL OR NEW.revoked_at IS NOT NULL OR NEW.revision <> OLD.revision + 1 OR NEW.updated_at IS DISTINCT FROM OLD.updated_at THEN RAISE EXCEPTION 'promotion permit revoke requires one complete DB-clock-owned CAS tuple'; END IF; NEW.revoked_at = statement_timestamp(); NEW.updated_at = NEW.revoked_at; RETURN NEW; END; $function$\n",
+      "identity_arguments": "",
+      "language": "plpgsql",
+      "name": "trigger_guard_promotion_permit",
       "owner": "$schema_owner",
       "result": "trigger",
       "security_definer": false,
@@ -24937,6 +25725,13 @@
       "grantee": "$schema_owner",
       "object_kind": "function",
       "object_name": "trigger_guard_model_version()",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "trigger_guard_promotion_permit()",
       "privilege": "EXECUTE"
     },
     {
@@ -27527,6 +28322,55 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_feedback_event_outbox",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_promotion_permit",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_promotion_permit",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_promotion_permit",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_promotion_permit",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_promotion_permit",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_promotion_permit",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_promotion_permit",
       "privilege": "UPDATE"
     },
     {
@@ -30599,6 +31443,16 @@
       "valid": true
     },
     {
+      "definition": "CREATE UNIQUE INDEX policy_activation_model_governance_audit_id_key ON public.policy_activation USING btree (model_governance_audit_id)",
+      "method": "btree",
+      "name": "policy_activation_model_governance_audit_id_key",
+      "primary": false,
+      "ready": true,
+      "table": "policy_activation",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE UNIQUE INDEX policy_activation_pkey ON public.policy_activation USING btree (policy_activation_id)",
       "method": "btree",
       "name": "policy_activation_pkey",
@@ -30612,6 +31466,36 @@
       "definition": "CREATE UNIQUE INDEX policy_activation_policy_approval_id_key ON public.policy_activation USING btree (policy_approval_id)",
       "method": "btree",
       "name": "policy_activation_policy_approval_id_key",
+      "primary": false,
+      "ready": true,
+      "table": "policy_activation",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX policy_activation_promotion_permit_id_key ON public.policy_activation USING btree (promotion_permit_id)",
+      "method": "btree",
+      "name": "policy_activation_promotion_permit_id_key",
+      "primary": false,
+      "ready": true,
+      "table": "policy_activation",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX policy_activation_promotion_transaction_hash_key ON public.policy_activation USING btree (promotion_transaction_hash)",
+      "method": "btree",
+      "name": "policy_activation_promotion_transaction_hash_key",
+      "primary": false,
+      "ready": true,
+      "table": "policy_activation",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_policy_activation_promotion_binding ON public.policy_activation USING btree (policy_activation_id, promotion_permit_id, promotion_transaction_hash, model_governance_audit_id)",
+      "method": "btree",
+      "name": "uq_policy_activation_promotion_binding",
       "primary": false,
       "ready": true,
       "table": "policy_activation",
@@ -31789,6 +32673,56 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_feedback_permit_active_scope ON public.quant_feedback_promotion_permit USING btree (research_profile_artifact_id, category, expires_at, promotion_permit_id) WHERE (revoked_at IS NULL)",
+      "method": "btree",
+      "name": "idx_quant_feedback_permit_active_scope",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_promotion_permit",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_feedback_promotion_permit_pkey ON public.quant_feedback_promotion_permit USING btree (promotion_permit_id)",
+      "method": "btree",
+      "name": "quant_feedback_promotion_permit_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_feedback_promotion_permit",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_feedback_permit_idempotency ON public.quant_feedback_promotion_permit USING btree (idempotency_key)",
+      "method": "btree",
+      "name": "uq_quant_feedback_permit_idempotency",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_promotion_permit",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_feedback_permit_issuance ON public.quant_feedback_promotion_permit USING btree (issuance_hash)",
+      "method": "btree",
+      "name": "uq_quant_feedback_permit_issuance",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_promotion_permit",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_feedback_permit_scope ON public.quant_feedback_promotion_permit USING btree (scope_hash)",
+      "method": "btree",
+      "name": "uq_quant_feedback_permit_scope",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_promotion_permit",
+      "unique": true,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_feedback_stage_job ON public.quant_feedback_stage_event USING btree (research_job_id) WHERE (research_job_id IS NOT NULL)",
       "method": "btree",
       "name": "idx_quant_feedback_stage_job",
@@ -32003,6 +32937,36 @@
       "method": "btree",
       "name": "quant_model_governance_audit_pkey",
       "primary": true,
+      "ready": true,
+      "table": "quant_model_governance_audit",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_model_governance_audit_promotion_permit_id_key ON public.quant_model_governance_audit USING btree (promotion_permit_id)",
+      "method": "btree",
+      "name": "quant_model_governance_audit_promotion_permit_id_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_model_governance_audit",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_model_governance_audit_promotion_transaction_hash_key ON public.quant_model_governance_audit USING btree (promotion_transaction_hash)",
+      "method": "btree",
+      "name": "quant_model_governance_audit_promotion_transaction_hash_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_model_governance_audit",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_model_governance_audit_promotion ON public.quant_model_governance_audit USING btree (audit_id, promotion_permit_id, promotion_transaction_hash)",
+      "method": "btree",
+      "name": "uq_quant_model_governance_audit_promotion",
+      "primary": false,
       "ready": true,
       "table": "quant_model_governance_audit",
       "unique": true,
@@ -33924,6 +34888,13 @@
     },
     {
       "kind": "r",
+      "name": "quant_feedback_promotion_permit",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
       "name": "quant_feedback_stage_event",
       "owner": "$schema_owner",
       "rls_enabled": false,
@@ -34552,6 +35523,12 @@
       "enabled": "O",
       "name": "trg_quant_feedback_event_outbox_guard",
       "table": "quant_feedback_event_outbox"
+    },
+    {
+      "definition": "CREATE TRIGGER trg_quant_feedback_promotion_permit_guard BEFORE DELETE OR UPDATE ON public.quant_feedback_promotion_permit FOR EACH ROW EXECUTE FUNCTION trigger_guard_promotion_permit()",
+      "enabled": "O",
+      "name": "trg_quant_feedback_promotion_permit_guard",
+      "table": "quant_feedback_promotion_permit"
     },
     {
       "definition": "CREATE TRIGGER trg_quant_feedback_stage_event_append_only BEFORE DELETE OR UPDATE ON public.quant_feedback_stage_event FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",

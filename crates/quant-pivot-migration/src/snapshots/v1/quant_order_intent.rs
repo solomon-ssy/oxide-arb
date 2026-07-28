@@ -15,6 +15,7 @@ pub struct Model {
     pub order_intent_id: Uuid,
     pub recommendation_id: Uuid,
     pub execution_account_id: Uuid,
+    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
     pub runtime_mode: QpQuantRuntimeMode,
     pub decision_policy_snapshot_id: Uuid,
     pub model_version_id: Uuid,

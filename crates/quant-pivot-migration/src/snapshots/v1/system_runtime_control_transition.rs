@@ -12,7 +12,9 @@ pub struct Model {
     pub runtime_control_transition_id: Uuid,
     pub from_revision: i64,
     pub to_revision: i64,
+    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
     pub from_quant_runtime_mode: QpQuantRuntimeMode,
+    #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
     pub to_quant_runtime_mode: QpQuantRuntimeMode,
     pub from_settlement_write_policy: QpSettlementWritePolicy,
     pub to_settlement_write_policy: QpSettlementWritePolicy,

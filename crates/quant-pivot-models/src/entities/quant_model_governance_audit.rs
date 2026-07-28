@@ -3,12 +3,13 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-use super::{quant_model_version, quant_training_dataset};
+use super::{quant_feedback_promotion_permit, quant_model_version, quant_training_dataset};
 use crate::{
     domain::quant::ModelGovernanceAuditDetail,
     enums::quant::{ModelGovernanceAction, PublicationStatus},
     types::{
-        AuditEventId, ModelGovernanceAuditId, ModelVersionId, RoleCode, TrainingDatasetId, UserId,
+        AuditEventId, ContentHash, ModelGovernanceAuditId, ModelVersionId, PromotionPermitId,
+        RoleCode, TrainingDatasetId, UserId,
     },
 };
 
@@ -30,6 +31,10 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub detail: ModelGovernanceAuditDetail,
     pub audit_event_id: AuditEventId,
+    #[sea_orm(unique)]
+    pub promotion_permit_id: Option<PromotionPermitId>,
+    #[sea_orm(unique)]
+    pub promotion_transaction_hash: Option<ContentHash>,
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(
@@ -46,6 +51,13 @@ pub struct Model {
         to = "training_dataset_id"
     )]
     pub training_dataset: BelongsTo<Option<quant_training_dataset::Entity>>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "PromotionPermit",
+        from = "promotion_permit_id",
+        to = "promotion_permit_id"
+    )]
+    pub promotion_permit: BelongsTo<Option<quant_feedback_promotion_permit::Entity>>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
