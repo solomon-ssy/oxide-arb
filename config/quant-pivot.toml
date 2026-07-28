@@ -422,6 +422,15 @@ model_train_concurrency = 1
 backtest_concurrency = 2
 # Deterministic feature-parity replays are I/O and CPU intensive; serialize.
 feature_parity_concurrency = 1
+# Frozen coverage scans and statistical drift both consume immutable artifacts;
+# serialize each kind independently.
+feedback_coverage_concurrency = 1
+feedback_drift_concurrency = 1
+feedback_learning_concurrency = 1
+# Maximum resident feedback cycles owned concurrently by one process. Each
+# cycle has at most one linked stage job; global/per-kind job caps remain the
+# compute authority. Default: 2.
+feedback_cycle_concurrency = 2
 # Executable policy fits are artifact-heavy and deterministic; serialize.
 trade_policy_fit_concurrency = 1
 trade_policy_validation_concurrency = 1
@@ -448,11 +457,18 @@ plan_sample_markets = 200
 # Minimum interval between throttled progress writes (DB heartbeat + WS push), ms.
 # Default: 500.
 progress_min_interval_ms = 500
+# Running-cycle DB-clock age that emits a deduplicated scheduler-health alert.
+# The scheduler never fabricates a terminal outcome. Default: 21600 (6 hours).
+feedback_stuck_secs = 21600
+# External alert dispatch timeout, bounded by the shutdown drain. Default: 2.
+feedback_alert_timeout_secs = 2
+# Repeated durable-condition alert dedupe horizon, seconds. Default: 900.
+feedback_alert_dedupe_secs = 900
 # Bounded grace period (seconds) a graceful shutdown waits for in-flight jobs to
 # cooperatively unwind at a section/phase boundary before their rows are
 # explicitly re-queued for the next epoch. Keep short: a build restarts from
-# scratch on re-lease, so draining only lets near-complete work finish. Default: 5.
-shutdown_drain_secs = 5
+# scratch on re-lease, so draining only lets near-complete work finish. Default: 3.
+shutdown_drain_secs = 3
 
 [quant.account]
 # Purpose: Polymarket funder address for keyless Data API position reads

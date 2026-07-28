@@ -370,6 +370,7 @@ mod tests {
         BacktestRunResult {
             report,
             sample_outcomes: samples,
+            portfolio_returns: Vec::new(),
         }
     }
 

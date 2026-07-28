@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use crate::{
-    domain::quant::FeedbackCycleKey,
+    domain::{ports::FeedbackCandidateFamily, quant::FeedbackCycleKey},
     enums::quant::{FeedbackCycleStatus, FeedbackDecision, FeedbackTriggerFamily},
     types::{
         CapabilityRegistryHashes, ContentHash, FeedbackCycleId, ModelVersionId,
@@ -32,6 +32,8 @@ pub struct Model {
     pub capability_registry_hashes: CapabilityRegistryHashes,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub candidate_family: FeedbackCandidateFamily,
     pub candidate_family_hash: ContentHash,
     pub status: FeedbackCycleStatus,
     pub decision: Option<FeedbackDecision>,

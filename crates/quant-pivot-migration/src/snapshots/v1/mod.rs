@@ -50,6 +50,7 @@ pub mod quant_feature_parity_subject;
 pub mod quant_feature_vector;
 pub mod quant_feedback_cycle;
 pub mod quant_feedback_evaluation_use;
+pub mod quant_feedback_event_outbox;
 pub mod quant_feedback_stage_event;
 pub mod quant_market_linkage;
 pub mod quant_market_linkage_source;
@@ -151,6 +152,7 @@ pub const TABLES: &[&str] = &[
     "quant_factor_value",
     "quant_feedback_cycle",
     "quant_feedback_evaluation_use",
+    "quant_feedback_event_outbox",
     "quant_feedback_stage_event",
     "quant_feature_parity_candidate",
     "quant_feature_parity_run",
@@ -386,6 +388,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_factor_value.rs"),
     include_bytes!("quant_feedback_cycle.rs"),
     include_bytes!("quant_feedback_evaluation_use.rs"),
+    include_bytes!("quant_feedback_event_outbox.rs"),
     include_bytes!("quant_feedback_stage_event.rs"),
     include_bytes!("quant_feature_parity_candidate.rs"),
     include_bytes!("quant_feature_parity_run.rs"),

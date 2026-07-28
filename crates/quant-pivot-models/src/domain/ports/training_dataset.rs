@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     domain::{
         api::{BuildTrainingDatasetRequest, TrainingDatasetPlanView, TrainingDatasetView},
+        ports::FeedbackDatasetBuildRequest,
         quant::{JobProgressSink, TrainingDatasetInfo},
     },
     types::{ContentHash, ResearchEvaluationTrack, TrainingDatasetId},
@@ -69,4 +70,16 @@ pub trait TrainingDatasetPort: Send + Sync {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetView>;
+
+    /// Materialize a Dataset owned by one frozen feedback cycle.
+    ///
+    /// This authority is intentionally absent from HTTP routes. The exact
+    /// cohort window, source lineage, purpose, and preassigned identity are
+    /// frozen in the durable learning-stage job.
+    async fn build_feedback(
+        &self,
+        request: FeedbackDatasetBuildRequest,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<TrainingDatasetInfo>;
 }

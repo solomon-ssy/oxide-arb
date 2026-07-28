@@ -48,7 +48,7 @@ expression: recommendation_immediate_entry()
         "profile_ref": {
           "id": "pooled_1h_control",
           "version": 3,
-          "content_hash": "blake3:84c34e2ad55d79bb67db2804a4371b105cc430890282381c1e9f25f623aad564"
+          "content_hash": "blake3:c14628f49a8aae856f11d644d6c9f550eec749f055e7711dc4e0b7067a1bce84"
         },
         "category": "politics",
         "horizon_secs": 86400,

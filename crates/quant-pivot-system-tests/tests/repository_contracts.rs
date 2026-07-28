@@ -52,8 +52,22 @@ mod execution_submission;
 mod factor_revision;
 #[path = "repository/research/feature_parity.rs"]
 mod feature_parity;
+#[path = "repository/research/feedback_boot_schema.rs"]
+mod feedback_boot_schema;
 #[path = "repository/research/feedback_cohort.rs"]
 mod feedback_cohort;
+#[path = "repository/research/feedback_coordinator.rs"]
+mod feedback_coordinator;
+#[path = "repository/research/feedback_cycle_repository.rs"]
+mod feedback_cycle_repository;
+#[path = "repository/research/feedback_decision_stage.rs"]
+mod feedback_decision_stage;
+#[path = "repository/research/feedback_learning_stage.rs"]
+mod feedback_learning_stage;
+#[path = "repository/research/feedback_shadow_stage.rs"]
+mod feedback_shadow_stage;
+#[path = "repository/research/feedback_signal_stage.rs"]
+mod feedback_signal_stage;
 #[path = "repository/catalog/market_linkage.rs"]
 mod market_linkage;
 #[path = "repository/catalog/market_page.rs"]
@@ -272,13 +286,6 @@ async fn run_research_scenarios() -> Result<(), String> {
         model_registry::model_version_rejects_boundary,
         model_registry::published_artifacts_coexist_explicit,
         model_registry::published_picker_catalog_filters,
-        research_job::job_kind_match_params,
-        research_job::finalize_requires_running_owner,
-        research_job::stale_rejected_after_reclaim,
-        research_job::requeue_inflight_requeues_recovery,
-        research_job::requeue_inflight_ignores_rows,
-        research_job::requeue_inflight_quarantines_cap,
-        research_job::double_finalize_returns_conflict,
         research_readiness::readiness_evidence_scoped_only,
         research_readiness::readiness_evidence_rejects_tampering,
         research_readiness::shadow_missing_without_fallbacks,
@@ -296,6 +303,44 @@ async fn execution_atomic_unique_concurrent() {
     ))
     .await
     .expect("start execution identity PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpcv_commit_contracts() {
+    Box::pin(with_postgres_suite(
+        backtest_path_set::quant_backtest_set_crud(),
+    ))
+    .await
+    .expect("start atomic CPCV commit PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn research_job_feedback_contracts() {
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(
+            research_job::feedback_enqueue_exact_retry,
+            research_job::feedback_retry_lineage,
+        );
+    }))
+    .await
+    .expect("start feedback research-job PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn research_job_recovery_contracts() {
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(
+            research_job::job_kind_match_params,
+            research_job::finalize_requires_running_owner,
+            research_job::stale_rejected_after_reclaim,
+            research_job::requeue_inflight_requeues_recovery,
+            research_job::requeue_inflight_ignores_rows,
+            research_job::requeue_inflight_quarantines_cap,
+            research_job::double_finalize_returns_conflict,
+        );
+    }))
+    .await
+    .expect("start research-job recovery PostgreSQL suite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -351,6 +396,98 @@ async fn factor_revision_contracts() {
     }))
     .await
     .expect("start factor-revision PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_boot_schema_contracts() {
+    Box::pin(with_postgres_suite(
+        feedback_boot_schema::feedback_schema_rejects_drift(),
+    ))
+    .await
+    .expect("start feedback boot-schema PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_cycle_repository_contracts() {
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(
+            feedback_cycle_repository::trigger_exact_retry,
+            feedback_cycle_repository::outbox_delivery_contracts,
+            feedback_cycle_repository::skip_locked_claims,
+            feedback_cycle_repository::lease_cas_recovery,
+            feedback_cycle_repository::evidence_append_contracts,
+        );
+    }))
+    .await
+    .expect("start feedback-cycle repository PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_coordinator_contracts() {
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(
+            feedback_coordinator::enqueue_gap_recovers,
+            feedback_coordinator::terminal_wake_advances,
+            feedback_coordinator::running_cancel_waits,
+            feedback_coordinator::job_orphan_restarts,
+            feedback_coordinator::failed_job_stops,
+            feedback_coordinator::dag_completes,
+            feedback_coordinator::empty_recovery_starts,
+            feedback_coordinator::lease_recovery_resumes,
+            feedback_coordinator::bounded_metrics_alerts,
+        );
+    }))
+    .await
+    .expect("start feedback-coordinator PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_learning_stage_contracts() {
+    Box::pin(with_postgres_suite(async {
+        run_scenarios!(
+            feedback_learning_stage::cycle_drift_rejected,
+            feedback_learning_stage::result_drift_rejected,
+            feedback_learning_stage::exact_chain_replays,
+        );
+    }))
+    .await
+    .expect("start feedback-learning stage PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shadow_observation_contracts() {
+    Box::pin(with_postgres_suite(
+        model_governance::shadow_window_is_exact(),
+    ))
+    .await
+    .expect("start exact shadow-observation PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_shadow_stage_contracts() {
+    Box::pin(with_postgres_suite(
+        feedback_shadow_stage::terminal_restart_tamper(),
+    ))
+    .await
+    .expect("start feedback-shadow stage PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_decision_stage_contracts() {
+    Box::pin(with_postgres_suite(
+        feedback_decision_stage::terminal_restart_tamper(),
+    ))
+    .await
+    .expect("start feedback-decision stage PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_signal_stage_contracts() {
+    Box::pin(with_postgres_suite(
+        feedback_signal_stage::signal_stages_isolate_parity(),
+    ))
+    .await
+    .expect("start feedback-signal stage PostgreSQL suite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

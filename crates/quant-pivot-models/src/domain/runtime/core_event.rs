@@ -369,6 +369,24 @@ pub enum MaterializationRunKind {
     TradePolicyFit,
     /// Independent row-level trade-policy validation.
     TradePolicyValidation,
+    /// Frozen feedback-cohort coverage qualification.
+    FeedbackCoverage,
+    /// Champion-relative data, concept, and label drift qualification.
+    FeedbackDrift,
+    /// Feedback-owned candidate Dataset sealing.
+    FeedbackDatasetSeal,
+    /// Feedback-owned candidate model training.
+    FeedbackTraining,
+    /// Feedback-owned candidate probability calibration.
+    FeedbackCalibration,
+    /// Feedback-owned candidate CPCV qualification.
+    FeedbackCpcv,
+    /// Reserved same-window Romano-Wolf candidate-family comparison.
+    FeedbackComparison,
+    /// Exact published-generation production-shadow observation gate.
+    FeedbackShadowReplay,
+    /// Evidence-only feedback terminal decision.
+    FeedbackDecision,
 }
 
 /// Terminal-or-progress status of a materialization run.
@@ -403,6 +421,15 @@ impl From<ResearchJobKind> for MaterializationRunKind {
             ResearchJobKind::FeatureParity => Self::FeatureParity,
             ResearchJobKind::TradePolicyFit => Self::TradePolicyFit,
             ResearchJobKind::TradePolicyValidation => Self::TradePolicyValidation,
+            ResearchJobKind::FeedbackCoverage => Self::FeedbackCoverage,
+            ResearchJobKind::FeedbackDrift => Self::FeedbackDrift,
+            ResearchJobKind::FeedbackDatasetSeal => Self::FeedbackDatasetSeal,
+            ResearchJobKind::FeedbackTraining => Self::FeedbackTraining,
+            ResearchJobKind::FeedbackCalibration => Self::FeedbackCalibration,
+            ResearchJobKind::FeedbackCpcv => Self::FeedbackCpcv,
+            ResearchJobKind::FeedbackComparison => Self::FeedbackComparison,
+            ResearchJobKind::FeedbackShadowReplay => Self::FeedbackShadowReplay,
+            ResearchJobKind::FeedbackDecision => Self::FeedbackDecision,
         }
     }
 }

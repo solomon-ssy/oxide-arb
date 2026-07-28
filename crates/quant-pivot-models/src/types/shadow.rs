@@ -6,8 +6,11 @@ use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    enums::quant::ModelWeightSource,
-    types::{ContentHash, ModelVersionId, Probability, ShadowComparisonId},
+    enums::{common::MarketCategory, quant::ModelWeightSource},
+    types::{
+        ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration, Probability,
+        ResearchProfileArtifactId, ShadowComparisonId,
+    },
 };
 
 /// Per-market ranking divergence over the markets scored by both models.
@@ -45,6 +48,13 @@ pub struct ShadowComparison {
     pub shadow_comparison_id: ShadowComparisonId,
     pub active_model_version_id: ModelVersionId,
     pub shadow_model_version_id: ModelVersionId,
+    pub active_serving_contract_hash: ContentHash,
+    pub shadow_serving_contract_hash: ContentHash,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    pub category_scope: Option<MarketCategory>,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub decision_policy_snapshot_hash: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
     pub weight_source: ModelWeightSource,
     pub decision_at: DateTime<Utc>,
     pub topn_overlap: Probability,

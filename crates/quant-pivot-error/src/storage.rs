@@ -87,6 +87,16 @@ pub mod entity {
     pub const QUANT_DOMAIN_EVENT_OUTBOX: &str = "quant_domain_event_outbox";
     /// `quant_research_job`.
     pub const QUANT_RESEARCH_JOB: &str = "quant_research_job";
+    /// `quant_feedback_cycle`.
+    pub const QUANT_FEEDBACK_CYCLE: &str = "quant_feedback_cycle";
+    /// `quant_feedback_stage_event`.
+    pub const QUANT_FEEDBACK_STAGE_EVENT: &str = "quant_feedback_stage_event";
+    /// `quant_feedback_event_outbox`.
+    pub const QUANT_FEEDBACK_EVENT_OUTBOX: &str = "quant_feedback_event_outbox";
+    /// `quant_drift_report`.
+    pub const QUANT_DRIFT_REPORT: &str = "quant_drift_report";
+    /// `quant_feedback_evaluation_use`.
+    pub const QUANT_FEEDBACK_EVALUATION_USE: &str = "quant_feedback_evaluation_use";
     /// `quant_feature_parity_run`.
     pub const QUANT_FEATURE_PARITY_RUN: &str = "quant_feature_parity_run";
     /// `quant_feature_parity_state`.
@@ -101,6 +111,8 @@ pub mod entity {
     pub const QUANT_MODEL_RUN: &str = "quant_model_run";
     /// `quant_backtest_report`.
     pub const QUANT_BACKTEST_REPORT: &str = "quant_backtest_report";
+    /// `quant_backtest_path_set`.
+    pub const QUANT_BACKTEST_PATH_SET: &str = "quant_backtest_path_set";
     /// `decision_policy_snapshot`.
     pub const DECISION_POLICY_SNAPSHOT: &str = "decision_policy_snapshot";
     /// `policy_activation`.

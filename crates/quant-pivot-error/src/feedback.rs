@@ -26,6 +26,18 @@ pub enum FeedbackError {
     #[error("invalid feedback stage event: {detail}")]
     InvalidStageEvent { detail: String },
 
+    #[error("invalid feedback research-job identity: {detail}")]
+    InvalidJobIdentity { detail: String },
+
+    #[error("invalid research-job enqueue contract: {detail}")]
+    InvalidJobContract { detail: String },
+
+    #[error("invalid feedback-coordinator configuration: {detail}")]
+    InvalidCoordinatorConfig { detail: String },
+
+    #[error("invalid feedback-coordinator state: {detail}")]
+    InvalidCoordinatorState { detail: String },
+
     #[error("invalid drift report: {detail}")]
     InvalidDriftReport { detail: String },
 
@@ -34,6 +46,15 @@ pub enum FeedbackError {
 
     #[error("evaluation holdout has already been consumed: {semantic_use_hash}")]
     EvaluationReuse { semantic_use_hash: String },
+
+    #[error("invalid feedback comparison contract: {detail}")]
+    InvalidComparisonContract { detail: String },
+
+    #[error("invalid feedback comparison evidence: {detail}")]
+    InvalidComparisonEvidence { detail: String },
+
+    #[error("feedback comparison same-window mismatch: {detail}")]
+    SameWindowMismatch { detail: String },
 
     #[error(transparent)]
     Hash(#[from] CanonicalDigestError),

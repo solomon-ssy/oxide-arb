@@ -15,6 +15,14 @@ pub trait ModelGovernanceAuditRepository: Send + Sync {
         audit: NewModelGovernanceAudit,
     ) -> Result<ModelGovernanceAuditInfo, StorageError>;
 
+    /// Append once, returning the stored row for an exact identity retry.
+    ///
+    /// Reusing an audit id with any semantic field drift fails closed.
+    async fn append_exact(
+        &self,
+        audit: NewModelGovernanceAudit,
+    ) -> Result<ModelGovernanceAuditInfo, StorageError>;
+
     /// List the audit trail for a model version, most recent first.
     async fn list_by_version(
         &self,

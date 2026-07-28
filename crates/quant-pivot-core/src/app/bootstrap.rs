@@ -54,7 +54,7 @@ pub async fn run(deploy: Arc<DeployConfig>, compute: Arc<ComputeExecutor>) -> Qu
         Arc::clone(&ctx.infra.repos.runtime_config) as Arc<dyn PolicyRepository>,
         ctx.config.quant.research_jobs.max_recovery_attempts,
     ));
-    ctx.register_research_job_worker(&mut runner, job_engine)?;
+    ctx.register_research_runtime(&mut runner, job_engine)?;
     ctx.register_readiness_worker(&mut runner)?;
     ctx.register_feature_parity_scheduler(&mut runner);
 

@@ -1190,6 +1190,23 @@ const INDEXES: &[IndexSpec] = &[
         predicate: Some("(status IN ('queued', 'running'))"),
     },
     IndexSpec {
+        name: "idx_quant_feedback_event_outbox_pending",
+        table: "quant_feedback_event_outbox",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "lease_expires_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "revision",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some("(published_at IS NULL)"),
+    },
+    IndexSpec {
         name: "uq_quant_feedback_stage_sequence",
         table: "quant_feedback_stage_event",
         method: IndexMethod::BTree,
@@ -1330,7 +1347,7 @@ const INDEXES: &[IndexSpec] = &[
                 direction: IndexDirection::Asc,
             },
             IndexColumnSpec {
-                name: "used_at",
+                name: "reserved_at",
                 direction: IndexDirection::Desc,
             },
         ],
@@ -2410,6 +2427,55 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
+        name: "uq_quant_research_job_feedback_root",
+        table: "quant_research_job",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "feedback_cycle_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "feedback_stage",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some("(feedback_cycle_id IS NOT NULL AND parent_job_id IS NULL)"),
+    },
+    IndexSpec {
+        name: "uq_quant_research_job_feedback_retry",
+        table: "quant_research_job",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "parent_job_id",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: Some("(feedback_cycle_id IS NOT NULL AND parent_job_id IS NOT NULL)"),
+    },
+    IndexSpec {
+        name: "idx_quant_research_job_feedback_stage",
+        table: "quant_research_job",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "feedback_cycle_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "feedback_stage",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some("(feedback_cycle_id IS NOT NULL)"),
+    },
+    IndexSpec {
         name: "idx_quant_research_job_status_created",
         table: "quant_research_job",
         method: IndexMethod::BTree,
@@ -2785,6 +2851,47 @@ const INDEXES: &[IndexSpec] = &[
             name: "comparison_hash",
             direction: IndexDirection::Asc,
         }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_shadow_observation_contract_window",
+        table: "quant_shadow_comparison",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "shadow_model_version_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "active_model_version_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "policy_bundle_generation",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "decision_policy_snapshot_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "research_profile_artifact_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "active_serving_contract_hash",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "shadow_serving_contract_hash",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "decision_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
         predicate: None,
     },
     IndexSpec {

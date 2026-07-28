@@ -39,12 +39,14 @@ use quant_pivot_models::{
         model::ModelFamily,
         quant::{CalibrationKind, ModelGovernanceAction, PublicationStatus},
     },
+    hashing::CanonicalDigest,
     runtime_config::{
         DecisionPolicySnapshot, QualityGateConfig, sections::ResearchValidationGatesConfig,
     },
     types::{
         AuditEventId, BacktestReportId, CalibrationArtifactId, ContentHash, DatasetCoverage,
-        FeatureParityRunId, ModelGovernanceAuditId, ModelVersionId, Probability,
+        FeatureParityRunId, ModelGovernanceAuditId, ModelVersionId, Probability, RoleCode,
+        TrainingDatasetId, UserId,
         model_lineage::ModelVersionDerivation,
         model_metrics::{
             MODEL_VERSION_METRICS_FORMAT_VERSION, ModelArtifactTrainingLineage,
@@ -64,9 +66,10 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
-    ModelGovernanceAuditRepository, ModelRegistryRepository, PublishFeatureParityPermit,
-    PublishModelVersionCommit, ShadowComparisonRepository, TrainingDatasetRepository,
+    BacktestPathSetRepository, BacktestReportRepository, BindPublishPathSetCommit,
+    CalibrationArtifactRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
+    PublishFeatureParityPermit, PublishModelVersionCommit, ShadowComparisonRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -82,6 +85,7 @@ use quant_pivot_research::{
     training::{LeakageFindings, scan_future_leakage},
 };
 use rust_decimal::Decimal;
+use serde::Serialize;
 
 use crate::{
     governance::{
@@ -134,6 +138,23 @@ pub struct ModelGovernanceDeps {
 /// Offline model-governance orchestration service.
 pub struct ModelGovernanceService {
     deps: ModelGovernanceDeps,
+}
+
+const GOVERNANCE_AUDIT_IDENTITY_DOMAIN: &str = "quant-pivot/model-governance-audit-identity";
+const GOVERNANCE_AUDIT_IDENTITY_VERSION: u32 = 1;
+
+#[derive(Serialize)]
+struct GovernanceAuditIdentity<'a> {
+    model_version_id: &'a Option<ModelVersionId>,
+    training_dataset_id: &'a Option<TrainingDatasetId>,
+    action: ModelGovernanceAction,
+    actor_user_id: &'a Option<UserId>,
+    actor_username: &'a str,
+    actor_role: &'a Option<RoleCode>,
+    reason: &'a str,
+    before_status: PublicationStatus,
+    after_status: PublicationStatus,
+    detail: &'a ModelGovernanceAuditDetail,
 }
 
 /// A shared gate evaluation: the report plus the shadow summary, which is
@@ -219,6 +240,85 @@ impl ModelGovernanceService {
             .map_err(QuantError::from)
     }
 
+    fn seal_exact_audit(
+        mut audit: NewModelGovernanceAudit,
+    ) -> QuantResult<NewModelGovernanceAudit> {
+        let identity = GovernanceAuditIdentity {
+            model_version_id: &audit.model_version_id,
+            training_dataset_id: &audit.training_dataset_id,
+            action: audit.action,
+            actor_user_id: &audit.actor_user_id,
+            actor_username: &audit.actor_username,
+            actor_role: &audit.actor_role,
+            reason: &audit.reason,
+            before_status: audit.before_status,
+            after_status: audit.after_status,
+            detail: &audit.detail,
+        };
+        let hash = CanonicalDigest::content_hash_typed(
+            GOVERNANCE_AUDIT_IDENTITY_DOMAIN,
+            GOVERNANCE_AUDIT_IDENTITY_VERSION,
+            &identity,
+        )?;
+        audit.audit_id = ModelGovernanceAuditId::from_content_hash(&hash);
+        audit.audit_event_id = AuditEventId::from_content_hash(&hash);
+        Ok(audit)
+    }
+
+    async fn write_exact_audit(&self, audit: NewModelGovernanceAudit) -> QuantResult<()> {
+        self.deps
+            .governance_audit_repo
+            .append_exact(Self::seal_exact_audit(audit)?)
+            .await
+            .map(|_| ())
+            .map_err(QuantError::from)
+    }
+
+    async fn require_path_binding_audit(
+        &self,
+        version: &ModelVersionInfo,
+        request: &BindPublishPathSetRequest,
+        actor: &GovernanceActor,
+        path_set_hash: ContentHash,
+    ) -> QuantResult<()> {
+        let audits = self
+            .deps
+            .governance_audit_repo
+            .list_by_version(&version.model_version_id)
+            .await?;
+        let latest = audits
+            .iter()
+            .find(|audit| audit.action == ModelGovernanceAction::BindPublishPathSet);
+        let exact = latest.is_some_and(|audit| {
+            audit.model_version_id == Some(version.model_version_id)
+                && audit.training_dataset_id == version.training_dataset_id
+                && audit.actor_user_id == actor.user_id
+                && audit.actor_username == actor.username
+                && audit.actor_role == actor.role
+                && audit.reason == request.reason
+                && audit.before_status == version.publication_status
+                && audit.after_status == version.publication_status
+                && matches!(
+                    audit.detail,
+                    ModelGovernanceAuditDetail::BindPublishPathSet {
+                        path_set_id,
+                        path_set_hash: stored_hash,
+                        ..
+                    } if path_set_id == request.path_set_id && stored_hash == path_set_hash
+                )
+        });
+        if !exact {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "model {} is bound to path set {} without its exact latest governance audit",
+                    version.model_version_id, request.path_set_id
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     fn seal_calibrated_artifact(
         artifact: &ModelArtifact,
         request: &BindCalibrationRequest,
@@ -231,7 +331,16 @@ impl ModelGovernanceService {
             .into());
         };
 
-        let new_version_id = ModelVersionId::from_v7();
+        let new_version_id = ModelVersionId::from_calibration_binding(
+            artifact
+                .header()
+                .serving_contract()
+                .bindings()
+                .model
+                .model_version_id,
+            request.calibrator_ref,
+            request.downside_source,
+        );
         let mut weighted = weighted.as_ref().clone();
         weighted.return_model = ReturnModelSpec::Calibrated(CalibratedReturnModel {
             calibrator_ref: request.calibrator_ref,
@@ -585,8 +694,7 @@ impl ModelGovernancePort for ModelGovernanceService {
         let calibrated = self
             .store_calibrated_artifact(&source, &request, calibrator.content_hash())
             .await?;
-        self.persist_calibrated_version(&version, &request, calibrated, actor)
-            .await
+        Box::pin(self.persist_calibrated_version(&version, &request, calibrated, actor)).await
     }
 
     async fn bind_publish_path_set(
@@ -637,13 +745,12 @@ impl ModelGovernancePort for ModelGovernanceService {
             .into());
         }
         let before = version.publish_path_set_id;
-        let updated = self
-            .deps
-            .model_registry_repo
-            .set_publish_path(&version.model_version_id, Some(request.path_set_id))
-            .await
-            .map_err(QuantError::from)?;
-        self.write_audit(NewModelGovernanceAudit {
+        if before == Some(request.path_set_id) {
+            self.require_path_binding_audit(&version, &request, &actor, path_set.path_set_hash)
+                .await?;
+            return Ok(version);
+        }
+        let audit = Self::seal_exact_audit(NewModelGovernanceAudit {
             audit_id: ModelGovernanceAuditId::from_v7(),
             model_version_id: Some(version.model_version_id),
             training_dataset_id: version.training_dataset_id,
@@ -653,16 +760,24 @@ impl ModelGovernancePort for ModelGovernanceService {
             actor_role: actor.role,
             reason: request.reason,
             before_status: version.publication_status,
-            after_status: updated.publication_status,
+            after_status: version.publication_status,
             detail: ModelGovernanceAuditDetail::BindPublishPathSet {
                 previous_path_set_id: before,
                 path_set_id: request.path_set_id,
                 path_set_hash: path_set.path_set_hash,
             },
             audit_event_id: AuditEventId::from_v7(),
-        })
-        .await?;
-        Ok(updated)
+        })?;
+        self.deps
+            .model_registry_repo
+            .commit_publish_path_binding(BindPublishPathSetCommit {
+                model_version_id: version.model_version_id,
+                expected_path_set_id: before,
+                path_set_id: request.path_set_id,
+                audit,
+            })
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -821,33 +936,30 @@ impl ModelGovernanceService {
             .model_registry_repo
             .next_version_for_spec(&model_spec_id)
             .await?;
-        let created = self
-            .deps
-            .model_registry_repo
-            .create_model_version(NewModelVersion {
-                model_version_id: new_version_id,
-                model_spec_id,
-                version: next,
-                artifact_hash,
-                serving_contract,
-                category_scope,
-                profile_ref,
-                training_dataset_id,
-                trade_policy_artifact_id: trade_policy.map(|(artifact_id, _)| artifact_id),
-                trade_policy_hash: trade_policy.map(|(_, content_hash)| content_hash),
-                publish_path_set_id: None,
-                derivation: ModelVersionDerivation::ReturnCalibration {
-                    parent_model_version_id: version.model_version_id,
-                    calibration_artifact_id: request.calibrator_ref,
-                },
-                metrics: version.metrics.clone(),
-                training_objective: version.training_objective.clone(),
-                quality_gate_report: None,
-                publication_status: PublicationStatus::Candidate,
-                published_at: None,
-                retired_at: None,
-            })
-            .await?;
+        let candidate = NewModelVersion {
+            model_version_id: new_version_id,
+            model_spec_id,
+            version: next,
+            artifact_hash,
+            serving_contract,
+            category_scope,
+            profile_ref,
+            training_dataset_id,
+            trade_policy_artifact_id: trade_policy.map(|(artifact_id, _)| artifact_id),
+            trade_policy_hash: trade_policy.map(|(_, content_hash)| content_hash),
+            publish_path_set_id: None,
+            derivation: ModelVersionDerivation::ReturnCalibration {
+                parent_model_version_id: version.model_version_id,
+                calibration_artifact_id: request.calibrator_ref,
+            },
+            metrics: version.metrics.clone(),
+            training_objective: version.training_objective.clone(),
+            quality_gate_report: None,
+            publication_status: PublicationStatus::Candidate,
+            published_at: None,
+            retired_at: None,
+        };
+        let created = self.create_calibrated_version(candidate).await?;
 
         self.deps
             .frozen_model_parity
@@ -868,7 +980,7 @@ impl ModelGovernanceService {
             .mark_active(&request.calibrator_ref)
             .await?;
 
-        self.write_audit(NewModelGovernanceAudit {
+        self.write_exact_audit(NewModelGovernanceAudit {
             audit_id: ModelGovernanceAuditId::from_v7(),
             model_version_id: Some(created.model_version_id),
             training_dataset_id: None,
@@ -891,6 +1003,80 @@ impl ModelGovernanceService {
         .await?;
 
         Ok(created)
+    }
+
+    async fn create_calibrated_version(
+        &self,
+        candidate: NewModelVersion,
+    ) -> QuantResult<ModelVersionInfo> {
+        if let Some(stored) = self
+            .deps
+            .model_registry_repo
+            .find_model_version(&candidate.model_version_id)
+            .await?
+        {
+            return Self::require_calibrated_retry(&candidate, stored);
+        }
+        match self
+            .deps
+            .model_registry_repo
+            .create_model_version(candidate.clone())
+            .await
+        {
+            Ok(created) => Ok(created),
+            Err(error) => {
+                let stored = self
+                    .deps
+                    .model_registry_repo
+                    .find_model_version(&candidate.model_version_id)
+                    .await?;
+                stored.map_or_else(
+                    || Err(error.into()),
+                    |stored| Self::require_calibrated_retry(&candidate, stored),
+                )
+            }
+        }
+    }
+
+    fn require_calibrated_retry(
+        candidate: &NewModelVersion,
+        stored: ModelVersionInfo,
+    ) -> QuantResult<ModelVersionInfo> {
+        let contract_hash = candidate.serving_contract_hash().map_err(|error| {
+            GovernanceError::IllegalTransition {
+                detail: format!("invalid calibrated candidate contract: {error}"),
+            }
+        })?;
+        let exact = stored.model_version_id == candidate.model_version_id
+            && stored.model_spec_id == candidate.model_spec_id
+            && stored.artifact_hash == candidate.artifact_hash
+            && stored.serving_contract == candidate.serving_contract
+            && stored.serving_contract_hash == contract_hash
+            && stored.category_scope == candidate.category_scope
+            && stored.profile_ref == candidate.profile_ref
+            && stored.training_dataset_id == candidate.training_dataset_id
+            && stored.trade_policy_artifact_id == candidate.trade_policy_artifact_id
+            && stored.trade_policy_hash == candidate.trade_policy_hash
+            && stored.publish_path_set_id == candidate.publish_path_set_id
+            && stored
+                .verified_derivation()
+                .is_ok_and(|derivation| derivation == candidate.derivation)
+            && stored.metrics == candidate.metrics
+            && stored.training_objective == candidate.training_objective
+            && stored.quality_gate_report == candidate.quality_gate_report
+            && stored.publication_status == candidate.publication_status
+            && stored.published_at == candidate.published_at
+            && stored.retired_at == candidate.retired_at;
+        if !exact {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "calibrated model identity {} was reused with semantic drift",
+                    candidate.model_version_id
+                ),
+            }
+            .into());
+        }
+        Ok(stored)
     }
 
     /// Evaluate the quality gate for a model version against the active

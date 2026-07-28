@@ -326,7 +326,13 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "ck_quant_feedback_cycle_identity",
         table: "quant_feedback_cycle",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((jsonb_typeof(idempotency_key) = 'object'::text AND idempotency_key ?& ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family_hash'::text] AND (idempotency_key - ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family_hash'::text]) = '{}'::jsonb AND (idempotency_key ->> 'format_version'::text)::integer = 1 AND idempotency_key ->> 'trigger_family'::text = trigger_family::text AND idempotency_key -> 'profile_ref'::text = profile_ref AND idempotency_key ->> 'feedback_policy_hash'::text = feedback_policy_hash AND (idempotency_key ->> 'label_cutoff'::text)::timestamp with time zone = label_cutoff AND idempotency_key -> 'capability_registry_hashes'::text = capability_registry_hashes AND (idempotency_key ->> 'champion_model_version_id'::text)::uuid = champion_model_version_id AND idempotency_key ->> 'champion_serving_contract_hash'::text = champion_serving_contract_hash AND idempotency_key ->> 'candidate_family_hash'::text = candidate_family_hash AND jsonb_typeof(profile_ref) = 'object'::text AND profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text] AND (profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb AND profile_ref ->> 'id'::text ~ '^[a-z0-9_]+$'::text AND (profile_ref ->> 'version'::text)::bigint > 0 AND profile_ref ->> 'content_hash'::text = profile_hash AND research_profile_artifact_id = (((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || profile_hash AND public.validate_content_hash_array(capability_registry_hashes) AND idempotency_hash ~ '^blake3:[0-9a-f]{64}$'::text AND profile_hash ~ '^blake3:[0-9a-f]{64}$'::text AND feedback_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text AND champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text AND candidate_family_hash ~ '^blake3:[0-9a-f]{64}$'::text AND label_cutoff <= created_at AND updated_at >= created_at AND generation >= 0))",
+        definition: concat!(
+            "CHECK ((jsonb_typeof(idempotency_key) = 'object'::text AND idempotency_key ?& ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family'::text] AND (idempotency_key - ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family'::text]) = '{}'::jsonb AND (idempotency_key ->> 'format_version'::text)::integer = 1 AND idempotency_key ->> 'trigger_family'::text = trigger_family::text AND idempotency_key -> 'profile_ref'::text = profile_ref AND idempotency_key ->> 'feedback_policy_hash'::text = feedback_policy_hash AND (idempotency_key ->> 'label_cutoff'::text)::timestamp with time zone = label_cutoff AND idempotency_key -> 'capability_registry_hashes'::text = capability_registry_hashes AND (idempotency_key ->> 'champion_model_version_id'::text)::uuid = champion_model_version_id AND idempotency_key ->> 'champion_serving_contract_hash'::text = champion_serving_contract_hash AND idempotency_key -> 'candidate_family'::text = candidate_family AND jsonb_typeof(candidate_family) = 'object'::text AND candidate_family ?& ARRAY['format_version'::text, 'candidate_family_hash'::text, 'shared_evaluation'::text, 'comparison_contract'::text, 'candidates'::text] AND (candidate_family - ARRAY['format_version'::text, 'candidate_family_hash'::text, 'shared_evaluation'::text, 'comparison_contract'::text, 'candidates'::text]) = '{}'::jsonb AND (candidate_family ->> 'format_version'::text)::integer = 1 AND candidate_family ->> 'candidate_family_hash'::text = candidate_family_hash",
+            " AND jsonb_typeof(candidate_family -> 'comparison_contract'::text) = 'object'::text AND (candidate_family -> 'comparison_contract'::text) ?& ARRAY['format_version'::text, 'comparison_contract_hash'::text, 'statistic'::text, 'alternative'::text, 'resampling'::text, 'stepdown'::text, 'p_value'::text, 'ties'::text, 'generator'::text, 'minimum_observations'::text, 'bootstrap_repetitions'::text, 'block_length'::text, 'bootstrap_seed'::text, 'minimum_effect_bps'::text, 'confidence'::text, 'effect_precision_dp'::text] AND ((candidate_family -> 'comparison_contract'::text) - ARRAY['format_version'::text, 'comparison_contract_hash'::text, 'statistic'::text, 'alternative'::text, 'resampling'::text, 'stepdown'::text, 'p_value'::text, 'ties'::text, 'generator'::text, 'minimum_observations'::text, 'bootstrap_repetitions'::text, 'block_length'::text, 'bootstrap_seed'::text, 'minimum_effect_bps'::text, 'confidence'::text, 'effect_precision_dp'::text]) = '{}'::jsonb",
+            " AND (candidate_family -> 'comparison_contract'::text ->> 'format_version'::text)::integer = 1 AND candidate_family -> 'comparison_contract'::text ->> 'comparison_contract_hash'::text ~ '^blake3:[0-9a-f]{64}$'::text AND candidate_family -> 'comparison_contract'::text ->> 'statistic'::text = 'mean_decision_tick_net_return_bps'::text AND candidate_family -> 'comparison_contract'::text ->> 'alternative'::text = 'candidate_greater_than_champion'::text AND candidate_family -> 'comparison_contract'::text ->> 'resampling'::text = 'circular_fixed_block'::text AND candidate_family -> 'comparison_contract'::text ->> 'stepdown'::text = 'romano_wolf_basic'::text AND candidate_family -> 'comparison_contract'::text ->> 'p_value'::text = 'plus_one_greater_or_equal'::text AND candidate_family -> 'comparison_contract'::text ->> 'ties'::text = 'equal_statistic_group'::text AND candidate_family -> 'comparison_contract'::text ->> 'generator'::text = 'blake3_counter_rejection_v1'::text",
+            " AND (candidate_family -> 'comparison_contract'::text ->> 'minimum_observations'::text)::numeric > 0 AND (candidate_family -> 'comparison_contract'::text ->> 'bootstrap_repetitions'::text)::numeric >= 1000 AND (candidate_family -> 'comparison_contract'::text ->> 'block_length'::text)::numeric BETWEEN 1 AND (candidate_family -> 'comparison_contract'::text ->> 'minimum_observations'::text)::numeric AND (candidate_family -> 'comparison_contract'::text ->> 'bootstrap_seed'::text)::numeric BETWEEN 0 AND 18446744073709551615 AND (candidate_family -> 'comparison_contract'::text ->> 'minimum_effect_bps'::text)::numeric > 0 AND (candidate_family -> 'comparison_contract'::text ->> 'confidence'::text)::numeric > 0 AND (candidate_family -> 'comparison_contract'::text ->> 'confidence'::text)::numeric < 1 AND (candidate_family -> 'comparison_contract'::text ->> 'effect_precision_dp'::text)::integer = 12",
+            " AND jsonb_typeof(candidate_family -> 'shared_evaluation'::text) = 'object'::text AND candidate_family -> 'shared_evaluation'::text ->> 'purpose'::text = 'evaluation'::text AND jsonb_typeof(candidate_family -> 'candidates'::text) = 'array'::text AND jsonb_array_length(candidate_family -> 'candidates'::text) BETWEEN 1 AND 32 AND jsonb_typeof(profile_ref) = 'object'::text AND profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text] AND (profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb AND profile_ref ->> 'id'::text ~ '^[a-z0-9_]+$'::text AND (profile_ref ->> 'version'::text)::bigint > 0 AND profile_ref ->> 'content_hash'::text = profile_hash AND research_profile_artifact_id = (((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || profile_hash AND public.validate_content_hash_array(capability_registry_hashes) AND idempotency_hash ~ '^blake3:[0-9a-f]{64}$'::text AND profile_hash ~ '^blake3:[0-9a-f]{64}$'::text AND feedback_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text AND champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text AND candidate_family_hash ~ '^blake3:[0-9a-f]{64}$'::text AND label_cutoff <= created_at AND updated_at >= created_at AND generation >= 0))",
+        ),
     },
     ConstraintSpec {
         name: "ck_quant_feedback_cycle_state",
@@ -365,6 +371,36 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "FOREIGN KEY (champion_model_version_id) REFERENCES public.quant_model_version(model_version_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
+        name: "ck_quant_research_job_feedback_lineage",
+        table: "quant_research_job",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((((feedback_cycle_id IS NULL) = (feedback_stage IS NULL)) AND ((feedback_stage IS NULL) OR (feedback_stage <> 'trigger'::qp_feedback_stage)) AND ((parent_job_id IS NULL) OR (parent_job_id <> job_id))))",
+    },
+    ConstraintSpec {
+        name: "uq_quant_research_job_feedback_lineage_key",
+        table: "quant_research_job",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (job_id, feedback_cycle_id, feedback_stage)",
+    },
+    ConstraintSpec {
+        name: "fk_quant_research_job_cycle",
+        table: "quant_research_job",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (feedback_cycle_id) REFERENCES public.quant_feedback_cycle(feedback_cycle_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_research_job_parent",
+        table: "quant_research_job",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (parent_job_id) REFERENCES public.quant_research_job(job_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_research_job_parent_lineage",
+        table: "quant_research_job",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (parent_job_id, feedback_cycle_id, feedback_stage) REFERENCES public.quant_research_job(job_id, feedback_cycle_id, feedback_stage) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
         name: "ck_quant_feedback_stage_event",
         table: "quant_feedback_stage_event",
         kind: ConstraintKind::Check,
@@ -377,10 +413,16 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "FOREIGN KEY (feedback_cycle_id) REFERENCES public.quant_feedback_cycle(feedback_cycle_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
-        name: "fk_quant_feedback_stage_job",
+        name: "fk_quant_feedback_stage_job_lineage",
         table: "quant_feedback_stage_event",
         kind: ConstraintKind::ForeignKey,
-        definition: "FOREIGN KEY (research_job_id) REFERENCES public.quant_research_job(job_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+        definition: "FOREIGN KEY (research_job_id, feedback_cycle_id, stage) REFERENCES public.quant_research_job(job_id, feedback_cycle_id, feedback_stage) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "ck_quant_feedback_event_outbox",
+        table: "quant_feedback_event_outbox",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((revision > 0 AND publish_attempts >= 0 AND created_at <= updated_at AND ((claim_owner IS NULL) = (lease_expires_at IS NULL)) AND (published_at IS NULL OR (published_at >= created_at AND claim_owner IS NULL AND lease_expires_at IS NULL AND last_error IS NULL)) AND (last_error IS NULL OR (octet_length(last_error) >= 1 AND octet_length(last_error) <= 2048 AND last_error = btrim(last_error) AND last_error !~ '[[:cntrl:]]'::text))))",
     },
     ConstraintSpec {
         name: "ck_quant_drift_report",
@@ -398,7 +440,7 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "ck_quant_feedback_evaluation_use",
         table: "quant_feedback_evaluation_use",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((purpose = 'promotion_comparison'::qp_feedback_evaluation_purpose AND dataset_purpose = 'evaluation'::qp_dataset_purpose AND jsonb_typeof(profile_ref) = 'object'::text AND profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text] AND (profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb AND profile_ref ->> 'id'::text ~ '^[a-z0-9_]+$'::text AND (profile_ref ->> 'version'::text)::bigint > 0 AND research_profile_artifact_id = (((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || (profile_ref ->> 'content_hash'::text) AND evaluation_window_start < evaluation_window_end AND evaluation_window_end <= label_cutoff AND label_cutoff <= used_at AND used_at <= created_at AND evaluation_dataset_hash ~ '^blake3:[0-9a-f]{64}$'::text AND evaluation_artifact_bytes_hash ~ '^blake3:[0-9a-f]{64}$'::text AND cohort_manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text AND champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text AND candidate_family_hash ~ '^blake3:[0-9a-f]{64}$'::text AND comparison_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text AND semantic_use_hash ~ '^blake3:[0-9a-f]{64}$'::text AND octet_length(result_artifact_uri) BETWEEN 1 AND 4096 AND result_artifact_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text AND result_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text AND evaluation_use_hash ~ '^blake3:[0-9a-f]{64}$'::text))",
+        definition: "CHECK ((purpose = 'promotion_comparison'::qp_feedback_evaluation_purpose AND dataset_purpose = 'evaluation'::qp_dataset_purpose AND jsonb_typeof(profile_ref) = 'object'::text AND profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text] AND (profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb AND profile_ref ->> 'id'::text ~ '^[a-z0-9_]+$'::text AND (profile_ref ->> 'version'::text)::bigint > 0 AND research_profile_artifact_id = (((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || (profile_ref ->> 'content_hash'::text) AND evaluation_window_start < evaluation_window_end AND evaluation_window_end <= label_cutoff AND label_cutoff <= reserved_at AND reserved_at = created_at AND evaluation_dataset_hash ~ '^blake3:[0-9a-f]{64}$'::text AND evaluation_artifact_bytes_hash ~ '^blake3:[0-9a-f]{64}$'::text AND cohort_manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text AND champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text AND candidate_family_hash ~ '^blake3:[0-9a-f]{64}$'::text AND comparison_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text AND semantic_use_hash ~ '^blake3:[0-9a-f]{64}$'::text AND octet_length(cpcv_artifact_uri) BETWEEN 1 AND 4096 AND cpcv_artifact_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text AND cpcv_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text AND evaluation_use_hash ~ '^blake3:[0-9a-f]{64}$'::text))",
     },
     ConstraintSpec {
         name: "fk_quant_feedback_evaluation_cycle",
@@ -971,6 +1013,12 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "CHECK ((missed_count > 0))",
     },
     ConstraintSpec {
+        name: "ck_quant_shadow_comparison_generation_identity",
+        table: "quant_shadow_comparison",
+        kind: ConstraintKind::Check,
+        definition: "CHECK (((active_model_version_id <> shadow_model_version_id) AND (active_serving_contract_hash <> shadow_serving_contract_hash) AND (active_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (shadow_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (decision_policy_snapshot_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (policy_bundle_generation > 0)))",
+    },
+    ConstraintSpec {
         name: "quant_research_readiness_evidence_check",
         table: "quant_research_readiness_evidence",
         kind: ConstraintKind::Check,
@@ -986,7 +1034,13 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "ck_quant_research_job_result_reference",
         table: "quant_research_job",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((((result_kind IS NULL) = (result_ref IS NULL)) AND ((status = 'succeeded'::qp_research_job_status) OR ((result_kind IS NULL) AND (result_ref IS NULL))) AND ((result_kind IS NULL) OR ((kind = 'dataset_build'::qp_research_job_kind) AND (result_kind = 'training_dataset'::qp_research_job_result_kind)) OR ((kind = 'model_train'::qp_research_job_kind) AND (result_kind = 'model_version'::qp_research_job_result_kind)) OR ((kind = 'backtest'::qp_research_job_kind) AND (result_kind = 'backtest_report'::qp_research_job_result_kind)) OR ((kind = 'cpcv_backtest'::qp_research_job_kind) AND (result_kind = 'backtest_path_set'::qp_research_job_result_kind)) OR ((kind = ANY (ARRAY['bias_table_fit'::qp_research_job_kind, 'model_calibration_fit'::qp_research_job_kind])) AND (result_kind = 'calibration_artifact'::qp_research_job_result_kind)) OR ((kind = 'feature_parity'::qp_research_job_kind) AND (result_kind = 'feature_parity_run'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_fit'::qp_research_job_kind) AND (result_kind = 'trade_policy_artifact'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_validation'::qp_research_job_kind) AND (result_kind = 'trade_policy_validation_run'::qp_research_job_result_kind)))))",
+        definition: "CHECK ((((result_kind IS NULL) = (result_ref IS NULL)) AND ((status = 'succeeded'::qp_research_job_status) OR ((result_kind IS NULL) AND (result_ref IS NULL))) AND ((result_kind IS NULL) OR ((kind = 'dataset_build'::qp_research_job_kind) AND (result_kind = 'training_dataset'::qp_research_job_result_kind)) OR ((kind = 'model_train'::qp_research_job_kind) AND (result_kind = 'model_version'::qp_research_job_result_kind)) OR ((kind = 'backtest'::qp_research_job_kind) AND (result_kind = 'backtest_report'::qp_research_job_result_kind)) OR ((kind = 'cpcv_backtest'::qp_research_job_kind) AND (result_kind = 'backtest_path_set'::qp_research_job_result_kind)) OR ((kind = ANY (ARRAY['bias_table_fit'::qp_research_job_kind, 'model_calibration_fit'::qp_research_job_kind])) AND (result_kind = 'calibration_artifact'::qp_research_job_result_kind)) OR ((kind = 'feature_parity'::qp_research_job_kind) AND (result_kind = 'feature_parity_run'::qp_research_job_result_kind)) OR ((kind = 'feedback_coverage'::qp_research_job_kind) AND (result_kind = 'feedback_coverage_artifact'::qp_research_job_result_kind)) OR ((kind = 'feedback_drift'::qp_research_job_kind) AND (result_kind = 'feedback_drift_artifact'::qp_research_job_result_kind)) OR ((kind = ANY (ARRAY['feedback_dataset_seal'::qp_research_job_kind, 'feedback_training'::qp_research_job_kind, 'feedback_calibration'::qp_research_job_kind, 'feedback_cpcv'::qp_research_job_kind])) AND (result_kind = 'feedback_learning_stage_artifact'::qp_research_job_result_kind)) OR ((kind = 'feedback_comparison'::qp_research_job_kind) AND (result_kind = 'feedback_comparison_artifact'::qp_research_job_result_kind)) OR ((kind = 'feedback_shadow_replay'::qp_research_job_kind) AND (result_kind = 'feedback_shadow_replay_artifact'::qp_research_job_result_kind)) OR ((kind = 'feedback_decision'::qp_research_job_kind) AND (result_kind = 'feedback_decision_artifact'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_fit'::qp_research_job_kind) AND (result_kind = 'trade_policy_artifact'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_validation'::qp_research_job_kind) AND (result_kind = 'trade_policy_validation_run'::qp_research_job_result_kind)))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_research_job_artifact_reference",
+        table: "quant_research_job",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((((result_artifact_uri IS NULL) = (result_artifact_hash IS NULL)) AND ((result_artifact_uri IS NULL) OR ((octet_length(result_artifact_uri) >= 1) AND (octet_length(result_artifact_uri) <= 4096) AND (result_artifact_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text))) AND ((result_artifact_hash IS NULL) OR (result_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND (((result_kind = ANY (ARRAY['feedback_coverage_artifact'::qp_research_job_result_kind, 'feedback_drift_artifact'::qp_research_job_result_kind, 'feedback_learning_stage_artifact'::qp_research_job_result_kind, 'feedback_comparison_artifact'::qp_research_job_result_kind, 'feedback_shadow_replay_artifact'::qp_research_job_result_kind, 'feedback_decision_artifact'::qp_research_job_result_kind])) AND (result_artifact_uri IS NOT NULL)) OR ((result_kind <> ALL (ARRAY['feedback_coverage_artifact'::qp_research_job_result_kind, 'feedback_drift_artifact'::qp_research_job_result_kind, 'feedback_learning_stage_artifact'::qp_research_job_result_kind, 'feedback_comparison_artifact'::qp_research_job_result_kind, 'feedback_shadow_replay_artifact'::qp_research_job_result_kind, 'feedback_decision_artifact'::qp_research_job_result_kind])) AND (result_artifact_uri IS NULL)) OR ((result_kind IS NULL) AND (result_artifact_uri IS NULL)))))",
     },
     ConstraintSpec {
         name: "ck_quant_research_job_acting_role",
@@ -1567,6 +1621,13 @@ mod tests {
         for binding in [
             "public.validate_content_hash_array(capability_registry_hashes)",
             "champion_serving_contract_hash",
+            "candidate_family -> 'shared_evaluation'",
+            "candidate_family -> 'comparison_contract'",
+            "'romano_wolf_basic'",
+            "'plus_one_greater_or_equal'",
+            "'equal_statistic_group'",
+            "'blake3_counter_rejection_v1'",
+            "jsonb_array_length(candidate_family -> 'candidates'::text) BETWEEN 1 AND 32",
             "candidate_family_hash",
             "idempotency_hash",
             "research_profile_artifact_id",
@@ -1608,6 +1669,8 @@ mod tests {
             "cohort_manifest_hash",
             "comparison_contract_hash",
             "semantic_use_hash",
+            "cpcv_artifact_uri",
+            "reserved_at = created_at",
             "evaluation_use_hash",
         ] {
             assert!(
@@ -1619,9 +1682,66 @@ mod tests {
         assert!(dataset_fk.contains("evaluation_dataset_hash"));
         assert!(dataset_fk.contains("evaluation_artifact_bytes_hash"));
 
+        let shadow = constraint("ck_quant_shadow_comparison_generation_identity").definition;
+        for binding in [
+            "active_model_version_id <> shadow_model_version_id",
+            "active_serving_contract_hash <> shadow_serving_contract_hash",
+            "decision_policy_snapshot_hash",
+            "policy_bundle_generation > 0",
+        ] {
+            assert!(
+                shadow.contains(binding),
+                "missing shadow generation binding {binding}"
+            );
+        }
+
+        let job_lineage = constraint("ck_quant_research_job_feedback_lineage").definition;
+        for binding in [
+            "(feedback_cycle_id IS NULL) = (feedback_stage IS NULL)",
+            "feedback_stage <> 'trigger'",
+            "parent_job_id <> job_id",
+        ] {
+            assert!(
+                job_lineage.contains(binding),
+                "missing research-job lineage binding {binding}"
+            );
+        }
+        let parent_lineage = constraint("fk_quant_research_job_parent_lineage").definition;
+        assert!(parent_lineage.contains("(parent_job_id, feedback_cycle_id, feedback_stage)"));
+        assert!(parent_lineage.contains("(job_id, feedback_cycle_id, feedback_stage)"));
+        let job_result = constraint("ck_quant_research_job_result_reference").definition;
+        assert!(job_result.contains(
+            "(kind = 'feedback_decision'::qp_research_job_kind) AND (result_kind = 'feedback_decision_artifact'::qp_research_job_result_kind)"
+        ));
+        let job_artifact = constraint("ck_quant_research_job_artifact_reference").definition;
+        for binding in [
+            "(result_artifact_uri IS NULL) = (result_artifact_hash IS NULL)",
+            "octet_length(result_artifact_uri) >= 1",
+            "octet_length(result_artifact_uri) <= 4096",
+            "^[a-z][a-z0-9+.-]*://.+$",
+            "^blake3:[0-9a-f]{64}$",
+            "feedback_coverage_artifact",
+            "feedback_drift_artifact",
+            "feedback_learning_stage_artifact",
+            "feedback_comparison_artifact",
+            "feedback_shadow_replay_artifact",
+            "feedback_decision_artifact",
+        ] {
+            assert!(
+                job_artifact.contains(binding),
+                "missing research-job artifact binding {binding}"
+            );
+        }
+        let stage_job = constraint("fk_quant_feedback_stage_job_lineage").definition;
+        assert!(stage_job.contains("(research_job_id, feedback_cycle_id, stage)"));
+        assert!(stage_job.contains("(job_id, feedback_cycle_id, feedback_stage)"));
+
         for name in [
+            "fk_quant_research_job_cycle",
+            "fk_quant_research_job_parent",
+            "fk_quant_research_job_parent_lineage",
             "fk_quant_feedback_stage_cycle",
-            "fk_quant_feedback_stage_job",
+            "fk_quant_feedback_stage_job_lineage",
             "fk_quant_drift_report_cycle",
             "fk_quant_feedback_evaluation_cycle",
             "fk_quant_feedback_evaluation_profile",
@@ -1633,5 +1753,18 @@ mod tests {
             assert!(definition.contains("ON DELETE NO ACTION"));
             assert!(!definition.contains("CASCADE"));
         }
+    }
+
+    #[test]
+    fn feedback_bounds_are_explicit() {
+        let outbox = constraint("ck_quant_feedback_event_outbox").definition;
+        assert!(outbox.contains("octet_length(last_error) >= 1"));
+        assert!(outbox.contains("octet_length(last_error) <= 2048"));
+        assert!(!outbox.contains("octet_length(last_error) BETWEEN"));
+
+        let job = constraint("ck_quant_research_job_artifact_reference").definition;
+        assert!(job.contains("octet_length(result_artifact_uri) >= 1"));
+        assert!(job.contains("octet_length(result_artifact_uri) <= 4096"));
+        assert!(!job.contains("octet_length(result_artifact_uri) BETWEEN"));
     }
 }

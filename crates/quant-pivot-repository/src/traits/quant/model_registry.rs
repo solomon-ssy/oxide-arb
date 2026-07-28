@@ -4,8 +4,8 @@ use quant_pivot_models::{
         api::{ModelPickerSide, ModelSpecListQuery, ModelVersionListQuery},
         pagination::Paginated,
         quant::{
-            ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion,
-            PublishedModelCatalogInfo,
+            ModelSpecInfo, ModelVersionInfo, NewModelGovernanceAudit, NewModelSpec,
+            NewModelVersion, PublishedModelCatalogInfo,
         },
     },
     enums::common::MarketCategory,
@@ -41,6 +41,14 @@ pub struct PublishModelVersionCommit<'a> {
 pub struct PublishModelVersionResult {
     pub published: ModelVersionInfo,
     pub feature_parity_state_id: FeatureParityStateId,
+}
+
+/// Atomic CPCV publish-path binding plus its WORM governance audit.
+pub struct BindPublishPathSetCommit {
+    pub model_version_id: ModelVersionId,
+    pub expected_path_set_id: Option<BacktestPathSetId>,
+    pub path_set_id: BacktestPathSetId,
+    pub audit: NewModelGovernanceAudit,
 }
 
 #[async_trait::async_trait]
@@ -152,5 +160,11 @@ pub trait ModelRegistryRepository: Send + Sync {
         &self,
         model_version_id: &ModelVersionId,
         publish_path_set_id: Option<BacktestPathSetId>,
+    ) -> Result<ModelVersionInfo, StorageError>;
+
+    /// Atomically compare-and-set a governed publish path and append its audit.
+    async fn commit_publish_path_binding(
+        &self,
+        commit: BindPublishPathSetCommit,
     ) -> Result<ModelVersionInfo, StorageError>;
 }

@@ -8,6 +8,7 @@ pub mod execution_read;
 pub mod execution_recovery;
 pub mod feature_integrity;
 pub mod feature_parity_execution;
+pub mod feedback_execution;
 pub mod market_linkage;
 pub mod model_governance;
 pub mod model_spec;
@@ -35,6 +36,25 @@ pub use execution_read::ExecutionReadPort;
 pub use execution_recovery::ExecutionRecoveryPort;
 pub use feature_integrity::{FeatureIntegrityActionContext, FeatureIntegrityPort};
 pub use feature_parity_execution::FeatureParityExecutionPort;
+pub use feedback_execution::{
+    FEEDBACK_LEARNING_MAX_CANDIDATES, FeedbackCalibrationCommand, FeedbackCalibrationJobParams,
+    FeedbackCandidateFamily, FeedbackCandidateFamilyInput, FeedbackCandidateRecipe,
+    FeedbackComparisonAlternative, FeedbackComparisonArtifactRef, FeedbackComparisonCandidateRef,
+    FeedbackComparisonContract, FeedbackComparisonExecutionPort, FeedbackComparisonExecutionResult,
+    FeedbackComparisonGenerator, FeedbackComparisonJobInput, FeedbackComparisonJobParams,
+    FeedbackComparisonPValue, FeedbackComparisonResampling, FeedbackComparisonStatistic,
+    FeedbackComparisonStepdown, FeedbackComparisonTies, FeedbackCoverageExecutionPort,
+    FeedbackCoverageExecutionResult, FeedbackCpcvCommand, FeedbackCpcvJobParams,
+    FeedbackDatasetBuildCommand, FeedbackDatasetBuildRequest, FeedbackDatasetRole,
+    FeedbackDatasetSealJobParams, FeedbackDecisionExecutionPort, FeedbackDecisionExecutionResult,
+    FeedbackDecisionJobInput, FeedbackDecisionJobParams, FeedbackDriftArtifactRef,
+    FeedbackDriftExecutionPort, FeedbackDriftExecutionResult, FeedbackEvaluationUseRef,
+    FeedbackLearningExecutionPort, FeedbackLearningExecutionResult,
+    FeedbackLearningStageArtifactRef, FeedbackShadowContract, FeedbackShadowContractInput,
+    FeedbackShadowExecutionPort, FeedbackShadowExecutionResult, FeedbackShadowJobParams,
+    FeedbackShadowObservationSource, FeedbackShadowReplayArtifactRef, FeedbackShadowSubject,
+    FeedbackShadowUnavailableReason, FeedbackTrainingCommand, FeedbackTrainingJobParams,
+};
 pub use market_linkage::MarketLinkageGovernancePort;
 pub use model_governance::{
     GovernanceActor, ModelGovernancePort, PublishModelCommand, RetireModelCommand,

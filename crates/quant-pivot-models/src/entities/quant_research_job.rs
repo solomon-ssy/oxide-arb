@@ -6,10 +6,11 @@ use uuid::Uuid;
 
 use super::{decision_policy_snapshot, quant_model_spec};
 use crate::{
-    enums::quant::{ResearchJobKind, ResearchJobResultKind, ResearchJobStatus},
+    enums::quant::{FeedbackStage, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus},
     types::{
-        DatasetCoverage, DecisionPolicySnapshotId, ModelSpecId, ResearchJobError, ResearchJobId,
-        ResearchJobParams, ResearchJobProgress, RoleCode, WorkerId,
+        ArtifactUri, ContentHash, DatasetCoverage, DecisionPolicySnapshotId, FeedbackCycleId,
+        ModelSpecId, ResearchJobError, ResearchJobId, ResearchJobParams, ResearchJobProgress,
+        RoleCode, WorkerId,
     },
 };
 
@@ -19,6 +20,8 @@ use crate::{
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub job_id: ResearchJobId,
+    pub feedback_cycle_id: Option<FeedbackCycleId>,
+    pub feedback_stage: Option<FeedbackStage>,
     pub kind: ResearchJobKind,
     pub status: ResearchJobStatus,
     pub model_spec_id: Option<ModelSpecId>,
@@ -29,6 +32,8 @@ pub struct Model {
     pub progress_json: Option<ResearchJobProgress>,
     pub result_kind: Option<ResearchJobResultKind>,
     pub result_ref: Option<Uuid>,
+    pub result_artifact_uri: Option<ArtifactUri>,
+    pub result_artifact_hash: Option<ContentHash>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub error_json: Option<ResearchJobError>,
     #[sea_orm(column_type = "JsonBinary", nullable)]

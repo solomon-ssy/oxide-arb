@@ -378,6 +378,24 @@ const FEEDBACK_CYCLE_GUARD_SQL: &str = "CREATE FUNCTION \
     NEW.updated_at = statement_timestamp(); \
     RETURN NEW; END; $function$";
 
+const FEEDBACK_OUTBOX_GUARD_SQL: &str = "CREATE FUNCTION \
+    public.trigger_guard_feedback_outbox() RETURNS trigger LANGUAGE plpgsql AS \
+    $function$ BEGIN \
+    IF TG_OP = 'DELETE' THEN \
+    RAISE EXCEPTION 'feedback outbox revision is durable; DELETE is not permitted'; \
+    END IF; \
+    IF OLD.published_at IS NOT NULL OR \
+    (to_jsonb(NEW) - ARRAY['published_at', 'publish_attempts', 'claim_owner', \
+    'lease_expires_at', 'last_error', 'updated_at']) IS DISTINCT FROM \
+    (to_jsonb(OLD) - ARRAY['published_at', 'publish_attempts', 'claim_owner', \
+    'lease_expires_at', 'last_error', 'updated_at']) OR \
+    NEW.publish_attempts < OLD.publish_attempts OR \
+    NEW.publish_attempts > OLD.publish_attempts + 1 THEN \
+    RAISE EXCEPTION 'feedback outbox immutable identity or delivery lifecycle changed illegally'; \
+    END IF; \
+    NEW.updated_at = statement_timestamp(); \
+    RETURN NEW; END; $function$";
+
 const DENY_WRITE_TRIGGER_SQL: &str = "CREATE FUNCTION public.trigger_deny_write() RETURNS trigger \
     LANGUAGE plpgsql AS $function$ BEGIN RAISE EXCEPTION \
     'table % is append-only (WORM); % is not permitted', TG_TABLE_NAME, TG_OP; END; $function$";
@@ -397,6 +415,22 @@ const UPDATED_AT_TRIGGER_SQL: &str = "CREATE FUNCTION public.trigger_set_updated
     trigger LANGUAGE plpgsql AS $function$ BEGIN IF (to_jsonb(NEW) - 'updated_at') IS DISTINCT FROM \
     (to_jsonb(OLD) - 'updated_at') THEN NEW.updated_at = statement_timestamp(); ELSE \
     NEW.updated_at = OLD.updated_at; END IF; RETURN NEW; END; $function$";
+
+const RESEARCH_JOB_GUARD_SQL: &str = "CREATE FUNCTION \
+    public.trigger_guard_research_job() RETURNS trigger LANGUAGE plpgsql AS \
+    $function$ BEGIN \
+    IF (to_jsonb(NEW) - ARRAY['status', 'progress_json', 'result_kind', 'result_ref', \
+    'result_artifact_uri', 'result_artifact_hash', \
+    'error_json', 'coverage_json', 'recovery_attempt', 'lease_owner', 'lease_expires_at', \
+    'started_at', 'finished_at', 'heartbeat_at', 'updated_at']) IS DISTINCT FROM \
+    (to_jsonb(OLD) - ARRAY['status', 'progress_json', 'result_kind', 'result_ref', \
+    'result_artifact_uri', 'result_artifact_hash', \
+    'error_json', 'coverage_json', 'recovery_attempt', 'lease_owner', 'lease_expires_at', \
+    'started_at', 'finished_at', 'heartbeat_at', 'updated_at']) THEN \
+    RAISE EXCEPTION 'research-job immutable identity and enqueue contract cannot change'; \
+    END IF; \
+    NEW.updated_at = statement_timestamp(); \
+    RETURN NEW; END; $function$";
 
 const MODEL_VERSION_GUARD_SQL: &str = r"
 CREATE FUNCTION public.trigger_guard_model_version()
@@ -580,9 +614,11 @@ pub(in crate::migrations) enum TriggerProgram {
     DenyWrite,
     GuardCalibrationArtifact,
     GuardFeedbackCycle,
+    GuardFeedbackOutbox,
     GuardFactorValue,
     GuardModelRun,
     GuardModelVersion,
+    GuardResearchJob,
     GuardSourceSlice,
     GuardTrainingDataset,
     SetUpdatedAt,
@@ -594,9 +630,11 @@ impl TriggerProgram {
             Self::DenyWrite => "trigger_deny_write",
             Self::GuardCalibrationArtifact => "trigger_guard_calibration_artifact",
             Self::GuardFeedbackCycle => "trigger_guard_feedback_cycle",
+            Self::GuardFeedbackOutbox => "trigger_guard_feedback_outbox",
             Self::GuardFactorValue => "trigger_guard_factor_value",
             Self::GuardModelRun => "trigger_guard_model_run",
             Self::GuardModelVersion => "trigger_guard_model_version",
+            Self::GuardResearchJob => "trigger_guard_research_job",
             Self::GuardSourceSlice => "trigger_guard_source_slice",
             Self::GuardTrainingDataset => "trigger_guard_training_dataset",
             Self::SetUpdatedAt => "trigger_set_updated_at",
@@ -683,6 +721,8 @@ pub(in crate::migrations) async fn create_trigger_programs(
         DENY_WRITE_TRIGGER_SQL,
         CALIBRATION_ARTIFACT_GUARD_SQL,
         FEEDBACK_CYCLE_GUARD_SQL,
+        FEEDBACK_OUTBOX_GUARD_SQL,
+        RESEARCH_JOB_GUARD_SQL,
         "CREATE FUNCTION public.trigger_guard_factor_value() RETURNS trigger LANGUAGE plpgsql AS \
          $function$ DECLARE \
          owning_kind public.qp_model_run_kind; \
@@ -826,7 +866,9 @@ pub(in crate::migrations) async fn drop_trigger_programs(
         "trigger_guard_source_slice",
         "trigger_guard_model_version",
         "trigger_guard_model_run",
+        "trigger_guard_research_job",
         "trigger_guard_factor_value",
+        "trigger_guard_feedback_outbox",
         "trigger_guard_feedback_cycle",
         "trigger_guard_calibration_artifact",
         "trigger_deny_write",

@@ -20,15 +20,18 @@ use quant_pivot_models::{
         ports::{
             BiasTableFitJobParams, JobSubmitContext, ModelCalibrationFitJobParams, ResearchJobPort,
         },
-        quant::{NewResearchJob, ResearchJobInfo},
+        quant::{FeedbackStageJobIdentity, NewResearchJob, ResearchJobInfo},
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
-        BacktestPathSetId, BacktestReportId, DecisionPolicySnapshotId, ModelSpecId, ModelVersionId,
-        ResearchJobError, ResearchJobId, ResearchJobParams, RoleCode, TrainingDatasetId,
+        BacktestPathSetId, BacktestReportId, DecisionPolicySnapshotId, ModelRunId, ModelSpecId,
+        ModelVersionId, ResearchJobError, ResearchJobId, ResearchJobParams, RoleCode,
+        TrainingDatasetId,
     },
 };
-use quant_pivot_repository::traits::{PolicyRepository, TrainingDatasetRepository};
+use quant_pivot_repository::traits::{
+    PolicyRepository, ResearchJobEnqueueOutcome, TrainingDatasetRepository,
+};
 
 use crate::app::research_job::ResearchJobEngine;
 
@@ -68,6 +71,8 @@ impl CoreResearchJobPort {
         let kind = params.kind();
         NewResearchJob {
             job_id: ResearchJobId::from_v7(),
+            feedback_cycle_id: None,
+            feedback_stage: None,
             kind,
             status: ResearchJobStatus::Queued,
             model_spec_id,
@@ -82,13 +87,19 @@ impl CoreResearchJobPort {
     }
 
     async fn enqueue(&self, job: NewResearchJob) -> QuantResult<ResearchJobView> {
-        let info = self
+        let outcome = self
             .engine
             .repo()
             .enqueue(job)
             .await
             .map_err(QuantError::from)?;
-        self.engine.publish(&info, None, None);
+        let (info, inserted) = match outcome {
+            ResearchJobEnqueueOutcome::Inserted(info) => (info, true),
+            ResearchJobEnqueueOutcome::AlreadyPresent(info) => (info, false),
+        };
+        if inserted {
+            self.engine.publish(&info, None, None);
+        }
         Ok(ResearchJobView::from(info))
     }
 }
@@ -135,6 +146,7 @@ impl ResearchJobPort for CoreResearchJobPort {
         let decision_policy_snapshot_id = Some(dataset.decision_policy_snapshot_id);
         let params = ResearchJobParams::ModelTrain(ModelTrainJobParams {
             model_version_id: ModelVersionId::from_v7(),
+            model_run_id: ModelRunId::from_v7(),
             request,
         });
         let job = self.new_job(
@@ -177,6 +189,7 @@ impl ResearchJobPort for CoreResearchJobPort {
         let decision_policy_snapshot_id = Some(request.decision_policy_snapshot_id);
         let params = ResearchJobParams::CpcvBacktest(CpcvBacktestJobParams {
             model_version_id,
+            model_run_id: ModelRunId::from_v7(),
             request,
         });
         let job = self.new_job(params, None, decision_policy_snapshot_id, None, &ctx);
@@ -204,6 +217,7 @@ impl ResearchJobPort for CoreResearchJobPort {
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
         let params = ResearchJobParams::ModelCalibrationFit(ModelCalibrationFitJobParams {
+            model_run_id: ModelRunId::from_v7(),
             request,
             decision_policy_snapshot_id,
         });
@@ -332,13 +346,23 @@ impl ResearchJobPort for CoreResearchJobPort {
                 "cannot retry a job that is still queued or running",
             )));
         }
-        let job = self.new_job(
+        info.validate_identity()?;
+        let mut job = self.new_job(
             info.params_json.clone(),
             info.model_spec_id,
             info.decision_policy_snapshot_id,
             Some(info.job_id),
             &ctx,
         );
+        if let (Some(feedback_cycle_id), Some(feedback_stage)) =
+            (info.feedback_cycle_id, info.feedback_stage)
+        {
+            job = job.try_bind_feedback(FeedbackStageJobIdentity::try_retry(
+                feedback_cycle_id,
+                feedback_stage,
+                info.job_id,
+            )?)?;
+        }
         self.enqueue(job).await
     }
 }

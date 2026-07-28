@@ -122,8 +122,9 @@ pub use reconciliation::{
 };
 pub use research_job::{
     BacktestJobParams, CancelResearchJobRequest, CpcvBacktestJobParams, FeatureParityJobParams,
-    ModelTrainJobParams, ResearchJobListQuery, ResearchJobView, RetryResearchJobRequest,
-    TradePolicyFitJobParams, TradePolicyValidationJobParams,
+    FeedbackCoverageJobParams, FeedbackDriftJobParams, ModelTrainJobParams, ResearchJobListQuery,
+    ResearchJobView, RetryResearchJobRequest, TradePolicyFitJobParams,
+    TradePolicyValidationJobParams,
 };
 pub use research_model_contract::ResearchModelApiContractSchema;
 pub use role::{

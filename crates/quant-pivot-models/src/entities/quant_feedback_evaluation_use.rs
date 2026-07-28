@@ -35,10 +35,10 @@ pub struct Model {
     pub candidate_family_hash: ContentHash,
     pub comparison_contract_hash: ContentHash,
     pub semantic_use_hash: ContentHash,
-    pub result_artifact_uri: ArtifactUri,
-    pub result_artifact_hash: ContentHash,
-    pub used_at: DateTime<Utc>,
+    pub cpcv_artifact_uri: ArtifactUri,
+    pub cpcv_artifact_hash: ContentHash,
     pub evaluation_use_hash: ContentHash,
+    pub reserved_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
 

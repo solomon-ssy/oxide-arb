@@ -32,6 +32,8 @@ fn hash(seed: char) -> ContentHash {
 fn job(job_id: ResearchJobId) -> NewResearchJob {
     NewResearchJob {
         job_id,
+        feedback_cycle_id: None,
+        feedback_stage: None,
         kind: ResearchJobKind::TradePolicyFit,
         status: ResearchJobStatus::Queued,
         model_spec_id: None,

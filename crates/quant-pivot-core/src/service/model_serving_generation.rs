@@ -18,7 +18,10 @@ use quant_pivot_models::{
     domain::{governance::DecisionPolicySnapshotInfo, quant::ModelVersionInfo},
     enums::{common::MarketCategory, model::ModelFamily},
     runtime_config::{ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot},
-    types::{ContentHash, DecisionPolicySnapshotId, ModelVersionId},
+    types::{
+        ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration, Probability,
+        ResearchProfileArtifactId,
+    },
 };
 use quant_pivot_repository::traits::ModelRegistryRepository;
 use quant_pivot_research::selection::ModelFeatureRequirements;
@@ -54,6 +57,14 @@ struct ModelInferencePolicy {
     candidate_score_floor: Decimal,
     shadow_diff_threshold: Decimal,
     min_quality_gate_age_secs: u64,
+    minimum_shadow_overlap: Probability,
+    required_shadow_window_secs: u64,
+}
+
+#[derive(Clone, Copy)]
+enum ModelServingGenerationAuthority {
+    Published(PolicyBundleGeneration),
+    HistoricalSnapshot,
 }
 
 struct ServingModel {
@@ -68,6 +79,7 @@ pub struct ModelServingGeneration {
     active: BTreeMap<BuyModelRoute, Arc<ServingModel>>,
     shadow: Option<(BuyModelRoute, Arc<ServingModel>)>,
     inference_policy: ModelInferencePolicy,
+    authority: ModelServingGenerationAuthority,
 }
 
 impl ModelServingGeneration {
@@ -125,6 +137,23 @@ impl ModelServingGeneration {
     }
 }
 
+/// Exact active/shadow identity from one atomically published all-route generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedShadowRouteIdentity {
+    pub route: BuyModelRoute,
+    pub category_scope: Option<MarketCategory>,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub decision_policy_snapshot_hash: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
+    pub active_model_version_id: ModelVersionId,
+    pub active_serving_contract_hash: ContentHash,
+    pub shadow_model_version_id: ModelVersionId,
+    pub shadow_serving_contract_hash: ContentHash,
+    pub minimum_topn_overlap: Probability,
+    pub required_shadow_window_secs: u64,
+}
+
 /// One route pinned to an owned immutable generation across await boundaries.
 #[derive(Clone)]
 pub struct ModelServingRouteSnapshot {
@@ -143,6 +172,54 @@ impl ModelServingRouteSnapshot {
     #[must_use]
     pub fn active_model_version_id(&self) -> ModelVersionId {
         self.active.version.model_version_id
+    }
+
+    /// Require this route to contain two distinct contracts from the current
+    /// atomically published policy generation.
+    pub fn published_shadow_identity(&self) -> Result<PublishedShadowRouteIdentity, ControlError> {
+        let ModelServingGenerationAuthority::Published(policy_bundle_generation) =
+            self.generation.authority
+        else {
+            return Err(ControlError::Precondition(
+                "historical serving snapshots cannot produce production shadow evidence".to_owned(),
+            ));
+        };
+        let shadow = self.shadow.as_ref().ok_or_else(|| {
+            ControlError::Precondition(format!(
+                "published route {:?} has no configured shadow model",
+                self.route
+            ))
+        })?;
+        let active_contract = self.active.loaded.contract_hash();
+        let shadow_contract = shadow.loaded.contract_hash();
+        if self.active.version.model_version_id == shadow.version.model_version_id
+            || active_contract == shadow_contract
+            || self.active.version.profile_ref != shadow.version.profile_ref
+            || self.active.version.category_scope != self.route.category()
+            || shadow.version.category_scope != self.route.category()
+        {
+            return Err(ControlError::Precondition(
+                "published active/shadow route has aliased subjects, contract, profile, or category"
+                    .to_owned(),
+            ));
+        }
+        Ok(PublishedShadowRouteIdentity {
+            route: self.route,
+            category_scope: self.route.category(),
+            research_profile_artifact_id: self.active.version.profile_ref.artifact_id(),
+            decision_policy_snapshot_id: self.generation.decision_policy_snapshot_id,
+            decision_policy_snapshot_hash: self.generation.snapshot_hash,
+            policy_bundle_generation,
+            active_model_version_id: self.active.version.model_version_id,
+            active_serving_contract_hash: active_contract,
+            shadow_model_version_id: shadow.version.model_version_id,
+            shadow_serving_contract_hash: shadow_contract,
+            minimum_topn_overlap: self.generation.inference_policy.minimum_shadow_overlap,
+            required_shadow_window_secs: self
+                .generation
+                .inference_policy
+                .required_shadow_window_secs,
+        })
     }
 
     #[must_use]
@@ -375,6 +452,7 @@ impl PreparedModelServingGeneration {
         self,
         decision_policy_snapshot_id: DecisionPolicySnapshotId,
         snapshot_hash: ContentHash,
+        authority: ModelServingGenerationAuthority,
     ) -> Result<ModelServingGeneration, ControlError> {
         if self.snapshot_hash != snapshot_hash {
             return Err(ControlError::Precondition(format!(
@@ -396,6 +474,7 @@ impl PreparedModelServingGeneration {
             active: self.active,
             shadow: self.shadow,
             inference_policy: self.inference_policy,
+            authority,
         })
     }
 }
@@ -443,6 +522,7 @@ impl ModelServingGenerationStore {
             .finalize(
                 published.decision_policy_snapshot_id,
                 published.snapshot_hash,
+                ModelServingGenerationAuthority::Published(published.generation),
             )
             .map_err(QuantError::from)?;
         Ok(Self {
@@ -496,7 +576,11 @@ impl ModelServingGenerationStore {
                 .map_err(QuantError::from)?;
             Arc::new(
                 prepared
-                    .finalize(request.decision_policy_snapshot_id, request.snapshot_hash)
+                    .finalize(
+                        request.decision_policy_snapshot_id,
+                        request.snapshot_hash,
+                        ModelServingGenerationAuthority::HistoricalSnapshot,
+                    )
                     .map_err(QuantError::from)?,
             )
         };
@@ -509,6 +593,11 @@ impl ModelServingGenerationStore {
     #[must_use]
     pub fn current(&self) -> Arc<ModelServingGeneration> {
         self.current.load_full()
+    }
+
+    /// Pin one route from the currently published all-route generation.
+    pub fn current_route(&self, route: BuyModelRoute) -> QuantResult<ModelServingRouteSnapshot> {
+        ModelServingGeneration::route_snapshot(self.current.load_full(), route)
     }
 
     pub(crate) async fn prepare(
@@ -652,8 +741,11 @@ impl ModelServingGenerationStore {
                     .to_owned(),
             ));
         }
-        let generation =
-            prepared.finalize(bundle.decision_policy_snapshot_id, bundle.snapshot_hash)?;
+        let generation = prepared.finalize(
+            bundle.decision_policy_snapshot_id,
+            bundle.snapshot_hash,
+            ModelServingGenerationAuthority::Published(bundle.generation),
+        )?;
         self.current.store(Arc::new(generation));
         *current = bundle.clone();
         drop(current);
@@ -668,6 +760,19 @@ const fn inference_policy(snapshot: &DecisionPolicySnapshot) -> ModelInferencePo
         candidate_score_floor: model.candidate_score_floor.value(),
         shadow_diff_threshold: model.shadow_diff_threshold.value(),
         min_quality_gate_age_secs: model.min_quality_gate_age_secs,
+        minimum_shadow_overlap: Probability::new(
+            snapshot
+                .profile_artifacts
+                .research_method
+                .model_promotion
+                .min_shadow_overlap_stability
+                .value,
+        ),
+        required_shadow_window_secs: snapshot
+            .profile_artifacts
+            .research_method
+            .model_promotion
+            .required_shadow_window_secs,
     }
 }
 
@@ -755,8 +860,9 @@ mod tests {
     };
 
     use super::{
-        LoadedServingPointer, ModelServingGenerationRequest, ModelServingGenerationStore,
-        ModelServingPointerResolver, ServingModel, ServingPointer, ServingRole,
+        LoadedServingPointer, ModelServingGeneration, ModelServingGenerationAuthority,
+        ModelServingGenerationRequest, ModelServingGenerationStore, ModelServingPointerResolver,
+        ServingModel, ServingPointer, ServingRole,
     };
     use crate::{
         runtime_config::store::PublishedPolicyBundle,
@@ -1044,6 +1150,59 @@ mod tests {
         assert!(
             resolver.max_in_flight() >= 4,
             "all configured routes must prepare concurrently"
+        );
+    }
+
+    #[tokio::test]
+    async fn published_shadow_requires_current() {
+        let versions = VersionInventory::fixture();
+        let resolver = Arc::new(StubPointerResolver::new(versions.entries()));
+        let active = bundle(
+            PolicyBundleGeneration::FIRST,
+            policy(&versions, versions.shadow.model_version_id),
+        );
+        let store = ModelServingGenerationStore::bootstrap_with_resolver(
+            active.clone(),
+            resolver as Arc<dyn ModelServingPointerResolver>,
+        )
+        .await
+        .expect("complete serving generation");
+        let published = store
+            .current_route(BuyModelRoute::Pooled)
+            .expect("current pooled route")
+            .published_shadow_identity()
+            .expect("published shadow identity");
+        assert_eq!(
+            published.active_model_version_id,
+            versions.pooled.model_version_id
+        );
+        assert_eq!(
+            published.shadow_model_version_id,
+            versions.shadow.model_version_id
+        );
+        assert_eq!(
+            published.policy_bundle_generation,
+            PolicyBundleGeneration::FIRST
+        );
+
+        let historical = Arc::new(
+            store
+                .prepare(&active.snapshot)
+                .await
+                .expect("prepare historical generation")
+                .finalize(
+                    active.decision_policy_snapshot_id,
+                    active.snapshot_hash,
+                    ModelServingGenerationAuthority::HistoricalSnapshot,
+                )
+                .expect("finalize historical generation"),
+        );
+        let historical_route =
+            ModelServingGeneration::route_snapshot(historical, BuyModelRoute::Pooled)
+                .expect("historical pooled route");
+        assert!(
+            historical_route.published_shadow_identity().is_err(),
+            "historical replays cannot create production shadow evidence"
         );
     }
 

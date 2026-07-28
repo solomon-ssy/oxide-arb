@@ -63,6 +63,24 @@ async fn backtest_exact_preimages() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_comparison_shared_inputs() {
+    Box::pin(postgres::with_postgres_suite(
+        model_training_backtest::comparison_reuses_inputs(),
+    ))
+    .await
+    .expect("start feedback-comparison shared-input PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpcv_exact_replay() {
+    Box::pin(postgres::with_postgres_suite(
+        model_training_backtest::train_cpcv_persists_decomposition(),
+    ))
+    .await
+    .expect("start CPCV exact-replay PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn online_model_runtime() {
     Box::pin(postgres::with_postgres_suite(
         model_runtime::online_loop_selection_candidates(),
@@ -123,6 +141,7 @@ async fn core_business_scenarios_server() {
         scenario!(model_governance::rejects_routed_model_retirement);
         scenario!(model_governance::uncalibrated_return_cannot_publish);
         scenario!(model_governance::bind_calibration_creates_model);
+        scenario!(model_governance::path_binding_is_exact);
         scenario!(model_governance::publish_rescans_not_findings);
         scenario!(model_governance::sell_publish_requires_oof);
         scenario!(model_governance::sell_cpcv_requires_oof);

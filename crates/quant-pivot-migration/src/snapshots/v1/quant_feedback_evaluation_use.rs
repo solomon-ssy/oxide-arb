@@ -37,12 +37,12 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub semantic_use_hash: String,
     #[sea_orm(column_type = "Text")]
-    pub result_artifact_uri: String,
+    pub cpcv_artifact_uri: String,
     #[sea_orm(column_type = "Text")]
-    pub result_artifact_hash: String,
-    pub used_at: DateTimeWithTimeZone,
+    pub cpcv_artifact_hash: String,
     #[sea_orm(column_type = "Text")]
     pub evaluation_use_hash: String,
+    pub reserved_at: DateTimeWithTimeZone,
     pub created_at: DateTimeWithTimeZone,
 }
 

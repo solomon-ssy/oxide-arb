@@ -31,6 +31,8 @@ pub struct Model {
     pub champion_model_version_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub champion_serving_contract_hash: String,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub candidate_family: Json,
     #[sea_orm(column_type = "Text")]
     pub candidate_family_hash: String,
     pub status: QpFeedbackCycleStatus,

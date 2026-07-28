@@ -62,6 +62,18 @@ pub enum ArtifactNamespace {
     Dataset,
     /// Included rows and outcome lineage for frozen feedback cohorts.
     FeedbackCohort,
+    /// Frozen coverage counts and exact champion-compatible evaluation rows.
+    FeedbackCoverage,
+    /// Data/concept/label drift detail and immutable stage decision.
+    FeedbackDrift,
+    /// Dataset/training/calibration/CPCV feedback-stage batch evidence.
+    FeedbackLearning,
+    /// Reserved same-window Romano-Wolf candidate-family evidence.
+    FeedbackComparison,
+    /// Exact published-generation production-shadow gate evidence.
+    FeedbackShadowReplay,
+    /// Evidence-only terminal feedback decision.
+    FeedbackDecision,
     /// Serialized model artifacts (`models/`).
     Model,
     /// Point-in-time backtest reports (`backtests/`).
@@ -85,6 +97,12 @@ impl ArtifactNamespace {
         match self {
             Self::Dataset => "datasets",
             Self::FeedbackCohort => "feedback-cohorts",
+            Self::FeedbackCoverage => "feedback-coverage",
+            Self::FeedbackDrift => "feedback-drift",
+            Self::FeedbackLearning => "feedback-learning",
+            Self::FeedbackComparison => "feedback-comparison",
+            Self::FeedbackShadowReplay => "feedback-shadow-replay",
+            Self::FeedbackDecision => "feedback-decision",
             Self::Model => "models",
             Self::Backtest => "backtests",
             Self::PolicyEvidence => "policy-evidence",

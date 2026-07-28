@@ -7,26 +7,27 @@ use std::{
     sync::Arc,
 };
 
+use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
-    domain::quant::{
-        FEEDBACK_COHORT_PAGE_LIMIT, FactorDefinitionInfo, FactorValueInfo, FeatureVectorInfo,
-        FeedbackCohortDecision, FeedbackCohortEvidence, FeedbackCohortPageQuery,
-        FeedbackCohortWindow, FeedbackExecutionAttempt, FeedbackRecommendationContext,
-        FeedbackResolutionEvidence, JobProgressSink,
+    domain::{
+        ports::FeedbackDatasetBuildRequest,
+        quant::{
+            FEEDBACK_COHORT_PAGE_LIMIT, FactorDefinitionInfo, FactorValueInfo, FeatureVectorInfo,
+            FeedbackCohortDecision, FeedbackCohortEvidence, FeedbackCohortPageQuery,
+            FeedbackCohortWindow, FeedbackExecutionAttempt, FeedbackRecommendationContext,
+            FeedbackResolutionEvidence, JobProgressSink,
+        },
     },
-    enums::quant::{
-        CohortCensorReason, CohortExclusionReason, DatasetPurpose, FeedbackCohort, OutcomeSide,
-    },
+    enums::quant::{CohortCensorReason, CohortExclusionReason, FeedbackCohort, OutcomeSide},
     hashing::CanonicalDigest,
     types::{
         CapabilityRegistryHashes, CohortCensorCount, CohortExclusionCount,
         DATASET_COHORT_MANIFEST_FORMAT_VERSION, DatasetCohortArtifactRef, DatasetCohortCounts,
-        DatasetCohortManifest, DatasetCoverage, DatasetSourceLineage, FactorDefinitionId,
-        FeatureSourceRefs, FeatureVectorId, MODEL_LEARNING_COHORT_FORMAT_VERSION,
-        ModelLearningCohortArtifact, ModelLearningCohortRow, ModelSpecId,
-        NewModelLearningCohortRow, ResearchJobProgress, SchemaVersion, TokenId, TrainingDatasetId,
-        TrainingSampleSource, TrainingSampleSources,
+        DatasetCohortManifest, DatasetCoverage, FactorDefinitionId, FeatureSourceRefs,
+        FeatureVectorId, MODEL_LEARNING_COHORT_FORMAT_VERSION, ModelLearningCohortArtifact,
+        ModelLearningCohortRow, ModelVersionId, NewModelLearningCohortRow, ResearchJobProgress,
+        SchemaVersion, TokenId, TrainingSampleSource, TrainingSampleSources,
         factor::{FactorDefinitionRef, FactorServingPlane},
     },
 };
@@ -37,6 +38,7 @@ use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     factors::FactorValue,
     features::FeatureVector,
+    feedback::{FeedbackCoverageCohorts, FeedbackMatureLabel},
     selection::SelectedMarket,
     training::{
         DatasetPlanRequest, ModelLearningCohortCodec, TOKEN_PAYOUT_RATIO, TrainingDatasetArtifact,
@@ -49,38 +51,6 @@ use crate::service::{
     feedback_cohort::evaluate_feedback_cohort, training_dataset::TrainingDatasetService,
 };
 
-/// Server-frozen inputs for one `ModelLearning` Dataset.
-#[derive(Debug, Clone)]
-pub struct FeedbackDatasetBuildRequest {
-    pub training_dataset_id: TrainingDatasetId,
-    pub model_spec_id: ModelSpecId,
-    pub source_lineage: DatasetSourceLineage,
-    pub window: FeedbackCohortWindow,
-    pub purpose: DatasetPurpose,
-}
-
-impl FeedbackDatasetBuildRequest {
-    fn validate(&self) -> QuantResult<()> {
-        self.source_lineage
-            .validate()
-            .map_err(|error| ResearchError::DatasetPlan {
-                detail: error.to_string(),
-            })?;
-        if self.purpose == DatasetPurpose::PolicyFit
-            || self.source_lineage.pit_cutoff != self.window.cutoff()
-            || self.source_lineage.research_profile_artifact_id
-                != self.window.profile_ref().artifact_id()
-        {
-            return Err(ResearchError::DatasetPlan {
-                detail: "feedback Dataset must bind a non-PolicyFit purpose, exact profile, and exact source cutoff"
-                    .to_owned(),
-            }
-            .into());
-        }
-        Ok(())
-    }
-}
-
 /// Dependencies for [`FeedbackDatasetService`].
 pub struct FeedbackDatasetServiceDeps {
     pub cohort_repository: Arc<dyn FeedbackCohortRepository>,
@@ -90,11 +60,44 @@ pub struct FeedbackDatasetServiceDeps {
     pub dataset_service: Arc<TrainingDatasetService>,
 }
 
+/// Repository dependencies for the canonical feedback-cohort materializer.
+pub(crate) struct FeedbackCohortMaterializerDeps {
+    pub cohorts: Arc<dyn FeedbackCohortRepository>,
+    pub features: Arc<dyn FeatureRepository>,
+    pub factors: Arc<dyn FactorRepository>,
+}
+
+/// Single owner of feedback keyset scans and exact serving-row reconstruction.
+#[derive(Clone)]
+pub(crate) struct FeedbackCohortMaterializer {
+    cohorts: Arc<dyn FeedbackCohortRepository>,
+    features: Arc<dyn FeatureRepository>,
+    factors: Arc<dyn FactorRepository>,
+}
+
+/// Frozen all-cohort counts and champion-compatible evaluation rows.
+pub(crate) struct FeedbackCoverageMaterialization {
+    pub cohorts: FeedbackCoverageCohorts,
+    pub mature_labels: Vec<FeedbackMatureLabel>,
+    pub new_mature_label_count: u64,
+    pub champion_rows: Vec<ModelLearningCohortRow>,
+    pub champion_examples: Vec<TrainingExample>,
+}
+
+impl FeedbackCohortMaterializer {
+    #[must_use]
+    pub(crate) fn new(deps: FeedbackCohortMaterializerDeps) -> Self {
+        Self {
+            cohorts: deps.cohorts,
+            features: deps.features,
+            factors: deps.factors,
+        }
+    }
+}
+
 /// Seals `ModelLearning` truth and materializes only exact serving rows.
 pub struct FeedbackDatasetService {
-    cohort_repository: Arc<dyn FeedbackCohortRepository>,
-    feature_repository: Arc<dyn FeatureRepository>,
-    factor_repository: Arc<dyn FactorRepository>,
+    materializer: FeedbackCohortMaterializer,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_service: Arc<TrainingDatasetService>,
 }
@@ -103,9 +106,11 @@ impl FeedbackDatasetService {
     #[must_use]
     pub fn new(deps: FeedbackDatasetServiceDeps) -> Self {
         Self {
-            cohort_repository: deps.cohort_repository,
-            feature_repository: deps.feature_repository,
-            factor_repository: deps.factor_repository,
+            materializer: FeedbackCohortMaterializer::new(FeedbackCohortMaterializerDeps {
+                cohorts: deps.cohort_repository,
+                features: deps.feature_repository,
+                factors: deps.factor_repository,
+            }),
             artifact_store: deps.artifact_store,
             dataset_service: deps.dataset_service,
         }
@@ -119,8 +124,15 @@ impl FeedbackDatasetService {
         cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetArtifact> {
         request.validate()?;
+        let expected_model_spec_hash = request.model_spec_definition_hash;
         let mut scan = self
-            .scan_cohort(&request.window, &progress, &cancel)
+            .materializer
+            .scan_cohort(
+                FeedbackCohort::ModelLearning,
+                &request.window,
+                &progress,
+                &cancel,
+            )
             .await?;
         if scan.eligible.is_empty() {
             return Err(ResearchError::NotEligible {
@@ -130,10 +142,9 @@ impl FeedbackDatasetService {
             }
             .into());
         }
-        let eligible_count = scan.eligible.len();
         let eligible = mem::take(&mut scan.eligible);
-        let materialized = self.materialize(eligible).await?;
-        let counts = scan.counts(eligible_count, materialized.rows.len())?;
+        let materialized = self.materializer.materialize(eligible).await?;
+        let counts = scan.counts(materialized.rows.len())?;
         let cohort_manifest = self
             .persist_cohort(
                 request.window.clone(),
@@ -170,6 +181,13 @@ impl FeedbackDatasetService {
                 materialized.factor_serving_plane,
             )
             .await?;
+        if plan.model_spec_definition_hash != expected_model_spec_hash {
+            return Err(ResearchError::DatasetPlan {
+                detail: "feedback Dataset ModelSpec differs from the frozen candidate recipe"
+                    .to_owned(),
+            }
+            .into());
+        }
         self.dataset_service
             .build_feedback(plan, materialized.examples, materialized.coverage)
             .await
@@ -185,6 +203,7 @@ struct EligibleFeedback {
 #[derive(Default)]
 struct CohortScan {
     candidate_count: u64,
+    eligible_count: u64,
     eligible: Vec<EligibleFeedback>,
     exclusions: HashMap<CohortExclusionReason, u64>,
     censors: HashMap<CohortCensorReason, u64>,
@@ -193,6 +212,7 @@ struct CohortScan {
 impl CohortScan {
     fn record(
         &mut self,
+        cohort: FeedbackCohort,
         context: FeedbackRecommendationContext,
         decision: FeedbackCohortDecision,
     ) -> QuantResult<()> {
@@ -202,29 +222,52 @@ impl CohortScan {
                 .ok_or_else(|| ResearchError::DatasetBuild {
                     detail: "feedback cohort candidate count overflowed u64".to_owned(),
                 })?;
-        match decision {
-            FeedbackCohortDecision::Eligible(FeedbackCohortEvidence::ModelLearning(resolution)) => {
+        match (cohort, decision) {
+            (
+                FeedbackCohort::ModelLearning,
+                FeedbackCohortDecision::Eligible(FeedbackCohortEvidence::ModelLearning(resolution)),
+            ) => {
+                self.increment_eligible()?;
                 self.eligible.push(EligibleFeedback {
                     context,
                     resolution,
                 });
             }
-            FeedbackCohortDecision::Eligible(
-                FeedbackCohortEvidence::ExecutionLearning(_)
-                | FeedbackCohortEvidence::PolicyEvaluation { .. },
+            (
+                FeedbackCohort::ExecutionLearning,
+                FeedbackCohortDecision::Eligible(FeedbackCohortEvidence::ExecutionLearning(_)),
+            )
+            | (
+                FeedbackCohort::PolicyEvaluation,
+                FeedbackCohortDecision::Eligible(FeedbackCohortEvidence::PolicyEvaluation {
+                    ..
+                }),
             ) => {
+                self.increment_eligible()?;
+            }
+            (_, FeedbackCohortDecision::Eligible(_)) => {
                 return Err(ResearchError::DatasetBuild {
-                    detail: "ModelLearning scan produced evidence from another cohort".to_owned(),
+                    detail: format!("{cohort} scan produced evidence from another cohort"),
                 }
                 .into());
             }
-            FeedbackCohortDecision::Excluded(reason) => {
+            (_, FeedbackCohortDecision::Excluded(reason)) => {
                 Self::increment(&mut self.exclusions, reason)?;
             }
-            FeedbackCohortDecision::Censored(reason) => {
+            (_, FeedbackCohortDecision::Censored(reason)) => {
                 Self::increment(&mut self.censors, reason)?;
             }
         }
+        Ok(())
+    }
+
+    fn increment_eligible(&mut self) -> QuantResult<()> {
+        self.eligible_count =
+            self.eligible_count
+                .checked_add(1)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "feedback cohort eligible count overflowed u64".to_owned(),
+                })?;
         Ok(())
     }
 
@@ -241,10 +284,7 @@ impl CohortScan {
         Ok(())
     }
 
-    fn counts(&self, eligible: usize, included: usize) -> QuantResult<DatasetCohortCounts> {
-        let eligible = u64::try_from(eligible).map_err(|error| ResearchError::DatasetBuild {
-            detail: format!("feedback eligible count conversion failed: {error}"),
-        })?;
+    fn counts(&self, included: usize) -> QuantResult<DatasetCohortCounts> {
         let included = u64::try_from(included).map_err(|error| ResearchError::DatasetBuild {
             detail: format!("feedback included count conversion failed: {error}"),
         })?;
@@ -268,7 +308,7 @@ impl CohortScan {
         censors.sort_by_key(|entry| entry.reason.as_str());
         DatasetCohortCounts::try_new(
             self.candidate_count,
-            eligible,
+            self.eligible_count,
             included,
             exclusions,
             censors,
@@ -280,11 +320,20 @@ impl CohortScan {
             .into()
         })
     }
+
+    fn count_all(&self) -> QuantResult<DatasetCohortCounts> {
+        let included =
+            usize::try_from(self.eligible_count).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("feedback eligible count exceeds usize: {error}"),
+            })?;
+        self.counts(included)
+    }
 }
 
-impl FeedbackDatasetService {
+impl FeedbackCohortMaterializer {
     async fn scan_cohort(
         &self,
+        cohort: FeedbackCohort,
         window: &FeedbackCohortWindow,
         progress: &Arc<dyn JobProgressSink>,
         cancel: &CancellationToken,
@@ -299,7 +348,7 @@ impl FeedbackDatasetService {
                 .into());
             }
             let query = FeedbackCohortPageQuery::try_new(
-                FeedbackCohort::ModelLearning,
+                cohort,
                 window.clone(),
                 after,
                 FEEDBACK_COHORT_PAGE_LIMIT,
@@ -307,10 +356,10 @@ impl FeedbackDatasetService {
             .map_err(|error| ResearchError::DatasetBuild {
                 detail: format!("construct feedback keyset page: {error}"),
             })?;
-            let page = self.cohort_repository.list_page(query).await?;
+            let page = self.cohorts.list_page(query).await?;
             for candidate in page.candidates() {
                 let decision = evaluate_feedback_cohort(
-                    FeedbackCohort::ModelLearning,
+                    cohort,
                     window,
                     candidate.context(),
                     candidate
@@ -320,12 +369,12 @@ impl FeedbackDatasetService {
                     candidate.execution_outcome(),
                 )
                 .map_err(|error| ResearchError::DatasetBuild {
-                    detail: format!("classify ModelLearning candidate: {error}"),
+                    detail: format!("classify {cohort} candidate: {error}"),
                 })?;
-                scan.record(candidate.context().clone(), decision)?;
+                scan.record(cohort, candidate.context().clone(), decision)?;
             }
             progress.report(ResearchJobProgress::indeterminate(
-                "feedback-cohort-scan",
+                format!("feedback-{cohort}-scan"),
                 scan.candidate_count,
             ));
             let Some(cursor) = page.next_cursor() else {
@@ -334,6 +383,79 @@ impl FeedbackDatasetService {
             after = Some(cursor);
         }
         Ok(scan)
+    }
+
+    /// Freeze all three orthogonal cohorts and reconstruct only rows bound to
+    /// the exact champion serving version.
+    pub(crate) async fn freeze_coverage(
+        &self,
+        window: &FeedbackCohortWindow,
+        champion_model_version_id: ModelVersionId,
+        champion_pit_cutoff: DateTime<Utc>,
+        progress: &Arc<dyn JobProgressSink>,
+        cancel: &CancellationToken,
+    ) -> QuantResult<FeedbackCoverageMaterialization> {
+        let mut model = self
+            .scan_cohort(FeedbackCohort::ModelLearning, window, progress, cancel)
+            .await?;
+        let execution = self
+            .scan_cohort(FeedbackCohort::ExecutionLearning, window, progress, cancel)
+            .await?;
+        let policy = self
+            .scan_cohort(FeedbackCohort::PolicyEvaluation, window, progress, cancel)
+            .await?;
+
+        let mut mature_labels = model
+            .eligible
+            .iter()
+            .map(|eligible| FeedbackMatureLabel {
+                recommendation_id: eligible.context.recommendation_id(),
+                model_version_id: eligible.context.model_version_id(),
+                candidate_available_at: eligible.context.available_at(),
+                label_available_at: eligible.resolution.available_at,
+                outcome_hash: eligible.resolution.outcome_hash,
+            })
+            .collect::<Vec<_>>();
+        mature_labels.sort_by_key(|label| {
+            (
+                label.recommendation_id.as_uuid(),
+                label.candidate_available_at,
+                label.label_available_at,
+            )
+        });
+        let new_mature_label_count = u64::try_from(
+            mature_labels
+                .iter()
+                .filter(|label| label.label_available_at > champion_pit_cutoff)
+                .count(),
+        )
+        .map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("new mature-label count conversion failed: {error}"),
+        })?;
+        let champion = mem::take(&mut model.eligible)
+            .into_iter()
+            .filter(|eligible| eligible.context.model_version_id() == champion_model_version_id)
+            .collect::<Vec<_>>();
+        let (mut champion_rows, mut champion_examples) = if champion.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            let materialized = self.materialize(champion).await?;
+            (materialized.rows, materialized.examples)
+        };
+        champion_rows.sort_by_key(|row| row.example_id.as_uuid());
+        champion_examples.sort_by_key(|example| example.example_id.as_uuid());
+        let cohorts = FeedbackCoverageCohorts {
+            model_learning: model.counts(champion_rows.len())?,
+            execution_learning: execution.count_all()?,
+            policy_evaluation: policy.count_all()?,
+        };
+        Ok(FeedbackCoverageMaterialization {
+            cohorts,
+            mature_labels,
+            new_mature_label_count,
+            champion_rows,
+            champion_examples,
+        })
     }
 }
 
@@ -346,7 +468,7 @@ struct MaterializedFeedback {
     knowledge_lag_secs: u64,
 }
 
-impl FeedbackDatasetService {
+impl FeedbackCohortMaterializer {
     async fn materialize(
         &self,
         eligible: Vec<EligibleFeedback>,
@@ -363,7 +485,7 @@ impl FeedbackDatasetService {
             }
             .into());
         }
-        let features = self.feature_repository.find_by_ids(&feature_ids).await?;
+        let features = self.features.find_by_ids(&feature_ids).await?;
         let features = features
             .into_iter()
             .map(|feature| (feature.feature_vector_id, feature))
@@ -403,7 +525,7 @@ impl FeedbackDatasetService {
             );
         }
         let definitions = self
-            .factor_repository
+            .factors
             .find_definitions_by_ids(&expected_factor_ids)
             .await?;
         let definitions = definitions
@@ -417,10 +539,7 @@ impl FeedbackDatasetService {
             )
             .into());
         }
-        let factor_rows = self
-            .factor_repository
-            .find_values_by_vectors(&feature_ids)
-            .await?;
+        let factor_rows = self.factors.find_values_by_vectors(&feature_ids).await?;
         let mut factors_by_vector = HashMap::<FeatureVectorId, Vec<FactorValueInfo>>::new();
         for factor in factor_rows {
             factors_by_vector
@@ -605,7 +724,7 @@ impl FeedbackDatasetService {
     }
 }
 
-impl FeedbackDatasetService {
+impl FeedbackCohortMaterializer {
     fn validate_feature(
         context: &FeedbackRecommendationContext,
         feature: &FeatureVectorInfo,

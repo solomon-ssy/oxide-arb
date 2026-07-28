@@ -22,6 +22,7 @@ mod factor;
 mod feature;
 mod feature_parity;
 mod feedback_cohort;
+mod feedback_cycle;
 mod governance_audit;
 mod market_linkage;
 mod model;
@@ -47,7 +48,7 @@ mod trade_policy;
 mod trade_tape_block_cursor;
 
 pub use account_snapshot::AccountSnapshotRepository;
-pub use backtest_path_set::BacktestPathSetRepository;
+pub use backtest_path_set::{BacktestPathSetRepository, CpcvPathSetCommit};
 pub use backtest_report::BacktestReportRepository;
 pub use basis_alert::BasisAlertRepository;
 pub use calibration_artifact::CalibrationArtifactRepository;
@@ -71,12 +72,17 @@ pub use feature_parity::{
     FeatureParityRepository, ServingEvidenceRepository,
 };
 pub use feedback_cohort::FeedbackCohortRepository;
+pub use feedback_cycle::{
+    DriftReportWriteOutcome, FeedbackCycleCasOutcome, FeedbackCycleClaim, FeedbackCycleClaimMode,
+    FeedbackCycleGeneration, FeedbackCycleLeaseGuard, FeedbackCycleRepository,
+    FeedbackCycleWriteOutcome, FeedbackEvaluationWriteOutcome, FeedbackStageWriteOutcome,
+};
 pub use governance_audit::ModelGovernanceAuditRepository;
 pub use market_linkage::MarketLinkageRepository;
 pub use model::ModelRunRepository;
 pub use model_registry::{
-    ModelRegistryRepository, PublishFeatureParityPermit, PublishModelVersionCommit,
-    PublishModelVersionResult,
+    BindPublishPathSetCommit, ModelRegistryRepository, PublishFeatureParityPermit,
+    PublishModelVersionCommit, PublishModelVersionResult,
 };
 pub use order_intent::OrderIntentRepository;
 pub use portfolio_plan::PortfolioPlanRepository;
@@ -87,7 +93,9 @@ pub use recommendation_report::RecommendationReportRepository;
 pub use recommendation_resolution_outcome::RecommendationResolutionOutcomeRepository;
 pub use reconciliation::ReconciliationRepository;
 pub use report_run::ReportRunRepository;
-pub use research_job::{KindRunningCount, ReclaimOutcome, ResearchJobRepository};
+pub use research_job::{
+    KindRunningCount, ReclaimOutcome, ResearchJobEnqueueOutcome, ResearchJobRepository,
+};
 pub use research_readiness::{ResearchReadinessEvidenceRepository, ShadowLatencyObservation};
 pub use reserved_capital::ReservedCapitalRepository;
 pub use selection::MarketSelectionRepository;

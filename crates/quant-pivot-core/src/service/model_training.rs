@@ -163,6 +163,8 @@ pub struct ModelTrainerConfig {
 pub struct TrainModelInput {
     /// Pre-assigned registry id (async job engine) or minted for direct calls.
     pub model_version_id: ModelVersionId,
+    /// Pre-assigned run id frozen in the durable job for exact lease recovery.
+    pub model_run_id: ModelRunId,
     /// Complete immutable target model specification.
     pub model_spec: ModelSpecInfo,
     /// Frozen dataset to train on.
@@ -392,7 +394,7 @@ impl ModelTrainerService {
         }
 
         let model_version_id = input.model_version_id;
-        let model_run_id = ModelRunId::from_v7();
+        let model_run_id = input.model_run_id;
         self.create_run(&model_run_id, &dataset).await?;
 
         let result = async {
@@ -1312,7 +1314,7 @@ impl ModelTrainerService {
         let materialization = require_dataset_materialization(dataset)?;
         self.deps
             .model_run_repo
-            .create(NewModelRun {
+            .start_exact(NewModelRun {
                 model_run_id: *model_run_id,
                 run_kind: ModelRunKind::Training,
                 model_version_id: None,

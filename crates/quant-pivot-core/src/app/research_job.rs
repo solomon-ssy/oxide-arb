@@ -21,6 +21,8 @@ use quant_pivot_repository::traits::ResearchJobRepository;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::service::feedback_coordinator::FeedbackCoordinatorWake;
+
 /// Shared, cheaply-cloneable handle wiring the job ledger, event bus, live
 /// cancellation-token registry, and this process's boot epoch id.
 #[derive(Clone)]
@@ -28,6 +30,7 @@ pub struct ResearchJobEngine {
     repo: Arc<dyn ResearchJobRepository>,
     events: CoreEventPublisher,
     cancels: Arc<DashMap<ResearchJobId, CancellationToken>>,
+    feedback_wake: FeedbackCoordinatorWake,
     instance_id: WorkerId,
 }
 
@@ -39,6 +42,7 @@ impl ResearchJobEngine {
             repo,
             events,
             cancels: Arc::new(DashMap::new()),
+            feedback_wake: FeedbackCoordinatorWake::new(),
             instance_id: WorkerId::from_v7(),
         }
     }
@@ -53,6 +57,12 @@ impl ResearchJobEngine {
     #[must_use]
     pub const fn instance_id(&self) -> &WorkerId {
         &self.instance_id
+    }
+
+    /// Non-authoritative lifecycle wake consumed by the feedback coordinator.
+    #[must_use]
+    pub fn feedback_wake(&self) -> FeedbackCoordinatorWake {
+        self.feedback_wake.clone()
     }
 
     /// Register a live cancellation token for a running job.
@@ -83,6 +93,7 @@ impl ResearchJobEngine {
         phase: Option<String>,
         pct: Option<f64>,
     ) {
+        self.feedback_wake.wake();
         let run_id = result_ref.map_or_else(|| job_id.to_string(), |uuid| uuid.to_string());
         self.events
             .publish(CoreEvent::MaterializationRun(MaterializationRunEvent::job(
@@ -97,6 +108,7 @@ impl ResearchJobEngine {
 
     /// Publish a `materialization.run_update` lifecycle/progress event.
     pub fn publish(&self, info: &ResearchJobInfo, phase: Option<String>, pct: Option<f64>) {
+        self.feedback_wake.wake();
         let run_id = info
             .result()
             .map_or_else(|| info.job_id.to_string(), |result| result.id.to_string());

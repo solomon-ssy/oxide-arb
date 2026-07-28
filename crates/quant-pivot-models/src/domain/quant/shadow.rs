@@ -6,9 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     entities::quant_shadow_comparison,
-    enums::quant::ModelWeightSource,
+    enums::{common::MarketCategory, quant::ModelWeightSource},
     types::{
-        ContentHash, ModelVersionId, Probability, ShadowComparisonId,
+        ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration, Probability,
+        ResearchProfileArtifactId, ShadowComparisonId,
         shadow::{ShadowMaturedOutcomeDelta, ShadowRankDelta, ShadowScoreDelta},
     },
 };
@@ -20,6 +21,13 @@ pub struct ShadowComparisonInfo {
     pub shadow_comparison_id: ShadowComparisonId,
     pub active_model_version_id: ModelVersionId,
     pub shadow_model_version_id: ModelVersionId,
+    pub active_serving_contract_hash: ContentHash,
+    pub shadow_serving_contract_hash: ContentHash,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    pub category_scope: Option<MarketCategory>,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub decision_policy_snapshot_hash: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
     pub weight_source: ModelWeightSource,
     pub decision_at: DateTime<Utc>,
     pub topn_overlap: Probability,
@@ -38,6 +46,13 @@ info_from_model!(
         shadow_comparison_id,
         active_model_version_id,
         shadow_model_version_id,
+        active_serving_contract_hash,
+        shadow_serving_contract_hash,
+        research_profile_artifact_id,
+        category_scope,
+        decision_policy_snapshot_id,
+        decision_policy_snapshot_hash,
+        policy_bundle_generation,
         weight_source,
         decision_at,
         topn_overlap,
@@ -57,6 +72,13 @@ pub struct NewShadowComparison {
     pub shadow_comparison_id: ShadowComparisonId,
     pub active_model_version_id: ModelVersionId,
     pub shadow_model_version_id: ModelVersionId,
+    pub active_serving_contract_hash: ContentHash,
+    pub shadow_serving_contract_hash: ContentHash,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    pub category_scope: Option<MarketCategory>,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub decision_policy_snapshot_hash: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
     pub weight_source: ModelWeightSource,
     pub decision_at: DateTime<Utc>,
     pub topn_overlap: Probability,
@@ -82,5 +104,35 @@ pub struct ShadowStabilitySummary {
     /// Mean `TopN` overlap across the window in `[0, 1]`.
     pub mean_topn_overlap: Probability,
     /// Whether any comparison in the window flagged a hard divergence.
+    pub any_hard_divergence: bool,
+}
+
+/// Exact immutable identity and half-open window used by the F10 gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShadowObservationQuery {
+    pub active_model_version_id: ModelVersionId,
+    pub shadow_model_version_id: ModelVersionId,
+    pub active_serving_contract_hash: ContentHash,
+    pub shadow_serving_contract_hash: ContentHash,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    pub category_scope: Option<MarketCategory>,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub decision_policy_snapshot_hash: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+}
+
+/// Exact aggregate over one [`ShadowObservationQuery`].
+///
+/// Empty windows carry no synthetic overlap or timestamp.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShadowObservationWindow {
+    pub sample_count: u64,
+    pub first_decision_at: Option<DateTime<Utc>>,
+    pub last_decision_at: Option<DateTime<Utc>>,
+    pub mean_topn_overlap: Option<Probability>,
     pub any_hard_divergence: bool,
 }

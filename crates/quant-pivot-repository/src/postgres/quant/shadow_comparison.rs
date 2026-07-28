@@ -5,7 +5,10 @@ use std::cmp;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::quant::{NewShadowComparison, ShadowComparisonInfo, ShadowStabilitySummary},
+    domain::quant::{
+        NewShadowComparison, ShadowComparisonInfo, ShadowObservationQuery, ShadowObservationWindow,
+        ShadowStabilitySummary,
+    },
     entities::quant_shadow_comparison::{Column, Entity},
     enums::quant::ModelWeightSource,
     types::{ModelVersionId, Probability},
@@ -96,6 +99,114 @@ impl ShadowComparisonRepository for PgShadowComparisonRepository {
             window_end: row.window_end,
             mean_topn_overlap: Probability::new(row.mean_topn_overlap.unwrap_or(Decimal::ZERO)),
             any_hard_divergence: row.any_hard_divergence.unwrap_or(false),
+        })
+    }
+
+    async fn observation_window(
+        &self,
+        query: &ShadowObservationQuery,
+    ) -> Result<ShadowObservationWindow, StorageError> {
+        if query.window_start >= query.window_end
+            || query.active_model_version_id == query.shadow_model_version_id
+            || query.active_serving_contract_hash == query.shadow_serving_contract_hash
+        {
+            return Err(StorageError::invariant_violation(
+                Some("quant_shadow_comparison"),
+                "F10 observation query has an invalid window or aliased subjects",
+            ));
+        }
+        let row = Entity::find()
+            .filter(Column::ActiveModelVersionId.eq(query.active_model_version_id))
+            .filter(Column::ShadowModelVersionId.eq(query.shadow_model_version_id))
+            .filter(Column::ActiveServingContractHash.eq(query.active_serving_contract_hash))
+            .filter(Column::ShadowServingContractHash.eq(query.shadow_serving_contract_hash))
+            .filter(
+                Column::ResearchProfileArtifactId.eq(query.research_profile_artifact_id.clone()),
+            )
+            .filter(Column::CategoryScope.eq(query.category_scope))
+            .filter(Column::DecisionPolicySnapshotId.eq(query.decision_policy_snapshot_id))
+            .filter(Column::DecisionPolicySnapshotHash.eq(query.decision_policy_snapshot_hash))
+            .filter(Column::PolicyBundleGeneration.eq(query.policy_bundle_generation))
+            .filter(Column::WeightSource.eq(ModelWeightSource::Artifact))
+            .filter(Column::DecisionAt.gte(query.window_start))
+            .filter(Column::DecisionAt.lt(query.window_end))
+            .filter(Column::CreatedAt.lt(query.window_end))
+            .select_only()
+            .column_as(
+                Expr::col(Column::ShadowComparisonId).count(),
+                "sample_count",
+            )
+            .column_as(Expr::col(Column::DecisionAt).min(), "window_start")
+            .column_as(Expr::col(Column::DecisionAt).max(), "window_end")
+            .column_as(Expr::col(Column::TopnOverlap).avg(), "mean_topn_overlap")
+            .column_as(
+                primitives::bool_or(Column::HardDivergence),
+                "any_hard_divergence",
+            )
+            .into_model::<ShadowSummaryRow>()
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some("quant_shadow_comparison"),
+                    "aggregate query returned no row",
+                )
+            })?;
+        let sample_count = u64::try_from(row.sample_count).map_err(|error| {
+            StorageError::invariant_violation(
+                Some("quant_shadow_comparison"),
+                format!("aggregate sample count is invalid: {error}"),
+            )
+        })?;
+        if sample_count == 0 {
+            if row.window_start.is_some()
+                || row.window_end.is_some()
+                || row.mean_topn_overlap.is_some()
+                || row.any_hard_divergence.is_some()
+            {
+                return Err(StorageError::invariant_violation(
+                    Some("quant_shadow_comparison"),
+                    "empty aggregate returned synthetic observation values",
+                ));
+            }
+            return Ok(ShadowObservationWindow {
+                sample_count,
+                first_decision_at: None,
+                last_decision_at: None,
+                mean_topn_overlap: None,
+                any_hard_divergence: false,
+            });
+        }
+        let first_decision_at = row.window_start.ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some("quant_shadow_comparison"),
+                "non-empty aggregate has no first decision time",
+            )
+        })?;
+        let last_decision_at = row.window_end.ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some("quant_shadow_comparison"),
+                "non-empty aggregate has no last decision time",
+            )
+        })?;
+        let mean_topn_overlap = row.mean_topn_overlap.ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some("quant_shadow_comparison"),
+                "non-empty aggregate has no mean overlap",
+            )
+        })?;
+        Ok(ShadowObservationWindow {
+            sample_count,
+            first_decision_at: Some(first_decision_at),
+            last_decision_at: Some(last_decision_at),
+            mean_topn_overlap: Some(Probability::new(mean_topn_overlap)),
+            any_hard_divergence: row.any_hard_divergence.ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some("quant_shadow_comparison"),
+                    "non-empty aggregate has no divergence aggregate",
+                )
+            })?,
         })
     }
 }

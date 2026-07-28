@@ -124,9 +124,10 @@ pub use feedback_cohort::{
 };
 pub use feedback_cycle::{
     DriftReportInfo, DriftReportInput, FeedbackCycleInfo, FeedbackCycleKey, FeedbackCycleKeyInput,
-    FeedbackEvaluationUseInfo, FeedbackEvaluationUseInput, FeedbackEvaluationUseKey,
-    FeedbackStageEventInfo, FeedbackStageEventInput, NewDriftReport, NewFeedbackCycle,
-    NewFeedbackEvaluationUse, NewFeedbackStageEvent,
+    FeedbackCycleTerminal, FeedbackEvaluationUseInfo, FeedbackEvaluationUseInput,
+    FeedbackEvaluationUseKey, FeedbackOutboxEntry, FeedbackQueueSnapshot, FeedbackStageEventInfo,
+    FeedbackStageEventInput, NewDriftReport, NewFeedbackCycle, NewFeedbackEvaluationUse,
+    NewFeedbackStageEvent,
 };
 pub use governance_audit::{
     ModelGovernanceAuditDetail, ModelGovernanceAuditInfo, NewModelGovernanceAudit,
@@ -185,14 +186,18 @@ pub use report_txn::{
     PreparedReportOutcome, PublishReportOutcome,
 };
 pub use research_job::{
-    JobProgressSink, NewResearchJob, NoopProgressSink, ResearchJobInfo, ResearchJobResultRef,
+    FeedbackStageJobIdentity, JobProgressSink, NewResearchJob, NoopProgressSink,
+    ResearchJobArtifactRef, ResearchJobFinalization, ResearchJobInfo, ResearchJobResultRef,
 };
 pub use research_readiness::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo};
 pub use selection::{
     MarketSelectionInfo, MarketSelectionMemberInfo, MarketSelectionModel, NewMarketSelection,
     NewMarketSelectionMember,
 };
-pub use shadow::{NewShadowComparison, ShadowComparisonInfo, ShadowStabilitySummary};
+pub use shadow::{
+    NewShadowComparison, ShadowComparisonInfo, ShadowObservationQuery, ShadowObservationWindow,
+    ShadowStabilitySummary,
+};
 pub use source_slice::{
     BeginSourceSliceOutcome, CompleteSourceSlice, NewSourceSlice, SourceSliceIdentity,
     SourceSliceIdentityInput, SourceSliceInfo,

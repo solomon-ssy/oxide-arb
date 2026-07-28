@@ -1536,7 +1536,8 @@ mod tests {
             },
         };
         use quant_pivot_repository::traits::{
-            ModelRegistryRepository, PublishModelVersionCommit, PublishModelVersionResult,
+            BindPublishPathSetCommit, ModelRegistryRepository, PublishModelVersionCommit,
+            PublishModelVersionResult,
         };
         use quant_pivot_research::{
             artifact::{ArtifactStore, LocalArtifactStore},
@@ -1653,6 +1654,12 @@ mod tests {
                 &self,
                 _model_version_id: &ModelVersionId,
                 _publish_path_set_id: Option<BacktestPathSetId>,
+            ) -> Result<ModelVersionInfo, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn commit_publish_path_binding(
+                &self,
+                _commit: BindPublishPathSetCommit,
             ) -> Result<ModelVersionInfo, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }

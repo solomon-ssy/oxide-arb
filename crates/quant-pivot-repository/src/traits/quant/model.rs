@@ -18,6 +18,10 @@ pub trait ModelRunRepository: Send + Sync {
     /// state and lifecycle start timestamp in the insert statement.
     async fn create(&self, run: NewModelRun) -> Result<ModelRunInfo, StorageError>;
 
+    /// Start one pre-assigned durable run or return its exact Running/Succeeded
+    /// replay. Identity drift and failed/cancelled terminal reuse fail closed.
+    async fn start_exact(&self, run: NewModelRun) -> Result<ModelRunInfo, StorageError>;
+
     /// Look up a run by id.
     async fn find_by_id(
         &self,
@@ -41,6 +45,18 @@ pub trait ModelRunRepository: Send + Sync {
     /// that already carried the version at create time). When `None`, the column
     /// is left unchanged.
     async fn succeed(
+        &self,
+        model_run_id: &ModelRunId,
+        output_hash: ContentHash,
+        model_version_id: Option<ModelVersionId>,
+    ) -> Result<ModelRunInfo, StorageError>;
+
+    /// Finalize success or return the exact already-succeeded terminal.
+    ///
+    /// This is the response-loss/restart boundary for durable jobs with a
+    /// preassigned run id. A different output, subject, or terminal state is
+    /// rejected rather than treated as an idempotent replay.
+    async fn succeed_exact(
         &self,
         model_run_id: &ModelRunId,
         output_hash: ContentHash,

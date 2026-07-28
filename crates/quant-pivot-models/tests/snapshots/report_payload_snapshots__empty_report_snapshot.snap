@@ -8,7 +8,7 @@ expression: empty_report()
   "profile_ref": {
     "id": "weather_forecast_24h",
     "version": 3,
-    "content_hash": "blake3:baf12884866475dd0e422f2adb8cf6c03563e601930fd098cc5d0b0a15be244c"
+    "content_hash": "blake3:0dca50a71b5630ce844dfcfb55bec134c6d65e954d2a7b948807c97d53bafdc3"
   },
   "report_kind": "top_n",
   "decision_at": "2023-11-14T22:11:20Z",

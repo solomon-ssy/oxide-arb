@@ -726,6 +726,8 @@ impl PolicyEvidenceFixture {
         PgResearchJobRepository::new(context.db.clone())
             .enqueue(NewResearchJob {
                 job_id: fit_job_id,
+                feedback_cycle_id: None,
+                feedback_stage: None,
                 kind: ResearchJobKind::TradePolicyFit,
                 status: ResearchJobStatus::Queued,
                 model_spec_id: Some(context.subject.model_spec_id),

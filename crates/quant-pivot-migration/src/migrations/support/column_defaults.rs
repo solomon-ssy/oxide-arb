@@ -425,7 +425,27 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     },
     ColumnDefaultSpec {
         table: "quant_feedback_evaluation_use",
+        column: "reserved_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_evaluation_use",
         column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_event_outbox",
+        column: "publish_attempts",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_event_outbox",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_event_outbox",
+        column: "updated_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {

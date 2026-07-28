@@ -43,6 +43,14 @@ pub struct ResearchJobsConfig {
     pub cpcv_backtest_concurrency: usize,
     /// Per-kind cap for deterministic feature-parity replay.
     pub feature_parity_concurrency: usize,
+    /// Per-kind cap for frozen feedback coverage scans.
+    pub feedback_coverage_concurrency: usize,
+    /// Per-kind cap for statistical drift computation.
+    pub feedback_drift_concurrency: usize,
+    /// Per-kind cap for each bounded feedback learning-stage batch.
+    pub feedback_learning_concurrency: usize,
+    /// Maximum feedback cycles concurrently owned by one resident coordinator.
+    pub feedback_cycle_concurrency: usize,
     /// Per-kind cap for executable trade-policy fits.
     pub trade_policy_fit_concurrency: usize,
     /// Per-kind cap for independent row-level trade-policy validation.
@@ -66,6 +74,14 @@ pub struct ResearchJobsConfig {
     pub plan_sample_markets: u32,
     /// Minimum interval between throttled progress writes (DB heartbeat + WS push).
     pub progress_min_interval_ms: u64,
+    /// Elapsed DB-clock age after which a running feedback cycle emits a
+    /// deduplicated scheduler-health alert. The cycle remains durable and is
+    /// never synthetically terminalized.
+    pub feedback_stuck_secs: u64,
+    /// Maximum time one feedback scheduler alert may occupy the coordinator.
+    pub feedback_alert_timeout_secs: u64,
+    /// Durable-condition alert dedupe horizon.
+    pub feedback_alert_dedupe_secs: u64,
     /// Bounded grace period a graceful shutdown waits for in-flight jobs to
     /// cooperatively unwind at a stage boundary before their rows are
     /// explicitly re-queued for the next epoch. Keep short: the build restarts
@@ -84,6 +100,10 @@ impl Default for ResearchJobsConfig {
             model_calibration_fit_concurrency: 1,
             cpcv_backtest_concurrency: 1,
             feature_parity_concurrency: 1,
+            feedback_coverage_concurrency: 1,
+            feedback_drift_concurrency: 1,
+            feedback_learning_concurrency: 1,
+            feedback_cycle_concurrency: 2,
             trade_policy_fit_concurrency: 1,
             trade_policy_validation_concurrency: 1,
             lease_ttl_secs: 90,
@@ -94,7 +114,10 @@ impl Default for ResearchJobsConfig {
             plan_sample_slices: 5,
             plan_sample_markets: 200,
             progress_min_interval_ms: 500,
-            shutdown_drain_secs: 5,
+            feedback_stuck_secs: 21_600,
+            feedback_alert_timeout_secs: 2,
+            feedback_alert_dedupe_secs: 900,
+            shutdown_drain_secs: 3,
         }
     }
 }
@@ -111,6 +134,15 @@ impl ResearchJobsConfig {
             ResearchJobKind::ModelCalibrationFit => self.model_calibration_fit_concurrency,
             ResearchJobKind::CpcvBacktest => self.cpcv_backtest_concurrency,
             ResearchJobKind::FeatureParity => self.feature_parity_concurrency,
+            ResearchJobKind::FeedbackCoverage => self.feedback_coverage_concurrency,
+            ResearchJobKind::FeedbackDrift => self.feedback_drift_concurrency,
+            ResearchJobKind::FeedbackDatasetSeal
+            | ResearchJobKind::FeedbackTraining
+            | ResearchJobKind::FeedbackCalibration
+            | ResearchJobKind::FeedbackCpcv
+            | ResearchJobKind::FeedbackComparison
+            | ResearchJobKind::FeedbackShadowReplay
+            | ResearchJobKind::FeedbackDecision => self.feedback_learning_concurrency,
             ResearchJobKind::TradePolicyFit => self.trade_policy_fit_concurrency,
             ResearchJobKind::TradePolicyValidation => self.trade_policy_validation_concurrency,
         }

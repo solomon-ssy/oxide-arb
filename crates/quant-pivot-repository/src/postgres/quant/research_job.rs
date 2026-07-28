@@ -6,22 +6,23 @@ use quant_pivot_models::{
     domain::{
         api::ResearchJobListQuery,
         pagination::{PageWindow, Paginated},
-        quant::{NewResearchJob, ResearchJobInfo, ResearchJobResultRef},
+        quant::{NewResearchJob, ResearchJobFinalization, ResearchJobInfo},
     },
-    entities::quant_research_job::{Column, Entity},
+    entities::quant_research_job::{Column, Entity, Model},
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
-    types::{DatasetCoverage, ResearchJobError, ResearchJobId, ResearchJobProgress, WorkerId},
+    types::{ResearchJobError, ResearchJobId, ResearchJobProgress, WorkerId},
 };
 use sea_orm::{
     ActiveValue::Set,
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, ExprTrait, FromQueryResult,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
-    sea_query::{Expr, LockBehavior, LockType},
+    ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction, EntityTrait, ExprTrait,
+    FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    TryInsertResult,
+    sea_query::{Expr, LockBehavior, LockType, OnConflict},
 };
 
 use crate::{
     postgres::{primitives, query::paginate_mapped},
-    traits::{KindRunningCount, ReclaimOutcome, ResearchJobRepository},
+    traits::{KindRunningCount, ReclaimOutcome, ResearchJobEnqueueOutcome, ResearchJobRepository},
 };
 
 /// Postgres-backed durable research-job ledger repository.
@@ -33,6 +34,75 @@ impl PgResearchJobRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
+
+    async fn enqueue_candidate(
+        transaction: &DatabaseTransaction,
+        job: &NewResearchJob,
+    ) -> Result<Option<Model>, StorageError> {
+        if let Some(stored) = Entity::find_by_id(job.job_id)
+            .one(transaction)
+            .await
+            .map_err(StorageError::from)?
+        {
+            return Ok(Some(stored));
+        }
+        let query = match (job.feedback_cycle_id, job.feedback_stage, job.parent_job_id) {
+            (Some(cycle_id), Some(stage), None) => Entity::find()
+                .filter(Column::FeedbackCycleId.eq(cycle_id))
+                .filter(Column::FeedbackStage.eq(stage))
+                .filter(Column::ParentJobId.is_null()),
+            (Some(cycle_id), Some(stage), Some(parent_job_id)) => Entity::find()
+                .filter(Column::FeedbackCycleId.eq(cycle_id))
+                .filter(Column::FeedbackStage.eq(stage))
+                .filter(Column::ParentJobId.eq(parent_job_id)),
+            _ => return Ok(None),
+        };
+        query.one(transaction).await.map_err(StorageError::from)
+    }
+
+    async fn validate_parent(
+        transaction: &DatabaseTransaction,
+        job: &NewResearchJob,
+    ) -> Result<(), StorageError> {
+        let Some(parent_job_id) = job.parent_job_id else {
+            return Ok(());
+        };
+        let parent = Entity::find_by_id(parent_job_id)
+            .lock(LockType::Update)
+            .one(transaction)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::not_found(QUANT_RESEARCH_JOB, parent_job_id))?;
+        let parent = ResearchJobInfo::from(parent);
+        parent.validate_identity().map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_RESEARCH_JOB),
+                format!("retry parent identity is invalid: {error}"),
+            )
+        })?;
+        if !parent.status.is_terminal() {
+            return Err(StorageError::state_conflict(
+                QUANT_RESEARCH_JOB,
+                Some(&job.job_id),
+                format!(
+                    "retry parent {parent_job_id} is still active as {}",
+                    parent.status
+                ),
+            ));
+        }
+        if job.feedback_cycle_id != parent.feedback_cycle_id
+            || job.feedback_stage != parent.feedback_stage
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_RESEARCH_JOB,
+                Some(&job.job_id),
+                format!(
+                    "retry parent {parent_job_id} does not own the same feedback cycle and stage"
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -43,12 +113,66 @@ struct KindCountRow {
 
 #[async_trait::async_trait]
 impl ResearchJobRepository for PgResearchJobRepository {
-    async fn enqueue(&self, job: NewResearchJob) -> Result<ResearchJobInfo, StorageError> {
-        Entity::insert(job.into_active_model())
-            .exec_with_returning(&self.db)
+    async fn enqueue(
+        &self,
+        job: NewResearchJob,
+    ) -> Result<ResearchJobEnqueueOutcome, StorageError> {
+        job.validate_enqueue().map_err(|error| {
+            StorageError::invariant_violation(Some(QUANT_RESEARCH_JOB), error.to_string())
+        })?;
+        let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        Self::validate_parent(&transaction, &job).await?;
+        let insert = Entity::insert(job.clone().into_active_model())
+            .on_conflict(OnConflict::new().do_nothing().to_owned())
+            .try_insert()
+            .exec_without_returning(&transaction)
             .await
-            .map_err(StorageError::from)
-            .map(Into::into)
+            .map_err(StorageError::from)?;
+        let inserted = match insert {
+            TryInsertResult::Inserted(1) => true,
+            TryInsertResult::Inserted(0) | TryInsertResult::Conflicted => false,
+            TryInsertResult::Inserted(rows) => {
+                return Err(StorageError::invariant_violation(
+                    Some(QUANT_RESEARCH_JOB),
+                    format!("single research-job insert affected {rows} rows"),
+                ));
+            }
+            TryInsertResult::Empty => {
+                return Err(StorageError::invariant_violation(
+                    Some(QUANT_RESEARCH_JOB),
+                    "non-empty research-job insert produced no statement",
+                ));
+            }
+        };
+        let stored = Self::enqueue_candidate(&transaction, &job)
+            .await?
+            .ok_or_else(|| {
+                StorageError::state_conflict(
+                    QUANT_RESEARCH_JOB,
+                    Some(&job.job_id),
+                    "enqueue conflict did not resolve to the deterministic winning row",
+                )
+            })?;
+        let info = ResearchJobInfo::from(stored);
+        info.validate_identity().map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_RESEARCH_JOB),
+                format!("stored research-job identity is invalid: {error}"),
+            )
+        })?;
+        if !job.accepts(&info) {
+            return Err(StorageError::state_conflict(
+                QUANT_RESEARCH_JOB,
+                Some(&job.job_id),
+                "research-job identity already exists with different immutable enqueue content",
+            ));
+        }
+        transaction.commit().await.map_err(StorageError::from)?;
+        Ok(if inserted {
+            ResearchJobEnqueueOutcome::Inserted(info)
+        } else {
+            ResearchJobEnqueueOutcome::AlreadyPresent(info)
+        })
     }
 
     async fn find_by_id(
@@ -120,7 +244,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
             txn.commit().await.map_err(StorageError::from)?;
             return Ok(None);
         };
-        let now = Utc::now();
+        let now = primitives::statement_timestamp(&txn).await?;
         let mut active = model.into_active_model();
         active.status = Set(ResearchJobStatus::Running);
         active.lease_owner = Set(Some(*owner));
@@ -155,7 +279,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
             return Ok(false);
         }
         let mut active = model.into_active_model();
-        active.heartbeat_at = Set(Some(Utc::now()));
+        active.heartbeat_at = Set(Some(primitives::statement_timestamp(&self.db).await?));
         active.lease_expires_at = Set(Some(lease_expires_at));
         if let Some(progress) = progress {
             active.progress_json = Set(Some(progress));
@@ -171,22 +295,28 @@ impl ResearchJobRepository for PgResearchJobRepository {
         &self,
         job_id: &ResearchJobId,
         owner: &WorkerId,
-        status: ResearchJobStatus,
-        result: Option<ResearchJobResultRef>,
-        error: Option<ResearchJobError>,
-        coverage: Option<DatasetCoverage>,
+        finalization: ResearchJobFinalization,
     ) -> Result<ResearchJobInfo, StorageError> {
-        debug_assert!(status.is_terminal(), "finalize requires a terminal status");
+        let (status, result, artifact, error, coverage) = finalization.into_parts();
         // Single conditional UPDATE: only the lease holder may terminalize.
         let (result_kind, result_ref) =
             result.map_or((None, None), |result| (Some(result.kind), Some(result.id)));
+        let (result_artifact_uri, result_artifact_hash) = artifact
+            .map_or((None, None), |artifact| {
+                (Some(artifact.uri), Some(artifact.content_hash))
+            });
         let result = Entity::update_many()
             .col_expr(Column::Status, primitives::enum_value(&status))
             .col_expr(Column::ResultKind, Expr::value(result_kind))
             .col_expr(Column::ResultRef, Expr::value(result_ref))
+            .col_expr(Column::ResultArtifactUri, Expr::value(result_artifact_uri))
+            .col_expr(
+                Column::ResultArtifactHash,
+                Expr::value(result_artifact_hash),
+            )
             .col_expr(Column::ErrorJson, Expr::value(error))
             .col_expr(Column::CoverageJson, Expr::value(coverage))
-            .col_expr(Column::FinishedAt, Expr::value(Utc::now()))
+            .col_expr(Column::FinishedAt, Expr::cust("statement_timestamp()"))
             .col_expr(Column::LeaseOwner, Expr::value(None::<WorkerId>))
             .col_expr(Column::LeaseExpiresAt, Expr::value(None::<DateTime<Utc>>))
             .filter(Column::JobId.eq(*job_id))
@@ -220,7 +350,7 @@ impl ResearchJobRepository for PgResearchJobRepository {
                 primitives::enum_value(&ResearchJobStatus::Cancelled),
             )
             .col_expr(Column::ErrorJson, Expr::value(error))
-            .col_expr(Column::FinishedAt, Expr::value(Utc::now()))
+            .col_expr(Column::FinishedAt, Expr::cust("statement_timestamp()"))
             .filter(Column::JobId.eq(*job_id))
             .filter(Column::Status.eq(ResearchJobStatus::Queued))
             .exec(&self.db)
@@ -263,7 +393,7 @@ impl PgResearchJobRepository {
             )
             .col_expr(Column::LeaseOwner, Expr::value(None::<WorkerId>))
             .col_expr(Column::LeaseExpiresAt, Expr::value(None::<DateTime<Utc>>))
-            .col_expr(Column::FinishedAt, Expr::value(Utc::now()))
+            .col_expr(Column::FinishedAt, Expr::cust("statement_timestamp()"))
             .col_expr(
                 Column::ErrorJson,
                 Expr::value(ResearchJobError::new(

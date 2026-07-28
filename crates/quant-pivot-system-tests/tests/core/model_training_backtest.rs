@@ -21,14 +21,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_core::{
-    app::ports::backtest::{CoreBacktestPort, CoreBacktestPortDeps},
+    app::ports::{
+        backtest::{CoreBacktestPort, CoreBacktestPortDeps},
+        cpcv_backtest::{CoreCpcvBacktestPort, CoreCpcvBacktestPortDeps},
+    },
     service::{
         backtest::{BacktestInput, BacktestService, BacktestServiceDeps},
-        bias_table_fit::resolve_frozen_bias_table,
-        cpcv_backtest::{
-            CpcvBacktestConfig, CpcvBacktestInput, CpcvBacktestService, CpcvBacktestServiceDeps,
-        },
-        historical_replay::ReplayConfig,
         model_calibration_fit::ModelCalibrationFitService,
         model_serving_preimage::{ModelServingPreimageDeps, ModelServingPreimageService},
         model_training::{
@@ -43,18 +41,22 @@ use quant_pivot_error::{QuantError, research::ResearchError, storage::StorageErr
 use quant_pivot_models::{
     domain::{
         api::{
-            BacktestPathSetView, FactorDefinitionListQuery, FitModelCalibratorRequest,
-            RunBacktestRequest,
+            BacktestPathSetView, CpcvBacktestJobParams, FactorDefinitionListQuery,
+            FitModelCalibratorRequest, RunBacktestRequest, RunCpcvBacktestRequest,
         },
         data_plane::DecisionClock,
         pagination::Paginated,
-        ports::{BacktestPort, ModelCalibrationFitJobParams, ModelCalibrationFitPort},
+        ports::{
+            BacktestPort, CpcvBacktestPort, FeedbackComparisonCandidateRef,
+            FeedbackComparisonContract, FeedbackComparisonJobInput, FeedbackComparisonJobParams,
+            FeedbackEvaluationUseRef, FeedbackLearningStageArtifactRef,
+            ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+        },
         quant::{
             CalibrationArtifactPayload, FactorDefinitionInfo, FactorRegistrationOutcome,
             FactorValueInfo, JobProgressSink, LatestFactorSnapshotBundleInfo,
-            LatestFactorSnapshotInfo, ModelSpecInfo, ModelVersionInfo, NewBacktestPathSet,
-            NewBacktestPathSetInput, NewFactorDefinition, NewFactorValue, NewModelRun,
-            NoopProgressSink,
+            LatestFactorSnapshotInfo, ModelSpecInfo, ModelVersionInfo, NewFactorDefinition,
+            NewFactorValue, NoopProgressSink, ResearchJobArtifactRef,
         },
     },
     entities::{
@@ -72,8 +74,8 @@ use quant_pivot_models::{
         model::ModelFamily,
         quant::{
             CalibrationKind, CalibrationMethod, DataQualityStatus, DatasetPurpose, FactorDirection,
-            ModelRunErrorCode, ModelRunKind, ModelRunStatus, OutcomeSide, PublicationStatus,
-            TrainingDatasetStatus,
+            FeedbackStage, ModelRunErrorCode, ModelRunKind, ModelRunStatus, OutcomeSide,
+            PublicationStatus, TrainingDatasetStatus,
         },
         runtime_config::ConfigResourceKind,
     },
@@ -86,11 +88,13 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, BacktestPathSetId, BacktestReportId, ContentHash, DatasetSourceLineage,
         DecisionPolicySnapshotId, EventId, FactorDefinitionId, FeatureCell, FeatureStaleness,
-        FeatureValue, FeatureVectorId, MarketId, ModelInputContract, ModelRunId, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, OrderIntentId, POOLED_1H_CONTROL_PROFILE_ID,
-        POOLED_1H_HORIZON_SECS, PositionId, Price, Probability, ResearchEvaluationTrack,
-        ResearchJobProgress, SchemaVersion, Shares, TokenId, TradePolicyEvidenceBundleManifest,
-        TrainingDatasetId, TrainingExampleId, TrainingSampleSource, TrainingSampleSources, Usd,
+        FeatureValue, FeatureVectorId, FeedbackComparisonArtifactId, FeedbackCycleId,
+        FeedbackEvaluationUseId, FeedbackLearningStageArtifactId, MarketId, ModelInputContract,
+        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OrderIntentId,
+        POOLED_1H_CONTROL_PROFILE_ID, POOLED_1H_HORIZON_SECS, PositionId, Price, Probability,
+        ResearchEvaluationTrack, ResearchJobId, ResearchJobProgress, SchemaVersion, Shares,
+        SourceSliceManifest, TokenId, TradePolicyEvidenceBundleManifest, TrainingDatasetId,
+        TrainingExampleId, TrainingSampleSource, TrainingSampleSources, Usd,
         builtin_research_profiles,
         factor::{FactorDefinitionRef, FactorExplanation, FactorServingPlane},
         model_metrics::{HeldOutMetricKind, ModelVersionMetricsDefinition},
@@ -137,7 +141,10 @@ use quant_pivot_research::{
 use quant_pivot_system_tests::{
     postgres::{ScenarioDatabase, setup_pg},
     support::{
-        artifact_store::{ReadTamperArtifactStoreFixture, VersionedArtifactStoreFixture},
+        artifact_store::{
+            ReadCountingArtifactStoreFixture, ReadTamperArtifactStoreFixture,
+            VersionedArtifactStoreFixture,
+        },
         catalog_fixtures::{make_event, make_market},
         model_serving_fixtures::{ModelDatasetLedgerFixture, ModelDatasetLedgerSeed},
         model_spec_fixtures,
@@ -1327,6 +1334,7 @@ impl TrainInputFixture {
     ) -> TrainModelInput {
         TrainModelInput {
             model_version_id: ModelVersionId::from_v7(),
+            model_run_id: ModelRunId::from_v7(),
             model_spec: model_spec.clone(),
             training_dataset_id,
         }
@@ -2201,14 +2209,24 @@ impl TrainerContractMatrix {
     }
 
     async fn verify_weighted_retry(&self) -> usize {
+        let model_version_id = ModelVersionId::from_v7();
+        let model_run_id = ModelRunId::from_v7();
+        let exact_input = || TrainModelInput {
+            model_version_id,
+            model_run_id,
+            model_spec: self.weighted_spec.clone(),
+            training_dataset_id: self.weighted_dataset.id,
+        };
         let first_cancellation = CancellationToken::new();
-        Box::pin(self.trainer.train(
-            TrainInputFixture::for_dataset(&self.weighted_spec, self.weighted_dataset.id),
+        let first = Box::pin(self.trainer.train(
+            exact_input(),
             &NoopProgressSink,
             &first_cancellation,
         ))
         .await
         .expect("first weighted training");
+        assert_eq!(first.version.model_version_id, model_version_id);
+        assert_eq!(first.model_run_id, model_run_id);
         let plane_size = self
             .weighted_dataset
             .factor_serving_plane
@@ -2225,13 +2243,20 @@ impl TrainerContractMatrix {
         assert_persisted_plane(&self.db, &self.weighted_dataset.factor_serving_plane).await;
 
         let retry_cancellation = CancellationToken::new();
-        Box::pin(self.trainer.train(
-            TrainInputFixture::for_dataset(&self.weighted_spec, self.weighted_dataset.id),
+        let retry = Box::pin(self.trainer.train(
+            exact_input(),
             &NoopProgressSink,
             &retry_cancellation,
         ))
         .await
         .expect("idempotent weighted training retry");
+        assert_eq!(retry.version.model_version_id, model_version_id);
+        assert_eq!(retry.model_run_id, model_run_id);
+        assert_eq!(retry.version.artifact_hash, first.version.artifact_hash);
+        assert_eq!(
+            retry.version.serving_contract_hash,
+            first.version.serving_contract_hash
+        );
         assert_eq!(self.factor_repo.register_calls(), 2);
         assert_eq!(self.factor_repo.inserted(), plane_size);
         assert_eq!(self.factor_repo.already_present(), plane_size);
@@ -2793,6 +2818,7 @@ async fn assert_calibration_rejected(
         .expect("count artifacts before Calibration Dataset tamper");
     let result = Box::pin(fitter.fit(
         ModelCalibrationFitJobParams {
+            model_run_id: ModelRunId::from_v7(),
             request: FitModelCalibratorRequest {
                 model_version_id: version.model_version_id,
                 calibration_dataset_id,
@@ -2835,7 +2861,7 @@ async fn assert_calibration_rejected(
     );
 }
 
-async fn assert_sample_floor_failed(
+async fn assert_sample_floor_terminal(
     db: &DatabaseConnection,
     fitter: &ModelCalibrationFitService,
     version: &ModelVersionInfo,
@@ -2857,28 +2883,46 @@ async fn assert_sample_floor_failed(
         .count(db)
         .await
         .expect("count Calibration runs before sample-floor failure");
-    let result = Box::pin(fitter.fit(
-        ModelCalibrationFitJobParams {
-            request: FitModelCalibratorRequest {
-                model_version_id: version.model_version_id,
-                calibration_dataset_id,
-                method: CalibrationMethod::Isotonic,
-                reason: "reject an underpowered isotonic fit".to_owned(),
-            },
-            decision_policy_snapshot_id: policy_snapshot_id,
+    let model_run_id = ModelRunId::from_v7();
+    let params = ModelCalibrationFitJobParams {
+        model_run_id,
+        request: FitModelCalibratorRequest {
+            model_version_id: version.model_version_id,
+            calibration_dataset_id,
+            method: CalibrationMethod::Isotonic,
+            reason: "record an underpowered isotonic fit".to_owned(),
         },
+        decision_policy_snapshot_id: policy_snapshot_id,
+    };
+    let outcome = Box::pin(fitter.fit(
+        params.clone(),
         Arc::new(NoopProgressSink),
         CancellationToken::new(),
     ))
-    .await;
-    assert!(
-        matches!(
-            &result,
-            Err(QuantError::Research(ResearchError::DatasetBuild { detail }))
-                if detail.contains("below the") && detail.contains("floor")
-        ),
-        "underpowered isotonic fit must fail closed, got error {:?}",
-        result.as_ref().err()
+    .await
+    .expect("underpowered calibration must return typed evidence");
+    let ModelCalibrationFitOutcome::Insufficient {
+        sample_count,
+        total_sample_count,
+        minimum_sample_count,
+        outcome_hash,
+    } = outcome
+    else {
+        panic!("underpowered isotonic fit must not persist a calibrator");
+    };
+    assert!(sample_count < minimum_sample_count);
+    assert!(sample_count <= total_sample_count);
+    let retry = Box::pin(fitter.fit(params, Arc::new(NoopProgressSink), CancellationToken::new()))
+        .await
+        .expect("exact underpowered calibration retry");
+    assert_eq!(
+        retry,
+        ModelCalibrationFitOutcome::Insufficient {
+            sample_count,
+            total_sample_count,
+            minimum_sample_count,
+            outcome_hash,
+        }
     );
     assert_eq!(
         CalibrationArtifactEntity::find()
@@ -2886,7 +2930,7 @@ async fn assert_sample_floor_failed(
             .await
             .expect("count artifacts after sample-floor failure"),
         artifacts_before,
-        "sample-floor failure must not persist a calibration artifact"
+        "sample-floor terminal must not persist a calibration artifact"
     );
     assert_eq!(
         Entity::find()
@@ -2897,38 +2941,31 @@ async fn assert_sample_floor_failed(
         runs_before + 1,
         "verified replay must have exactly one terminal Calibration run"
     );
-    let failed = Entity::find()
-        .filter(Column::RunKind.eq(ModelRunKind::Calibration))
-        .filter(Column::Status.eq(ModelRunStatus::Failed))
+    let terminal = Entity::find_by_id(model_run_id)
         .one(db)
         .await
-        .expect("load failed Calibration run")
-        .expect("failed Calibration run");
+        .expect("load insufficient Calibration run")
+        .expect("insufficient Calibration run");
     assert_eq!(
-        failed.model_version_id,
+        terminal.model_version_id,
         Some(version.model_version_id),
-        "failed run source model"
+        "terminal run source model"
     );
     assert_eq!(
-        failed.decision_policy_snapshot_id, policy_snapshot_id,
-        "failed run policy snapshot"
+        terminal.decision_policy_snapshot_id, policy_snapshot_id,
+        "terminal run policy snapshot"
     );
-    assert_eq!(failed.window_start, dataset.window_start);
-    assert_eq!(failed.window_end, dataset.window_end);
-    assert_eq!(failed.input_hash, calibration_dataset_hash);
-    assert_eq!(failed.output_hash, None);
-    assert_eq!(
-        failed.error_code,
-        Some(ModelRunErrorCode::CalibrationFailed)
-    );
+    assert_eq!(terminal.window_start, dataset.window_start);
+    assert_eq!(terminal.window_end, dataset.window_end);
+    assert_eq!(terminal.input_hash, calibration_dataset_hash);
+    assert_eq!(terminal.status, ModelRunStatus::Succeeded);
+    assert_eq!(terminal.output_hash, Some(outcome_hash));
+    assert!(terminal.error_code.is_none());
+    assert!(terminal.error_message.is_none());
     assert!(
-        failed
-            .error_message
-            .as_deref()
-            .is_some_and(|detail| detail.contains("below the") && detail.contains("floor")),
-        "failed run must retain the sample-floor cause"
+        terminal.finished_at.is_some(),
+        "insufficient run must be terminal"
     );
-    assert!(failed.finished_at.is_some(), "failed run must be terminal");
 }
 
 async fn assert_model_rejected(
@@ -3157,6 +3194,152 @@ async fn build_backtest_services(
     }
 }
 
+fn fixture_hash(label: &str) -> ContentHash {
+    CanonicalDigest::content_hash_typed("quant-pivot:test:feedback-comparison", 1, &label)
+        .expect("feedback-comparison fixture hash")
+}
+
+async fn train_comparison_candidate(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    scenario: &TrainingBacktestScenario,
+) -> ModelVersionInfo {
+    let trainer = TrainerFixture::build(
+        db,
+        Arc::clone(store),
+        Arc::clone(&scenario.registry),
+        Arc::new(PgFactorRepository::new(db.clone())),
+        scenario.policy_snapshot_id,
+    )
+    .await;
+    Box::pin(trainer.train(
+        TrainInputFixture::for_dataset(&scenario.model_spec, scenario.training_dataset_id),
+        &NoopProgressSink,
+        &CancellationToken::new(),
+    ))
+    .await
+    .expect("train distinct comparison candidate")
+    .version
+}
+
+async fn comparison_replay_fixture(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    scenario: &TrainingBacktestScenario,
+    candidate: &ModelVersionInfo,
+) -> (FeedbackComparisonJobParams, Vec<ArtifactUri>) {
+    let dataset = PgTrainingDatasetRepository::new(db.clone())
+        .find_by_id(&scenario.evaluation_dataset_id)
+        .await
+        .expect("load comparison Evaluation Dataset")
+        .expect("comparison Evaluation Dataset");
+    let materialization = dataset
+        .materialization()
+        .expect("comparison Evaluation materialization");
+    let manifest_uri = dataset.source_lineage.source_slice.manifest_uri.clone();
+    let manifest_bytes = store
+        .get(&manifest_uri)
+        .await
+        .expect("read comparison Source Slice manifest fixture");
+    let source_manifest = serde_json::from_slice::<SourceSliceManifest>(&manifest_bytes)
+        .expect("decode comparison Source Slice manifest fixture");
+    let mut read_targets = Vec::with_capacity(source_manifest.objects.len() + 2);
+    read_targets.push(materialization.parquet_uri.clone());
+    read_targets.push(manifest_uri);
+    read_targets.extend(
+        source_manifest
+            .objects
+            .iter()
+            .map(|object| object.uri.clone()),
+    );
+
+    let cycle_idempotency_hash = fixture_hash("cycle");
+    let feedback_cycle_id = FeedbackCycleId::from_idempotency_hash(&cycle_idempotency_hash);
+    let candidate_family_hash = fixture_hash("candidate-family");
+    let comparison_contract = FeedbackComparisonContract::try_from_policy(
+        &dataset
+            .research_profile_artifact_id
+            .profile_ref()
+            .resolve_builtin_research_profile()
+            .expect("resolve comparison profile")
+            .spec
+            .feedback_policy,
+    )
+    .expect("freeze comparison contract");
+    let cpcv_artifact_uri =
+        ArtifactUri::parse("s3://feedback-comparison-fixture/cpcv.json").expect("CPCV fixture URI");
+    let cpcv_artifact_hash = fixture_hash("cpcv-artifact");
+    let previous = FeedbackLearningStageArtifactRef {
+        feedback_cycle_id,
+        stage: FeedbackStage::Cpcv,
+        job_id: ResearchJobId::from_v7(),
+        artifact_id: FeedbackLearningStageArtifactId::from_cycle_stage(
+            feedback_cycle_id,
+            FeedbackStage::Cpcv,
+        )
+        .expect("CPCV artifact identity"),
+        input_hash: fixture_hash("cpcv-input"),
+        artifact: ResearchJobArtifactRef {
+            uri: cpcv_artifact_uri.clone(),
+            content_hash: cpcv_artifact_hash,
+        },
+    };
+    let semantic_use_hash = fixture_hash("evaluation-semantic-use");
+    let evaluation_use = FeedbackEvaluationUseRef {
+        feedback_evaluation_use_id: FeedbackEvaluationUseId::from_semantic_hash(&semantic_use_hash),
+        feedback_cycle_id,
+        profile_ref: dataset.research_profile_artifact_id.profile_ref(),
+        evaluation_dataset_id: dataset.training_dataset_id,
+        evaluation_dataset_hash: *materialization.dataset_hash,
+        evaluation_artifact_bytes_hash: *materialization.artifact_bytes_hash,
+        cohort_manifest_hash: CanonicalDigest::content_hash_json(
+            dataset
+                .cohort_manifest
+                .as_ref()
+                .expect("comparison Evaluation cohort"),
+        )
+        .expect("comparison cohort hash"),
+        evaluation_window_start: dataset.window_start,
+        evaluation_window_end: dataset.window_end,
+        label_cutoff: dataset.pit_cutoff,
+        champion_model_version_id: scenario.version.model_version_id,
+        champion_serving_contract_hash: scenario.version.serving_contract_hash,
+        candidate_family_hash,
+        comparison_contract_hash: comparison_contract.comparison_contract_hash(),
+        semantic_use_hash,
+        cpcv_artifact_uri,
+        cpcv_artifact_hash,
+        evaluation_use_hash: fixture_hash("evaluation-use"),
+    };
+    let artifact_id = FeedbackComparisonArtifactId::from_cycle_id(feedback_cycle_id);
+    let candidate_ref = FeedbackComparisonCandidateRef {
+        candidate_recipe_hash: fixture_hash("candidate-recipe"),
+        model_version_id: candidate.model_version_id,
+        serving_contract_hash: candidate.serving_contract_hash,
+        path_set_id: BacktestPathSetId::from_v7(),
+        path_set_hash: fixture_hash("candidate-path-set"),
+        model_run_id: ModelRunId::from_feedback_comparison(artifact_id, candidate.model_version_id),
+        backtest_report_id: BacktestReportId::from_feedback_comparison(
+            artifact_id,
+            candidate.model_version_id,
+        ),
+    };
+    let params = FeedbackComparisonJobParams::try_new(FeedbackComparisonJobInput {
+        feedback_cycle_id,
+        cycle_idempotency_hash,
+        candidate_family_hash,
+        previous,
+        evaluation_use,
+        comparison_contract,
+        decision_policy_snapshot_id: scenario.policy_snapshot_id,
+        champion_model_version_id: scenario.version.model_version_id,
+        champion_serving_contract_hash: scenario.version.serving_contract_hash,
+        candidates: vec![candidate_ref],
+    })
+    .expect("freeze comparison replay params");
+    (params, read_targets)
+}
+
 async fn assert_calibration_persisted(
     db: &DatabaseConnection,
     scenario: &TrainingBacktestScenario,
@@ -3167,24 +3350,39 @@ async fn assert_calibration_persisted(
         .await
         .expect("load verified Calibration Dataset")
         .expect("verified Calibration Dataset");
-    let fit_outcome = Box::pin(services.calibration_fitter.fit(
-        ModelCalibrationFitJobParams {
-            request: FitModelCalibratorRequest {
-                model_version_id: scenario.version.model_version_id,
-                calibration_dataset_id: scenario.calibration_dataset_id,
-                method: CalibrationMethod::Platt,
-                reason: "persist an exact-preimage model calibrator".to_owned(),
-            },
-            decision_policy_snapshot_id: scenario.policy_snapshot_id,
+    let fit_params = ModelCalibrationFitJobParams {
+        model_run_id: ModelRunId::from_v7(),
+        request: FitModelCalibratorRequest {
+            model_version_id: scenario.version.model_version_id,
+            calibration_dataset_id: scenario.calibration_dataset_id,
+            method: CalibrationMethod::Platt,
+            reason: "persist an exact-preimage model calibrator".to_owned(),
         },
+        decision_policy_snapshot_id: scenario.policy_snapshot_id,
+    };
+    let model_run_id = fit_params.model_run_id;
+    let fit_outcome = Box::pin(services.calibration_fitter.fit(
+        fit_params.clone(),
         Arc::new(NoopProgressSink),
         CancellationToken::new(),
     ))
     .await
     .expect("fit model calibrator");
-    let calibration_artifact_id = fit_outcome
-        .artifact_id
-        .expect("successful Platt fit must persist an artifact");
+    let ModelCalibrationFitOutcome::Calibrated {
+        artifact_id: calibration_artifact_id,
+        sample_count,
+    } = fit_outcome
+    else {
+        panic!("successful Platt fit must persist an artifact");
+    };
+    let retry_outcome = Box::pin(services.calibration_fitter.fit(
+        fit_params,
+        Arc::new(NoopProgressSink),
+        CancellationToken::new(),
+    ))
+    .await
+    .expect("exact model-calibration retry");
+    assert_eq!(retry_outcome, fit_outcome);
     let calibration_artifact = services
         .calibration_repo
         .find_by_id(&calibration_artifact_id)
@@ -3203,12 +3401,9 @@ async fn assert_calibration_persisted(
     assert_eq!(
         u64::try_from(calibration_artifact.sample_count)
             .expect("non-negative calibration sample count"),
-        fit_outcome.sample_count
+        sample_count
     );
-    let successful_run = Entity::find()
-        .filter(Column::RunKind.eq(ModelRunKind::Calibration))
-        .filter(Column::Status.eq(ModelRunStatus::Succeeded))
-        .filter(Column::ModelVersionId.eq(scenario.version.model_version_id))
+    let successful_run = Entity::find_by_id(model_run_id)
         .one(db)
         .await
         .expect("load successful Calibration run")
@@ -3395,7 +3590,7 @@ pub async fn train_backtest_evaluation_e2e() {
         scenario.policy_snapshot_id,
     )
     .await;
-    assert_sample_floor_failed(
+    assert_sample_floor_terminal(
         &db,
         &services.calibration_fitter,
         &scenario.version,
@@ -3405,6 +3600,91 @@ pub async fn train_backtest_evaluation_e2e() {
     )
     .await;
     assert_calibration_persisted(&db, &scenario, &services).await;
+}
+
+pub async fn comparison_reuses_inputs() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let artifact_root =
+        env::temp_dir().join(format!("qp_feedback_compare_{}", Uuid::new_v4().simple()));
+    let inner: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(&artifact_root));
+    let base_store: Arc<dyn ArtifactStore> = Arc::new(VersionedArtifactStoreFixture::new(inner));
+    let scenario = Box::pin(prepare_training_scenario(&db, &base_store)).await;
+    let candidate = train_comparison_candidate(&db, &base_store, &scenario).await;
+    assert_ne!(
+        candidate.model_version_id, scenario.version.model_version_id,
+        "comparison requires distinct champion and challenger identities"
+    );
+    assert_ne!(
+        candidate.serving_contract_hash, scenario.version.serving_contract_hash,
+        "distinct model versions require distinct serving contracts"
+    );
+    let (params, read_targets) =
+        comparison_replay_fixture(&db, &base_store, &scenario, &candidate).await;
+    let counted = Arc::new(ReadCountingArtifactStoreFixture::new(
+        base_store,
+        read_targets.clone(),
+    ));
+    let counted_store: Arc<dyn ArtifactStore> =
+        Arc::<ReadCountingArtifactStoreFixture>::clone(&counted);
+    let dataset_repo: Arc<dyn TrainingDatasetRepository> =
+        Arc::new(PgTrainingDatasetRepository::new(db.clone()));
+    let calibration_repo: Arc<dyn CalibrationArtifactRepository> =
+        Arc::new(PgCalibrationArtifactRepository::new(db.clone()));
+    let (serving_preimages, _trade_policy_preimages) = TrainerPreimageFixture::build(
+        &db,
+        &counted_store,
+        &scenario.registry,
+        &dataset_repo,
+        &calibration_repo,
+    );
+    serving_preimages
+        .load(&scenario.version)
+        .await
+        .expect("load champion preimage baseline");
+    serving_preimages
+        .load(&candidate)
+        .await
+        .expect("load candidate preimage baseline");
+    let preimage_reads = read_targets
+        .iter()
+        .map(|uri| counted.reads(uri))
+        .collect::<Vec<_>>();
+    counted.reset();
+    let services = build_backtest_services(&db, &counted_store, &scenario).await;
+
+    let replay = Box::pin(services.backtester.replay_feedback_family(
+        &params,
+        Arc::new(NoopProgressSink),
+        CancellationToken::new(),
+    ))
+    .await
+    .expect("replay one shared Evaluation input across the candidate family");
+    assert_eq!(
+        replay.champion.model_version_id,
+        scenario.version.model_version_id
+    );
+    assert_eq!(replay.candidates.len(), 1);
+    assert_eq!(
+        replay.candidates[0].model_version_id,
+        candidate.model_version_id
+    );
+    assert!(
+        !replay.champion.portfolio_returns.is_empty(),
+        "shared replay must retain decision-tick observations"
+    );
+    assert_eq!(
+        replay.champion.portfolio_returns.len(),
+        replay.candidates[0].portfolio_returns.len(),
+        "champion and challenger must share the same observation universe"
+    );
+    for (uri, preimage_read_count) in read_targets.into_iter().zip(preimage_reads) {
+        assert_eq!(
+            counted.reads(&uri),
+            preimage_read_count + 1,
+            "family replay must add exactly one shared Evaluation read after the two full serving-preimage reads: {uri}"
+        );
+    }
 }
 
 struct CpcvTrainingScenario {
@@ -3494,105 +3774,49 @@ pub async fn train_cpcv_persists_decomposition() {
         Arc::new(PgTrainingDatasetRepository::new(db.clone()));
     let calibration_repo: Arc<dyn CalibrationArtifactRepository> =
         Arc::new(PgCalibrationArtifactRepository::new(db.clone()));
+    let path_set_repo: Arc<dyn BacktestPathSetRepository> =
+        Arc::new(PgBacktestPathSetRepository::new(db.clone()));
+    let model_run_repo: Arc<dyn ModelRunRepository> =
+        Arc::new(PgModelRunRepository::new(db.clone()));
     let (serving_preimages, _trade_policy_preimages) =
         TrainerPreimageFixture::build(&db, &store, &registry, &dataset_repo, &calibration_repo);
-    let source = Arc::new(
-        serving_preimages
-            .load(&version)
-            .await
-            .expect("load verified CPCV serving graph"),
-    );
-    let runtime = &source.policy_snapshot().snapshot;
-    let bias_table = resolve_frozen_bias_table(
-        calibration_repo.as_ref(),
-        &runtime.profile_artifacts.scoring.definition,
-    )
-    .await
-    .expect("resolve frozen CPCV bias table");
-    let service = CpcvBacktestService::new(
-        CpcvBacktestServiceDeps {
-            compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
-            artifact_store: Arc::clone(&store),
-        },
-        CpcvBacktestConfig::from_policy(runtime, version.model_family)
-            .expect("project governed CPCV config"),
-        &runtime.execution_risk.portfolio,
-        ReplayConfig {
-            features: runtime.profile_artifacts.features.definition.clone(),
-            factors: runtime.profile_artifacts.scoring.definition.clone(),
-            domain: runtime.profile_artifacts.domain.definition.clone(),
-            data_quality: runtime.recommendation.data_quality.clone(),
-            bias_table,
-        },
-    )
-    .expect("build canonical CPCV service");
-    let prepared = service
-        .prepare_run(&version, source, None)
-        .expect("prepare verified CPCV run");
-    let dataset = prepared.source().training_dataset();
+    let port = CoreCpcvBacktestPort::new(CoreCpcvBacktestPortDeps {
+        compute: Arc::new(ComputeExecutor::new().expect("test compute executor")),
+        artifact_store: Arc::clone(&store),
+        path_set_repo,
+        model_registry_repo: Arc::clone(&registry),
+        model_run_repo,
+        bias_table_repo: calibration_repo,
+        serving_preimages,
+    });
     let model_run_id = ModelRunId::from_v7();
-    let model_run_repo = PgModelRunRepository::new(db.clone());
-    model_run_repo
-        .create(NewModelRun {
-            model_run_id,
-            run_kind: ModelRunKind::Cpcv,
-            model_version_id: Some(version.model_version_id),
-            decision_policy_snapshot_id: rc_id,
-            market_selection_id: None,
-            window_start: dataset.window_start,
-            window_end: dataset.window_end,
-            input_hash: prepared.input_hash(),
-        })
-        .await
-        .expect("create CPCV model run");
-    let outcome = service
-        .run(
-            CpcvBacktestInput::from_prepared(&prepared, model_run_id, path_set_id, coord_n),
-            &NoopProgressSink,
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("run canonical CPCV service");
-    let path_count = i64::try_from(outcome.path_set.paths.len()).expect("path count");
-    let combination_count =
-        i64::try_from(outcome.path_set.combination_count).expect("combination count");
-    let new_path_set = NewBacktestPathSet::try_seal(NewBacktestPathSetInput {
-        path_set_id,
+    let params = CpcvBacktestJobParams {
         model_version_id: version.model_version_id,
         model_run_id,
-        training_dataset_id: dataset_id,
-        decision_policy_snapshot_id: rc_id,
-        window_start: outcome.window_start,
-        window_end: outcome.window_end,
-        subject: prepared.subject(),
-        methodology: prepared.methodology().clone(),
-        fold_artifacts: outcome.fold_artifacts,
-        path_count,
-        combination_count,
-        median_rank_ic: outcome.path_set.median_rank_ic,
-        sharpe_distribution: outcome.path_set.sharpe_distribution,
-        paths: outcome.path_set.paths.into(),
-        deflated_sharpe: outcome.dsr.deflated_sharpe,
-        dsr_benchmark_sharpe: outcome.dsr.benchmark_sharpe,
-        pbo: outcome.pbo,
-        min_track_record_length_secs: outcome
-            .min_track_record_length
-            .map(|duration| duration.num_seconds()),
-        trial_count: i64::from(outcome.trial_count),
-        trial_grid_count: i64::from(outcome.trial_grid_count),
-        coord_search_effective_n: i64::from(outcome.coord_search_effective_n),
-    })
-    .expect("seal CPCV path set");
-    let path_set_hash = new_path_set.path_set_hash();
-    let info = PgBacktestPathSetRepository::new(db.clone())
-        .create(new_path_set)
+        request: RunCpcvBacktestRequest {
+            training_dataset_id: dataset_id,
+            decision_policy_snapshot_id: rc_id,
+            reason: "persist exact CPCV decomposition".to_owned(),
+            path_set_id: Some(path_set_id),
+        },
+    };
+    let view = port
+        .run(
+            params.clone(),
+            Arc::new(NoopProgressSink),
+            CancellationToken::new(),
+        )
         .await
-        .expect("persist CPCV path set");
-    model_run_repo
-        .succeed(&model_run_id, path_set_hash, Some(version.model_version_id))
+        .expect("run canonical CPCV port");
+    let retry = port
+        .run(params, Arc::new(NoopProgressSink), CancellationToken::new())
         .await
-        .expect("complete CPCV model run");
-    let view = BacktestPathSetView::from(info);
+        .expect("exact CPCV port retry");
+    assert_eq!(retry.path_set_id, view.path_set_id);
+    assert_eq!(retry.model_run_id, view.model_run_id);
+    assert_eq!(retry.path_set_hash, view.path_set_hash);
+    assert_eq!(retry.subject, view.subject);
+    assert_eq!(retry.methodology, view.methodology);
 
     assert_cpcv_view_bind(&db, &registry, &version, &view, &path_set_id, coord_n).await;
 }

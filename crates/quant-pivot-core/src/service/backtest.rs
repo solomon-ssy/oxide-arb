@@ -17,10 +17,14 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use quant_pivot_compute::{ComputeExecutor, OfflineMemory};
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
+use quant_pivot_error::{
+    QuantError, QuantResult, feedback::FeedbackError, research::ResearchError,
+    storage::StorageError,
+};
 use quant_pivot_models::{
     domain::{
         governance::DecisionPolicySnapshotInfo,
+        ports::{FeedbackComparisonCandidateRef, FeedbackComparisonJobParams},
         quant::{
             BacktestReportInfo, JobProgressSink, ModelComparisonReportInfo, ModelVersionInfo,
             NewBacktestReport, NewModelComparisonReport, NewModelRun, TrainingDatasetInfo,
@@ -30,9 +34,10 @@ use quant_pivot_models::{
     enums::quant::{DatasetPurpose, ModelRunErrorCode, ModelRunKind},
     hashing::CanonicalDigest,
     types::{
-        BacktestReportId, Bps, DecisionPolicySnapshotId, MarketId, ModelComparisonReportId,
-        ModelRunId, ModelVersionId, PayoutRatio, ResearchJobProgress, ResearchProfileArtifact,
-        TokenId, TrainingDatasetId, calibration::ModelScoreCalibrationFitContract,
+        BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, MarketId,
+        ModelComparisonReportId, ModelRunId, ModelVersionId, PayoutRatio, ResearchJobProgress,
+        ResearchProfileArtifact, TokenId, TrainingDatasetId,
+        calibration::ModelScoreCalibrationFitContract,
         model_serving::ModelServingPolicySnapshotBinding,
     },
 };
@@ -45,7 +50,8 @@ use quant_pivot_research::{
     backtest::{
         BacktestExecutionSnapshot, BacktestInputs, BacktestMarketMeta, BacktestReport,
         BacktestRequest, BacktestRunResult, BacktestTick, Backtester, MarketOutcome,
-        ModelComparisonReport, PortfolioCaps, PortfolioReplayBacktester, SampleOutcome,
+        ModelComparisonReport, PortfolioCaps, PortfolioReplayBacktester,
+        PortfolioReturnObservation, SampleOutcome,
     },
     execution_semantics::{PitFeeSchedule, aggressive_buy_limit},
     model::QuantModelRuntime,
@@ -63,7 +69,9 @@ use crate::{
     },
     projection::inference_batch::build_frozen_runtime_input,
     service::{
-        model_serving_preimage::{ModelServingPreimageService, VerifiedReplayDataset},
+        model_serving_preimage::{
+            ModelServingPreimageService, VerifiedModelServingPreimage, VerifiedReplayDataset,
+        },
         training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
     },
 };
@@ -100,12 +108,29 @@ pub struct BacktestInput {
     pub backtest_report_id: Option<BacktestReportId>,
 }
 
+/// One model's deterministic, non-persisted replay inside a feedback
+/// comparison job.
+pub struct FeedbackModelReplay {
+    pub model_version_id: ModelVersionId,
+    pub serving_contract_hash: ContentHash,
+    pub report_hash: ContentHash,
+    pub portfolio_returns: Vec<PortfolioReturnObservation>,
+}
+
+/// Shared-object replay result for the champion and all challengers.
+pub struct FeedbackFamilyReplay {
+    pub champion: FeedbackModelReplay,
+    pub candidates: Vec<FeedbackModelReplay>,
+}
+
 /// Internal replay request for model-score calibration evidence.
 ///
 /// Calibration reuses the deterministic replay computation but does not write
 /// a `quant_backtest_report`: that ledger is reserved for reusable evaluation
 /// evidence and its `evaluation_dataset_id` invariant.
 pub(crate) struct CalibrationReplayInput {
+    /// Pre-assigned run id frozen in the durable calibration job.
+    pub model_run_id: ModelRunId,
     /// Model version whose scores are being calibrated.
     pub source_model: ModelVersionId,
     /// Independent purpose-bound calibration dataset.
@@ -185,6 +210,91 @@ impl BacktestService {
                 .await?
                 .info,
         )
+    }
+
+    /// Replay a complete reserved candidate family after loading the Evaluation
+    /// Dataset Parquet and Source Slice exactly once.
+    pub async fn replay_feedback_family(
+        &self,
+        params: &FeedbackComparisonJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<FeedbackFamilyReplay> {
+        params.validate()?;
+        if params.decision_policy_snapshot_id != self.policy_binding.decision_policy_snapshot_id {
+            return Err(Self::comparison_error(
+                "comparison policy differs from the bound BacktestService",
+            ));
+        }
+        let dataset = self
+            .find_dataset(&params.evaluation_use.evaluation_dataset_id)
+            .await?;
+        Self::verify_reserved_dataset(params, &dataset)?;
+
+        let champion_version = self.find_version(&params.champion_model_version_id).await?;
+        let champion_source = self.deps.serving_preimages.load(&champion_version).await?;
+        Self::verify_comparison_model(
+            &champion_version,
+            params.champion_model_version_id,
+            params.champion_serving_contract_hash,
+        )?;
+        let replay = Box::pin(self.deps.serving_preimages.verify_replay_dataset(
+            &champion_source,
+            &dataset,
+            DatasetPurpose::Evaluation,
+        ))
+        .await?;
+        let (examples, frozen_source) = self
+            .load_replay_artifacts(&replay, champion_source.profile())
+            .await?;
+
+        let mut prepared = Vec::with_capacity(params.candidates.len() + 1);
+        prepared.push(FeedbackPreparedModel::champion(params, &champion_source)?);
+        for candidate in &params.candidates {
+            let version = self.find_version(&candidate.model_version_id).await?;
+            let source = self.deps.serving_preimages.load(&version).await?;
+            Self::verify_comparison_model(
+                &version,
+                candidate.model_version_id,
+                candidate.serving_contract_hash,
+            )?;
+            Box::pin(self.deps.serving_preimages.verify_replay_bindings(
+                &source,
+                &dataset,
+                DatasetPurpose::Evaluation,
+            ))
+            .await?;
+            prepared.push(FeedbackPreparedModel::candidate(candidate, &source)?);
+        }
+
+        let batch = FeedbackReplayBatch {
+            prepared,
+            examples,
+            frozen_source,
+            caps: self.caps.clone(),
+            entry_max_slippage_bps: self.entry_max_slippage_bps,
+            evaluation_dataset_id: dataset.training_dataset_id,
+            decision_policy_snapshot_id: params.decision_policy_snapshot_id,
+            window_start: dataset.window_start,
+            window_end: dataset.window_end,
+            progress,
+            cancel: cancel.clone(),
+        };
+        let runtime = Handle::current();
+        let replayed = self
+            .deps
+            .compute
+            .run_offline_cancellable(OfflineMemory::try_gib(4)?, &cancel, move || {
+                let _runtime = runtime.enter();
+                batch.run_blocking()
+            })
+            .await?;
+        replayed.ok_or_else(|| {
+            ResearchError::Cancelled {
+                detail: "feedback comparison cancelled during shared replay".to_owned(),
+            }
+            .into()
+        })
     }
 
     /// Verify every canonical replay preimage without creating a run, report,
@@ -300,7 +410,7 @@ impl BacktestService {
         })?;
         let fit_window =
             TimeWindow::new(prepared.dataset.window_start, prepared.dataset.window_end);
-        let model_run_id = ModelRunId::from_v7();
+        let model_run_id = input.model_run_id;
         self.create_run(
             &model_run_id,
             input.source_model,
@@ -724,6 +834,58 @@ impl BacktestService {
             })
     }
 
+    fn verify_reserved_dataset(
+        params: &FeedbackComparisonJobParams,
+        dataset: &TrainingDatasetInfo,
+    ) -> QuantResult<()> {
+        let materialization = require_dataset_materialization(dataset)?;
+        let cohort_manifest = dataset.cohort_manifest.as_ref().ok_or_else(|| {
+            Self::comparison_error("reserved Evaluation Dataset has no cohort manifest")
+        })?;
+        let cohort_manifest_hash = CanonicalDigest::content_hash_json(cohort_manifest)?;
+        if dataset.training_dataset_id != params.evaluation_use.evaluation_dataset_id
+            || dataset.window_start != params.evaluation_use.evaluation_window_start
+            || dataset.window_end != params.evaluation_use.evaluation_window_end
+            || dataset.research_profile_artifact_id.profile_ref()
+                != params.evaluation_use.profile_ref
+            || dataset.decision_policy_snapshot_id != params.decision_policy_snapshot_id
+            || *materialization.dataset_hash != params.evaluation_use.evaluation_dataset_hash
+            || *materialization.artifact_bytes_hash
+                != params.evaluation_use.evaluation_artifact_bytes_hash
+            || cohort_manifest_hash != params.evaluation_use.cohort_manifest_hash
+        {
+            return Err(Self::comparison_error(
+                "Evaluation Dataset differs from its durable one-time reservation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_comparison_model(
+        version: &ModelVersionInfo,
+        expected_id: ModelVersionId,
+        expected_contract_hash: ContentHash,
+    ) -> QuantResult<()> {
+        version.verified_serving_contract().map_err(|error| {
+            Self::comparison_error(format!("invalid serving contract: {error}"))
+        })?;
+        if version.model_version_id != expected_id
+            || version.serving_contract_hash != expected_contract_hash
+        {
+            return Err(Self::comparison_error(
+                "comparison model differs from its frozen id/serving-contract hash",
+            ));
+        }
+        Ok(())
+    }
+
+    fn comparison_error(detail: impl Into<String>) -> QuantError {
+        FeedbackError::InvalidComparisonEvidence {
+            detail: detail.into(),
+        }
+        .into()
+    }
+
     async fn create_run(
         &self,
         model_run_id: &ModelRunId,
@@ -735,7 +897,7 @@ impl BacktestService {
         let materialization = require_dataset_materialization(dataset)?;
         self.deps
             .model_run_repo
-            .create(NewModelRun {
+            .start_exact(NewModelRun {
                 model_run_id: *model_run_id,
                 run_kind,
                 model_version_id: Some(model_version_id),
@@ -759,6 +921,127 @@ struct PreparedReplay {
     examples: Vec<TrainingExample>,
     frozen_source: FrozenSourceSlice,
     calibration_contract: Option<ModelScoreCalibrationFitContract>,
+}
+
+struct FeedbackPreparedModel {
+    model_version_id: ModelVersionId,
+    serving_contract_hash: ContentHash,
+    model_run_id: ModelRunId,
+    backtest_report_id: BacktestReportId,
+    model: Arc<dyn QuantModelRuntime>,
+}
+
+impl FeedbackPreparedModel {
+    fn champion(
+        params: &FeedbackComparisonJobParams,
+        source: &VerifiedModelServingPreimage,
+    ) -> QuantResult<Self> {
+        Ok(Self {
+            model_version_id: params.champion_model_version_id,
+            serving_contract_hash: params.champion_serving_contract_hash,
+            model_run_id: params.champion_model_run_id,
+            backtest_report_id: params.champion_backtest_report_id,
+            model: source.buy_runtime()?,
+        })
+    }
+
+    fn candidate(
+        candidate: &FeedbackComparisonCandidateRef,
+        source: &VerifiedModelServingPreimage,
+    ) -> QuantResult<Self> {
+        Ok(Self {
+            model_version_id: candidate.model_version_id,
+            serving_contract_hash: candidate.serving_contract_hash,
+            model_run_id: candidate.model_run_id,
+            backtest_report_id: candidate.backtest_report_id,
+            model: source.buy_runtime()?,
+        })
+    }
+}
+
+struct FeedbackReplayBatch {
+    prepared: Vec<FeedbackPreparedModel>,
+    examples: Vec<TrainingExample>,
+    frozen_source: FrozenSourceSlice,
+    caps: PortfolioCaps,
+    entry_max_slippage_bps: Bps,
+    evaluation_dataset_id: TrainingDatasetId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    progress: Arc<dyn JobProgressSink>,
+    cancel: CancellationToken,
+}
+
+impl FeedbackReplayBatch {
+    fn run_blocking(self) -> QuantResult<Option<FeedbackFamilyReplay>> {
+        Handle::current().block_on(self.run())
+    }
+
+    async fn run(self) -> QuantResult<Option<FeedbackFamilyReplay>> {
+        let mut outputs = Vec::with_capacity(self.prepared.len());
+        let total = u64::try_from(self.prepared.len()).map_err(|error| {
+            BacktestService::comparison_error(format!(
+                "comparison model count does not fit u64: {error}"
+            ))
+        })?;
+        for (index, prepared) in self.prepared.into_iter().enumerate() {
+            if self.cancel.is_cancelled() {
+                return Ok(None);
+            }
+            let completed = u64::try_from(index).map_err(|error| {
+                BacktestService::comparison_error(format!(
+                    "comparison progress index does not fit u64: {error}"
+                ))
+            })?;
+            self.progress.report(ResearchJobProgress::with_total(
+                "comparison_replay",
+                completed,
+                total,
+            ));
+            let Some(ticks) = frozen_ticks(
+                &self.examples,
+                &self.frozen_source,
+                self.entry_max_slippage_bps,
+                prepared.model.as_ref(),
+                &prepared.model_run_id,
+                &self.cancel,
+                self.progress.as_ref(),
+            )?
+            else {
+                return Ok(None);
+            };
+            let result = PortfolioReplayBacktester::new()
+                .run(BacktestInputs {
+                    request: BacktestRequest {
+                        backtest_report_id: prepared.backtest_report_id,
+                        model_version_id: prepared.model_version_id,
+                        dataset_id: self.evaluation_dataset_id,
+                        decision_policy_snapshot_id: self.decision_policy_snapshot_id,
+                        window_start: self.window_start,
+                        window_end: self.window_end,
+                    },
+                    model: prepared.model.as_ref(),
+                    ticks,
+                    caps: self.caps.clone(),
+                })
+                .await?;
+            outputs.push(FeedbackModelReplay {
+                model_version_id: prepared.model_version_id,
+                serving_contract_hash: prepared.serving_contract_hash,
+                report_hash: result.report.report_hash,
+                portfolio_returns: result.portfolio_returns,
+            });
+        }
+        let mut outputs = outputs.into_iter();
+        let champion = outputs
+            .next()
+            .ok_or_else(|| BacktestService::comparison_error("comparison lost champion replay"))?;
+        Ok(Some(FeedbackFamilyReplay {
+            champion,
+            candidates: outputs.collect(),
+        }))
+    }
 }
 
 /// Inputs for one recorded backtest replay.

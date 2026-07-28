@@ -6,10 +6,10 @@ use quant_pivot_models::{
     domain::{
         api::ResearchJobListQuery,
         pagination::Paginated,
-        quant::{NewResearchJob, ResearchJobInfo, ResearchJobResultRef},
+        quant::{NewResearchJob, ResearchJobFinalization, ResearchJobInfo},
     },
-    enums::quant::{ResearchJobKind, ResearchJobStatus},
-    types::{DatasetCoverage, ResearchJobError, ResearchJobId, ResearchJobProgress, WorkerId},
+    enums::quant::ResearchJobKind,
+    types::{ResearchJobError, ResearchJobId, ResearchJobProgress, WorkerId},
 };
 
 /// Number of running jobs of one kind (concurrency-cap accounting).
@@ -28,11 +28,23 @@ pub struct ReclaimOutcome {
     pub quarantined: u64,
 }
 
+/// Exact-retry outcome when enqueueing one immutable research-job contract.
+#[derive(Debug, Clone)]
+pub enum ResearchJobEnqueueOutcome {
+    Inserted(ResearchJobInfo),
+    AlreadyPresent(ResearchJobInfo),
+}
+
 /// Persistence port for the durable async research-job ledger.
 #[async_trait::async_trait]
 pub trait ResearchJobRepository: Send + Sync {
-    /// Insert a newly-enqueued job (`queued`), returning the persisted projection.
-    async fn enqueue(&self, job: NewResearchJob) -> Result<ResearchJobInfo, StorageError>;
+    /// Insert a newly-enqueued job or return the exact existing row.
+    ///
+    /// A conflicting immutable contract under the same deterministic identity
+    /// fails closed; a mutable status/progress change does not invalidate an
+    /// exact retry of the original enqueue request.
+    async fn enqueue(&self, job: NewResearchJob)
+    -> Result<ResearchJobEnqueueOutcome, StorageError>;
 
     /// Look up a job by id.
     async fn find_by_id(
@@ -85,10 +97,7 @@ pub trait ResearchJobRepository: Send + Sync {
         &self,
         job_id: &ResearchJobId,
         owner: &WorkerId,
-        status: ResearchJobStatus,
-        result: Option<ResearchJobResultRef>,
-        error: Option<ResearchJobError>,
-        coverage: Option<DatasetCoverage>,
+        finalization: ResearchJobFinalization,
     ) -> Result<ResearchJobInfo, StorageError>;
 
     /// Cancel a still-`queued` job atomically (never touches a `running` one).

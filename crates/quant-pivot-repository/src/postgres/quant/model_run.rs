@@ -10,7 +10,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-    sea_query::Expr,
+    sea_query::{Expr, OnConflict},
 };
 
 use crate::{postgres::primitives, traits::ModelRunRepository};
@@ -68,7 +68,44 @@ impl ModelRunRepository for PgModelRunRepository {
             .exec_with_returning(&self.db)
             .await
             .map_err(StorageError::from)
-            .map(Into::into)
+            .map(ModelRunInfo::from)
+    }
+
+    async fn start_exact(&self, run: NewModelRun) -> Result<ModelRunInfo, StorageError> {
+        Entity::insert(run.clone().into_active_model())
+            .on_conflict(
+                OnConflict::column(Column::ModelRunId)
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .exec_without_returning(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        let info = Entity::find_by_id(run.model_run_id)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .map(ModelRunInfo::from)
+            .ok_or_else(|| {
+                StorageError::state_conflict(
+                    QUANT_MODEL_RUN,
+                    Some(&run.model_run_id),
+                    "exact model-run start completed without an observable row",
+                )
+            })?;
+        if !info.matches_new(&run)
+            || !matches!(
+                info.status,
+                ModelRunStatus::Running | ModelRunStatus::Succeeded
+            )
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_MODEL_RUN,
+                Some(&run.model_run_id),
+                "model-run identity drifted or reused a failed/cancelled terminal",
+            ));
+        }
+        Ok(info)
     }
 
     async fn find_by_id(
@@ -128,6 +165,36 @@ impl ModelRunRepository for PgModelRunRepository {
             .await
             .map_err(StorageError::from)?;
         self.terminal_result(model_run_id, rows).await
+    }
+
+    async fn succeed_exact(
+        &self,
+        model_run_id: &ModelRunId,
+        output_hash: ContentHash,
+        model_version_id: Option<ModelVersionId>,
+    ) -> Result<ModelRunInfo, StorageError> {
+        let error = match self
+            .succeed(model_run_id, output_hash, model_version_id)
+            .await
+        {
+            Ok(info) => return Ok(info),
+            Err(error) => error,
+        };
+        let Some(info) = self.find_by_id(model_run_id).await? else {
+            return Err(error);
+        };
+        let subject_matches =
+            model_version_id.is_none_or(|version_id| info.model_version_id == Some(version_id));
+        if info.status == ModelRunStatus::Succeeded
+            && info.output_hash == Some(output_hash)
+            && subject_matches
+            && info.error_code.is_none()
+            && info.error_message.is_none()
+            && info.finished_at.is_some()
+        {
+            return Ok(info);
+        }
+        Err(error)
     }
 
     async fn fail(

@@ -3,7 +3,10 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::quant::{NewShadowComparison, ShadowComparisonInfo, ShadowStabilitySummary},
+    domain::quant::{
+        NewShadowComparison, ShadowComparisonInfo, ShadowObservationQuery, ShadowObservationWindow,
+        ShadowStabilitySummary,
+    },
     types::ModelVersionId,
 };
 
@@ -25,4 +28,11 @@ pub trait ShadowComparisonRepository: Send + Sync {
         shadow_model_version_id: &ModelVersionId,
         since: DateTime<Utc>,
     ) -> Result<ShadowStabilitySummary, StorageError>;
+
+    /// Aggregate only rows carrying the exact published-generation identity
+    /// inside the frozen half-open decision/creation window.
+    async fn observation_window(
+        &self,
+        query: &ShadowObservationQuery,
+    ) -> Result<ShadowObservationWindow, StorageError>;
 }

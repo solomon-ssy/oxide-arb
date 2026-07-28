@@ -103,6 +103,11 @@ const SETTLEMENT_LAG_BUCKETS_SECS: &[f64] = &[
     1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 900.0, 3_600.0, 21_600.0, 86_400.0,
 ];
 
+/// Feedback lifecycle buckets in seconds (10 ms … 24 h).
+const FEEDBACK_RUN_BUCKETS_SECS: &[f64] = &[
+    0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 30.0, 60.0, 300.0, 900.0, 3_600.0, 21_600.0, 86_400.0,
+];
+
 /// Central Prometheus registry for live paths only.
 pub struct MetricsHub {
     pub registry: Registry,
@@ -181,6 +186,26 @@ pub struct MetricsHub {
     pub feature_parity_latch_open: IntGauge,
     /// Containment attempts by terminal outcome (`completed`/`failed`).
     pub feature_parity_containment_total: IntCounterVec,
+
+    // ── Research feedback lifecycle ───────────────────────────────────
+    /// Terminal feedback cycles by controlled status/decision labels.
+    pub feedback_cycle_total: IntCounterVec,
+    /// End-to-end feedback-cycle duration by controlled status.
+    pub feedback_cycle_duration_seconds: HistogramVec,
+    /// Research-job duration observed at each feedback stage.
+    pub feedback_stage_duration_seconds: HistogramVec,
+    /// Feedback cycles currently owned by this process.
+    pub feedback_cycle_active: IntGauge,
+    /// Queued feedback cycles in authoritative `PostgreSQL` state.
+    pub feedback_cycle_queued: IntGauge,
+    /// Unpublished feedback control-plane revisions.
+    pub feedback_outbox_pending: IntGauge,
+    /// Running cycles that crossed the configured DB-clock age threshold.
+    pub feedback_stuck_total: IntCounter,
+    /// Advisory progress values superseded in the single latest-value slot.
+    pub research_progress_coalesced_total: IntCounter,
+    /// Research-job lease heartbeat failures by controlled operation/result.
+    pub research_heartbeat_total: IntCounterVec,
 
     // ── Execution governance ───────────────────────────────────────
     /// `1` when the operational kill-switch blocks new auto entries (any
@@ -299,6 +324,18 @@ struct FeatureParityMetrics {
     comparisons: IntCounterVec,
     latch_open: IntGauge,
     containment: IntCounterVec,
+}
+
+struct ResearchFeedbackMetrics {
+    cycle_total: IntCounterVec,
+    cycle_duration: HistogramVec,
+    stage_duration: HistogramVec,
+    cycle_active: IntGauge,
+    cycle_queued: IntGauge,
+    outbox_pending: IntGauge,
+    stuck_total: IntCounter,
+    progress_coalesced: IntCounter,
+    heartbeat_total: IntCounterVec,
 }
 
 /// Execution, risk, and governance counters.
@@ -647,6 +684,62 @@ fn register_feature_parity_metrics(registry: &Registry) -> FeatureParityMetrics 
     }
 }
 
+fn register_research_feedback_metrics(registry: &Registry) -> ResearchFeedbackMetrics {
+    ResearchFeedbackMetrics {
+        cycle_total: register_counter_vec!(
+            registry,
+            "quant_feedback_cycle_total",
+            "Terminal feedback cycles by status and decision",
+            &["status", "decision"]
+        ),
+        cycle_duration: register_histogram_vec!(
+            registry,
+            "quant_feedback_cycle_duration_seconds",
+            "End-to-end feedback-cycle duration by terminal status",
+            &["status"],
+            FEEDBACK_RUN_BUCKETS_SECS
+        ),
+        stage_duration: register_histogram_vec!(
+            registry,
+            "quant_feedback_stage_duration_seconds",
+            "Research-job duration by feedback stage and terminal status",
+            &["stage", "status"],
+            FEEDBACK_RUN_BUCKETS_SECS
+        ),
+        cycle_active: register_gauge_int!(
+            registry,
+            "quant_feedback_cycle_active",
+            "Feedback cycles currently owned by this process"
+        ),
+        cycle_queued: register_gauge_int!(
+            registry,
+            "quant_feedback_cycle_queued",
+            "Queued feedback cycles in authoritative PostgreSQL state"
+        ),
+        outbox_pending: register_gauge_int!(
+            registry,
+            "quant_feedback_outbox_pending",
+            "Unpublished feedback control-plane revisions"
+        ),
+        stuck_total: register_counter!(
+            registry,
+            "quant_feedback_stuck_total",
+            "Running feedback cycles that crossed the configured DB-clock age threshold"
+        ),
+        progress_coalesced: register_counter!(
+            registry,
+            "quant_research_progress_coalesced_total",
+            "Research progress values superseded in the single latest-value slot"
+        ),
+        heartbeat_total: register_counter_vec!(
+            registry,
+            "quant_research_heartbeat_total",
+            "Research-job lease heartbeat results by operation and result",
+            &["operation", "result"]
+        ),
+    }
+}
+
 fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
     ExecutionMetrics {
         auto_execution_halted: register_gauge_int!(
@@ -773,6 +866,7 @@ impl MetricsHub {
         let infra = register_infra_metrics(&registry);
         let report = register_report_metrics(&registry);
         let feature_parity = register_feature_parity_metrics(&registry);
+        let research_feedback = register_research_feedback_metrics(&registry);
         let data_quality_tokens = register_gauge_vec!(
             &registry,
             "quant_pivot_data_quality_tokens",
@@ -850,6 +944,15 @@ impl MetricsHub {
             feature_parity_comparisons_total: feature_parity.comparisons,
             feature_parity_latch_open: feature_parity.latch_open,
             feature_parity_containment_total: feature_parity.containment,
+            feedback_cycle_total: research_feedback.cycle_total,
+            feedback_cycle_duration_seconds: research_feedback.cycle_duration,
+            feedback_stage_duration_seconds: research_feedback.stage_duration,
+            feedback_cycle_active: research_feedback.cycle_active,
+            feedback_cycle_queued: research_feedback.cycle_queued,
+            feedback_outbox_pending: research_feedback.outbox_pending,
+            feedback_stuck_total: research_feedback.stuck_total,
+            research_progress_coalesced_total: research_feedback.progress_coalesced,
+            research_heartbeat_total: research_feedback.heartbeat_total,
             auto_execution_halted: execution.auto_execution_halted,
             admission_denied: execution.admission_denied,
             order_intents_created: execution.order_intents_created,
@@ -1064,6 +1167,34 @@ impl MetricsHub {
     pub fn record_feature_parity_containment(&self, outcome: &str) {
         self.feature_parity_containment_total
             .with_label_values(&[outcome])
+            .inc();
+    }
+
+    pub fn record_feedback_cycle(&self, status: &str, decision: &str, duration_secs: f64) {
+        self.feedback_cycle_total
+            .with_label_values(&[status, decision])
+            .inc();
+        self.feedback_cycle_duration_seconds
+            .with_label_values(&[status])
+            .observe(duration_secs);
+    }
+
+    pub fn observe_feedback_stage(&self, stage: &str, status: &str, duration_secs: f64) {
+        self.feedback_stage_duration_seconds
+            .with_label_values(&[stage, status])
+            .observe(duration_secs);
+    }
+
+    pub fn set_feedback_queue(&self, queued: u64, pending_outbox: u64) {
+        self.feedback_cycle_queued
+            .set(i64::try_from(queued).unwrap_or(i64::MAX));
+        self.feedback_outbox_pending
+            .set(i64::try_from(pending_outbox).unwrap_or(i64::MAX));
+    }
+
+    pub fn record_research_heartbeat(&self, operation: &str, result: &str) {
+        self.research_heartbeat_total
+            .with_label_values(&[operation, result])
             .inc();
     }
 

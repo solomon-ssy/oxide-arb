@@ -785,10 +785,37 @@ impl ModelRunner {
         weight_source: ModelWeightSource,
         shadow_candidates: &[SignalCandidate],
     ) {
+        let observation = match request.serving.published_shadow_identity() {
+            Ok(observation) => observation,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "skipping non-production or incomplete shadow observation"
+                );
+                return;
+            }
+        };
+        if observation.active_model_version_id != active.active_version_id
+            || observation.shadow_model_version_id != *shadow_version_id
+        {
+            tracing::warn!(
+                active_model_version_id = %active.active_version_id,
+                shadow_model_version_id = %shadow_version_id,
+                "skipping shadow observation whose pinned generation subjects drifted"
+            );
+            return;
+        }
         let threshold = request.serving.shadow_diff_threshold();
         let comparison = match compute_shadow_comparison(&ShadowComparisonRequest {
             active_model_version_id: active.active_version_id,
             shadow_model_version_id: *shadow_version_id,
+            active_serving_contract_hash: observation.active_serving_contract_hash,
+            shadow_serving_contract_hash: observation.shadow_serving_contract_hash,
+            research_profile_artifact_id: observation.research_profile_artifact_id,
+            category_scope: observation.category_scope,
+            decision_policy_snapshot_id: observation.decision_policy_snapshot_id,
+            decision_policy_snapshot_hash: observation.decision_policy_snapshot_hash,
+            policy_bundle_generation: observation.policy_bundle_generation,
             weight_source,
             decision_at: request.boundary.decision_at(),
             active: &active.active_candidates,
@@ -1259,11 +1286,18 @@ fn shadow_diff(
 }
 
 /// Project a computed [`ShadowComparison`] into its persistence insert payload.
-const fn new_shadow_comparison(comparison: &ShadowComparison) -> NewShadowComparison {
+fn new_shadow_comparison(comparison: &ShadowComparison) -> NewShadowComparison {
     NewShadowComparison {
         shadow_comparison_id: comparison.shadow_comparison_id,
         active_model_version_id: comparison.active_model_version_id,
         shadow_model_version_id: comparison.shadow_model_version_id,
+        active_serving_contract_hash: comparison.active_serving_contract_hash,
+        shadow_serving_contract_hash: comparison.shadow_serving_contract_hash,
+        research_profile_artifact_id: comparison.research_profile_artifact_id.clone(),
+        category_scope: comparison.category_scope,
+        decision_policy_snapshot_id: comparison.decision_policy_snapshot_id,
+        decision_policy_snapshot_hash: comparison.decision_policy_snapshot_hash,
+        policy_bundle_generation: comparison.policy_bundle_generation,
         weight_source: comparison.weight_source,
         decision_at: comparison.decision_at,
         topn_overlap: comparison.topn_overlap,

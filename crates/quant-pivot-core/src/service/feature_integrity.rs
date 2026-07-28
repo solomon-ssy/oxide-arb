@@ -380,6 +380,8 @@ impl FeatureParityRunCoordinator {
         });
         NewResearchJob {
             job_id: ResearchJobId::from_v7(),
+            feedback_cycle_id: None,
+            feedback_stage: None,
             kind: ResearchJobKind::FeatureParity,
             status: ResearchJobStatus::Queued,
             model_spec_id: None,
@@ -1010,6 +1012,8 @@ mod tests {
     fn job_info(job: NewResearchJob, now: DateTime<Utc>) -> ResearchJobInfo {
         ResearchJobInfo {
             job_id: job.job_id,
+            feedback_cycle_id: job.feedback_cycle_id,
+            feedback_stage: job.feedback_stage,
             kind: job.kind,
             status: job.status,
             model_spec_id: job.model_spec_id,
@@ -1018,6 +1022,8 @@ mod tests {
             progress_json: None,
             result_kind: None,
             result_ref: None,
+            result_artifact_uri: None,
+            result_artifact_hash: None,
             error_json: None,
             coverage_json: None,
             requested_by: job.requested_by,

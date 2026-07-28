@@ -7,8 +7,14 @@ use quant_pivot_models::{
         pagination::Paginated,
         quant::{BacktestPathSetInfo, NewBacktestPathSet},
     },
-    types::{BacktestPathSetId, ModelVersionId},
+    types::{BacktestPathSetId, ContentHash, ModelVersionId},
 };
+
+/// One atomic CPCV path-set append and exact `ModelRun` terminal transition.
+pub struct CpcvPathSetCommit {
+    pub path_set: NewBacktestPathSet,
+    pub input_hash: ContentHash,
+}
 
 /// Persistence port for the append-only CPCV + trial-grid validation ledger.
 #[async_trait::async_trait]
@@ -17,6 +23,13 @@ pub trait BacktestPathSetRepository: Send + Sync {
     async fn create(
         &self,
         path_set: NewBacktestPathSet,
+    ) -> Result<BacktestPathSetInfo, StorageError>;
+
+    /// Atomically append one path set and succeed its exact pre-assigned run.
+    /// Exact retries return the stored path set; every other collision fails closed.
+    async fn commit_cpcv(
+        &self,
+        commit: CpcvPathSetCommit,
     ) -> Result<BacktestPathSetInfo, StorageError>;
 
     /// Look up a path set by id.

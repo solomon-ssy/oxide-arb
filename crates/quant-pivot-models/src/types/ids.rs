@@ -21,7 +21,10 @@ use std::sync::Arc;
 use quant_pivot_macros::{StrId, UuidId};
 use uuid::Uuid;
 
-use crate::types::ContentHash;
+use crate::{
+    enums::quant::{DownsideSource, FeedbackStage},
+    types::ContentHash,
+};
 
 // ── External string identifiers (Arc<str>) ───────────────────────────────
 
@@ -333,6 +336,34 @@ pub struct ModelSpecId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelVersionId(Uuid);
 
+impl ModelVersionId {
+    /// Stable identity of one feedback candidate's uncalibrated model.
+    #[must_use]
+    pub fn from_feedback_candidate(
+        feedback_cycle_id: FeedbackCycleId,
+        candidate_recipe_hash: ContentHash,
+    ) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f20d);
+        let name = format!("{feedback_cycle_id}:{candidate_recipe_hash}");
+        Self::new(Uuid::new_v5(&NAMESPACE, name.as_bytes()))
+    }
+
+    /// Deterministic identity of one calibrated derivation.
+    #[must_use]
+    pub fn from_calibration_binding(
+        source_model_version_id: Self,
+        calibration_artifact_id: CalibrationArtifactId,
+        downside_source: DownsideSource,
+    ) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f209);
+        let name = format!(
+            "{source_model_version_id}:{calibration_artifact_id}:{}",
+            downside_source.as_str()
+        );
+        Self::new(Uuid::new_v5(&NAMESPACE, name.as_bytes()))
+    }
+}
+
 /// Model training, backtest, shadow, or inference run identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelRunId(Uuid);
@@ -439,6 +470,19 @@ pub struct BacktestReportId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BacktestPathSetId(Uuid);
 
+impl BacktestPathSetId {
+    /// Stable identity of one feedback candidate's CPCV path set.
+    #[must_use]
+    pub fn from_feedback_candidate(
+        feedback_cycle_id: FeedbackCycleId,
+        candidate_recipe_hash: ContentHash,
+    ) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f20f);
+        let name = format!("{feedback_cycle_id}:{candidate_recipe_hash}");
+        Self::new(Uuid::new_v5(&NAMESPACE, name.as_bytes()))
+    }
+}
+
 /// Pairwise model-comparison report identifier (baseline vs candidate replay).
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelComparisonReportId(Uuid);
@@ -488,6 +532,153 @@ impl FeedbackCycleId {
     pub fn from_idempotency_hash(idempotency_hash: &ContentHash) -> Self {
         const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f201);
         Self::new(uuid_v5_for_content(&NAMESPACE, idempotency_hash))
+    }
+}
+
+/// Immutable coverage artifact produced once per feedback cycle.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeedbackCoverageArtifactId(Uuid);
+
+impl FeedbackCoverageArtifactId {
+    /// Project the cycle identity into the stable coverage-artifact namespace.
+    #[must_use]
+    pub fn from_cycle_id(feedback_cycle_id: FeedbackCycleId) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f206);
+        Self::new(Uuid::new_v5(
+            &NAMESPACE,
+            feedback_cycle_id.as_uuid().as_bytes(),
+        ))
+    }
+}
+
+/// Immutable statistical-drift artifact produced once per feedback cycle.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeedbackDriftArtifactId(Uuid);
+
+impl FeedbackDriftArtifactId {
+    /// Project the cycle identity into the stable drift-artifact namespace.
+    #[must_use]
+    pub fn from_cycle_id(feedback_cycle_id: FeedbackCycleId) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f207);
+        Self::new(Uuid::new_v5(
+            &NAMESPACE,
+            feedback_cycle_id.as_uuid().as_bytes(),
+        ))
+    }
+}
+
+/// Immutable Dataset/Training/Calibration/CPCV stage artifact for one feedback cycle.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeedbackLearningStageArtifactId(Uuid);
+
+impl FeedbackLearningStageArtifactId {
+    /// Derive one artifact identity from the exact cycle and learning stage.
+    ///
+    /// Coverage, drift, comparison, shadow, and decision have separate artifact
+    /// contracts and are deliberately rejected here.
+    #[must_use]
+    pub fn from_cycle_stage(
+        feedback_cycle_id: FeedbackCycleId,
+        stage: FeedbackStage,
+    ) -> Option<Self> {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f208);
+        if !matches!(
+            stage,
+            FeedbackStage::DatasetSeal
+                | FeedbackStage::Training
+                | FeedbackStage::Calibration
+                | FeedbackStage::Cpcv
+        ) {
+            return None;
+        }
+        let name = format!("{feedback_cycle_id}:{}", stage.as_str());
+        Some(Self::new(Uuid::new_v5(&NAMESPACE, name.as_bytes())))
+    }
+}
+
+/// Immutable same-window comparison artifact for one feedback cycle.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeedbackComparisonArtifactId(Uuid);
+
+impl FeedbackComparisonArtifactId {
+    /// Project the cycle identity into the stable comparison-artifact namespace.
+    #[must_use]
+    pub fn from_cycle_id(feedback_cycle_id: FeedbackCycleId) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f20a);
+        Self::new(Uuid::new_v5(
+            &NAMESPACE,
+            feedback_cycle_id.as_uuid().as_bytes(),
+        ))
+    }
+}
+
+/// Immutable production-shadow/replay gate artifact for one feedback cycle.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeedbackShadowReplayArtifactId(Uuid);
+
+impl FeedbackShadowReplayArtifactId {
+    /// Project the cycle identity into the stable shadow/replay namespace.
+    #[must_use]
+    pub fn from_cycle_id(feedback_cycle_id: FeedbackCycleId) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f20d);
+        Self::new(Uuid::new_v5(
+            &NAMESPACE,
+            feedback_cycle_id.as_uuid().as_bytes(),
+        ))
+    }
+}
+
+/// Immutable evidence-only decision artifact for one feedback cycle.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeedbackDecisionArtifactId(Uuid);
+
+impl FeedbackDecisionArtifactId {
+    /// Project the cycle identity into the stable decision-artifact namespace.
+    #[must_use]
+    pub fn from_cycle_id(feedback_cycle_id: FeedbackCycleId) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f20e);
+        Self::new(Uuid::new_v5(
+            &NAMESPACE,
+            feedback_cycle_id.as_uuid().as_bytes(),
+        ))
+    }
+}
+
+impl BacktestReportId {
+    /// Stable report identity for one model replay in a comparison artifact.
+    #[must_use]
+    pub fn from_feedback_comparison(
+        artifact_id: FeedbackComparisonArtifactId,
+        model_version_id: ModelVersionId,
+    ) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f20b);
+        let name = format!("{artifact_id}:{model_version_id}");
+        Self::new(Uuid::new_v5(&NAMESPACE, name.as_bytes()))
+    }
+}
+
+impl ModelRunId {
+    /// Stable run identity for one candidate in a feedback learning stage.
+    #[must_use]
+    pub fn from_feedback_stage(
+        feedback_cycle_id: FeedbackCycleId,
+        stage: FeedbackStage,
+        candidate_recipe_hash: ContentHash,
+    ) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f20e);
+        let name = format!("{feedback_cycle_id}:{stage}:{candidate_recipe_hash}");
+        Self::new(Uuid::new_v5(&NAMESPACE, name.as_bytes()))
+    }
+
+    /// Stable model-run identity for one model replay in a comparison artifact.
+    #[must_use]
+    pub fn from_feedback_comparison(
+        artifact_id: FeedbackComparisonArtifactId,
+        model_version_id: ModelVersionId,
+    ) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f20c);
+        let name = format!("{artifact_id}:{model_version_id}");
+        Self::new(Uuid::new_v5(&NAMESPACE, name.as_bytes()))
     }
 }
 
@@ -541,6 +732,15 @@ pub struct BasisAlertId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResearchJobId(Uuid);
 
+impl ResearchJobId {
+    /// Project one canonical feedback stage/retry identity into its durable job id.
+    #[must_use]
+    pub fn from_feedback_identity_hash(identity_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f205);
+        Self::new(uuid_v5_for_content(&NAMESPACE, identity_hash))
+    }
+}
+
 /// One deterministic online/offline feature-parity replay run.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FeatureParityRunId(Uuid);
@@ -568,6 +768,15 @@ pub struct FeatureParityStateId(Uuid);
 /// Model-governance audit row identifier (publish / retire / rollback / promote).
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelGovernanceAuditId(Uuid);
+
+impl ModelGovernanceAuditId {
+    /// Project an immutable governance action into an exact-retry identity.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f20a);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
 
 /// Decision-time venue account / capital snapshot identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -720,6 +929,15 @@ pub struct PreproductionResetNonce(Uuid);
 /// Append-only operation-log row identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AuditEventId(Uuid);
+
+impl AuditEventId {
+    /// Project an immutable governance action into its audit-event identity.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f20b);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
 
 /// Append-only atomic runtime-control transition identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]

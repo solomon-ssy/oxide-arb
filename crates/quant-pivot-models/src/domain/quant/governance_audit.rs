@@ -66,6 +66,25 @@ pub struct ModelGovernanceAuditInfo {
     pub created_at: DateTime<Utc>,
 }
 
+impl ModelGovernanceAuditInfo {
+    /// Whether a retry carries the exact immutable audit payload.
+    #[must_use]
+    pub fn matches_new(&self, audit: &NewModelGovernanceAudit) -> bool {
+        self.audit_id == audit.audit_id
+            && self.model_version_id == audit.model_version_id
+            && self.training_dataset_id == audit.training_dataset_id
+            && self.action == audit.action
+            && self.actor_user_id == audit.actor_user_id
+            && self.actor_username == audit.actor_username
+            && self.actor_role == audit.actor_role
+            && self.reason == audit.reason
+            && self.before_status == audit.before_status
+            && self.after_status == audit.after_status
+            && self.detail == audit.detail
+            && self.audit_event_id == audit.audit_event_id
+    }
+}
+
 info_from_model!(
     ModelGovernanceAuditInfo,
     quant_model_governance_audit::Model,
@@ -87,7 +106,7 @@ info_from_model!(
 );
 
 /// Insert payload for `quant_model_governance_audit` (omits DB-managed `created_at`).
-#[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_model_governance_audit::ActiveModel")]
 pub struct NewModelGovernanceAudit {
     pub audit_id: ModelGovernanceAuditId,

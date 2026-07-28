@@ -231,6 +231,12 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
+        name: "trg_quant_feedback_event_outbox_guard",
+        table: "quant_feedback_event_outbox",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::GuardFeedbackOutbox,
+    },
+    TriggerSpec {
         name: "trg_quant_feedback_stage_event_append_only",
         table: "quant_feedback_stage_event",
         events: TriggerEvents::DeleteOrUpdate,
@@ -345,10 +351,10 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::SetUpdatedAt,
     },
     TriggerSpec {
-        name: "trg_quant_research_job_updated_at",
+        name: "trg_quant_research_job_lifecycle_guard",
         table: "quant_research_job",
         events: TriggerEvents::Update,
-        program: TriggerProgram::SetUpdatedAt,
+        program: TriggerProgram::GuardResearchJob,
     },
     TriggerSpec {
         name: "trg_quant_research_readiness_evidence_append_only",
@@ -579,6 +585,12 @@ mod tests {
             assert_eq!(trigger.events, TriggerEvents::DeleteOrUpdate);
             assert_eq!(trigger.program, TriggerProgram::DenyWrite);
         }
+        let outbox = TRIGGERS
+            .iter()
+            .find(|trigger| trigger.name == "trg_quant_feedback_event_outbox_guard")
+            .expect("feedback outbox lifecycle guard");
+        assert_eq!(outbox.events, TriggerEvents::DeleteOrUpdate);
+        assert_eq!(outbox.program, TriggerProgram::GuardFeedbackOutbox);
         let cycle = TRIGGERS
             .iter()
             .find(|trigger| trigger.name == "trg_quant_feedback_cycle_lifecycle_guard")

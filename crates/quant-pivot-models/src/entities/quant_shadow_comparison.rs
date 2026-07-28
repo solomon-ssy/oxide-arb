@@ -3,11 +3,12 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-use super::quant_model_version;
+use super::{quant_model_version, research_profile_artifact};
 use crate::{
-    enums::quant::ModelWeightSource,
+    enums::{common::MarketCategory, quant::ModelWeightSource},
     types::{
-        ContentHash, ModelVersionId, Probability, ShadowComparisonId,
+        ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration, Probability,
+        ResearchProfileArtifactId, ShadowComparisonId,
         shadow::{ShadowMaturedOutcomeDelta, ShadowRankDelta, ShadowScoreDelta},
     },
 };
@@ -20,6 +21,14 @@ pub struct Model {
     pub shadow_comparison_id: ShadowComparisonId,
     pub active_model_version_id: ModelVersionId,
     pub shadow_model_version_id: ModelVersionId,
+    pub active_serving_contract_hash: ContentHash,
+    pub shadow_serving_contract_hash: ContentHash,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    #[sea_orm(column_type = r#"custom("qp_market_category")"#)]
+    pub category_scope: Option<MarketCategory>,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub decision_policy_snapshot_hash: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
     pub weight_source: ModelWeightSource,
     pub decision_at: DateTime<Utc>,
     pub topn_overlap: Probability,
@@ -47,6 +56,12 @@ pub struct Model {
         to = "model_version_id"
     )]
     pub shadow_version: BelongsTo<quant_model_version::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "research_profile_artifact_id",
+        to = "research_profile_artifact_id"
+    )]
+    pub research_profile: BelongsTo<research_profile_artifact::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -27,7 +27,7 @@ use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
     config::{ArtifactStoreDeployConfig, ClickHouseConfig},
     domain::{
-        api::BindCalibrationRequest,
+        api::{BindCalibrationRequest, BindPublishPathSetRequest},
         data_plane::DecisionClock,
         ports::{GovernanceActor, ModelGovernancePort, PublishModelCommand, RetireModelCommand},
         quant::{
@@ -121,6 +121,8 @@ use quant_pivot_system_tests::{
 };
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
+
+const SHADOW_ACTIVE_FIXTURE_VERSION: i32 = 10_000;
 
 /// Test harness wiring governance against a real store + config repo.
 struct GovernanceHarness {
@@ -1083,6 +1085,53 @@ async fn seed_shadow_window(
     shadow: &ModelVersionId,
     seed_base: char,
 ) {
+    assert_ne!(
+        active, shadow,
+        "shadow evidence requires distinct active and candidate models"
+    );
+    let registry = PgModelRegistryRepository::new(db.clone());
+    let active_version = registry
+        .find_model_version(active)
+        .await
+        .expect("load active shadow subject")
+        .expect("active shadow subject exists");
+    let shadow_version = registry
+        .find_model_version(shadow)
+        .await
+        .expect("load candidate shadow subject")
+        .expect("candidate shadow subject exists");
+    let active_policy = &active_version
+        .verified_serving_contract()
+        .expect("active serving contract")
+        .bindings()
+        .policy_snapshot;
+    let shadow_policy = &shadow_version
+        .verified_serving_contract()
+        .expect("candidate serving contract")
+        .bindings()
+        .policy_snapshot;
+    assert_eq!(
+        active_policy, shadow_policy,
+        "shadow subjects must share one policy snapshot"
+    );
+    assert_eq!(
+        active_version.profile_ref, shadow_version.profile_ref,
+        "shadow subjects must share one ResearchProfile"
+    );
+    assert_ne!(
+        active_version.serving_contract_hash, shadow_version.serving_contract_hash,
+        "shadow evidence requires distinct serving contracts"
+    );
+    let policy_bundle = PgPolicyRepository::new(db.clone())
+        .load_current_bundle()
+        .await
+        .expect("load current policy bundle")
+        .expect("current policy bundle");
+    assert_eq!(
+        policy_bundle.decision_policy_snapshot_id,
+        active_policy.decision_policy_snapshot_id
+    );
+    assert_eq!(policy_bundle.snapshot_hash, active_policy.snapshot_hash);
     let now = Utc::now();
     let repo = PgShadowComparisonRepository::new(db.clone());
     for (overlap, hours_ago, offset) in [(dec!(0.82), 25_i64, 0_u32), (dec!(0.80), 1, 1)] {
@@ -1090,6 +1139,13 @@ async fn seed_shadow_window(
             shadow_comparison_id: ShadowComparisonId::from_v7(),
             active_model_version_id: *active,
             shadow_model_version_id: *shadow,
+            active_serving_contract_hash: active_version.serving_contract_hash,
+            shadow_serving_contract_hash: shadow_version.serving_contract_hash,
+            research_profile_artifact_id: active_version.profile_ref.artifact_id(),
+            category_scope: active_version.category_scope,
+            decision_policy_snapshot_id: policy_bundle.decision_policy_snapshot_id,
+            decision_policy_snapshot_hash: policy_bundle.snapshot_hash,
+            policy_bundle_generation: policy_bundle.generation,
             weight_source: ModelWeightSource::Artifact,
             decision_at: now - ChronoDuration::hours(hours_ago),
             topn_overlap: Probability::new(overlap),
@@ -1111,6 +1167,40 @@ async fn seed_shadow_window(
         .await
         .expect("shadow comparison");
     }
+}
+
+async fn seed_buy_shadow_active(
+    db: &DatabaseConnection,
+    artifact_store: &Arc<dyn ArtifactStore>,
+    spec: &ModelSpecId,
+    dataset: TrainingDatasetId,
+) -> ModelVersionId {
+    seed_version(
+        db,
+        artifact_store,
+        spec,
+        SHADOW_ACTIVE_FIXTURE_VERSION,
+        dataset,
+        false,
+        DatasetProjection::Exact,
+    )
+    .await
+}
+
+async fn seed_sell_shadow_active(
+    db: &DatabaseConnection,
+    artifact_store: &Arc<dyn ArtifactStore>,
+    spec: &ModelSpecId,
+    dataset: TrainingDatasetId,
+) -> ModelVersionId {
+    seed_sell_version(
+        db,
+        artifact_store,
+        spec,
+        SHADOW_ACTIVE_FIXTURE_VERSION,
+        dataset,
+    )
+    .await
 }
 
 pub async fn publish_requires_quality_pass() {
@@ -1249,6 +1339,7 @@ pub async fn publish_requires_backtest_report() {
         healthy_coverage(),
     )
     .await;
+    let shadow_active = seed_buy_shadow_active(&db, &harness.artifact_store, &spec, dataset).await;
     let candidate = seed_version(
         &db,
         &harness.artifact_store,
@@ -1259,7 +1350,7 @@ pub async fn publish_requires_backtest_report() {
         DatasetProjection::Exact,
     )
     .await;
-    seed_shadow_window(&db, &candidate, &candidate, 'p').await;
+    seed_shadow_window(&db, &shadow_active, &candidate, 'p').await;
     // Deliberately no backtest report.
 
     let result = harness
@@ -1340,6 +1431,7 @@ pub async fn publish_succeeds_without_immutable() {
         healthy_coverage(),
     )
     .await;
+    let shadow_active = seed_buy_shadow_active(&db, &harness.artifact_store, &spec, dataset).await;
     let candidate = seed_version(
         &db,
         &harness.artifact_store,
@@ -1352,7 +1444,7 @@ pub async fn publish_succeeds_without_immutable() {
     .await;
     Box::pin(seed_backtest(&db, &candidate, &rc_id, '1')).await;
     seed_path_set(&db, &candidate, &rc_id, '1').await;
-    seed_shadow_window(&db, &candidate, &candidate, 'p').await;
+    seed_shadow_window(&db, &shadow_active, &candidate, 'p').await;
 
     let published = harness
         .service
@@ -1467,7 +1559,7 @@ async fn seed_path_set(
     version: &ModelVersionId,
     rc_id: &DecisionPolicySnapshotId,
     hash_seed: char,
-) {
+) -> BacktestPathSetId {
     let model_run_id = ModelRunId::from_v7();
     let window_start = Utc::now() - ChronoDuration::hours(2);
 
@@ -1582,6 +1674,7 @@ async fn seed_path_set(
         .set_publish_path(version, Some(path_set_id))
         .await
         .expect("bind publish path set");
+    path_set_id
 }
 
 pub async fn retire_unrouted_without_routing() {
@@ -1599,6 +1692,7 @@ pub async fn retire_unrouted_without_routing() {
         healthy_coverage(),
     )
     .await;
+    let shadow_active = seed_buy_shadow_active(&db, &harness.artifact_store, &spec, dataset).await;
     let version = seed_version(
         &db,
         &harness.artifact_store,
@@ -1614,7 +1708,7 @@ pub async fn retire_unrouted_without_routing() {
         db: &db,
         rc_id: &rc_id,
         version: &version,
-        active_for_shadow: &version,
+        active_for_shadow: &shadow_active,
         backtest_seed: '1',
         shadow_seed: 'a',
         reason: "publish for retire",
@@ -1669,6 +1763,7 @@ pub async fn rejects_routed_model_retirement() {
         healthy_coverage(),
     )
     .await;
+    let shadow_active = seed_buy_shadow_active(&db, &harness.artifact_store, &spec, dataset).await;
     let version = seed_version(
         &db,
         &harness.artifact_store,
@@ -1684,7 +1779,7 @@ pub async fn rejects_routed_model_retirement() {
         db: &db,
         rc_id: &rc_id,
         version: &version,
-        active_for_shadow: &version,
+        active_for_shadow: &shadow_active,
         backtest_seed: '1',
         shadow_seed: 'a',
         reason: "publish for category-pointer retire",
@@ -1770,6 +1865,7 @@ pub async fn uncalibrated_return_cannot_publish() {
         healthy_coverage(),
     )
     .await;
+    let shadow_active = seed_buy_shadow_active(&db, &harness.artifact_store, &spec, dataset).await;
     let candidate = seed_version(
         &db,
         &harness.artifact_store,
@@ -1782,7 +1878,7 @@ pub async fn uncalibrated_return_cannot_publish() {
     .await;
     Box::pin(seed_backtest(&db, &candidate, &rc_id, '1')).await;
     seed_path_set(&db, &candidate, &rc_id, '1').await;
-    seed_shadow_window(&db, &candidate, &candidate, 'p').await;
+    seed_shadow_window(&db, &shadow_active, &candidate, 'p').await;
 
     let result = harness
         .service
@@ -1844,21 +1940,28 @@ pub async fn bind_calibration_creates_model() {
     ))
     .await;
 
+    let request = BindCalibrationRequest {
+        calibrator_ref: calibrator,
+        downside_source: DownsideSource::MfeMae,
+        reason: "bind test".to_owned(),
+    };
     let bound = harness
         .service
-        .bind_calibration(
-            &candidate,
-            BindCalibrationRequest {
-                calibrator_ref: calibrator,
-                downside_source: DownsideSource::MfeMae,
-                reason: "bind test".to_owned(),
-            },
-            GovernanceActor::system(),
-        )
+        .bind_calibration(&candidate, request.clone(), GovernanceActor::system())
         .await
         .expect("bind calibration");
+    let replayed = harness
+        .service
+        .bind_calibration(&candidate, request, GovernanceActor::system())
+        .await
+        .expect("exact calibration replay");
 
     assert_ne!(bound.model_version_id, candidate);
+    assert_eq!(replayed.model_version_id, bound.model_version_id);
+    assert_eq!(replayed.artifact_hash, bound.artifact_hash);
+    assert_eq!(replayed.serving_contract_hash, bound.serving_contract_hash);
+    assert_eq!(replayed.training_dataset_id, bound.training_dataset_id);
+    assert_eq!(replayed.publication_status, bound.publication_status);
     assert_eq!(bound.publication_status, PublicationStatus::Candidate);
     let bytes = harness
         .artifact_store
@@ -1873,6 +1976,87 @@ pub async fn bind_calibration_creates_model() {
         panic!("bound version must carry Calibrated return model");
     };
     assert_eq!(calibrated.calibrator_ref, calibrator);
+    let audits = PgModelGovernanceAuditRepository::new(db)
+        .list_by_version(&bound.model_version_id)
+        .await
+        .expect("calibration audits");
+    assert_eq!(audits.len(), 1);
+    assert!(matches!(
+        audits[0].detail,
+        ModelGovernanceAuditDetail::BindCalibration {
+            source_version_id,
+            calibrated_version_id,
+            calibrator_id,
+            ..
+        } if source_version_id == candidate
+            && calibrated_version_id == bound.model_version_id
+            && calibrator_id == calibrator
+    ));
+}
+
+pub async fn path_binding_is_exact() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let spec = seed_spec(&db).await;
+    let harness = harness(&db, DecisionPolicySnapshot::default()).await;
+    let dataset = seed_dataset(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        &rc_id,
+        healthy_coverage(),
+    )
+    .await;
+    let candidate = seed_version(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        1,
+        dataset,
+        false,
+        DatasetProjection::Exact,
+    )
+    .await;
+    let path_set_id = seed_path_set(&db, &candidate, &rc_id, 'x').await;
+    PgModelRegistryRepository::new(db.clone())
+        .set_publish_path(&candidate, None)
+        .await
+        .expect("restore unbound candidate");
+    let request = BindPublishPathSetRequest {
+        path_set_id,
+        reason: "feedback CPCV exact bind".to_owned(),
+    };
+
+    let bound = harness
+        .service
+        .bind_publish_path_set(&candidate, request.clone(), GovernanceActor::system())
+        .await
+        .expect("bind publish path");
+    let replayed = harness
+        .service
+        .bind_publish_path_set(&candidate, request, GovernanceActor::system())
+        .await
+        .expect("exact publish-path replay");
+    assert_eq!(bound.model_version_id, replayed.model_version_id);
+    assert_eq!(bound.artifact_hash, replayed.artifact_hash);
+    assert_eq!(bound.serving_contract_hash, replayed.serving_contract_hash);
+    assert_eq!(bound.publication_status, replayed.publication_status);
+    assert_eq!(bound.publish_path_set_id, Some(path_set_id));
+
+    let audits = PgModelGovernanceAuditRepository::new(db)
+        .list_by_version(&candidate)
+        .await
+        .expect("path-binding audits");
+    assert_eq!(audits.len(), 1);
+    assert!(matches!(
+        audits[0].detail,
+        ModelGovernanceAuditDetail::BindPublishPathSet {
+            previous_path_set_id: None,
+            path_set_id: stored_path_set_id,
+            ..
+        } if stored_path_set_id == path_set_id
+    ));
 }
 
 pub async fn publish_rescans_not_findings() {
@@ -1883,6 +2067,8 @@ pub async fn publish_rescans_not_findings() {
     let harness = harness(&db, DecisionPolicySnapshot::default()).await;
 
     let dataset_id = seed_leaking_dataset(&db, &harness.artifact_store, &spec, &rc_id).await;
+    let shadow_active =
+        seed_buy_shadow_active(&db, &harness.artifact_store, &spec, dataset_id).await;
     let candidate = seed_version(
         &db,
         &harness.artifact_store,
@@ -1895,7 +2081,7 @@ pub async fn publish_rescans_not_findings() {
     .await;
     Box::pin(seed_backtest(&db, &candidate, &rc_id, '1')).await;
     seed_path_set(&db, &candidate, &rc_id, '1').await;
-    seed_shadow_window(&db, &candidate, &candidate, 'p').await;
+    seed_shadow_window(&db, &shadow_active, &candidate, 'p').await;
 
     let result = harness
         .service
@@ -2039,8 +2225,9 @@ pub async fn sell_publish_requires_oof() {
         healthy_sell_coverage(),
     )
     .await;
+    let shadow_active = seed_sell_shadow_active(&db, &harness.artifact_store, &spec, dataset).await;
     let candidate = seed_sell_version(&db, &harness.artifact_store, &spec, 1, dataset).await;
-    seed_shadow_window(&db, &candidate, &candidate, 'p').await;
+    seed_shadow_window(&db, &shadow_active, &candidate, 'p').await;
     let result = harness
         .service
         .publish(
@@ -2088,13 +2275,14 @@ pub async fn sell_cpcv_requires_oof() {
         healthy_sell_coverage(),
     )
     .await;
+    let shadow_active = seed_sell_shadow_active(&db, &harness.artifact_store, &spec, dataset).await;
     let candidate = seed_sell_version(&db, &harness.artifact_store, &spec, 1, dataset).await;
     // `seed_path_set` clears the alpha-significance hard gates
     // (median_rank_ic=0.15 >= 0.02, deflated_sharpe=0.97 >= 1-0.05, pbo=0.20
     // <= 0.5) with the exact same defaults for Buy and Sell; the Sell settings
     // mirror `research.validation.gates.*` under `quality_gate.sell.*`.
     seed_path_set(&db, &candidate, &rc_id, '1').await;
-    seed_shadow_window(&db, &candidate, &candidate, 'p').await;
+    seed_shadow_window(&db, &shadow_active, &candidate, 'p').await;
 
     let error = harness
         .service

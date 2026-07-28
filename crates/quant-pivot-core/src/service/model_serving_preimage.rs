@@ -427,6 +427,20 @@ impl ModelServingPreimageService {
         dataset: &'a TrainingDatasetInfo,
         purpose: DatasetPurpose,
     ) -> QuantResult<VerifiedReplayDataset<'a>> {
+        let replay = Box::pin(self.verify_replay_bindings(source, dataset, purpose)).await?;
+        self.verify_source_slice_ledger(dataset).await?;
+        Ok(replay)
+    }
+
+    /// Verify one model against an already-loaded replay Dataset without
+    /// reopening Dataset or Source Slice objects. F09 uses this for every
+    /// member of one reserved candidate family.
+    pub(crate) async fn verify_replay_bindings<'a>(
+        &self,
+        source: &VerifiedModelServingPreimage,
+        dataset: &'a TrainingDatasetInfo,
+        purpose: DatasetPurpose,
+    ) -> QuantResult<VerifiedReplayDataset<'a>> {
         if !source.graph_verified {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: "replay requires a fully verified model dependency graph".to_owned(),
@@ -492,8 +506,6 @@ impl ModelServingPreimageService {
             }
             .into());
         }
-        self.verify_dataset_objects(dataset, source.profile())
-            .await?;
         Ok(VerifiedReplayDataset {
             dataset,
             materialization,
@@ -894,7 +906,40 @@ impl ModelServingPreimageService {
             .get(materialization.parquet_uri)
             .await?;
         verify_frozen_dataset_artifact(dataset, &bytes)?;
+        self.verify_source_slice_ledger(dataset).await?;
 
+        let lineage = &dataset.source_lineage;
+        let frozen = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
+            .read_ref(&lineage.source_slice)
+            .await?;
+        lineage
+            .verify_manifest(&frozen.manifest)
+            .map_err(|error| ResearchError::DatasetBuild {
+                detail: format!(
+                    "dataset {} Source Slice manifest differs from its frozen lineage: {error}",
+                    dataset.training_dataset_id
+                ),
+            })?;
+        frozen
+            .manifest
+            .validate_for_profile(
+                profile,
+                &lineage.research_program_hash,
+                dataset.window_start,
+                dataset.window_end,
+                dataset.pit_cutoff,
+            )
+            .map_err(|detail| ResearchError::DatasetBuild {
+                detail: format!(
+                    "dataset {} Source Slice profile/PIT contract failed: {detail}",
+                    dataset.training_dataset_id
+                ),
+            })?;
+        Ok(())
+    }
+
+    /// Verify the Dataset-bound Source Slice row without opening any object.
+    async fn verify_source_slice_ledger(&self, dataset: &TrainingDatasetInfo) -> QuantResult<()> {
         let lineage = &dataset.source_lineage;
         let ledger = self
             .deps
@@ -942,32 +987,6 @@ impl ModelServingPreimageService {
             }
             .into());
         }
-        let frozen = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
-            .read(&ledger)
-            .await?;
-        lineage
-            .verify_manifest(&frozen.manifest)
-            .map_err(|error| ResearchError::DatasetBuild {
-                detail: format!(
-                    "dataset {} Source Slice manifest differs from its frozen lineage: {error}",
-                    dataset.training_dataset_id
-                ),
-            })?;
-        frozen
-            .manifest
-            .validate_for_profile(
-                profile,
-                &lineage.research_program_hash,
-                dataset.window_start,
-                dataset.window_end,
-                dataset.pit_cutoff,
-            )
-            .map_err(|detail| ResearchError::DatasetBuild {
-                detail: format!(
-                    "dataset {} Source Slice profile/PIT contract failed: {detail}",
-                    dataset.training_dataset_id
-                ),
-            })?;
         Ok(())
     }
 

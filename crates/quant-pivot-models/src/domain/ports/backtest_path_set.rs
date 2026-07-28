@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     domain::{
-        api::{BacktestPathSetView, RunCpcvBacktestRequest},
+        api::{BacktestPathSetView, CpcvBacktestJobParams},
         quant::JobProgressSink,
     },
     types::{BacktestPathSetId, ModelVersionId},
@@ -24,8 +24,7 @@ pub trait CpcvBacktestPort: Send + Sync {
     /// for `model_version_id` and persist a report.
     async fn run(
         &self,
-        model_version_id: ModelVersionId,
-        request: RunCpcvBacktestRequest,
+        params: CpcvBacktestJobParams,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<BacktestPathSetView>;

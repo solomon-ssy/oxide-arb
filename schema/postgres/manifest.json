@@ -8048,6 +8048,19 @@
       "type": "text"
     },
     {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "candidate_family",
+      "nullable": false,
+      "ordinal": 13,
+      "storage": "x",
+      "table": "quant_feedback_cycle",
+      "type": "jsonb"
+    },
+    {
       "collation": "default",
       "compression": "",
       "default": null,
@@ -8055,7 +8068,7 @@
       "identity": "",
       "name": "candidate_family_hash",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 14,
       "storage": "x",
       "table": "quant_feedback_cycle",
       "type": "text"
@@ -8068,7 +8081,7 @@
       "identity": "",
       "name": "status",
       "nullable": false,
-      "ordinal": 14,
+      "ordinal": 15,
       "storage": "p",
       "table": "quant_feedback_cycle",
       "type": "qp_feedback_cycle_status"
@@ -8081,7 +8094,7 @@
       "identity": "",
       "name": "decision",
       "nullable": true,
-      "ordinal": 15,
+      "ordinal": 16,
       "storage": "p",
       "table": "quant_feedback_cycle",
       "type": "qp_feedback_decision"
@@ -8094,7 +8107,7 @@
       "identity": "",
       "name": "terminal_reason_code",
       "nullable": true,
-      "ordinal": 16,
+      "ordinal": 17,
       "storage": "x",
       "table": "quant_feedback_cycle",
       "type": "character varying"
@@ -8107,7 +8120,7 @@
       "identity": "",
       "name": "generation",
       "nullable": false,
-      "ordinal": 17,
+      "ordinal": 18,
       "storage": "p",
       "table": "quant_feedback_cycle",
       "type": "bigint"
@@ -8120,7 +8133,7 @@
       "identity": "",
       "name": "lease_owner",
       "nullable": true,
-      "ordinal": 18,
+      "ordinal": 19,
       "storage": "p",
       "table": "quant_feedback_cycle",
       "type": "uuid"
@@ -8133,7 +8146,7 @@
       "identity": "",
       "name": "lease_expires_at",
       "nullable": true,
-      "ordinal": 19,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_feedback_cycle",
       "type": "timestamp with time zone"
@@ -8146,7 +8159,7 @@
       "identity": "",
       "name": "cancel_requested_at",
       "nullable": true,
-      "ordinal": 20,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_feedback_cycle",
       "type": "timestamp with time zone"
@@ -8159,7 +8172,7 @@
       "identity": "",
       "name": "started_at",
       "nullable": true,
-      "ordinal": 21,
+      "ordinal": 22,
       "storage": "p",
       "table": "quant_feedback_cycle",
       "type": "timestamp with time zone"
@@ -8172,7 +8185,7 @@
       "identity": "",
       "name": "completed_at",
       "nullable": true,
-      "ordinal": 22,
+      "ordinal": 23,
       "storage": "p",
       "table": "quant_feedback_cycle",
       "type": "timestamp with time zone"
@@ -8185,7 +8198,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 23,
+      "ordinal": 24,
       "storage": "p",
       "table": "quant_feedback_cycle",
       "type": "timestamp with time zone"
@@ -8198,7 +8211,7 @@
       "identity": "",
       "name": "updated_at",
       "nullable": false,
-      "ordinal": 24,
+      "ordinal": 25,
       "storage": "p",
       "table": "quant_feedback_cycle",
       "type": "timestamp with time zone"
@@ -8443,7 +8456,7 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "result_artifact_uri",
+      "name": "cpcv_artifact_uri",
       "nullable": false,
       "ordinal": 19,
       "storage": "x",
@@ -8456,25 +8469,12 @@
       "default": null,
       "generated": "",
       "identity": "",
-      "name": "result_artifact_hash",
+      "name": "cpcv_artifact_hash",
       "nullable": false,
       "ordinal": 20,
       "storage": "x",
       "table": "quant_feedback_evaluation_use",
       "type": "text"
-    },
-    {
-      "collation": null,
-      "compression": "",
-      "default": null,
-      "generated": "",
-      "identity": "",
-      "name": "used_at",
-      "nullable": false,
-      "ordinal": 21,
-      "storage": "p",
-      "table": "quant_feedback_evaluation_use",
-      "type": "timestamp with time zone"
     },
     {
       "collation": "default",
@@ -8484,10 +8484,23 @@
       "identity": "",
       "name": "evaluation_use_hash",
       "nullable": false,
-      "ordinal": 22,
+      "ordinal": 21,
       "storage": "x",
       "table": "quant_feedback_evaluation_use",
       "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "reserved_at",
+      "nullable": false,
+      "ordinal": 22,
+      "storage": "p",
+      "table": "quant_feedback_evaluation_use",
+      "type": "timestamp with time zone"
     },
     {
       "collation": null,
@@ -8500,6 +8513,123 @@
       "ordinal": 23,
       "storage": "p",
       "table": "quant_feedback_evaluation_use",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "d",
+      "name": "revision",
+      "nullable": false,
+      "ordinal": 1,
+      "storage": "p",
+      "table": "quant_feedback_event_outbox",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_stage_event_id",
+      "nullable": false,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_feedback_event_outbox",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "published_at",
+      "nullable": true,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_feedback_event_outbox",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "name": "publish_attempts",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "p",
+      "table": "quant_feedback_event_outbox",
+      "type": "integer"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "claim_owner",
+      "nullable": true,
+      "ordinal": 5,
+      "storage": "p",
+      "table": "quant_feedback_event_outbox",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "lease_expires_at",
+      "nullable": true,
+      "ordinal": 6,
+      "storage": "p",
+      "table": "quant_feedback_event_outbox",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "last_error",
+      "nullable": true,
+      "ordinal": 7,
+      "storage": "x",
+      "table": "quant_feedback_event_outbox",
+      "type": "character varying"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "created_at",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_feedback_event_outbox",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": "statement_timestamp()",
+      "generated": "",
+      "identity": "",
+      "name": "updated_at",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "p",
+      "table": "quant_feedback_event_outbox",
       "type": "timestamp with time zone"
     },
     {
@@ -13370,9 +13500,35 @@
       "default": null,
       "generated": "",
       "identity": "",
+      "name": "feedback_cycle_id",
+      "nullable": true,
+      "ordinal": 2,
+      "storage": "p",
+      "table": "quant_research_job",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "feedback_stage",
+      "nullable": true,
+      "ordinal": 3,
+      "storage": "p",
+      "table": "quant_research_job",
+      "type": "qp_feedback_stage"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
       "name": "kind",
       "nullable": false,
-      "ordinal": 2,
+      "ordinal": 4,
       "storage": "p",
       "table": "quant_research_job",
       "type": "qp_research_job_kind"
@@ -13385,7 +13541,7 @@
       "identity": "",
       "name": "status",
       "nullable": false,
-      "ordinal": 3,
+      "ordinal": 5,
       "storage": "p",
       "table": "quant_research_job",
       "type": "qp_research_job_status"
@@ -13398,7 +13554,7 @@
       "identity": "",
       "name": "model_spec_id",
       "nullable": true,
-      "ordinal": 4,
+      "ordinal": 6,
       "storage": "p",
       "table": "quant_research_job",
       "type": "uuid"
@@ -13411,7 +13567,7 @@
       "identity": "",
       "name": "decision_policy_snapshot_id",
       "nullable": true,
-      "ordinal": 5,
+      "ordinal": 7,
       "storage": "p",
       "table": "quant_research_job",
       "type": "uuid"
@@ -13424,7 +13580,7 @@
       "identity": "",
       "name": "params_json",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 8,
       "storage": "x",
       "table": "quant_research_job",
       "type": "jsonb"
@@ -13437,7 +13593,7 @@
       "identity": "",
       "name": "progress_json",
       "nullable": true,
-      "ordinal": 7,
+      "ordinal": 9,
       "storage": "x",
       "table": "quant_research_job",
       "type": "jsonb"
@@ -13450,7 +13606,7 @@
       "identity": "",
       "name": "result_kind",
       "nullable": true,
-      "ordinal": 8,
+      "ordinal": 10,
       "storage": "p",
       "table": "quant_research_job",
       "type": "qp_research_job_result_kind"
@@ -13463,10 +13619,36 @@
       "identity": "",
       "name": "result_ref",
       "nullable": true,
-      "ordinal": 9,
+      "ordinal": 11,
       "storage": "p",
       "table": "quant_research_job",
       "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "result_artifact_uri",
+      "nullable": true,
+      "ordinal": 12,
+      "storage": "x",
+      "table": "quant_research_job",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "result_artifact_hash",
+      "nullable": true,
+      "ordinal": 13,
+      "storage": "x",
+      "table": "quant_research_job",
+      "type": "text"
     },
     {
       "collation": null,
@@ -13476,7 +13658,7 @@
       "identity": "",
       "name": "error_json",
       "nullable": true,
-      "ordinal": 10,
+      "ordinal": 14,
       "storage": "x",
       "table": "quant_research_job",
       "type": "jsonb"
@@ -13489,7 +13671,7 @@
       "identity": "",
       "name": "coverage_json",
       "nullable": true,
-      "ordinal": 11,
+      "ordinal": 15,
       "storage": "x",
       "table": "quant_research_job",
       "type": "jsonb"
@@ -13502,7 +13684,7 @@
       "identity": "",
       "name": "requested_by",
       "nullable": true,
-      "ordinal": 12,
+      "ordinal": 16,
       "storage": "x",
       "table": "quant_research_job",
       "type": "character varying"
@@ -13515,7 +13697,7 @@
       "identity": "",
       "name": "acting_role",
       "nullable": false,
-      "ordinal": 13,
+      "ordinal": 17,
       "storage": "x",
       "table": "quant_research_job",
       "type": "character varying"
@@ -13528,7 +13710,7 @@
       "identity": "",
       "name": "parent_job_id",
       "nullable": true,
-      "ordinal": 14,
+      "ordinal": 18,
       "storage": "p",
       "table": "quant_research_job",
       "type": "uuid"
@@ -13541,7 +13723,7 @@
       "identity": "",
       "name": "recovery_attempt",
       "nullable": false,
-      "ordinal": 15,
+      "ordinal": 19,
       "storage": "p",
       "table": "quant_research_job",
       "type": "integer"
@@ -13554,7 +13736,7 @@
       "identity": "",
       "name": "max_recovery_attempts",
       "nullable": false,
-      "ordinal": 16,
+      "ordinal": 20,
       "storage": "p",
       "table": "quant_research_job",
       "type": "integer"
@@ -13567,7 +13749,7 @@
       "identity": "",
       "name": "lease_owner",
       "nullable": true,
-      "ordinal": 17,
+      "ordinal": 21,
       "storage": "p",
       "table": "quant_research_job",
       "type": "uuid"
@@ -13580,7 +13762,7 @@
       "identity": "",
       "name": "lease_expires_at",
       "nullable": true,
-      "ordinal": 18,
+      "ordinal": 22,
       "storage": "p",
       "table": "quant_research_job",
       "type": "timestamp with time zone"
@@ -13593,7 +13775,7 @@
       "identity": "",
       "name": "started_at",
       "nullable": true,
-      "ordinal": 19,
+      "ordinal": 23,
       "storage": "p",
       "table": "quant_research_job",
       "type": "timestamp with time zone"
@@ -13606,7 +13788,7 @@
       "identity": "",
       "name": "finished_at",
       "nullable": true,
-      "ordinal": 20,
+      "ordinal": 24,
       "storage": "p",
       "table": "quant_research_job",
       "type": "timestamp with time zone"
@@ -13619,7 +13801,7 @@
       "identity": "",
       "name": "heartbeat_at",
       "nullable": true,
-      "ordinal": 21,
+      "ordinal": 25,
       "storage": "p",
       "table": "quant_research_job",
       "type": "timestamp with time zone"
@@ -13632,7 +13814,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 22,
+      "ordinal": 26,
       "storage": "p",
       "table": "quant_research_job",
       "type": "timestamp with time zone"
@@ -13645,7 +13827,7 @@
       "identity": "",
       "name": "updated_at",
       "nullable": false,
-      "ordinal": 23,
+      "ordinal": 27,
       "storage": "p",
       "table": "quant_research_job",
       "type": "timestamp with time zone"
@@ -16017,6 +16199,97 @@
       "type": "uuid"
     },
     {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "active_serving_contract_hash",
+      "nullable": false,
+      "ordinal": 4,
+      "storage": "x",
+      "table": "quant_shadow_comparison",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "shadow_serving_contract_hash",
+      "nullable": false,
+      "ordinal": 5,
+      "storage": "x",
+      "table": "quant_shadow_comparison",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "research_profile_artifact_id",
+      "nullable": false,
+      "ordinal": 6,
+      "storage": "x",
+      "table": "quant_shadow_comparison",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "category_scope",
+      "nullable": true,
+      "ordinal": 7,
+      "storage": "p",
+      "table": "quant_shadow_comparison",
+      "type": "qp_market_category"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_policy_snapshot_id",
+      "nullable": false,
+      "ordinal": 8,
+      "storage": "p",
+      "table": "quant_shadow_comparison",
+      "type": "uuid"
+    },
+    {
+      "collation": "default",
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "decision_policy_snapshot_hash",
+      "nullable": false,
+      "ordinal": 9,
+      "storage": "x",
+      "table": "quant_shadow_comparison",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "compression": "",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "name": "policy_bundle_generation",
+      "nullable": false,
+      "ordinal": 10,
+      "storage": "p",
+      "table": "quant_shadow_comparison",
+      "type": "bigint"
+    },
+    {
       "collation": null,
       "compression": "",
       "default": null,
@@ -16024,7 +16297,7 @@
       "identity": "",
       "name": "weight_source",
       "nullable": false,
-      "ordinal": 4,
+      "ordinal": 11,
       "storage": "p",
       "table": "quant_shadow_comparison",
       "type": "qp_model_weight_source"
@@ -16037,7 +16310,7 @@
       "identity": "",
       "name": "decision_at",
       "nullable": false,
-      "ordinal": 5,
+      "ordinal": 12,
       "storage": "p",
       "table": "quant_shadow_comparison",
       "type": "timestamp with time zone"
@@ -16050,7 +16323,7 @@
       "identity": "",
       "name": "topn_overlap",
       "nullable": false,
-      "ordinal": 6,
+      "ordinal": 13,
       "storage": "m",
       "table": "quant_shadow_comparison",
       "type": "numeric"
@@ -16063,7 +16336,7 @@
       "identity": "",
       "name": "rank_delta_json",
       "nullable": false,
-      "ordinal": 7,
+      "ordinal": 14,
       "storage": "x",
       "table": "quant_shadow_comparison",
       "type": "jsonb"
@@ -16076,7 +16349,7 @@
       "identity": "",
       "name": "score_delta_json",
       "nullable": false,
-      "ordinal": 8,
+      "ordinal": 15,
       "storage": "x",
       "table": "quant_shadow_comparison",
       "type": "jsonb"
@@ -16089,7 +16362,7 @@
       "identity": "",
       "name": "matured_outcome_json",
       "nullable": true,
-      "ordinal": 9,
+      "ordinal": 16,
       "storage": "x",
       "table": "quant_shadow_comparison",
       "type": "jsonb"
@@ -16102,7 +16375,7 @@
       "identity": "",
       "name": "hard_divergence",
       "nullable": false,
-      "ordinal": 10,
+      "ordinal": 17,
       "storage": "p",
       "table": "quant_shadow_comparison",
       "type": "boolean"
@@ -16115,7 +16388,7 @@
       "identity": "",
       "name": "comparison_hash",
       "nullable": false,
-      "ordinal": 11,
+      "ordinal": 18,
       "storage": "x",
       "table": "quant_shadow_comparison",
       "type": "text"
@@ -16128,7 +16401,7 @@
       "identity": "",
       "name": "created_at",
       "nullable": false,
-      "ordinal": 12,
+      "ordinal": 19,
       "storage": "p",
       "table": "quant_shadow_comparison",
       "type": "timestamp with time zone"
@@ -20403,7 +20676,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((jsonb_typeof(idempotency_key) = 'object'::text) AND (idempotency_key ?& ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family_hash'::text]) AND ((idempotency_key - ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family_hash'::text]) = '{}'::jsonb) AND (((idempotency_key ->> 'format_version'::text))::integer = 1) AND ((idempotency_key ->> 'trigger_family'::text) = (trigger_family)::text) AND ((idempotency_key -> 'profile_ref'::text) = profile_ref) AND ((idempotency_key ->> 'feedback_policy_hash'::text) = feedback_policy_hash) AND (((idempotency_key ->> 'label_cutoff'::text))::timestamp with time zone = label_cutoff) AND ((idempotency_key -> 'capability_registry_hashes'::text) = capability_registry_hashes) AND (((idempotency_key ->> 'champion_model_version_id'::text))::uuid = champion_model_version_id) AND ((idempotency_key ->> 'champion_serving_contract_hash'::text) = champion_serving_contract_hash) AND ((idempotency_key ->> 'candidate_family_hash'::text) = candidate_family_hash) AND (jsonb_typeof(profile_ref) = 'object'::text) AND (profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text]) AND ((profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb) AND ((profile_ref ->> 'id'::text) ~ '^[a-z0-9_]+$'::text) AND (((profile_ref ->> 'version'::text))::bigint > 0) AND ((profile_ref ->> 'content_hash'::text) = profile_hash) AND (research_profile_artifact_id = ((((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || profile_hash)) AND validate_content_hash_array(capability_registry_hashes) AND (idempotency_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (profile_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (feedback_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (candidate_family_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (label_cutoff <= created_at) AND (updated_at >= created_at) AND (generation >= 0)))",
+      "definition": "CHECK (((jsonb_typeof(idempotency_key) = 'object'::text) AND (idempotency_key ?& ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family'::text]) AND ((idempotency_key - ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family'::text]) = '{}'::jsonb) AND (((idempotency_key ->> 'format_version'::text))::integer = 1) AND ((idempotency_key ->> 'trigger_family'::text) = (trigger_family)::text) AND ((idempotency_key -> 'profile_ref'::text) = profile_ref) AND ((idempotency_key ->> 'feedback_policy_hash'::text) = feedback_policy_hash) AND (((idempotency_key ->> 'label_cutoff'::text))::timestamp with time zone = label_cutoff) AND ((idempotency_key -> 'capability_registry_hashes'::text) = capability_registry_hashes) AND (((idempotency_key ->> 'champion_model_version_id'::text))::uuid = champion_model_version_id) AND ((idempotency_key ->> 'champion_serving_contract_hash'::text) = champion_serving_contract_hash) AND ((idempotency_key -> 'candidate_family'::text) = candidate_family) AND (jsonb_typeof(candidate_family) = 'object'::text) AND (candidate_family ?& ARRAY['format_version'::text, 'candidate_family_hash'::text, 'shared_evaluation'::text, 'comparison_contract'::text, 'candidates'::text]) AND ((candidate_family - ARRAY['format_version'::text, 'candidate_family_hash'::text, 'shared_evaluation'::text, 'comparison_contract'::text, 'candidates'::text]) = '{}'::jsonb) AND (((candidate_family ->> 'format_version'::text))::integer = 1) AND ((candidate_family ->> 'candidate_family_hash'::text) = candidate_family_hash) AND (jsonb_typeof((candidate_family -> 'comparison_contract'::text)) = 'object'::text) AND ((candidate_family -> 'comparison_contract'::text) ?& ARRAY['format_version'::text, 'comparison_contract_hash'::text, 'statistic'::text, 'alternative'::text, 'resampling'::text, 'stepdown'::text, 'p_value'::text, 'ties'::text, 'generator'::text, 'minimum_observations'::text, 'bootstrap_repetitions'::text, 'block_length'::text, 'bootstrap_seed'::text, 'minimum_effect_bps'::text, 'confidence'::text, 'effect_precision_dp'::text]) AND (((candidate_family -> 'comparison_contract'::text) - ARRAY['format_version'::text, 'comparison_contract_hash'::text, 'statistic'::text, 'alternative'::text, 'resampling'::text, 'stepdown'::text, 'p_value'::text, 'ties'::text, 'generator'::text, 'minimum_observations'::text, 'bootstrap_repetitions'::text, 'block_length'::text, 'bootstrap_seed'::text, 'minimum_effect_bps'::text, 'confidence'::text, 'effect_precision_dp'::text]) = '{}'::jsonb) AND ((((candidate_family -> 'comparison_contract'::text) ->> 'format_version'::text))::integer = 1) AND (((candidate_family -> 'comparison_contract'::text) ->> 'comparison_contract_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text) AND (((candidate_family -> 'comparison_contract'::text) ->> 'statistic'::text) = 'mean_decision_tick_net_return_bps'::text) AND (((candidate_family -> 'comparison_contract'::text) ->> 'alternative'::text) = 'candidate_greater_than_champion'::text) AND (((candidate_family -> 'comparison_contract'::text) ->> 'resampling'::text) = 'circular_fixed_block'::text) AND (((candidate_family -> 'comparison_contract'::text) ->> 'stepdown'::text) = 'romano_wolf_basic'::text) AND (((candidate_family -> 'comparison_contract'::text) ->> 'p_value'::text) = 'plus_one_greater_or_equal'::text) AND (((candidate_family -> 'comparison_contract'::text) ->> 'ties'::text) = 'equal_statistic_group'::text) AND (((candidate_family -> 'comparison_contract'::text) ->> 'generator'::text) = 'blake3_counter_rejection_v1'::text) AND ((((candidate_family -> 'comparison_contract'::text) ->> 'minimum_observations'::text))::numeric > (0)::numeric) AND ((((candidate_family -> 'comparison_contract'::text) ->> 'bootstrap_repetitions'::text))::numeric >= (1000)::numeric) AND (((((candidate_family -> 'comparison_contract'::text) ->> 'block_length'::text))::numeric >= (1)::numeric) AND ((((candidate_family -> 'comparison_contract'::text) ->> 'block_length'::text))::numeric <= (((candidate_family -> 'comparison_contract'::text) ->> 'minimum_observations'::text))::numeric)) AND (((((candidate_family -> 'comparison_contract'::text) ->> 'bootstrap_seed'::text))::numeric >= (0)::numeric) AND ((((candidate_family -> 'comparison_contract'::text) ->> 'bootstrap_seed'::text))::numeric <= '18446744073709551615'::numeric)) AND ((((candidate_family -> 'comparison_contract'::text) ->> 'minimum_effect_bps'::text))::numeric > (0)::numeric) AND ((((candidate_family -> 'comparison_contract'::text) ->> 'confidence'::text))::numeric > (0)::numeric) AND ((((candidate_family -> 'comparison_contract'::text) ->> 'confidence'::text))::numeric < (1)::numeric) AND ((((candidate_family -> 'comparison_contract'::text) ->> 'effect_precision_dp'::text))::integer = 12) AND (jsonb_typeof((candidate_family -> 'shared_evaluation'::text)) = 'object'::text) AND (((candidate_family -> 'shared_evaluation'::text) ->> 'purpose'::text) = 'evaluation'::text) AND (jsonb_typeof((candidate_family -> 'candidates'::text)) = 'array'::text) AND ((jsonb_array_length((candidate_family -> 'candidates'::text)) >= 1) AND (jsonb_array_length((candidate_family -> 'candidates'::text)) <= 32)) AND (jsonb_typeof(profile_ref) = 'object'::text) AND (profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text]) AND ((profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb) AND ((profile_ref ->> 'id'::text) ~ '^[a-z0-9_]+$'::text) AND (((profile_ref ->> 'version'::text))::bigint > 0) AND ((profile_ref ->> 'content_hash'::text) = profile_hash) AND (research_profile_artifact_id = ((((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || profile_hash)) AND validate_content_hash_array(capability_registry_hashes) AND (idempotency_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (profile_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (feedback_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (candidate_family_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (label_cutoff <= created_at) AND (updated_at >= created_at) AND (generation >= 0)))",
       "initially_deferred": false,
       "name": "ck_quant_feedback_cycle_identity",
       "table": "quant_feedback_cycle",
@@ -20466,7 +20739,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK (((purpose = 'promotion_comparison'::qp_feedback_evaluation_purpose) AND (dataset_purpose = 'evaluation'::qp_dataset_purpose) AND (jsonb_typeof(profile_ref) = 'object'::text) AND (profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text]) AND ((profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb) AND ((profile_ref ->> 'id'::text) ~ '^[a-z0-9_]+$'::text) AND (((profile_ref ->> 'version'::text))::bigint > 0) AND (research_profile_artifact_id = ((((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || (profile_ref ->> 'content_hash'::text))) AND (evaluation_window_start < evaluation_window_end) AND (evaluation_window_end <= label_cutoff) AND (label_cutoff <= used_at) AND (used_at <= created_at) AND (evaluation_dataset_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (evaluation_artifact_bytes_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (cohort_manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (candidate_family_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (comparison_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (semantic_use_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((octet_length(result_artifact_uri) >= 1) AND (octet_length(result_artifact_uri) <= 4096)) AND (result_artifact_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text) AND (result_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (evaluation_use_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
+      "definition": "CHECK (((purpose = 'promotion_comparison'::qp_feedback_evaluation_purpose) AND (dataset_purpose = 'evaluation'::qp_dataset_purpose) AND (jsonb_typeof(profile_ref) = 'object'::text) AND (profile_ref ?& ARRAY['id'::text, 'version'::text, 'content_hash'::text]) AND ((profile_ref - ARRAY['id'::text, 'version'::text, 'content_hash'::text]) = '{}'::jsonb) AND ((profile_ref ->> 'id'::text) ~ '^[a-z0-9_]+$'::text) AND (((profile_ref ->> 'version'::text))::bigint > 0) AND (research_profile_artifact_id = ((((('rpa:'::text || (profile_ref ->> 'id'::text)) || ':'::text) || (profile_ref ->> 'version'::text)) || ':'::text) || (profile_ref ->> 'content_hash'::text))) AND (evaluation_window_start < evaluation_window_end) AND (evaluation_window_end <= label_cutoff) AND (label_cutoff <= reserved_at) AND (reserved_at = created_at) AND (evaluation_dataset_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (evaluation_artifact_bytes_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (cohort_manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (candidate_family_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (comparison_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (semantic_use_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND ((octet_length(cpcv_artifact_uri) >= 1) AND (octet_length(cpcv_artifact_uri) <= 4096)) AND (cpcv_artifact_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text) AND (cpcv_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (evaluation_use_hash ~ '^blake3:[0-9a-f]{64}$'::text)))",
       "initially_deferred": false,
       "name": "ck_quant_feedback_evaluation_use",
       "table": "quant_feedback_evaluation_use",
@@ -20520,6 +20793,42 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((revision > 0) AND (publish_attempts >= 0) AND (created_at <= updated_at) AND ((claim_owner IS NULL) = (lease_expires_at IS NULL)) AND ((published_at IS NULL) OR ((published_at >= created_at) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (last_error IS NULL))) AND ((last_error IS NULL) OR ((octet_length((last_error)::text) >= 1) AND (octet_length((last_error)::text) <= 2048) AND ((last_error)::text = btrim((last_error)::text)) AND ((last_error)::text !~ '[[:cntrl:]]'::text)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_feedback_event_outbox",
+      "table": "quant_feedback_event_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (feedback_stage_event_id) REFERENCES quant_feedback_stage_event(feedback_stage_event_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_feedback_event_outbox-feedback_stage_event_id",
+      "table": "quant_feedback_event_outbox",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (feedback_stage_event_id)",
+      "initially_deferred": false,
+      "name": "quant_feedback_event_outbox_feedback_stage_event_id_key",
+      "table": "quant_feedback_event_outbox",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "PRIMARY KEY (revision)",
+      "initially_deferred": false,
+      "name": "quant_feedback_event_outbox_pkey",
+      "table": "quant_feedback_event_outbox",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK (((event_sequence > 0) AND (occurred_at <= created_at) AND (event_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((evidence_uri IS NULL) AND (evidence_hash IS NULL)) OR ((evidence_uri IS NOT NULL) AND (evidence_hash IS NOT NULL) AND (octet_length(evidence_uri) >= 1) AND (octet_length(evidence_uri) <= 4096) AND (evidence_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text) AND (evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text))) AND ((actor IS NULL) OR ((octet_length((actor)::text) >= 1) AND (octet_length((actor)::text) <= 256) AND ((actor)::text = btrim((actor)::text)) AND ((actor)::text !~ '[[:cntrl:]]'::text))) AND ((reason_code IS NULL) OR ((reason_code)::text ~ '^[a-z][a-z0-9_.]{0,127}$'::text)) AND (((event_kind = 'triggered'::qp_feedback_stage_event_kind) AND (stage = 'trigger'::qp_feedback_stage) AND (research_job_id IS NULL) AND (actor IS NOT NULL) AND (reason_code IS NOT NULL)) OR ((event_kind = 'cancellation_requested'::qp_feedback_stage_event_kind) AND (stage <> 'trigger'::qp_feedback_stage) AND (actor IS NOT NULL) AND (reason_code IS NOT NULL)) OR ((event_kind = ANY (ARRAY['job_linked'::qp_feedback_stage_event_kind, 'started'::qp_feedback_stage_event_kind])) AND (stage <> 'trigger'::qp_feedback_stage) AND (research_job_id IS NOT NULL) AND (actor IS NULL) AND (reason_code IS NULL)) OR ((event_kind = 'succeeded'::qp_feedback_stage_event_kind) AND (stage <> 'trigger'::qp_feedback_stage) AND (research_job_id IS NOT NULL) AND (actor IS NULL) AND (reason_code IS NULL) AND (evidence_uri IS NOT NULL)) OR ((event_kind = ANY (ARRAY['failed'::qp_feedback_stage_event_kind, 'cancelled'::qp_feedback_stage_event_kind, 'lease_recovered'::qp_feedback_stage_event_kind])) AND (stage <> 'trigger'::qp_feedback_stage) AND (research_job_id IS NOT NULL) AND (actor IS NULL) AND (reason_code IS NOT NULL)))))",
       "initially_deferred": false,
       "name": "ck_quant_feedback_stage_event",
@@ -20538,9 +20847,9 @@
     },
     {
       "deferrable": false,
-      "definition": "FOREIGN KEY (research_job_id) REFERENCES quant_research_job(job_id)",
+      "definition": "FOREIGN KEY (research_job_id, feedback_cycle_id, stage) REFERENCES quant_research_job(job_id, feedback_cycle_id, feedback_stage)",
       "initially_deferred": false,
-      "name": "fk_quant_feedback_stage_job",
+      "name": "fk_quant_feedback_stage_job_lineage",
       "table": "quant_feedback_stage_event",
       "type": "f",
       "validated": true
@@ -22077,6 +22386,24 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK ((((result_artifact_uri IS NULL) = (result_artifact_hash IS NULL)) AND ((result_artifact_uri IS NULL) OR ((octet_length(result_artifact_uri) >= 1) AND (octet_length(result_artifact_uri) <= 4096) AND (result_artifact_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text))) AND ((result_artifact_hash IS NULL) OR (result_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND (((result_kind = ANY (ARRAY['feedback_coverage_artifact'::qp_research_job_result_kind, 'feedback_drift_artifact'::qp_research_job_result_kind, 'feedback_learning_stage_artifact'::qp_research_job_result_kind, 'feedback_comparison_artifact'::qp_research_job_result_kind, 'feedback_shadow_replay_artifact'::qp_research_job_result_kind, 'feedback_decision_artifact'::qp_research_job_result_kind])) AND (result_artifact_uri IS NOT NULL)) OR ((result_kind <> ALL (ARRAY['feedback_coverage_artifact'::qp_research_job_result_kind, 'feedback_drift_artifact'::qp_research_job_result_kind, 'feedback_learning_stage_artifact'::qp_research_job_result_kind, 'feedback_comparison_artifact'::qp_research_job_result_kind, 'feedback_shadow_replay_artifact'::qp_research_job_result_kind, 'feedback_decision_artifact'::qp_research_job_result_kind])) AND (result_artifact_uri IS NULL)) OR ((result_kind IS NULL) AND (result_artifact_uri IS NULL)))))",
+      "initially_deferred": false,
+      "name": "ck_quant_research_job_artifact_reference",
+      "table": "quant_research_job",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "CHECK ((((feedback_cycle_id IS NULL) = (feedback_stage IS NULL)) AND ((feedback_stage IS NULL) OR (feedback_stage <> 'trigger'::qp_feedback_stage)) AND ((parent_job_id IS NULL) OR (parent_job_id <> job_id))))",
+      "initially_deferred": false,
+      "name": "ck_quant_research_job_feedback_lineage",
+      "table": "quant_research_job",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "CHECK (((jsonb_typeof(params_json) = 'object'::text) AND (jsonb_typeof((params_json -> 'params'::text)) = 'object'::text) AND ((params_json ->> 'kind'::text) = (kind)::text)))",
       "initially_deferred": false,
       "name": "ck_quant_research_job_params_kind",
@@ -22086,7 +22413,7 @@
     },
     {
       "deferrable": false,
-      "definition": "CHECK ((((result_kind IS NULL) = (result_ref IS NULL)) AND ((status = 'succeeded'::qp_research_job_status) OR ((result_kind IS NULL) AND (result_ref IS NULL))) AND ((result_kind IS NULL) OR ((kind = 'dataset_build'::qp_research_job_kind) AND (result_kind = 'training_dataset'::qp_research_job_result_kind)) OR ((kind = 'model_train'::qp_research_job_kind) AND (result_kind = 'model_version'::qp_research_job_result_kind)) OR ((kind = 'backtest'::qp_research_job_kind) AND (result_kind = 'backtest_report'::qp_research_job_result_kind)) OR ((kind = 'cpcv_backtest'::qp_research_job_kind) AND (result_kind = 'backtest_path_set'::qp_research_job_result_kind)) OR ((kind = ANY (ARRAY['bias_table_fit'::qp_research_job_kind, 'model_calibration_fit'::qp_research_job_kind])) AND (result_kind = 'calibration_artifact'::qp_research_job_result_kind)) OR ((kind = 'feature_parity'::qp_research_job_kind) AND (result_kind = 'feature_parity_run'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_fit'::qp_research_job_kind) AND (result_kind = 'trade_policy_artifact'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_validation'::qp_research_job_kind) AND (result_kind = 'trade_policy_validation_run'::qp_research_job_result_kind)))))",
+      "definition": "CHECK ((((result_kind IS NULL) = (result_ref IS NULL)) AND ((status = 'succeeded'::qp_research_job_status) OR ((result_kind IS NULL) AND (result_ref IS NULL))) AND ((result_kind IS NULL) OR ((kind = 'dataset_build'::qp_research_job_kind) AND (result_kind = 'training_dataset'::qp_research_job_result_kind)) OR ((kind = 'model_train'::qp_research_job_kind) AND (result_kind = 'model_version'::qp_research_job_result_kind)) OR ((kind = 'backtest'::qp_research_job_kind) AND (result_kind = 'backtest_report'::qp_research_job_result_kind)) OR ((kind = 'cpcv_backtest'::qp_research_job_kind) AND (result_kind = 'backtest_path_set'::qp_research_job_result_kind)) OR ((kind = ANY (ARRAY['bias_table_fit'::qp_research_job_kind, 'model_calibration_fit'::qp_research_job_kind])) AND (result_kind = 'calibration_artifact'::qp_research_job_result_kind)) OR ((kind = 'feature_parity'::qp_research_job_kind) AND (result_kind = 'feature_parity_run'::qp_research_job_result_kind)) OR ((kind = 'feedback_coverage'::qp_research_job_kind) AND (result_kind = 'feedback_coverage_artifact'::qp_research_job_result_kind)) OR ((kind = 'feedback_drift'::qp_research_job_kind) AND (result_kind = 'feedback_drift_artifact'::qp_research_job_result_kind)) OR ((kind = ANY (ARRAY['feedback_dataset_seal'::qp_research_job_kind, 'feedback_training'::qp_research_job_kind, 'feedback_calibration'::qp_research_job_kind, 'feedback_cpcv'::qp_research_job_kind])) AND (result_kind = 'feedback_learning_stage_artifact'::qp_research_job_result_kind)) OR ((kind = 'feedback_comparison'::qp_research_job_kind) AND (result_kind = 'feedback_comparison_artifact'::qp_research_job_result_kind)) OR ((kind = 'feedback_shadow_replay'::qp_research_job_kind) AND (result_kind = 'feedback_shadow_replay_artifact'::qp_research_job_result_kind)) OR ((kind = 'feedback_decision'::qp_research_job_kind) AND (result_kind = 'feedback_decision_artifact'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_fit'::qp_research_job_kind) AND (result_kind = 'trade_policy_artifact'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_validation'::qp_research_job_kind) AND (result_kind = 'trade_policy_validation_run'::qp_research_job_result_kind)))))",
       "initially_deferred": false,
       "name": "ck_quant_research_job_result_reference",
       "table": "quant_research_job",
@@ -22113,11 +22440,47 @@
     },
     {
       "deferrable": false,
+      "definition": "FOREIGN KEY (feedback_cycle_id) REFERENCES quant_feedback_cycle(feedback_cycle_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_research_job_cycle",
+      "table": "quant_research_job",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (parent_job_id) REFERENCES quant_research_job(job_id)",
+      "initially_deferred": false,
+      "name": "fk_quant_research_job_parent",
+      "table": "quant_research_job",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (parent_job_id, feedback_cycle_id, feedback_stage) REFERENCES quant_research_job(job_id, feedback_cycle_id, feedback_stage)",
+      "initially_deferred": false,
+      "name": "fk_quant_research_job_parent_lineage",
+      "table": "quant_research_job",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "PRIMARY KEY (job_id)",
       "initially_deferred": false,
       "name": "quant_research_job_pkey",
       "table": "quant_research_job",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "UNIQUE (job_id, feedback_cycle_id, feedback_stage)",
+      "initially_deferred": false,
+      "name": "uq_quant_research_job_feedback_lineage_key",
+      "table": "quant_research_job",
+      "type": "u",
       "validated": true
     },
     {
@@ -22563,9 +22926,27 @@
     },
     {
       "deferrable": false,
+      "definition": "CHECK (((active_model_version_id <> shadow_model_version_id) AND (active_serving_contract_hash <> shadow_serving_contract_hash) AND (active_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (shadow_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (decision_policy_snapshot_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (policy_bundle_generation > 0)))",
+      "initially_deferred": false,
+      "name": "ck_quant_shadow_comparison_generation_identity",
+      "table": "quant_shadow_comparison",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
       "definition": "FOREIGN KEY (active_model_version_id) REFERENCES quant_model_version(model_version_id)",
       "initially_deferred": false,
       "name": "fk-quant_shadow_comparison-active_model_version_id",
+      "table": "quant_shadow_comparison",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "definition": "FOREIGN KEY (research_profile_artifact_id) REFERENCES research_profile_artifact(research_profile_artifact_id)",
+      "initially_deferred": false,
+      "name": "fk-quant_shadow_comparison-research_profile_artifact_id",
       "table": "quant_shadow_comparison",
       "type": "f",
       "validated": true
@@ -23985,6 +24366,15 @@
         "model_calibration_fit",
         "cpcv_backtest",
         "feature_parity",
+        "feedback_coverage",
+        "feedback_drift",
+        "feedback_dataset_seal",
+        "feedback_training",
+        "feedback_calibration",
+        "feedback_cpcv",
+        "feedback_comparison",
+        "feedback_shadow_replay",
+        "feedback_decision",
         "trade_policy_fit",
         "trade_policy_validation"
       ],
@@ -23998,6 +24388,12 @@
         "backtest_path_set",
         "calibration_artifact",
         "feature_parity_run",
+        "feedback_coverage_artifact",
+        "feedback_drift_artifact",
+        "feedback_learning_stage_artifact",
+        "feedback_comparison_artifact",
+        "feedback_shadow_replay_artifact",
+        "feedback_decision_artifact",
         "trade_policy_artifact",
         "trade_policy_validation_run"
       ],
@@ -24383,6 +24779,16 @@
       "volatility": "v"
     },
     {
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_feedback_outbox()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'feedback outbox revision is durable; DELETE is not permitted'; END IF; IF OLD.published_at IS NOT NULL OR (to_jsonb(NEW) - ARRAY['published_at', 'publish_attempts', 'claim_owner', 'lease_expires_at', 'last_error', 'updated_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['published_at', 'publish_attempts', 'claim_owner', 'lease_expires_at', 'last_error', 'updated_at']) OR NEW.publish_attempts < OLD.publish_attempts OR NEW.publish_attempts > OLD.publish_attempts + 1 THEN RAISE EXCEPTION 'feedback outbox immutable identity or delivery lifecycle changed illegally'; END IF; NEW.updated_at = statement_timestamp(); RETURN NEW; END; $function$\n",
+      "identity_arguments": "",
+      "language": "plpgsql",
+      "name": "trigger_guard_feedback_outbox",
+      "owner": "$schema_owner",
+      "result": "trigger",
+      "security_definer": false,
+      "volatility": "v"
+    },
+    {
       "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_model_run()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'model-run audit row is immutable; DELETE is not permitted'; END IF; IF OLD.status <> 'running'::public.qp_model_run_status OR NEW.status NOT IN ('succeeded'::public.qp_model_run_status, 'failed'::public.qp_model_run_status, 'cancelled'::public.qp_model_run_status) THEN RAISE EXCEPTION 'illegal model-run transition from % to %', OLD.status, NEW.status; END IF; IF (to_jsonb(NEW) - ARRAY['status', 'model_version_id', 'output_hash', 'error_code', 'error_message', 'finished_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'model_version_id', 'output_hash', 'error_code', 'error_message', 'finished_at']) THEN RAISE EXCEPTION 'model-run immutable lineage cannot change during finalization'; END IF; IF NEW.finished_at IS NULL OR NEW.finished_at < OLD.started_at OR EXISTS ( SELECT 1 FROM public.quant_factor_value WHERE model_run_id = NEW.model_run_id AND created_at > NEW.finished_at ) THEN RAISE EXCEPTION 'model-run finish precedes its lifecycle start or an owned factor value'; END IF; RETURN NEW; END; $function$\n",
       "identity_arguments": "",
       "language": "plpgsql",
@@ -24397,6 +24803,16 @@
       "identity_arguments": "",
       "language": "plpgsql",
       "name": "trigger_guard_model_version",
+      "owner": "$schema_owner",
+      "result": "trigger",
+      "security_definer": false,
+      "volatility": "v"
+    },
+    {
+      "definition": "CREATE OR REPLACE FUNCTION public.trigger_guard_research_job()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$ BEGIN IF (to_jsonb(NEW) - ARRAY['status', 'progress_json', 'result_kind', 'result_ref', 'result_artifact_uri', 'result_artifact_hash', 'error_json', 'coverage_json', 'recovery_attempt', 'lease_owner', 'lease_expires_at', 'started_at', 'finished_at', 'heartbeat_at', 'updated_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'progress_json', 'result_kind', 'result_ref', 'result_artifact_uri', 'result_artifact_hash', 'error_json', 'coverage_json', 'recovery_attempt', 'lease_owner', 'lease_expires_at', 'started_at', 'finished_at', 'heartbeat_at', 'updated_at']) THEN RAISE EXCEPTION 'research-job immutable identity and enqueue contract cannot change'; END IF; NEW.updated_at = statement_timestamp(); RETURN NEW; END; $function$\n",
+      "identity_arguments": "",
+      "language": "plpgsql",
+      "name": "trigger_guard_research_job",
       "owner": "$schema_owner",
       "result": "trigger",
       "security_definer": false,
@@ -24506,6 +24922,13 @@
       "grantable": "NO",
       "grantee": "$schema_owner",
       "object_kind": "function",
+      "object_name": "trigger_guard_feedback_outbox()",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
       "object_name": "trigger_guard_model_run()",
       "privilege": "EXECUTE"
     },
@@ -24514,6 +24937,13 @@
       "grantee": "$schema_owner",
       "object_kind": "function",
       "object_name": "trigger_guard_model_version()",
+      "privilege": "EXECUTE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "function",
+      "object_name": "trigger_guard_research_job()",
       "privilege": "EXECUTE"
     },
     {
@@ -24596,6 +25026,13 @@
     {
       "grantable": "NO",
       "grantee": "$schema_owner",
+      "object_kind": "sequence",
+      "object_name": "quant_feedback_event_outbox_revision_seq",
+      "privilege": "USAGE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "casbin_rule",
       "privilege": "DELETE"
@@ -27041,6 +27478,55 @@
       "grantee": "$schema_owner",
       "object_kind": "table",
       "object_name": "quant_feedback_evaluation_use",
+      "privilege": "UPDATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_event_outbox",
+      "privilege": "DELETE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_event_outbox",
+      "privilege": "INSERT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_event_outbox",
+      "privilege": "REFERENCES"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_event_outbox",
+      "privilege": "SELECT"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_event_outbox",
+      "privilege": "TRIGGER"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_event_outbox",
+      "privilege": "TRUNCATE"
+    },
+    {
+      "grantable": "NO",
+      "grantee": "$schema_owner",
+      "object_kind": "table",
+      "object_name": "quant_feedback_event_outbox",
       "privilege": "UPDATE"
     },
     {
@@ -31223,7 +31709,7 @@
       "valid": true
     },
     {
-      "definition": "CREATE INDEX idx_quant_feedback_evaluation_cycle ON public.quant_feedback_evaluation_use USING btree (feedback_cycle_id, used_at DESC)",
+      "definition": "CREATE INDEX idx_quant_feedback_evaluation_cycle ON public.quant_feedback_evaluation_use USING btree (feedback_cycle_id, reserved_at DESC)",
       "method": "btree",
       "name": "idx_quant_feedback_evaluation_cycle",
       "primary": false,
@@ -31269,6 +31755,36 @@
       "primary": false,
       "ready": true,
       "table": "quant_feedback_evaluation_use",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_feedback_event_outbox_pending ON public.quant_feedback_event_outbox USING btree (lease_expires_at, revision) WHERE (published_at IS NULL)",
+      "method": "btree",
+      "name": "idx_quant_feedback_event_outbox_pending",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_event_outbox",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_feedback_event_outbox_feedback_stage_event_id_key ON public.quant_feedback_event_outbox USING btree (feedback_stage_event_id)",
+      "method": "btree",
+      "name": "quant_feedback_event_outbox_feedback_stage_event_id_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_feedback_event_outbox",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX quant_feedback_event_outbox_pkey ON public.quant_feedback_event_outbox USING btree (revision)",
+      "method": "btree",
+      "name": "quant_feedback_event_outbox_pkey",
+      "primary": true,
+      "ready": true,
+      "table": "quant_feedback_event_outbox",
       "unique": true,
       "valid": true
     },
@@ -32173,6 +32689,16 @@
       "valid": true
     },
     {
+      "definition": "CREATE INDEX idx_quant_research_job_feedback_stage ON public.quant_research_job USING btree (feedback_cycle_id, feedback_stage, created_at) WHERE (feedback_cycle_id IS NOT NULL)",
+      "method": "btree",
+      "name": "idx_quant_research_job_feedback_stage",
+      "primary": false,
+      "ready": true,
+      "table": "quant_research_job",
+      "unique": false,
+      "valid": true
+    },
+    {
       "definition": "CREATE INDEX idx_quant_research_job_kind_status ON public.quant_research_job USING btree (kind, status)",
       "method": "btree",
       "name": "idx_quant_research_job_kind_status",
@@ -32217,6 +32743,36 @@
       "method": "btree",
       "name": "quant_research_job_pkey",
       "primary": true,
+      "ready": true,
+      "table": "quant_research_job",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_research_job_feedback_lineage_key ON public.quant_research_job USING btree (job_id, feedback_cycle_id, feedback_stage)",
+      "method": "btree",
+      "name": "uq_quant_research_job_feedback_lineage_key",
+      "primary": false,
+      "ready": true,
+      "table": "quant_research_job",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_research_job_feedback_retry ON public.quant_research_job USING btree (parent_job_id) WHERE ((feedback_cycle_id IS NOT NULL) AND (parent_job_id IS NOT NULL))",
+      "method": "btree",
+      "name": "uq_quant_research_job_feedback_retry",
+      "primary": false,
+      "ready": true,
+      "table": "quant_research_job",
+      "unique": true,
+      "valid": true
+    },
+    {
+      "definition": "CREATE UNIQUE INDEX uq_quant_research_job_feedback_root ON public.quant_research_job USING btree (feedback_cycle_id, feedback_stage) WHERE ((feedback_cycle_id IS NOT NULL) AND (parent_job_id IS NULL))",
+      "method": "btree",
+      "name": "uq_quant_research_job_feedback_root",
+      "primary": false,
       "ready": true,
       "table": "quant_research_job",
       "unique": true,
@@ -32506,6 +33062,16 @@
       "definition": "CREATE INDEX idx_quant_shadow_comparison_shadow_version_decision_at ON public.quant_shadow_comparison USING btree (shadow_model_version_id, decision_at DESC)",
       "method": "btree",
       "name": "idx_quant_shadow_comparison_shadow_version_decision_at",
+      "primary": false,
+      "ready": true,
+      "table": "quant_shadow_comparison",
+      "unique": false,
+      "valid": true
+    },
+    {
+      "definition": "CREATE INDEX idx_quant_shadow_observation_contract_window ON public.quant_shadow_comparison USING btree (shadow_model_version_id, active_model_version_id, policy_bundle_generation, decision_policy_snapshot_id, research_profile_artifact_id, active_serving_contract_hash, shadow_serving_contract_hash, decision_at DESC)",
+      "method": "btree",
+      "name": "idx_quant_shadow_observation_contract_window",
       "primary": false,
       "ready": true,
       "table": "quant_shadow_comparison",
@@ -32985,6 +33551,17 @@
       "owner": "$schema_owner",
       "start": 1,
       "type": "bigint"
+    },
+    {
+      "cache": 1,
+      "cycle": false,
+      "increment": 1,
+      "maximum": 9223372036854775807,
+      "minimum": 1,
+      "name": "quant_feedback_event_outbox_revision_seq",
+      "owner": "$schema_owner",
+      "start": 1,
+      "type": "bigint"
     }
   ],
   "tables": [
@@ -33334,6 +33911,13 @@
     {
       "kind": "r",
       "name": "quant_feedback_evaluation_use",
+      "owner": "$schema_owner",
+      "rls_enabled": false,
+      "rls_forced": false
+    },
+    {
+      "kind": "r",
+      "name": "quant_feedback_event_outbox",
       "owner": "$schema_owner",
       "rls_enabled": false,
       "rls_forced": false
@@ -33964,6 +34548,12 @@
       "table": "quant_feedback_evaluation_use"
     },
     {
+      "definition": "CREATE TRIGGER trg_quant_feedback_event_outbox_guard BEFORE DELETE OR UPDATE ON public.quant_feedback_event_outbox FOR EACH ROW EXECUTE FUNCTION trigger_guard_feedback_outbox()",
+      "enabled": "O",
+      "name": "trg_quant_feedback_event_outbox_guard",
+      "table": "quant_feedback_event_outbox"
+    },
+    {
       "definition": "CREATE TRIGGER trg_quant_feedback_stage_event_append_only BEFORE DELETE OR UPDATE ON public.quant_feedback_stage_event FOR EACH ROW EXECUTE FUNCTION trigger_deny_write()",
       "enabled": "O",
       "name": "trg_quant_feedback_stage_event_append_only",
@@ -34042,9 +34632,9 @@
       "table": "quant_report_schedule_state"
     },
     {
-      "definition": "CREATE TRIGGER trg_quant_research_job_updated_at BEFORE UPDATE ON public.quant_research_job FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at()",
+      "definition": "CREATE TRIGGER trg_quant_research_job_lifecycle_guard BEFORE UPDATE ON public.quant_research_job FOR EACH ROW EXECUTE FUNCTION trigger_guard_research_job()",
       "enabled": "O",
-      "name": "trg_quant_research_job_updated_at",
+      "name": "trg_quant_research_job_lifecycle_guard",
       "table": "quant_research_job"
     },
     {

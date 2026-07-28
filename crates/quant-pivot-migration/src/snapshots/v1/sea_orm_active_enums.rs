@@ -1301,6 +1301,24 @@ pub enum QpResearchJobKind {
     CpcvBacktest,
     #[sea_orm(string_value = "feature_parity")]
     FeatureParity,
+    #[sea_orm(string_value = "feedback_coverage")]
+    FeedbackCoverage,
+    #[sea_orm(string_value = "feedback_drift")]
+    FeedbackDrift,
+    #[sea_orm(string_value = "feedback_dataset_seal")]
+    FeedbackDatasetSeal,
+    #[sea_orm(string_value = "feedback_training")]
+    FeedbackTraining,
+    #[sea_orm(string_value = "feedback_calibration")]
+    FeedbackCalibration,
+    #[sea_orm(string_value = "feedback_cpcv")]
+    FeedbackCpcv,
+    #[sea_orm(string_value = "feedback_comparison")]
+    FeedbackComparison,
+    #[sea_orm(string_value = "feedback_shadow_replay")]
+    FeedbackShadowReplay,
+    #[sea_orm(string_value = "feedback_decision")]
+    FeedbackDecision,
     #[sea_orm(string_value = "trade_policy_fit")]
     TradePolicyFit,
     #[sea_orm(string_value = "trade_policy_validation")]
@@ -1325,6 +1343,18 @@ pub enum QpResearchJobResultKind {
     CalibrationArtifact,
     #[sea_orm(string_value = "feature_parity_run")]
     FeatureParityRun,
+    #[sea_orm(string_value = "feedback_coverage_artifact")]
+    FeedbackCoverageArtifact,
+    #[sea_orm(string_value = "feedback_drift_artifact")]
+    FeedbackDriftArtifact,
+    #[sea_orm(string_value = "feedback_learning_stage_artifact")]
+    FeedbackLearningStageArtifact,
+    #[sea_orm(string_value = "feedback_comparison_artifact")]
+    FeedbackComparisonArtifact,
+    #[sea_orm(string_value = "feedback_shadow_replay_artifact")]
+    FeedbackShadowReplayArtifact,
+    #[sea_orm(string_value = "feedback_decision_artifact")]
+    FeedbackDecisionArtifact,
     #[sea_orm(string_value = "trade_policy_artifact")]
     TradePolicyArtifact,
     #[sea_orm(string_value = "trade_policy_validation_run")]

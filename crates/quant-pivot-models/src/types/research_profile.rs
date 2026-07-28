@@ -37,6 +37,8 @@ const MAX_FEEDBACK_EVALUATION_WINDOW_DAYS: u32 = 365;
 const MAX_FEEDBACK_DURATION_SECS: u64 = 365 * SECONDS_PER_DAY;
 // PostgreSQL cohort and scheduler counters use signed BIGINT.
 const MAX_FEEDBACK_OBSERVATION_COUNT: u64 = 9_223_372_036_854_775_807;
+const MIN_FEEDBACK_BOOTSTRAP_REPETITIONS: u32 = 1_000;
+const MAX_FEEDBACK_BOOTSTRAP_REPETITIONS: u32 = 100_000;
 /// Breaking hash-schema version for [`ResearchFeedbackPolicy`].
 pub const RESEARCH_FEEDBACK_POLICY_HASH_VERSION: u32 = 1;
 const RESEARCH_FEEDBACK_POLICY_HASH_DOMAIN: &str = "quant-pivot/research-feedback-policy";
@@ -351,6 +353,15 @@ pub struct ResearchFeedbackPolicy {
     pub label_js_divergence: Decimal,
     pub minimum_effect_bps: Bps,
     pub effect_confidence: Decimal,
+    /// Minimum number of same-decision-tick portfolio-return observations
+    /// required before the comparison stage may emit numeric evidence.
+    pub comparison_minimum_observations: u64,
+    /// Fixed number of shared circular-block bootstrap repetitions.
+    pub comparison_bootstrap_repetitions: u32,
+    /// Fixed circular block length measured in decision-tick observations.
+    pub comparison_block_length: u32,
+    /// Explicit deterministic seed for the domain-separated counter generator.
+    pub comparison_bootstrap_seed: u64,
     pub shadow_minimum_observations: u64,
 }
 
@@ -410,6 +421,21 @@ pub enum ResearchFeedbackPolicyError {
     NonPositivePsi,
     #[error("feedback policy `minimum_effect_bps` must be positive")]
     NonPositiveEffect,
+    #[error(
+        "feedback policy comparison bootstrap repetitions must be within [{minimum}, {maximum}], got {actual}"
+    )]
+    BootstrapRepetitions {
+        minimum: u32,
+        maximum: u32,
+        actual: u32,
+    },
+    #[error(
+        "feedback policy comparison block length must be positive and no greater than minimum observations ({minimum_observations}), got {actual}"
+    )]
+    ComparisonBlockLength {
+        minimum_observations: u64,
+        actual: u32,
+    },
     #[error(transparent)]
     Hash(#[from] CanonicalDigestError),
 }
@@ -463,6 +489,10 @@ impl ResearchFeedbackPolicy {
             ("minimum_mature_labels", self.minimum_mature_labels),
             ("minimum_new_mature_labels", self.minimum_new_mature_labels),
             (
+                "comparison_minimum_observations",
+                self.comparison_minimum_observations,
+            ),
+            (
                 "shadow_minimum_observations",
                 self.shadow_minimum_observations,
             ),
@@ -500,6 +530,23 @@ impl ResearchFeedbackPolicy {
         }
         if self.minimum_effect_bps.inner() <= Decimal::ZERO {
             return Err(ResearchFeedbackPolicyError::NonPositiveEffect);
+        }
+        if !(MIN_FEEDBACK_BOOTSTRAP_REPETITIONS..=MAX_FEEDBACK_BOOTSTRAP_REPETITIONS)
+            .contains(&self.comparison_bootstrap_repetitions)
+        {
+            return Err(ResearchFeedbackPolicyError::BootstrapRepetitions {
+                minimum: MIN_FEEDBACK_BOOTSTRAP_REPETITIONS,
+                maximum: MAX_FEEDBACK_BOOTSTRAP_REPETITIONS,
+                actual: self.comparison_bootstrap_repetitions,
+            });
+        }
+        if self.comparison_block_length == 0
+            || u64::from(self.comparison_block_length) > self.comparison_minimum_observations
+        {
+            return Err(ResearchFeedbackPolicyError::ComparisonBlockLength {
+                minimum_observations: self.comparison_minimum_observations,
+                actual: self.comparison_block_length,
+            });
         }
         Ok(())
     }
@@ -832,6 +879,10 @@ fn production_feedback_policy(
         label_js_divergence: Decimal::new(1, 1),
         minimum_effect_bps: Bps::new(Decimal::from(25)),
         effect_confidence: Decimal::new(95, 2),
+        comparison_minimum_observations: 500,
+        comparison_bootstrap_repetitions: 10_000,
+        comparison_block_length: 32,
+        comparison_bootstrap_seed: 11_900_909,
         shadow_minimum_observations: 1_000,
     }
 }
@@ -885,15 +936,15 @@ mod tests {
         assert_eq!(weather.profile_ref.version, 3);
         assert_eq!(
             pooled.profile_ref.content_hash.to_string(),
-            "blake3:84c34e2ad55d79bb67db2804a4371b105cc430890282381c1e9f25f623aad564"
+            "blake3:c14628f49a8aae856f11d644d6c9f550eec749f055e7711dc4e0b7067a1bce84"
         );
         assert_eq!(
             crypto.profile_ref.content_hash.to_string(),
-            "blake3:592fcda74a28166d5ebcc5ae9e2267648d975b04aebfc7b74cb5a66dbda1351a"
+            "blake3:2639401dcb138626f130ad2589fb2829d1186d1c5f72e28ed8ea6b68594d7682"
         );
         assert_eq!(
             weather.profile_ref.content_hash.to_string(),
-            "blake3:baf12884866475dd0e422f2adb8cf6c03563e601930fd098cc5d0b0a15be244c"
+            "blake3:0dca50a71b5630ce844dfcfb55bec134c6d65e954d2a7b948807c97d53bafdc3"
         );
         assert_eq!(pooled.spec.feedback_policy.feedback_cadence_secs, 86_400);
         assert_eq!(
@@ -1009,7 +1060,7 @@ mod tests {
             })
         );
 
-        let zero_counts: [(&str, PolicyMutation); 3] = [
+        let zero_counts: [(&str, PolicyMutation); 4] = [
             (
                 "minimum_mature_labels",
                 |policy: &mut ResearchFeedbackPolicy| policy.minimum_mature_labels = 0,
@@ -1018,6 +1069,12 @@ mod tests {
                 "minimum_new_mature_labels",
                 |policy: &mut ResearchFeedbackPolicy| {
                     policy.minimum_new_mature_labels = 0;
+                },
+            ),
+            (
+                "comparison_minimum_observations",
+                |policy: &mut ResearchFeedbackPolicy| {
+                    policy.comparison_minimum_observations = 0;
                 },
             ),
             (
@@ -1045,6 +1102,8 @@ mod tests {
         policy.retraining_cooldown_secs = MAX_FEEDBACK_DURATION_SECS;
         policy.minimum_mature_labels = MAX_FEEDBACK_OBSERVATION_COUNT;
         policy.minimum_new_mature_labels = MAX_FEEDBACK_OBSERVATION_COUNT;
+        policy.comparison_minimum_observations = MAX_FEEDBACK_OBSERVATION_COUNT;
+        policy.comparison_block_length = 1;
         policy.shadow_minimum_observations = MAX_FEEDBACK_OBSERVATION_COUNT;
         policy.validate().expect("inclusive boundaries");
 
@@ -1085,7 +1144,7 @@ mod tests {
             );
         }
 
-        let excessive_counts: [(&str, PolicyMutation); 3] = [
+        let excessive_counts: [(&str, PolicyMutation); 4] = [
             (
                 "minimum_mature_labels",
                 |policy: &mut ResearchFeedbackPolicy| {
@@ -1097,6 +1156,12 @@ mod tests {
                 |policy: &mut ResearchFeedbackPolicy| {
                     policy.minimum_mature_labels = MAX_FEEDBACK_OBSERVATION_COUNT;
                     policy.minimum_new_mature_labels = MAX_FEEDBACK_OBSERVATION_COUNT + 1;
+                },
+            ),
+            (
+                "comparison_minimum_observations",
+                |policy: &mut ResearchFeedbackPolicy| {
+                    policy.comparison_minimum_observations = MAX_FEEDBACK_OBSERVATION_COUNT + 1;
                 },
             ),
             (
@@ -1214,13 +1279,13 @@ mod tests {
             );
             let expected = match profile.profile_ref.id.as_str() {
                 POOLED_1H_CONTROL_PROFILE_ID => {
-                    "blake3:362524dc4430f41701712d7bff99938f631d942f4f32b962a5ae47ecb6aa4d1b"
+                    "blake3:5d6518877b0f3998f18c31c2920fe7b4916bd2db0412d90ce0fcac9f41220ba1"
                 }
                 CRYPTO_PRICE_15M_PROFILE_ID => {
-                    "blake3:1c71c258792a3148ddd5448d488a508cf71a949f05b4649654cbc3bece5e10be"
+                    "blake3:fbed5098069fb80f50835a399ef2eec960be54813ca01d5bf495a31d5718e8b2"
                 }
                 WEATHER_FORECAST_24H_PROFILE_ID => {
-                    "blake3:f43676d206d3e6793a6246d77d0c9a12fa8fa50c24f03623d969ac83c901fc8c"
+                    "blake3:6dc19095fc1b0062938c0cfa839c817c238f0d486d39b0b974d94ceed294d6c2"
                 }
                 other => panic!("unexpected built-in profile {other}"),
             };

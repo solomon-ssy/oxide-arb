@@ -7,13 +7,14 @@ use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        api::{TrainModelRequest, TrainedModelView},
+        api::{ModelTrainJobParams, TrainModelRequest, TrainedModelView},
         governance::DecisionPolicySnapshotInfo,
         ports::ModelTrainingPort,
         quant::{JobProgressSink, ModelVersionInfo},
     },
+    enums::quant::{ModelRunKind, ModelRunStatus},
     types::{
-        DecisionPolicySnapshotId, ModelVersionId, TrainingDatasetId,
+        DecisionPolicySnapshotId, ModelRunId, ModelVersionId, TrainingDatasetId,
         model_lineage::ModelVersionDerivation,
     },
 };
@@ -172,24 +173,79 @@ impl CoreModelTrainingPort {
                 .into()
             })
     }
+
+    async fn require_retry_run(
+        &self,
+        model_run_id: ModelRunId,
+        version: &ModelVersionInfo,
+        training_dataset_id: TrainingDatasetId,
+    ) -> QuantResult<()> {
+        let dataset = self
+            .dataset_repo
+            .find_by_id(&training_dataset_id)
+            .await?
+            .ok_or_else(|| StorageError::not_found("training_dataset", training_dataset_id))?;
+        let dataset_hash =
+            dataset
+                .dataset_hash
+                .ok_or_else(|| ResearchError::InvalidModelArtifact {
+                    detail: format!(
+                        "model-training retry Dataset {training_dataset_id} has no immutable hash"
+                    ),
+                })?;
+        let run = self
+            .model_run_repo
+            .find_by_id(&model_run_id)
+            .await?
+            .ok_or_else(|| StorageError::not_found("model_run", model_run_id))?;
+        if run.run_kind != ModelRunKind::Training
+            || run.model_version_id != Some(version.model_version_id)
+            || run.decision_policy_snapshot_id != dataset.decision_policy_snapshot_id
+            || run.market_selection_id.is_some()
+            || run.window_start != dataset.window_start
+            || run.window_end != dataset.window_end
+            || run.status != ModelRunStatus::Succeeded
+            || run.input_hash != dataset_hash
+            || run.output_hash != Some(version.artifact_hash)
+            || run.error_code.is_some()
+            || run.error_message.is_some()
+            || run.finished_at.is_none()
+        {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "model-training retry run {model_run_id} does not exactly bind version {}",
+                    version.model_version_id
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl ModelTrainingPort for CoreModelTrainingPort {
     async fn train(
         &self,
-        model_version_id: ModelVersionId,
-        request: TrainModelRequest,
+        params: ModelTrainJobParams,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TrainedModelView> {
+        let ModelTrainJobParams {
+            model_version_id,
+            model_run_id,
+            request,
+        } = params;
         if let Some(existing) = self
             .model_registry_repo
             .find_model_version(&model_version_id)
             .await
             .map_err(QuantError::from)?
         {
-            ModelTrainingRetryIdentity::try_from(&existing)?.verify_request(&request)?;
+            let retry = ModelTrainingRetryIdentity::try_from(&existing)?;
+            retry.verify_request(&request)?;
+            self.require_retry_run(model_run_id, &existing, retry.training_dataset_id)
+                .await?;
             self.serving_preimages.load(&existing).await?;
             self.frozen_model_parity
                 .verify_and_record(
@@ -198,7 +254,9 @@ impl ModelTrainingPort for CoreModelTrainingPort {
                     "verify existing candidate against its frozen training artifact",
                 )
                 .await?;
-            return Ok(TrainedModelView::from(existing));
+            let mut view = TrainedModelView::from(existing);
+            view.model_run_id = Some(model_run_id);
+            return Ok(view);
         }
         let _reason = request.reason;
         let dataset = self
@@ -247,6 +305,7 @@ impl ModelTrainingPort for CoreModelTrainingPort {
         let outcome = Box::pin(service.train(
             TrainModelInput {
                 model_version_id,
+                model_run_id,
                 model_spec,
                 training_dataset_id: dataset.training_dataset_id,
             },

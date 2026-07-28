@@ -1,0 +1,871 @@
+//! Durable execution for feedback-owned Dataset, training, calibration, and CPCV batches.
+
+use std::{collections::BTreeMap, sync::Arc};
+
+use async_trait::async_trait;
+use quant_pivot_error::{
+    QuantError, QuantResult, feedback::FeedbackError, research::ResearchError,
+    storage::StorageError,
+};
+use quant_pivot_models::{
+    domain::{
+        api::{BindCalibrationRequest, BindPublishPathSetRequest},
+        ports::{
+            CalibrationArtifactFitPort, CpcvBacktestPort, FeedbackCalibrationCommand,
+            FeedbackCalibrationJobParams, FeedbackCpcvJobParams, FeedbackDatasetBuildCommand,
+            FeedbackDatasetRole, FeedbackDatasetSealJobParams, FeedbackLearningExecutionPort,
+            FeedbackLearningExecutionResult, FeedbackLearningStageArtifactRef,
+            FeedbackTrainingJobParams, GovernanceActor, ModelCalibrationFitOutcome,
+            ModelCalibrationFitPort, ModelGovernancePort, ModelTrainingPort, TrainingDatasetPort,
+        },
+        quant::{JobProgressSink, ModelVersionInfo, ResearchJobArtifactRef, TrainingDatasetInfo},
+    },
+    enums::quant::{CalibrationMethod, DatasetPurpose, FeedbackStage, TrainingDatasetStatus},
+    hashing::CanonicalDigest,
+    types::{
+        ContentHash, ModelRunId, ModelVersionId, ResearchJobProgress, TrainingDatasetId,
+        calibration::MonotoneMapping, model_lineage::ModelVersionDerivation,
+    },
+};
+use quant_pivot_research::{
+    artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
+    feedback_learning::{
+        FeedbackCalibrationStageResult, FeedbackCpcvStageResult, FeedbackDatasetStageResult,
+        FeedbackLearningStageArtifact, FeedbackLearningStageCodec, FeedbackLearningStageResults,
+        FeedbackTrainingStageResult,
+    },
+};
+use tokio_util::sync::CancellationToken;
+
+const COHORT_MANIFEST_DOMAIN: &str = "quant-pivot/feedback-learning-cohort-manifest";
+const COHORT_MANIFEST_VERSION: u32 = 1;
+
+/// Dependencies for [`FeedbackLearningExecutionService`].
+pub struct FeedbackLearningExecutionDeps {
+    pub datasets: Arc<dyn TrainingDatasetPort>,
+    pub training: Arc<dyn ModelTrainingPort>,
+    pub calibration_fit: Arc<dyn ModelCalibrationFitPort>,
+    pub calibration_artifacts: Arc<dyn CalibrationArtifactFitPort>,
+    pub cpcv: Arc<dyn CpcvBacktestPort>,
+    pub governance: Arc<dyn ModelGovernancePort>,
+    pub artifacts: Arc<dyn ArtifactStore>,
+}
+
+/// Executes one canonical, bounded batch for each feedback learning stage.
+pub struct FeedbackLearningExecutionService {
+    datasets: Arc<dyn TrainingDatasetPort>,
+    training: Arc<dyn ModelTrainingPort>,
+    calibration_fit: Arc<dyn ModelCalibrationFitPort>,
+    calibration_artifacts: Arc<dyn CalibrationArtifactFitPort>,
+    cpcv: Arc<dyn CpcvBacktestPort>,
+    governance: Arc<dyn ModelGovernancePort>,
+    artifacts: Arc<dyn ArtifactStore>,
+}
+
+impl FeedbackLearningExecutionService {
+    #[must_use]
+    pub fn new(deps: FeedbackLearningExecutionDeps) -> Self {
+        Self {
+            datasets: deps.datasets,
+            training: deps.training,
+            calibration_fit: deps.calibration_fit,
+            calibration_artifacts: deps.calibration_artifacts,
+            cpcv: deps.cpcv,
+            governance: deps.governance,
+            artifacts: deps.artifacts,
+        }
+    }
+
+    async fn execute_dataset_batch(
+        &self,
+        params: FeedbackDatasetSealJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<FeedbackLearningExecutionResult> {
+        params.validate()?;
+        let total = Self::batch_total(params.commands.len())?;
+        let mut results = Vec::with_capacity(params.commands.len());
+        for (index, command) in params.commands.iter().cloned().enumerate() {
+            Self::require_active(&cancel, FeedbackStage::DatasetSeal)?;
+            let info = self
+                .datasets
+                .build_feedback(
+                    command.request.clone(),
+                    Arc::clone(&progress),
+                    cancel.clone(),
+                )
+                .await?;
+            results.push(Self::dataset_result(&command, &info)?);
+            progress.report(ResearchJobProgress::with_total(
+                "feedback-dataset-seal",
+                Self::batch_progress(index)?,
+                total,
+            ));
+        }
+        let artifact = FeedbackLearningStageArtifact::try_new(
+            params.feedback_cycle_id,
+            params.cycle_idempotency_hash,
+            params.candidate_family_hash,
+            params.input_hash()?,
+            None,
+            FeedbackLearningStageResults::DatasetSeal(results),
+        )?;
+        self.persist(artifact).await
+    }
+
+    async fn execute_training_batch(
+        &self,
+        params: FeedbackTrainingJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<FeedbackLearningExecutionResult> {
+        params.validate()?;
+        let previous = self
+            .load_previous(
+                &params.previous,
+                params.candidate_family_hash,
+                FeedbackStage::DatasetSeal,
+            )
+            .await?;
+        let FeedbackLearningStageResults::DatasetSeal(dataset_results) = &previous.results else {
+            return Err(Self::contract(
+                "Training predecessor is not a DatasetSeal result",
+            ));
+        };
+        let datasets = Self::candidate_datasets(dataset_results, DatasetPurpose::Training);
+        let total = Self::batch_total(params.commands.len())?;
+        let mut results = Vec::with_capacity(params.commands.len());
+        for (index, command) in params.commands.iter().cloned().enumerate() {
+            Self::require_active(&cancel, FeedbackStage::Training)?;
+            let expected = datasets
+                .get(&command.candidate_recipe_hash)
+                .ok_or_else(|| {
+                    Self::contract("Training command has no exact DatasetSeal recipe")
+                })?;
+            if command.params.request.training_dataset_id != expected.training_dataset_id {
+                return Err(Self::contract(
+                    "Training command Dataset differs from its frozen recipe",
+                ));
+            }
+            let dataset = self
+                .require_dataset(&expected.training_dataset_id, DatasetPurpose::Training)
+                .await?;
+            Self::verify_dataset_evidence(&dataset, expected)?;
+            let view = self
+                .training
+                .train(
+                    command.params.clone(),
+                    Arc::clone(&progress),
+                    cancel.clone(),
+                )
+                .await?;
+            if view.model_version_id != command.params.model_version_id
+                || view.model_run_id != Some(command.params.model_run_id)
+            {
+                return Err(Self::contract(
+                    "Training port returned another preassigned model version or run",
+                ));
+            }
+            let model = self.require_model(&command.params.model_version_id).await?;
+            results.push(Self::training_result(
+                command.candidate_recipe_hash,
+                command.params.model_run_id,
+                &dataset,
+                &model,
+            )?);
+            progress.report(ResearchJobProgress::with_total(
+                "feedback-training",
+                Self::batch_progress(index)?,
+                total,
+            ));
+        }
+        let artifact = FeedbackLearningStageArtifact::try_new(
+            params.feedback_cycle_id,
+            params.cycle_idempotency_hash,
+            params.candidate_family_hash,
+            params.input_hash()?,
+            Some(params.previous),
+            FeedbackLearningStageResults::Training(results),
+        )?;
+        self.persist(artifact).await
+    }
+
+    fn dataset_result(
+        command: &FeedbackDatasetBuildCommand,
+        info: &TrainingDatasetInfo,
+    ) -> QuantResult<FeedbackDatasetStageResult> {
+        if info.training_dataset_id != command.request.training_dataset_id
+            || info.model_spec_id != command.request.model_spec_id
+            || info.purpose != command.request.purpose
+            || info.source_lineage != command.request.source_lineage
+            || info.status != TrainingDatasetStatus::Ready
+        {
+            return Err(Self::contract(
+                "feedback Dataset read-back differs from its frozen command",
+            ));
+        }
+        let manifest = info
+            .manifest
+            .as_ref()
+            .ok_or_else(|| Self::contract("Ready feedback Dataset has no immutable manifest"))?;
+        manifest.validate().map_err(|error| {
+            Self::contract(format!("invalid feedback Dataset manifest: {error}"))
+        })?;
+        let cohort = info
+            .cohort_manifest
+            .as_ref()
+            .ok_or_else(|| Self::contract("Ready feedback Dataset has no cohort manifest"))?;
+        cohort.validate().map_err(|error| {
+            Self::contract(format!("invalid feedback cohort manifest: {error}"))
+        })?;
+        if manifest.cohort_manifest.as_ref() != Some(cohort)
+            || cohort.window != command.request.window
+            || manifest.purpose != command.request.purpose
+            || manifest.model_spec_id != command.request.model_spec_id
+            || manifest.source_lineage != command.request.source_lineage
+        {
+            return Err(Self::contract(
+                "feedback Dataset manifests differ from their frozen command",
+            ));
+        }
+        let sample_count = info
+            .sample_count
+            .and_then(|count| u64::try_from(count).ok())
+            .filter(|count| *count > 0)
+            .ok_or_else(|| Self::contract("Ready feedback Dataset has no positive sample count"))?;
+        let dataset_hash = info
+            .dataset_hash
+            .ok_or_else(|| Self::contract("Ready feedback Dataset has no dataset hash"))?;
+        let manifest_hash = info
+            .manifest_hash
+            .ok_or_else(|| Self::contract("Ready feedback Dataset has no manifest hash"))?;
+        let artifact_bytes_hash = info
+            .artifact_bytes_hash
+            .ok_or_else(|| Self::contract("Ready feedback Dataset has no artifact byte hash"))?;
+        let parquet_uri = info
+            .parquet_uri
+            .clone()
+            .ok_or_else(|| Self::contract("Ready feedback Dataset has no artifact URI"))?;
+        let cohort_manifest_hash = CanonicalDigest::content_hash_typed(
+            COHORT_MANIFEST_DOMAIN,
+            COHORT_MANIFEST_VERSION,
+            cohort,
+        )?;
+        Ok(FeedbackDatasetStageResult {
+            role: command.role,
+            training_dataset_id: info.training_dataset_id,
+            purpose: info.purpose,
+            dataset_hash,
+            manifest_hash,
+            artifact_bytes_hash,
+            parquet_uri,
+            cohort_manifest_hash,
+            sample_count,
+        })
+    }
+
+    fn training_result(
+        candidate_recipe_hash: ContentHash,
+        model_run_id: ModelRunId,
+        dataset: &TrainingDatasetInfo,
+        model: &ModelVersionInfo,
+    ) -> QuantResult<FeedbackTrainingStageResult> {
+        let contract = model.verified_serving_contract().map_err(|error| {
+            Self::contract(format!("invalid trained serving contract: {error}"))
+        })?;
+        let bindings = contract.bindings();
+        if model.training_dataset_id != Some(dataset.training_dataset_id)
+            || model.model_spec_id != dataset.model_spec_id
+            || model.model_family != dataset.model_family
+            || model.model_spec_definition_hash != dataset.model_spec_definition_hash
+            || model.profile_ref.artifact_id() != dataset.research_profile_artifact_id
+            || bindings.dataset.manifest.training_dataset_id != dataset.training_dataset_id
+        {
+            return Err(Self::contract(
+                "trained model does not exactly bind its frozen feedback Dataset",
+            ));
+        }
+        Ok(FeedbackTrainingStageResult {
+            candidate_recipe_hash,
+            model_version_id: model.model_version_id,
+            model_run_id,
+            training_dataset_id: dataset.training_dataset_id,
+            model_artifact_hash: model.artifact_hash,
+            serving_contract_hash: model.serving_contract_hash,
+            training_input_hash: bindings.transform.training_input_hash,
+        })
+    }
+
+    async fn require_dataset(
+        &self,
+        training_dataset_id: &TrainingDatasetId,
+        purpose: DatasetPurpose,
+    ) -> QuantResult<TrainingDatasetInfo> {
+        let info = self
+            .datasets
+            .find_by_id(training_dataset_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found("quant_training_dataset", training_dataset_id)
+            })?;
+        if info.status != TrainingDatasetStatus::Ready || info.purpose != purpose {
+            return Err(Self::contract(format!(
+                "Dataset {training_dataset_id} must be Ready/{purpose}, found {}/{}",
+                info.status, info.purpose
+            )));
+        }
+        Ok(info)
+    }
+
+    async fn require_model(
+        &self,
+        model_version_id: &ModelVersionId,
+    ) -> QuantResult<ModelVersionInfo> {
+        let model = self
+            .training
+            .find_version(model_version_id)
+            .await?
+            .ok_or_else(|| StorageError::not_found("quant_model_version", model_version_id))?;
+        model
+            .verified_serving_contract()
+            .map_err(|error| Self::contract(format!("invalid model serving contract: {error}")))?;
+        Ok(model)
+    }
+
+    fn verify_dataset_evidence(
+        info: &TrainingDatasetInfo,
+        expected: &FeedbackDatasetStageResult,
+    ) -> QuantResult<()> {
+        let exact = info.training_dataset_id == expected.training_dataset_id
+            && info.purpose == expected.purpose
+            && info.dataset_hash == Some(expected.dataset_hash)
+            && info.manifest_hash == Some(expected.manifest_hash)
+            && info.artifact_bytes_hash == Some(expected.artifact_bytes_hash)
+            && info.parquet_uri.as_ref() == Some(&expected.parquet_uri)
+            && info
+                .sample_count
+                .and_then(|count| u64::try_from(count).ok())
+                == Some(expected.sample_count);
+        if !exact {
+            return Err(Self::contract(
+                "persisted Dataset differs from DatasetSeal stage evidence",
+            ));
+        }
+        Ok(())
+    }
+
+    fn candidate_datasets(
+        results: &[FeedbackDatasetStageResult],
+        purpose: DatasetPurpose,
+    ) -> BTreeMap<ContentHash, FeedbackDatasetStageResult> {
+        results
+            .iter()
+            .filter_map(|result| {
+                let ((
+                    DatasetPurpose::Training,
+                    FeedbackDatasetRole::CandidateTraining {
+                        candidate_recipe_hash: recipe,
+                    },
+                )
+                | (
+                    DatasetPurpose::Calibration,
+                    FeedbackDatasetRole::CandidateCalibration {
+                        candidate_recipe_hash: recipe,
+                    },
+                )) = (purpose, result.role)
+                else {
+                    return None;
+                };
+                Some((recipe, result.clone()))
+            })
+            .collect::<BTreeMap<_, _>>()
+    }
+
+    async fn execute_calibration_batch(
+        &self,
+        params: FeedbackCalibrationJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<FeedbackLearningExecutionResult> {
+        params.validate()?;
+        let training_artifact = self
+            .load_previous(
+                &params.previous,
+                params.candidate_family_hash,
+                FeedbackStage::Training,
+            )
+            .await?;
+        let FeedbackLearningStageResults::Training(training_results) = &training_artifact.results
+        else {
+            return Err(Self::contract(
+                "Calibration predecessor is not a Training result",
+            ));
+        };
+        let dataset_reference = training_artifact
+            .previous
+            .as_ref()
+            .ok_or_else(|| Self::contract("Training artifact lost its DatasetSeal predecessor"))?;
+        let dataset_artifact = self
+            .load_previous(
+                dataset_reference,
+                params.candidate_family_hash,
+                FeedbackStage::DatasetSeal,
+            )
+            .await?;
+        let FeedbackLearningStageResults::DatasetSeal(dataset_results) = &dataset_artifact.results
+        else {
+            return Err(Self::contract(
+                "Calibration ancestry is not a DatasetSeal result",
+            ));
+        };
+        let training_models = training_results
+            .iter()
+            .map(|result| (result.candidate_recipe_hash, result))
+            .collect::<BTreeMap<_, _>>();
+        let calibration_datasets =
+            Self::candidate_datasets(dataset_results, DatasetPurpose::Calibration);
+        let total = Self::batch_total(params.commands.len())?;
+        let mut results = Vec::with_capacity(params.commands.len());
+        for (index, command) in params.commands.iter().cloned().enumerate() {
+            Self::require_active(&cancel, FeedbackStage::Calibration)?;
+            let trained = training_models
+                .get(&command.candidate_recipe_hash)
+                .ok_or_else(|| Self::contract("Calibration command has no exact trained recipe"))?;
+            let dataset = calibration_datasets
+                .get(&command.candidate_recipe_hash)
+                .ok_or_else(|| {
+                    Self::contract("Calibration command has no exact held-out Dataset")
+                })?;
+            if command.params.request.model_version_id != trained.model_version_id
+                || command.params.request.calibration_dataset_id != dataset.training_dataset_id
+            {
+                return Err(Self::contract(
+                    "Calibration command differs from its Training/DatasetSeal evidence",
+                ));
+            }
+            let source_model = self.require_model(&trained.model_version_id).await?;
+            Self::verify_training_evidence(&source_model, trained)?;
+            let calibration_dataset = self
+                .require_dataset(&dataset.training_dataset_id, DatasetPurpose::Calibration)
+                .await?;
+            Self::verify_dataset_evidence(&calibration_dataset, dataset)?;
+            let outcome = self
+                .calibration_fit
+                .fit(
+                    command.params.clone(),
+                    Arc::clone(&progress),
+                    cancel.clone(),
+                )
+                .await?;
+            results.push(
+                self.calibration_result(command, source_model, calibration_dataset, outcome)
+                    .await?,
+            );
+            progress.report(ResearchJobProgress::with_total(
+                "feedback-calibration",
+                Self::batch_progress(index)?,
+                total,
+            ));
+        }
+        let artifact = FeedbackLearningStageArtifact::try_new(
+            params.feedback_cycle_id,
+            params.cycle_idempotency_hash,
+            params.candidate_family_hash,
+            params.input_hash()?,
+            Some(params.previous),
+            FeedbackLearningStageResults::Calibration(results),
+        )?;
+        self.persist(artifact).await
+    }
+
+    async fn calibration_result(
+        &self,
+        command: FeedbackCalibrationCommand,
+        source_model: ModelVersionInfo,
+        calibration_dataset: TrainingDatasetInfo,
+        outcome: ModelCalibrationFitOutcome,
+    ) -> QuantResult<FeedbackCalibrationStageResult> {
+        let method = command.params.request.method;
+        let (calibration_artifact_id, sample_count) = match outcome {
+            ModelCalibrationFitOutcome::Calibrated {
+                artifact_id,
+                sample_count,
+            } => (artifact_id, sample_count),
+            ModelCalibrationFitOutcome::Insufficient {
+                sample_count,
+                total_sample_count,
+                minimum_sample_count,
+                outcome_hash,
+            } => {
+                return Ok(FeedbackCalibrationStageResult::Insufficient {
+                    candidate_recipe_hash: command.candidate_recipe_hash,
+                    source_model_version_id: source_model.model_version_id,
+                    model_run_id: command.params.model_run_id,
+                    calibration_dataset_id: calibration_dataset.training_dataset_id,
+                    method,
+                    sample_count,
+                    total_sample_count,
+                    minimum_sample_count,
+                    outcome_hash,
+                });
+            }
+        };
+        let info = self
+            .calibration_artifacts
+            .find(&calibration_artifact_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found("quant_calibration_artifact", calibration_artifact_id)
+            })?;
+        let payload = info
+            .verify_model_score()
+            .map_err(|error| Self::contract(format!("invalid calibration artifact: {error}")))?;
+        let fit = &payload.fit_contract;
+        let mapping_matches = matches!(
+            (method, &payload.mapping),
+            (
+                CalibrationMethod::Isotonic,
+                MonotoneMapping::Isotonic { .. }
+            ) | (CalibrationMethod::Platt, MonotoneMapping::Platt { .. })
+        );
+        if !mapping_matches
+            || fit.model.model_version_id != source_model.model_version_id
+            || fit.model.artifact_hash != source_model.artifact_hash
+            || fit.model.serving_contract_hash != source_model.serving_contract_hash
+            || fit.calibration_dataset.calibration_dataset_id
+                != calibration_dataset.training_dataset_id
+            || fit.calibration_dataset.dataset_hash != Self::dataset_hash(&calibration_dataset)?
+            || fit.policy_snapshot.decision_policy_snapshot_id
+                != command.params.decision_policy_snapshot_id
+            || sample_count != payload.reliability.n_samples
+            || i64::try_from(sample_count).ok() != Some(info.sample_count)
+        {
+            return Err(Self::contract(
+                "calibration artifact read-back differs from its frozen fit command",
+            ));
+        }
+        let calibrated = self
+            .governance
+            .bind_calibration(
+                &source_model.model_version_id,
+                BindCalibrationRequest {
+                    calibrator_ref: calibration_artifact_id,
+                    downside_source: command.downside_source,
+                    reason: command.bind_reason,
+                },
+                GovernanceActor::system(),
+            )
+            .await?;
+        let derivation = calibrated.verified_derivation().map_err(|error| {
+            Self::contract(format!("invalid calibrated model derivation: {error}"))
+        })?;
+        if derivation
+            != (ModelVersionDerivation::ReturnCalibration {
+                parent_model_version_id: source_model.model_version_id,
+                calibration_artifact_id,
+            })
+        {
+            return Err(Self::contract(
+                "calibrated model does not bind its exact source and calibrator",
+            ));
+        }
+        let contract = calibrated.verified_serving_contract().map_err(|error| {
+            Self::contract(format!("invalid calibrated serving contract: {error}"))
+        })?;
+        let source_contract = source_model
+            .verified_serving_contract()
+            .map_err(|error| Self::contract(format!("invalid source serving contract: {error}")))?;
+        let bindings = contract.bindings();
+        if calibrated.training_dataset_id != source_model.training_dataset_id
+            || bindings.transform.training_input_hash
+                != source_contract.bindings().transform.training_input_hash
+        {
+            return Err(Self::contract(
+                "calibrated model changed its source Dataset or training input",
+            ));
+        }
+        Ok(FeedbackCalibrationStageResult::Calibrated {
+            candidate_recipe_hash: command.candidate_recipe_hash,
+            source_model_version_id: source_model.model_version_id,
+            model_run_id: command.params.model_run_id,
+            calibration_dataset_id: calibration_dataset.training_dataset_id,
+            method,
+            calibration_artifact_id,
+            calibration_artifact_hash: info.content_hash,
+            calibrated_model_version_id: calibrated.model_version_id,
+            calibrated_model_artifact_hash: calibrated.artifact_hash,
+            calibrated_serving_contract_hash: calibrated.serving_contract_hash,
+            training_input_hash: bindings.transform.training_input_hash,
+            sample_count,
+        })
+    }
+
+    async fn execute_cpcv_batch(
+        &self,
+        params: FeedbackCpcvJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<FeedbackLearningExecutionResult> {
+        params.validate()?;
+        let calibration_artifact = self
+            .load_previous(
+                &params.previous,
+                params.candidate_family_hash,
+                FeedbackStage::Calibration,
+            )
+            .await?;
+        let FeedbackLearningStageResults::Calibration(calibration_results) =
+            &calibration_artifact.results
+        else {
+            return Err(Self::contract(
+                "CPCV predecessor is not a Calibration result",
+            ));
+        };
+        let calibrated = calibration_results
+            .iter()
+            .filter_map(|result| match result {
+                FeedbackCalibrationStageResult::Calibrated {
+                    candidate_recipe_hash,
+                    calibrated_model_version_id,
+                    ..
+                } => Some((*candidate_recipe_hash, *calibrated_model_version_id)),
+                FeedbackCalibrationStageResult::Insufficient { .. } => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let total = Self::batch_total(params.commands.len())?;
+        let mut results = Vec::with_capacity(params.commands.len());
+        for (index, command) in params.commands.iter().cloned().enumerate() {
+            Self::require_active(&cancel, FeedbackStage::Cpcv)?;
+            let expected_model = calibrated
+                .get(&command.candidate_recipe_hash)
+                .ok_or_else(|| Self::contract("CPCV command has no calibrated candidate"))?;
+            if command.params.model_version_id != *expected_model {
+                return Err(Self::contract(
+                    "CPCV command model differs from Calibration evidence",
+                ));
+            }
+            let path_set_id =
+                command.params.request.path_set_id.ok_or_else(|| {
+                    Self::contract("CPCV command lost its preassigned path-set id")
+                })?;
+            let view = self
+                .cpcv
+                .run(
+                    command.params.clone(),
+                    Arc::clone(&progress),
+                    cancel.clone(),
+                )
+                .await?;
+            if view.path_set_id != path_set_id {
+                return Err(Self::contract(
+                    "CPCV port returned another preassigned path-set id",
+                ));
+            }
+            let stored = self
+                .cpcv
+                .find_path_set(&path_set_id)
+                .await?
+                .ok_or_else(|| StorageError::not_found("quant_backtest_path_set", path_set_id))?;
+            if stored.path_set_hash != view.path_set_hash
+                || stored.model_version_id != command.params.model_version_id
+                || stored.model_run_id != command.params.model_run_id
+                || stored.training_dataset_id != command.params.request.training_dataset_id
+                || stored.decision_policy_snapshot_id
+                    != command.params.request.decision_policy_snapshot_id
+            {
+                return Err(Self::contract(
+                    "CPCV path-set read-back differs from its frozen command",
+                ));
+            }
+            let bound = self
+                .governance
+                .bind_publish_path_set(
+                    &command.params.model_version_id,
+                    BindPublishPathSetRequest {
+                        path_set_id,
+                        reason: command.bind_reason,
+                    },
+                    GovernanceActor::system(),
+                )
+                .await?;
+            if bound.publish_path_set_id != Some(path_set_id) {
+                return Err(Self::contract(
+                    "governance did not bind the exact CPCV path set",
+                ));
+            }
+            results.push(FeedbackCpcvStageResult {
+                candidate_recipe_hash: command.candidate_recipe_hash,
+                model_version_id: stored.model_version_id,
+                training_dataset_id: stored.training_dataset_id,
+                path_set_id: stored.path_set_id,
+                model_run_id: stored.model_run_id,
+                path_set_hash: stored.path_set_hash,
+            });
+            progress.report(ResearchJobProgress::with_total(
+                "feedback-cpcv",
+                Self::batch_progress(index)?,
+                total,
+            ));
+        }
+        let artifact = FeedbackLearningStageArtifact::try_new(
+            params.feedback_cycle_id,
+            params.cycle_idempotency_hash,
+            params.candidate_family_hash,
+            params.input_hash()?,
+            Some(params.previous),
+            FeedbackLearningStageResults::Cpcv(results),
+        )?;
+        self.persist(artifact).await
+    }
+
+    async fn load_previous(
+        &self,
+        reference: &FeedbackLearningStageArtifactRef,
+        candidate_family_hash: ContentHash,
+        stage: FeedbackStage,
+    ) -> QuantResult<FeedbackLearningStageArtifact> {
+        reference.validate_for(reference.feedback_cycle_id, stage)?;
+        let bytes = self.artifacts.get(&reference.artifact.uri).await?;
+        if FeedbackLearningStageCodec::bytes_hash(&bytes) != reference.artifact.content_hash {
+            return Err(Self::contract(
+                "learning-stage predecessor bytes differ from their terminal hash",
+            ));
+        }
+        let artifact = FeedbackLearningStageCodec::decode(&bytes)?;
+        if artifact.feedback_cycle_id != reference.feedback_cycle_id
+            || artifact.stage() != reference.stage
+            || artifact.artifact_id != reference.artifact_id
+            || artifact.input_hash != reference.input_hash
+            || artifact.candidate_family_hash != candidate_family_hash
+        {
+            return Err(Self::contract(
+                "learning-stage predecessor differs from its frozen reference",
+            ));
+        }
+        Ok(artifact)
+    }
+
+    async fn persist(
+        &self,
+        artifact: FeedbackLearningStageArtifact,
+    ) -> QuantResult<FeedbackLearningExecutionResult> {
+        let artifact_id = artifact.artifact_id;
+        let bytes = FeedbackLearningStageCodec::encode(&artifact)?;
+        let content_hash = FeedbackLearningStageCodec::bytes_hash(&bytes);
+        let key = ArtifactKey::new(
+            ArtifactNamespace::FeedbackLearning,
+            content_hash.hex(),
+            "json",
+        )?;
+        let uri = self.artifacts.put(key, &bytes).await?;
+        let persisted = self.artifacts.get(&uri).await?;
+        if FeedbackLearningStageCodec::bytes_hash(&persisted) != content_hash
+            || FeedbackLearningStageCodec::decode(&persisted)? != artifact
+        {
+            return Err(ResearchError::ArtifactHashMismatch {
+                expected: content_hash.to_string(),
+                actual: FeedbackLearningStageCodec::bytes_hash(&persisted).to_string(),
+            }
+            .into());
+        }
+        Ok(FeedbackLearningExecutionResult {
+            artifact_id,
+            artifact: ResearchJobArtifactRef { uri, content_hash },
+        })
+    }
+
+    fn verify_training_evidence(
+        model: &ModelVersionInfo,
+        expected: &FeedbackTrainingStageResult,
+    ) -> QuantResult<()> {
+        let contract = model
+            .verified_serving_contract()
+            .map_err(|error| Self::contract(format!("invalid trained model contract: {error}")))?;
+        let exact = model.model_version_id == expected.model_version_id
+            && model.training_dataset_id == Some(expected.training_dataset_id)
+            && model.artifact_hash == expected.model_artifact_hash
+            && model.serving_contract_hash == expected.serving_contract_hash
+            && contract.bindings().transform.training_input_hash == expected.training_input_hash;
+        if !exact {
+            return Err(Self::contract(
+                "persisted model differs from Training stage evidence",
+            ));
+        }
+        Ok(())
+    }
+
+    fn dataset_hash(dataset: &TrainingDatasetInfo) -> QuantResult<ContentHash> {
+        dataset
+            .dataset_hash
+            .ok_or_else(|| Self::contract("Ready Dataset has no immutable dataset hash"))
+    }
+
+    fn batch_total(len: usize) -> QuantResult<u64> {
+        u64::try_from(len).map_err(|error| {
+            Self::contract(format!("learning-stage batch length exceeds u64: {error}"))
+        })
+    }
+
+    fn batch_progress(index: usize) -> QuantResult<u64> {
+        index
+            .checked_add(1)
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| Self::contract("learning-stage progress counter overflowed"))
+    }
+
+    fn require_active(cancel: &CancellationToken, stage: FeedbackStage) -> QuantResult<()> {
+        if cancel.is_cancelled() {
+            return Err(ResearchError::Cancelled {
+                detail: format!("{stage} batch cancelled between candidates"),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn contract(detail: impl Into<String>) -> QuantError {
+        FeedbackError::InvalidJobContract {
+            detail: detail.into(),
+        }
+        .into()
+    }
+}
+
+#[async_trait]
+impl FeedbackLearningExecutionPort for FeedbackLearningExecutionService {
+    async fn seal_datasets(
+        &self,
+        params: FeedbackDatasetSealJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<FeedbackLearningExecutionResult> {
+        self.execute_dataset_batch(params, progress, cancel).await
+    }
+
+    async fn train(
+        &self,
+        params: FeedbackTrainingJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<FeedbackLearningExecutionResult> {
+        self.execute_training_batch(params, progress, cancel).await
+    }
+
+    async fn calibrate(
+        &self,
+        params: FeedbackCalibrationJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<FeedbackLearningExecutionResult> {
+        Box::pin(self.execute_calibration_batch(params, progress, cancel)).await
+    }
+
+    async fn validate_cpcv(
+        &self,
+        params: FeedbackCpcvJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<FeedbackLearningExecutionResult> {
+        self.execute_cpcv_batch(params, progress, cancel).await
+    }
+}

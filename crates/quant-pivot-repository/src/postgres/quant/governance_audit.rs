@@ -19,6 +19,29 @@ impl PgModelGovernanceAuditRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
+
+    async fn find_by_id(
+        &self,
+        audit: &NewModelGovernanceAudit,
+    ) -> Result<Option<ModelGovernanceAuditInfo>, StorageError> {
+        Entity::find_by_id(audit.audit_id)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .map(Into::into)
+            .map(|stored: ModelGovernanceAuditInfo| {
+                if stored.matches_new(audit) {
+                    Ok(stored)
+                } else {
+                    Err(StorageError::state_conflict(
+                        "quant_model_governance_audit",
+                        Some(&audit.audit_id),
+                        "governance audit identity was reused with semantic drift",
+                    ))
+                }
+            })
+            .transpose()
+    }
 }
 
 #[async_trait::async_trait]
@@ -32,6 +55,25 @@ impl ModelGovernanceAuditRepository for PgModelGovernanceAuditRepository {
             .await
             .map_err(StorageError::from)
             .map(Into::into)
+    }
+
+    async fn append_exact(
+        &self,
+        audit: NewModelGovernanceAudit,
+    ) -> Result<ModelGovernanceAuditInfo, StorageError> {
+        if let Some(stored) = self.find_by_id(&audit).await? {
+            return Ok(stored);
+        }
+        let insert = Entity::insert(audit.clone().into_active_model())
+            .exec_with_returning(&self.db)
+            .await;
+        match insert {
+            Ok(stored) => Ok(stored.into()),
+            Err(error) => self
+                .find_by_id(&audit)
+                .await?
+                .ok_or_else(|| StorageError::from(error)),
+        }
     }
 
     async fn list_by_version(

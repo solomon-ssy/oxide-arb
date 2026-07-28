@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     domain::{
-        api::{TrainModelRequest, TrainedModelView},
+        api::{ModelTrainJobParams, TrainedModelView},
         quant::{JobProgressSink, ModelVersionInfo},
     },
     types::ModelVersionId,
@@ -26,8 +26,7 @@ pub trait ModelTrainingPort: Send + Sync {
     /// promptly ([`quant_pivot_error::research::ResearchError::Cancelled`]).
     async fn train(
         &self,
-        model_version_id: ModelVersionId,
-        request: TrainModelRequest,
+        params: ModelTrainJobParams,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TrainedModelView>;

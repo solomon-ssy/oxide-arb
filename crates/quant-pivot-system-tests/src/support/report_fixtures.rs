@@ -120,6 +120,8 @@ pub fn sampled_parity(report: &NewRecommendationReport) -> NewReportFeatureParit
     };
     let job = NewResearchJob {
         job_id: ResearchJobId::from_v7(),
+        feedback_cycle_id: None,
+        feedback_stage: None,
         kind: ResearchJobKind::FeatureParity,
         status: ResearchJobStatus::Queued,
         model_spec_id: None,

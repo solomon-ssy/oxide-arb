@@ -38,8 +38,8 @@ use quant_pivot_models::{
     },
     runtime_config::PortfolioConfig,
     types::{
-        BacktestReportId, ContentHash, DecisionPolicySnapshotId, EventId, MarketId, ModelVersionId,
-        PayoutRatio, Price, Probability, Shares, TokenId, TrainingDatasetId, Usd,
+        BacktestReportId, Bps, ContentHash, DecisionPolicySnapshotId, EventId, MarketId,
+        ModelVersionId, PayoutRatio, Price, Probability, Shares, TokenId, TrainingDatasetId, Usd,
         backtest::{CategoryMetric, ExpectedVsRealized, PnlSimulation},
     },
 };
@@ -302,6 +302,20 @@ pub struct SampleOutcome {
     pub substitution_reasons: Vec<NullReason>,
 }
 
+/// Net portfolio result for one governed decision tick.
+///
+/// Comparison keeps every decision tick, including genuine no-allocation
+/// ticks whose realized `PnL` and return are exactly zero. The positive governed
+/// capital base is shared across champion and challengers and is never replaced
+/// by allocated capital.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortfolioReturnObservation {
+    pub decision_at: DateTime<Utc>,
+    pub realized_pnl_usd: Usd,
+    pub capital_base_usd: Usd,
+    pub net_return_bps: Bps,
+}
+
 /// The result of a backtest run: the persisted report + per-sample outcomes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BacktestRunResult {
@@ -309,6 +323,8 @@ pub struct BacktestRunResult {
     pub report: BacktestReport,
     /// Per-sample resolved outcomes (calibration input; not in `report_hash`).
     pub sample_outcomes: Vec<SampleOutcome>,
+    /// Complete same-window decision-tick portfolio-return series.
+    pub portfolio_returns: Vec<PortfolioReturnObservation>,
 }
 
 /// Runs a point-in-time backtest of a model version.

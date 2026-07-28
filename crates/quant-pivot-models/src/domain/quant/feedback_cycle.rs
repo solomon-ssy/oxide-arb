@@ -7,6 +7,7 @@ use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    domain::ports::FeedbackCandidateFamily,
     entities::{
         quant_drift_report, quant_feedback_cycle, quant_feedback_evaluation_use,
         quant_feedback_stage_event,
@@ -49,7 +50,7 @@ pub struct FeedbackCycleKey {
     capability_registry_hashes: CapabilityRegistryHashes,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
-    candidate_family_hash: ContentHash,
+    candidate_family: FeedbackCandidateFamily,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,7 +64,7 @@ struct FeedbackCycleKeyDocument {
     capability_registry_hashes: CapabilityRegistryHashes,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
-    candidate_family_hash: ContentHash,
+    candidate_family: FeedbackCandidateFamily,
 }
 
 /// Inputs frozen by the server before a cycle row is claimed.
@@ -76,7 +77,7 @@ pub struct FeedbackCycleKeyInput {
     pub capability_registry_hashes: CapabilityRegistryHashes,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
-    pub candidate_family_hash: ContentHash,
+    pub candidate_family: FeedbackCandidateFamily,
 }
 
 impl FeedbackCycleKey {
@@ -91,7 +92,7 @@ impl FeedbackCycleKey {
             capability_registry_hashes: input.capability_registry_hashes,
             champion_model_version_id: input.champion_model_version_id,
             champion_serving_contract_hash: input.champion_serving_contract_hash,
-            candidate_family_hash: input.candidate_family_hash,
+            candidate_family: input.candidate_family,
         };
         key.validate()?;
         Ok(key)
@@ -115,6 +116,22 @@ impl FeedbackCycleKey {
             .map_err(|error| FeedbackError::InvalidCycleIdentity {
                 detail: format!("capability registry hashes are not canonical: {error}"),
             })?;
+        self.candidate_family
+            .validate()
+            .map_err(|error| FeedbackError::InvalidCycleIdentity {
+                detail: format!("candidate family is invalid: {error}"),
+            })?;
+        let evaluation = self.candidate_family.shared_evaluation();
+        if evaluation.window.profile_ref() != &self.profile_ref
+            || evaluation.source_lineage.pit_cutoff != self.label_cutoff
+            || evaluation.source_lineage.capability_registry_hashes
+                != self.capability_registry_hashes
+        {
+            return Err(FeedbackError::InvalidCycleIdentity {
+                detail: "candidate family profile, label cutoff, or capability set differs from the cycle"
+                    .to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -165,7 +182,12 @@ impl FeedbackCycleKey {
 
     #[must_use]
     pub const fn candidate_family_hash(&self) -> ContentHash {
-        self.candidate_family_hash
+        self.candidate_family.candidate_family_hash()
+    }
+
+    #[must_use]
+    pub const fn candidate_family(&self) -> &FeedbackCandidateFamily {
+        &self.candidate_family
     }
 }
 
@@ -182,7 +204,7 @@ impl TryFrom<FeedbackCycleKeyDocument> for FeedbackCycleKey {
             capability_registry_hashes: document.capability_registry_hashes,
             champion_model_version_id: document.champion_model_version_id,
             champion_serving_contract_hash: document.champion_serving_contract_hash,
-            candidate_family_hash: document.candidate_family_hash,
+            candidate_family: document.candidate_family,
         };
         key.validate()?;
         Ok(key)
@@ -190,7 +212,7 @@ impl TryFrom<FeedbackCycleKeyDocument> for FeedbackCycleKey {
 }
 
 /// Insert payload for one deduplicated feedback-cycle claim.
-#[derive(Debug, Clone, Serialize, DeriveIntoActiveModel)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_feedback_cycle::ActiveModel")]
 pub struct NewFeedbackCycle {
     feedback_cycle_id: FeedbackCycleId,
@@ -208,6 +230,8 @@ pub struct NewFeedbackCycle {
     capability_registry_hashes: CapabilityRegistryHashes,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
+    #[sea_orm(column_type = "JsonBinary")]
+    candidate_family: FeedbackCandidateFamily,
     candidate_family_hash: ContentHash,
 }
 
@@ -221,6 +245,7 @@ impl NewFeedbackCycle {
         let capability_registry_hashes = idempotency_key.capability_registry_hashes().clone();
         let champion_model_version_id = idempotency_key.champion_model_version_id();
         let champion_serving_contract_hash = idempotency_key.champion_serving_contract_hash();
+        let candidate_family = idempotency_key.candidate_family().clone();
         let candidate_family_hash = idempotency_key.candidate_family_hash();
         Ok(Self {
             feedback_cycle_id: FeedbackCycleId::from_idempotency_hash(&idempotency_hash),
@@ -235,6 +260,7 @@ impl NewFeedbackCycle {
             capability_registry_hashes,
             champion_model_version_id,
             champion_serving_contract_hash,
+            candidate_family,
             candidate_family_hash,
         })
     }
@@ -247,6 +273,85 @@ impl NewFeedbackCycle {
     #[must_use]
     pub const fn idempotency_hash(&self) -> ContentHash {
         self.idempotency_hash
+    }
+
+    #[must_use]
+    pub const fn label_cutoff(&self) -> DateTime<Utc> {
+        self.label_cutoff
+    }
+}
+
+/// Valid terminal projection for a feedback-cycle CAS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeedbackCycleTerminal {
+    Succeeded {
+        decision: FeedbackDecision,
+        reason_code: String,
+    },
+    Failed {
+        reason_code: String,
+    },
+    Cancelled {
+        reason_code: String,
+    },
+}
+
+impl FeedbackCycleTerminal {
+    pub fn try_succeeded(
+        decision: FeedbackDecision,
+        reason_code: String,
+    ) -> Result<Self, FeedbackError> {
+        Self::validate_reason(&reason_code)?;
+        Ok(Self::Succeeded {
+            decision,
+            reason_code,
+        })
+    }
+
+    pub fn try_failed(reason_code: String) -> Result<Self, FeedbackError> {
+        Self::validate_reason(&reason_code)?;
+        Ok(Self::Failed { reason_code })
+    }
+
+    pub fn try_cancelled(reason_code: String) -> Result<Self, FeedbackError> {
+        Self::validate_reason(&reason_code)?;
+        Ok(Self::Cancelled { reason_code })
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> FeedbackCycleStatus {
+        match self {
+            Self::Succeeded { .. } => FeedbackCycleStatus::Succeeded,
+            Self::Failed { .. } => FeedbackCycleStatus::Failed,
+            Self::Cancelled { .. } => FeedbackCycleStatus::Cancelled,
+        }
+    }
+
+    #[must_use]
+    pub const fn decision(&self) -> Option<FeedbackDecision> {
+        match self {
+            Self::Succeeded { decision, .. } => Some(*decision),
+            Self::Failed { .. } | Self::Cancelled { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn reason_code(&self) -> &str {
+        match self {
+            Self::Succeeded { reason_code, .. }
+            | Self::Failed { reason_code }
+            | Self::Cancelled { reason_code } => reason_code,
+        }
+    }
+
+    fn validate_reason(reason_code: &str) -> Result<(), FeedbackError> {
+        if valid_reason(reason_code) {
+            Ok(())
+        } else {
+            Err(FeedbackError::InvalidCycleState {
+                detail: "terminal reason code is empty or invalid".to_owned(),
+            })
+        }
     }
 }
 
@@ -266,6 +371,7 @@ pub struct FeedbackCycleInfo {
     pub capability_registry_hashes: CapabilityRegistryHashes,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
+    pub candidate_family: FeedbackCandidateFamily,
     pub candidate_family_hash: ContentHash,
     pub status: FeedbackCycleStatus,
     pub decision: Option<FeedbackDecision>,
@@ -296,6 +402,7 @@ info_from_model!(
         capability_registry_hashes,
         champion_model_version_id,
         champion_serving_contract_hash,
+        candidate_family,
         candidate_family_hash,
         status,
         decision,
@@ -312,6 +419,42 @@ info_from_model!(
 );
 
 impl FeedbackCycleInfo {
+    /// Whether an idempotent retry carries the exact frozen cycle identity.
+    #[must_use]
+    pub fn has_same_identity(&self, candidate: &NewFeedbackCycle) -> bool {
+        self.feedback_cycle_id == candidate.feedback_cycle_id
+            && self.idempotency_hash == candidate.idempotency_hash
+            && self.idempotency_key == candidate.idempotency_key
+            && self.trigger_family == candidate.trigger_family
+            && self.profile_ref == candidate.profile_ref
+            && self.research_profile_artifact_id == candidate.research_profile_artifact_id
+            && self.profile_hash == candidate.profile_hash
+            && self.feedback_policy_hash == candidate.feedback_policy_hash
+            && self.label_cutoff == candidate.label_cutoff
+            && self.capability_registry_hashes == candidate.capability_registry_hashes
+            && self.champion_model_version_id == candidate.champion_model_version_id
+            && self.champion_serving_contract_hash == candidate.champion_serving_contract_hash
+            && self.candidate_family == candidate.candidate_family
+            && self.candidate_family_hash == candidate.candidate_family_hash
+    }
+
+    #[must_use]
+    pub fn accepts_drift(&self, candidate: &NewDriftReport) -> bool {
+        self.feedback_cycle_id == candidate.feedback_cycle_id
+            && self.label_cutoff == candidate.label_cutoff
+    }
+
+    #[must_use]
+    pub fn accepts_evaluation(&self, candidate: &NewFeedbackEvaluationUse) -> bool {
+        self.feedback_cycle_id == candidate.feedback_cycle_id
+            && self.profile_ref == candidate.profile_ref
+            && self.research_profile_artifact_id == candidate.research_profile_artifact_id
+            && self.label_cutoff == candidate.label_cutoff
+            && self.champion_model_version_id == candidate.champion_model_version_id
+            && self.champion_serving_contract_hash == candidate.champion_serving_contract_hash
+            && self.candidate_family_hash == candidate.candidate_family_hash
+    }
+
     /// Revalidate every immutable projection plus the lifecycle/decision shape.
     pub fn validate(&self) -> Result<(), FeedbackError> {
         self.idempotency_key.validate()?;
@@ -330,6 +473,7 @@ impl FeedbackCycleInfo {
             || self.champion_model_version_id != self.idempotency_key.champion_model_version_id()
             || self.champion_serving_contract_hash
                 != self.idempotency_key.champion_serving_contract_hash()
+            || self.candidate_family != *self.idempotency_key.candidate_family()
             || self.candidate_family_hash != self.idempotency_key.candidate_family_hash()
         {
             return Err(FeedbackError::InvalidCycleIdentity {
@@ -476,6 +620,39 @@ impl NewFeedbackStageEvent {
     pub const fn feedback_stage_event_id(&self) -> FeedbackStageEventId {
         self.feedback_stage_event_id
     }
+
+    #[must_use]
+    pub const fn feedback_cycle_id(&self) -> FeedbackCycleId {
+        self.feedback_cycle_id
+    }
+
+    #[must_use]
+    pub const fn event_sequence(&self) -> i64 {
+        self.event_sequence
+    }
+
+    #[must_use]
+    pub const fn event_kind(&self) -> FeedbackStageEventKind {
+        self.event_kind
+    }
+
+    pub fn cancellation_reason(&self) -> Result<&str, FeedbackError> {
+        if self.event_kind != FeedbackStageEventKind::CancellationRequested {
+            return Err(FeedbackError::InvalidStageEvent {
+                detail: "event is not a cancellation request".to_owned(),
+            });
+        }
+        self.reason_code
+            .as_deref()
+            .ok_or_else(|| FeedbackError::InvalidStageEvent {
+                detail: "cancellation event has no reason code".to_owned(),
+            })
+    }
+
+    #[must_use]
+    pub const fn occurred_at(&self) -> DateTime<Utc> {
+        self.occurred_at
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -528,6 +705,36 @@ pub struct FeedbackStageEventInfo {
     pub created_at: DateTime<Utc>,
 }
 
+/// One globally ordered feedback event claimed for durable publication.
+#[derive(Debug, Clone)]
+pub struct FeedbackOutboxEntry {
+    pub revision: i64,
+    pub publish_attempts: i32,
+    pub event: FeedbackStageEventInfo,
+}
+
+impl FeedbackOutboxEntry {
+    pub fn validate(&self) -> Result<(), FeedbackError> {
+        if self.revision <= 0 || self.publish_attempts < 0 {
+            return Err(FeedbackError::InvalidCoordinatorState {
+                detail: "feedback outbox revision and publish attempts must be non-negative"
+                    .to_owned(),
+            });
+        }
+        self.event.validate()
+    }
+}
+
+/// Bounded scheduler backlog snapshot from the authoritative database clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedbackQueueSnapshot {
+    pub queued: u64,
+    pub running: u64,
+    pub pending_outbox: u64,
+    pub oldest_queued_at: Option<DateTime<Utc>>,
+    pub oldest_running_at: Option<DateTime<Utc>>,
+}
+
 info_from_model!(
     FeedbackStageEventInfo,
     quant_feedback_stage_event::Model,
@@ -549,6 +756,23 @@ info_from_model!(
 );
 
 impl FeedbackStageEventInfo {
+    /// Whether an idempotent append carries the exact immutable event.
+    #[must_use]
+    pub fn has_same_content(&self, candidate: &NewFeedbackStageEvent) -> bool {
+        self.feedback_stage_event_id == candidate.feedback_stage_event_id
+            && self.feedback_cycle_id == candidate.feedback_cycle_id
+            && self.event_sequence == candidate.event_sequence
+            && self.stage == candidate.stage
+            && self.event_kind == candidate.event_kind
+            && self.research_job_id == candidate.research_job_id
+            && self.actor == candidate.actor
+            && self.reason_code == candidate.reason_code
+            && self.evidence_uri == candidate.evidence_uri
+            && self.evidence_hash == candidate.evidence_hash
+            && self.occurred_at == candidate.occurred_at
+            && self.event_hash == candidate.event_hash
+    }
+
     pub fn validate(&self) -> Result<(), FeedbackError> {
         let input = FeedbackStageEventInput {
             feedback_cycle_id: self.feedback_cycle_id,
@@ -601,7 +825,7 @@ pub struct DriftReportInput {
 }
 
 /// Content-addressed append-only drift report header.
-#[derive(Debug, Clone, Serialize, DeriveIntoActiveModel)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_drift_report::ActiveModel")]
 pub struct NewDriftReport {
     drift_report_id: DriftReportId,
@@ -642,14 +866,34 @@ impl NewDriftReport {
             evaluation_window_start: input.evaluation_window_start,
             evaluation_window_end: input.evaluation_window_end,
             label_cutoff: input.label_cutoff,
-            observed_value: input.observed_value,
-            threshold: input.threshold,
+            observed_value: input.observed_value.map(|value| value.normalize()),
+            threshold: input.threshold.normalize(),
             sample_count: input.sample_count,
             detail_uri: input.detail_uri,
             detail_hash: input.detail_hash,
             observed_at: input.observed_at,
             report_hash,
         })
+    }
+
+    #[must_use]
+    pub const fn drift_report_id(&self) -> DriftReportId {
+        self.drift_report_id
+    }
+
+    #[must_use]
+    pub const fn feedback_cycle_id(&self) -> FeedbackCycleId {
+        self.feedback_cycle_id
+    }
+
+    #[must_use]
+    pub const fn metric(&self) -> FeedbackDriftMetric {
+        self.metric
+    }
+
+    #[must_use]
+    pub const fn observed_at(&self) -> DateTime<Utc> {
+        self.observed_at
     }
 }
 
@@ -684,8 +928,8 @@ impl<'a> From<&'a DriftReportInput> for DriftReportDocument<'a> {
             evaluation_window_start: input.evaluation_window_start,
             evaluation_window_end: input.evaluation_window_end,
             label_cutoff: input.label_cutoff,
-            observed_value: input.observed_value,
-            threshold: input.threshold,
+            observed_value: input.observed_value.map(|value| value.normalize()),
+            threshold: input.threshold.normalize(),
             sample_count: input.sample_count,
             detail_uri: &input.detail_uri,
             detail_hash: input.detail_hash,
@@ -744,6 +988,28 @@ info_from_model!(
 );
 
 impl DriftReportInfo {
+    /// Whether an idempotent append carries the exact immutable report.
+    #[must_use]
+    pub fn has_same_content(&self, candidate: &NewDriftReport) -> bool {
+        self.drift_report_id == candidate.drift_report_id
+            && self.feedback_cycle_id == candidate.feedback_cycle_id
+            && self.kind == candidate.kind
+            && self.metric == candidate.metric
+            && self.assessment == candidate.assessment
+            && self.baseline_window_start == candidate.baseline_window_start
+            && self.baseline_window_end == candidate.baseline_window_end
+            && self.evaluation_window_start == candidate.evaluation_window_start
+            && self.evaluation_window_end == candidate.evaluation_window_end
+            && self.label_cutoff == candidate.label_cutoff
+            && self.observed_value == candidate.observed_value
+            && self.threshold == candidate.threshold
+            && self.sample_count == candidate.sample_count
+            && self.detail_uri == candidate.detail_uri
+            && self.detail_hash == candidate.detail_hash
+            && self.observed_at == candidate.observed_at
+            && self.report_hash == candidate.report_hash
+    }
+
     pub fn validate(&self) -> Result<(), FeedbackError> {
         let input = DriftReportInput {
             feedback_cycle_id: self.feedback_cycle_id,
@@ -815,9 +1081,8 @@ pub struct FeedbackEvaluationUseInput {
     pub champion_serving_contract_hash: ContentHash,
     pub candidate_family_hash: ContentHash,
     pub comparison_contract_hash: ContentHash,
-    pub result_artifact_uri: ArtifactUri,
-    pub result_artifact_hash: ContentHash,
-    pub used_at: DateTime<Utc>,
+    pub cpcv_artifact_uri: ArtifactUri,
+    pub cpcv_artifact_hash: ContentHash,
 }
 
 /// Content-addressed append-only proof that an evaluation holdout was consumed.
@@ -843,9 +1108,8 @@ pub struct NewFeedbackEvaluationUse {
     candidate_family_hash: ContentHash,
     comparison_contract_hash: ContentHash,
     semantic_use_hash: ContentHash,
-    result_artifact_uri: ArtifactUri,
-    result_artifact_hash: ContentHash,
-    used_at: DateTime<Utc>,
+    cpcv_artifact_uri: ArtifactUri,
+    cpcv_artifact_hash: ContentHash,
     evaluation_use_hash: ContentHash,
 }
 
@@ -865,9 +1129,8 @@ impl NewFeedbackEvaluationUse {
                 feedback_cycle_id: input.feedback_cycle_id,
                 semantic_use_hash,
                 key: &key,
-                result_artifact_uri: &input.result_artifact_uri,
-                result_artifact_hash: input.result_artifact_hash,
-                used_at: input.used_at,
+                cpcv_artifact_uri: &input.cpcv_artifact_uri,
+                cpcv_artifact_hash: input.cpcv_artifact_hash,
             },
         )?;
         Ok(Self {
@@ -893,11 +1156,45 @@ impl NewFeedbackEvaluationUse {
             candidate_family_hash: input.candidate_family_hash,
             comparison_contract_hash: input.comparison_contract_hash,
             semantic_use_hash,
-            result_artifact_uri: input.result_artifact_uri,
-            result_artifact_hash: input.result_artifact_hash,
-            used_at: input.used_at,
+            cpcv_artifact_uri: input.cpcv_artifact_uri,
+            cpcv_artifact_hash: input.cpcv_artifact_hash,
             evaluation_use_hash,
         })
+    }
+
+    #[must_use]
+    pub const fn feedback_evaluation_use_id(&self) -> FeedbackEvaluationUseId {
+        self.feedback_evaluation_use_id
+    }
+
+    #[must_use]
+    pub const fn feedback_cycle_id(&self) -> FeedbackCycleId {
+        self.feedback_cycle_id
+    }
+
+    #[must_use]
+    pub const fn evaluation_dataset_id(&self) -> TrainingDatasetId {
+        self.evaluation_dataset_id
+    }
+
+    #[must_use]
+    pub const fn evaluation_dataset_hash(&self) -> ContentHash {
+        self.evaluation_dataset_hash
+    }
+
+    #[must_use]
+    pub const fn evaluation_artifact_bytes_hash(&self) -> ContentHash {
+        self.evaluation_artifact_bytes_hash
+    }
+
+    #[must_use]
+    pub const fn cohort_manifest_hash(&self) -> ContentHash {
+        self.cohort_manifest_hash
+    }
+
+    #[must_use]
+    pub const fn semantic_use_hash(&self) -> ContentHash {
+        self.semantic_use_hash
     }
 }
 
@@ -927,9 +1224,8 @@ struct EvaluationUseDocument<'a> {
     feedback_cycle_id: FeedbackCycleId,
     semantic_use_hash: ContentHash,
     key: &'a FeedbackEvaluationUseKey,
-    result_artifact_uri: &'a ArtifactUri,
-    result_artifact_hash: ContentHash,
-    used_at: DateTime<Utc>,
+    cpcv_artifact_uri: &'a ArtifactUri,
+    cpcv_artifact_hash: ContentHash,
 }
 
 /// Full read projection for one consumed evaluation holdout.
@@ -954,10 +1250,10 @@ pub struct FeedbackEvaluationUseInfo {
     pub candidate_family_hash: ContentHash,
     pub comparison_contract_hash: ContentHash,
     pub semantic_use_hash: ContentHash,
-    pub result_artifact_uri: ArtifactUri,
-    pub result_artifact_hash: ContentHash,
-    pub used_at: DateTime<Utc>,
+    pub cpcv_artifact_uri: ArtifactUri,
+    pub cpcv_artifact_hash: ContentHash,
     pub evaluation_use_hash: ContentHash,
+    pub reserved_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -983,15 +1279,41 @@ info_from_model!(
         candidate_family_hash,
         comparison_contract_hash,
         semantic_use_hash,
-        result_artifact_uri,
-        result_artifact_hash,
-        used_at,
+        cpcv_artifact_uri,
+        cpcv_artifact_hash,
         evaluation_use_hash,
+        reserved_at,
         created_at,
     }
 );
 
 impl FeedbackEvaluationUseInfo {
+    /// Whether an idempotent append carries the exact immutable holdout use.
+    #[must_use]
+    pub fn has_same_content(&self, candidate: &NewFeedbackEvaluationUse) -> bool {
+        self.feedback_evaluation_use_id == candidate.feedback_evaluation_use_id
+            && self.feedback_cycle_id == candidate.feedback_cycle_id
+            && self.purpose == candidate.purpose
+            && self.dataset_purpose == candidate.dataset_purpose
+            && self.profile_ref == candidate.profile_ref
+            && self.research_profile_artifact_id == candidate.research_profile_artifact_id
+            && self.evaluation_dataset_id == candidate.evaluation_dataset_id
+            && self.evaluation_dataset_hash == candidate.evaluation_dataset_hash
+            && self.evaluation_artifact_bytes_hash == candidate.evaluation_artifact_bytes_hash
+            && self.cohort_manifest_hash == candidate.cohort_manifest_hash
+            && self.evaluation_window_start == candidate.evaluation_window_start
+            && self.evaluation_window_end == candidate.evaluation_window_end
+            && self.label_cutoff == candidate.label_cutoff
+            && self.champion_model_version_id == candidate.champion_model_version_id
+            && self.champion_serving_contract_hash == candidate.champion_serving_contract_hash
+            && self.candidate_family_hash == candidate.candidate_family_hash
+            && self.comparison_contract_hash == candidate.comparison_contract_hash
+            && self.semantic_use_hash == candidate.semantic_use_hash
+            && self.cpcv_artifact_uri == candidate.cpcv_artifact_uri
+            && self.cpcv_artifact_hash == candidate.cpcv_artifact_hash
+            && self.evaluation_use_hash == candidate.evaluation_use_hash
+    }
+
     pub fn validate(&self) -> Result<(), FeedbackError> {
         if self.purpose != FeedbackEvaluationPurpose::PromotionComparison
             || self.dataset_purpose != DatasetPurpose::Evaluation
@@ -1016,9 +1338,8 @@ impl FeedbackEvaluationUseInfo {
             champion_serving_contract_hash: self.champion_serving_contract_hash,
             candidate_family_hash: self.candidate_family_hash,
             comparison_contract_hash: self.comparison_contract_hash,
-            result_artifact_uri: self.result_artifact_uri.clone(),
-            result_artifact_hash: self.result_artifact_hash,
-            used_at: self.used_at,
+            cpcv_artifact_uri: self.cpcv_artifact_uri.clone(),
+            cpcv_artifact_hash: self.cpcv_artifact_hash,
         };
         input.validate()?;
         let key = FeedbackEvaluationUseKey::from(&input);
@@ -1034,12 +1355,11 @@ impl FeedbackEvaluationUseInfo {
                 feedback_cycle_id: self.feedback_cycle_id,
                 semantic_use_hash: expected_semantic_hash,
                 key: &key,
-                result_artifact_uri: &self.result_artifact_uri,
-                result_artifact_hash: self.result_artifact_hash,
-                used_at: self.used_at,
+                cpcv_artifact_uri: &self.cpcv_artifact_uri,
+                cpcv_artifact_hash: self.cpcv_artifact_hash,
             },
         )?;
-        if self.created_at < self.used_at
+        if self.reserved_at != self.created_at
             || self.semantic_use_hash != expected_semantic_hash
             || self.evaluation_use_hash != expected_use_hash
             || self.feedback_evaluation_use_id
@@ -1194,17 +1514,17 @@ impl FeedbackEvaluationUseInput {
                 detail: error.to_string(),
             })?;
         validate_artifact_ref(
-            Some(&self.result_artifact_uri),
-            Some(self.result_artifact_hash),
-            "evaluation result",
+            Some(&self.cpcv_artifact_uri),
+            Some(self.cpcv_artifact_hash),
+            "CPCV predecessor",
         )
         .map_err(|detail| FeedbackError::InvalidEvaluationUse { detail })?;
         if self.evaluation_window_start >= self.evaluation_window_end
             || self.evaluation_window_end > self.label_cutoff
-            || self.label_cutoff > self.used_at
         {
             return Err(FeedbackError::InvalidEvaluationUse {
-                detail: "evaluation window, cutoff, or use timestamp is invalid".to_owned(),
+                detail: "evaluation window must end no later than the frozen label cutoff"
+                    .to_owned(),
             });
         }
         Ok(())
@@ -1263,7 +1583,22 @@ mod tests {
         NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent, ResearchJobId,
         ResearchProfileRef, TrainingDatasetId, Utc,
     };
-    use crate::types::ResearchProfileId;
+    use crate::{
+        domain::{
+            ports::{
+                FeedbackCandidateFamily, FeedbackCandidateFamilyInput, FeedbackCandidateRecipe,
+                FeedbackComparisonContract, FeedbackDatasetBuildRequest,
+            },
+            quant::FeedbackCohortWindow,
+        },
+        enums::quant::{CalibrationMethod, DatasetPurpose, DownsideSource},
+        types::{
+            DATASET_SOURCE_LINEAGE_FORMAT_VERSION, DatasetSourceLineage, DecisionPolicySnapshotId,
+            ModelSpecId, ReaderContractVersion, ResearchProfileArtifactId, ResearchProfileId,
+            SchemaContractVersion, SourceSliceId, SourceSliceManifestRef,
+            builtin_research_profiles,
+        },
+    };
 
     fn hash(seed: u8) -> ContentHash {
         ContentHash::from_bytes([seed; 32])
@@ -1285,21 +1620,134 @@ mod tests {
             .expect("valid cutoff")
     }
 
+    fn source_lineage(
+        profile: &ResearchProfileRef,
+        capabilities: &CapabilityRegistryHashes,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+    ) -> DatasetSourceLineage {
+        DatasetSourceLineage {
+            format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+            source_slice_id: SourceSliceId::from_v7(),
+            source_slice_identity_hash: hash(20),
+            research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(profile),
+            research_program_hash: hash(21),
+            source_slice: SourceSliceManifestRef {
+                manifest_uri: ArtifactUri::parse("s3://worm/cycle/source.json")
+                    .expect("valid source URI"),
+                manifest_hash: hash(22),
+            },
+            source_window_start: window_start,
+            source_window_end: window_end,
+            pit_cutoff: window_end,
+            decision_policy_snapshot_id,
+            runtime_config_hash: hash(23),
+            reader_contract_version: ReaderContractVersion::v1(),
+            schema_contract_version: SchemaContractVersion::v1(),
+            source_schema_hash: hash(24),
+            capability_registry_hashes: capabilities.clone(),
+        }
+    }
+
+    fn dataset_request(
+        profile: &ResearchProfileRef,
+        capabilities: &CapabilityRegistryHashes,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        model_spec_id: ModelSpecId,
+        purpose: DatasetPurpose,
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+    ) -> FeedbackDatasetBuildRequest {
+        FeedbackDatasetBuildRequest {
+            training_dataset_id: TrainingDatasetId::from_v7(),
+            model_spec_id,
+            model_spec_definition_hash: hash(25),
+            source_lineage: source_lineage(
+                profile,
+                capabilities,
+                decision_policy_snapshot_id,
+                window_start,
+                window_end,
+            ),
+            window: FeedbackCohortWindow::try_new(profile.clone(), window_start, window_end)
+                .expect("valid cycle Dataset window"),
+            purpose,
+        }
+    }
+
+    fn candidate_family(
+        profile: &ResearchProfileRef,
+        capabilities: &CapabilityRegistryHashes,
+    ) -> FeedbackCandidateFamily {
+        let decision_policy_snapshot_id = DecisionPolicySnapshotId::from_v7();
+        let model_spec_id = ModelSpecId::from_v7();
+        let comparison_contract = FeedbackComparisonContract::try_from_policy(
+            &builtin_research_profiles()
+                .expect("built-in research profiles")
+                .into_iter()
+                .next()
+                .expect("built-in pooled profile")
+                .spec
+                .feedback_policy,
+        )
+        .expect("valid comparison contract");
+        let recipe = FeedbackCandidateRecipe::try_seal(
+            dataset_request(
+                profile,
+                capabilities,
+                decision_policy_snapshot_id,
+                model_spec_id,
+                DatasetPurpose::Training,
+                cutoff() - Duration::days(9),
+                cutoff() - Duration::days(7),
+            ),
+            dataset_request(
+                profile,
+                capabilities,
+                decision_policy_snapshot_id,
+                model_spec_id,
+                DatasetPurpose::Calibration,
+                cutoff() - Duration::days(6),
+                cutoff() - Duration::days(4),
+            ),
+            CalibrationMethod::Platt,
+            DownsideSource::MfeMae,
+            decision_policy_snapshot_id,
+        )
+        .expect("valid cycle candidate recipe");
+        FeedbackCandidateFamily::try_seal(FeedbackCandidateFamilyInput {
+            shared_evaluation: dataset_request(
+                profile,
+                capabilities,
+                decision_policy_snapshot_id,
+                model_spec_id,
+                DatasetPurpose::Evaluation,
+                cutoff() - Duration::days(3),
+                cutoff(),
+            ),
+            comparison_contract,
+            candidates: vec![recipe],
+        })
+        .expect("valid cycle candidate family")
+    }
+
     impl FeedbackCycleKey {
         fn fixture() -> Self {
+            let profile_ref = ResearchProfileRef::fixture();
+            let capability_registry_hashes =
+                CapabilityRegistryHashes::try_new(vec![hash(3), hash(4)])
+                    .expect("canonical capabilities");
+            let candidate_family = candidate_family(&profile_ref, &capability_registry_hashes);
             Self::try_new(FeedbackCycleKeyInput {
                 trigger_family: FeedbackTriggerFamily::Scheduled,
-                profile_ref: ResearchProfileRef::fixture(),
+                profile_ref,
                 feedback_policy_hash: hash(2),
                 label_cutoff: cutoff(),
-                capability_registry_hashes: CapabilityRegistryHashes::try_new(vec![
-                    hash(3),
-                    hash(4),
-                ])
-                .expect("canonical capabilities"),
+                capability_registry_hashes,
                 champion_model_version_id: ModelVersionId::from_v7(),
                 champion_serving_contract_hash: hash(5),
-                candidate_family_hash: hash(6),
+                candidate_family,
             })
             .expect("valid cycle key")
         }
@@ -1329,6 +1777,11 @@ mod tests {
             .expect("cycle key object")
             .insert("legacy_run_id".to_owned(), Value::Bool(true));
         assert!(from_value::<FeedbackCycleKey>(unknown).is_err());
+
+        let mut family_tamper = to_value(&key).expect("serialize cycle family");
+        family_tamper["candidate_family"]["comparison_contract"]["comparison_contract_hash"] =
+            Value::String(hash(99).to_string());
+        assert!(from_value::<FeedbackCycleKey>(family_tamper).is_err());
 
         let mut invalid_profile = key;
         invalid_profile.profile_ref.version = 0;
@@ -1397,6 +1850,13 @@ mod tests {
             sealed.drift_report_id,
             super::DriftReportId::from_report_hash(&sealed.report_hash)
         );
+        let mut database_scale = input.clone();
+        database_scale.observed_value = Some(dec!(0.200000000000));
+        database_scale.threshold = dec!(0.200000000000);
+        let roundtrip =
+            NewDriftReport::try_seal(database_scale).expect("seal database-scale drift");
+        assert_eq!(roundtrip.report_hash, sealed.report_hash);
+        assert_eq!(roundtrip.drift_report_id, sealed.drift_report_id);
 
         let mut wrong = input;
         wrong.assessment = FeedbackDriftAssessment::WithinThreshold;
@@ -1419,10 +1879,9 @@ mod tests {
             champion_serving_contract_hash: hash(11),
             candidate_family_hash: hash(12),
             comparison_contract_hash: hash(13),
-            result_artifact_uri: ArtifactUri::parse("file:///evaluation/result.json")
+            cpcv_artifact_uri: ArtifactUri::parse("file:///feedback/cpcv.json")
                 .expect("valid artifact URI"),
-            result_artifact_hash: hash(14),
-            used_at: cutoff() + Duration::minutes(1),
+            cpcv_artifact_hash: hash(14),
         };
         let first = NewFeedbackEvaluationUse::try_seal(input.clone()).expect("seal evaluation use");
         let second = NewFeedbackEvaluationUse::try_seal(input.clone()).expect("seal exact retry");

@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Error as AnyhowError, Result, ensure};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_api::settlement::resolution::{
@@ -22,9 +22,8 @@ use quant_pivot_core::{
         OutcomeReconciliationServiceDeps,
     },
     service::{
-        feedback_dataset::{
-            FeedbackDatasetBuildRequest, FeedbackDatasetService, FeedbackDatasetServiceDeps,
-        },
+        feedback_dataset::{FeedbackDatasetService, FeedbackDatasetServiceDeps},
+        feedback_signals::{FeedbackSignalService, FeedbackSignalServiceDeps},
         training_dataset::{
             TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
             default_labelers,
@@ -35,20 +34,30 @@ use quant_pivot_error::storage::entity::MARKET_RESOLUTION_EVENT;
 use quant_pivot_models::{
     clickhouse::MarketResolutionRow,
     domain::{
+        api::FeedbackCoverageJobParams,
         data_plane::{
             DecisionClock, DecisionSource, DomainCursorStatus, DomainSourceCheckpoint,
             DomainSourceCursorCasOutcome, UpsertDomainSourceCursor,
         },
+        ports::{
+            FeedbackCandidateFamily, FeedbackCandidateFamilyInput, FeedbackCandidateRecipe,
+            FeedbackComparisonContract, FeedbackCoverageExecutionPort, FeedbackDatasetBuildRequest,
+        },
         quant::{
-            FeedbackCohortWindow, FeedbackRecommendationContext, NewRecommendation,
-            NoopProgressSink,
+            FeatureParityStateInfo, FeedbackCohortWindow, FeedbackCycleInfo, FeedbackCycleKey,
+            FeedbackCycleKeyInput, FeedbackRecommendationContext, FeedbackStageEventInput,
+            NewFeedbackCycle, NewFeedbackStageEvent, NewRecommendation, NoopProgressSink,
+            TrainingDatasetInfo,
         },
     },
     enums::{
         catalog::CatalogTimestampQuality,
         feature::EvidenceSourceKind,
         market::MarketStatus,
-        quant::{DataQualityStatus, DatasetPurpose},
+        quant::{
+            CalibrationMethod, DataQualityStatus, DatasetPurpose, DownsideSource, FeedbackStage,
+            FeedbackStageEventKind, FeedbackTriggerFamily,
+        },
     },
     hashing::CanonicalDigest,
     types::{
@@ -56,32 +65,35 @@ use quant_pivot_models::{
         ContentHash, DatasetSourceLineage, DecisionCaptureEvidence, DecisionPolicySnapshotId,
         DecisionSnapshotEvidence, DomainInstrumentKey, DomainSourceId, EvidenceSourceRef,
         EvmAddress, EvmBlockHash, EvmTransactionHash, FeatureCell, FeatureStaleness, FeatureValue,
-        MarketId, PayoutRatio, Probability, ResearchEvaluationTrack, SchemaVersion,
-        TrainingDatasetId, TrainingExampleId, TrainingSampleSource,
+        FeedbackCoverageArtifactId, MarketId, ModelVersionId, PayoutRatio, Probability,
+        ResearchEvaluationTrack, ResearchProfileRef, SchemaVersion, TrainingDatasetId,
+        TrainingExampleId, TrainingSampleSource, WorkerId,
     },
 };
 use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChQuantFactReadRepository},
     postgres::{
         PgCalibrationArtifactRepository, PgCatalogLedgerRepository, PgClobMarketInfoRepository,
-        PgDomainSourceCursorRepository, PgFactorRepository, PgFeatureRepository,
-        PgFeedbackCohortRepository, PgMarketLinkageRepository, PgMarketRepository,
-        PgModelRegistryRepository, PgPolicyRepository, PgPositionRepository,
-        PgRecommendationExecutionOutcomeRepository, PgRecommendationReportRepository,
-        PgRecommendationRepository, PgRecommendationResolutionOutcomeRepository,
-        PgTradePolicyRepository, PgTrainingDatasetRepository,
+        PgDomainSourceCursorRepository, PgFactorRepository, PgFeatureParityRepository,
+        PgFeatureRepository, PgFeedbackCohortRepository, PgFeedbackCycleRepository,
+        PgMarketLinkageRepository, PgMarketRepository, PgModelRegistryRepository,
+        PgPolicyRepository, PgPositionRepository, PgRecommendationExecutionOutcomeRepository,
+        PgRecommendationReportRepository, PgRecommendationRepository,
+        PgRecommendationResolutionOutcomeRepository, PgTradePolicyRepository,
+        PgTrainingDatasetRepository,
     },
     traits::{
-        DomainSourceCursorRepository, FactWriter, FactorRepository, FeatureRepository,
-        MarketRepository, ModelRegistryRepository, PolicyRepository,
-        RecommendationReportRepository, RecommendationRepository,
-        RecommendationResolutionOutcomeRepository,
+        DomainSourceCursorRepository, FactWriter, FactorRepository, FeatureParityRepository,
+        FeatureRepository, FeedbackCycleRepository, MarketRepository, ModelRegistryRepository,
+        PolicyRepository, RecommendationReportRepository, RecommendationRepository,
+        RecommendationResolutionOutcomeRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
     factors::{FactorValue, FactorValueInsertContext},
     features::{FeatureVector, names::book::MID},
+    feedback::{CoverageGateOutcome, CoverageNoActionReason, FeedbackCoverageCodec},
     selection::SelectedMarket,
     training::{
         TOKEN_PAYOUT_RATIO, TrainingDatasetArtifact, TrainingExample, TrainingLabel,
@@ -100,10 +112,12 @@ use quant_pivot_system_tests::{
             fixture_no_token_id, fixture_profile_ref, prepare_report_on_infra,
             seed_demo_with_store, seed_feedback_scale,
         },
+        model_serving_runtime::ModelServingRegistryFixture,
         report_lifecycle_seed::persist_and_publish_report,
         research_fixtures::{
             ReplayableSourceSliceFixture, persist_replayable_source_slice, seed_source_manifest,
         },
+        trade_policy_fixtures::PublishedTradePolicyFixture,
     },
 };
 use rust_decimal_macros::dec;
@@ -178,6 +192,7 @@ async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
     let old_request = FeedbackDatasetBuildRequest {
         training_dataset_id: TrainingDatasetId::from_v7(),
         model_spec_id: model.model_spec_id,
+        model_spec_definition_hash: model.model_spec_definition_hash,
         source_lineage: old_source,
         window: feedback_window(reconciliation.window_start, reconciliation.frozen_cutoff)?,
         purpose: DatasetPurpose::Training,
@@ -228,6 +243,7 @@ async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
         FeedbackDatasetBuildRequest {
             training_dataset_id: TrainingDatasetId::from_v7(),
             model_spec_id: model.model_spec_id,
+            model_spec_definition_hash: model.model_spec_definition_hash,
             source_lineage: next_source,
             window: feedback_window(reconciliation.window_start, reconciliation.next_cutoff)?,
             purpose: DatasetPurpose::Training,
@@ -241,6 +257,13 @@ async fn run_contract(stack: &SystemStack, artifact_root: &Path) -> Result<()> {
         first_artifact.dataset_hash != next_artifact.dataset_hash,
         "next cutoff did not incorporate the late outcome"
     );
+    assert_signal_coverage(
+        &db,
+        Arc::clone(&store),
+        infra.model_version_id,
+        reconciliation.next_cutoff,
+    )
+    .await?;
 
     let storage_counts = assert_storage_idempotency(&db, ch.as_ref(), &reports).await?;
     print_evidence(&first_artifact, &next_artifact, storage_counts)?;
@@ -253,6 +276,225 @@ struct ReconciledOutcomes {
     next_cutoff: DateTime<Utc>,
     first_resolved_at: DateTime<Utc>,
     second_resolved_at: DateTime<Utc>,
+}
+
+async fn assert_signal_coverage(
+    db: &DatabaseConnection,
+    store: Arc<dyn ArtifactStore>,
+    model_version_id: ModelVersionId,
+    label_cutoff: DateTime<Utc>,
+) -> Result<()> {
+    let cycle = record_signal_cycle(db, model_version_id, label_cutoff).await?;
+    let parity = PgFeatureParityRepository::new(db.clone());
+    let before = parity
+        .current_state()
+        .await?
+        .context("seeded parity state before feedback coverage")?;
+    let service = signal_service(db, Arc::clone(&store))?;
+    let artifact_id = FeedbackCoverageArtifactId::from_cycle_id(cycle.feedback_cycle_id);
+    let result = Box::pin(service.execute(
+        FeedbackCoverageJobParams {
+            feedback_cycle_id: cycle.feedback_cycle_id,
+            cycle_idempotency_hash: cycle.idempotency_hash,
+            artifact_id,
+        },
+        Arc::new(NoopProgressSink),
+        CancellationToken::new(),
+    ))
+    .await?;
+    ensure!(
+        result.artifact_id == artifact_id,
+        "coverage executor returned another artifact identity"
+    );
+    let bytes = store.get(&result.artifact.uri).await?;
+    ensure!(
+        FeedbackCoverageCodec::bytes_hash(&bytes) == result.artifact.content_hash,
+        "coverage result hash does not bind its object bytes"
+    );
+    let artifact = FeedbackCoverageCodec::decode(&bytes)?;
+    let cycle_hash_matches = artifact.cycle_idempotency_hash == cycle.idempotency_hash;
+    ensure!(
+        artifact.feedback_cycle_id == cycle.feedback_cycle_id && cycle_hash_matches,
+        "coverage object differs from its live frozen cycle"
+    );
+    ensure!(
+        matches!(
+            artifact.gate_outcome,
+            CoverageGateOutcome::NoAction {
+                reason: CoverageNoActionReason::InsufficientMatureLabels,
+                ..
+            }
+        ),
+        "two real mature outcomes must not pass the production 500-label floor"
+    );
+    ensure!(
+        artifact.cohorts.policy_evaluation.eligible_count() == FEEDBACK_SCALE_TOTAL as u64,
+        "coverage denominator did not retain the complete PolicyEvaluation universe"
+    );
+    ensure!(
+        artifact.cohorts.model_learning.eligible_count() == 2
+            && artifact.new_mature_label_count == 2
+            && artifact.champion_rows.len() == 2
+            && artifact.champion_examples.len() == 2,
+        "coverage did not freeze the two real mature champion labels"
+    );
+    let after = parity
+        .current_state()
+        .await?
+        .context("seeded parity state after feedback coverage")?;
+    assert_parity_unchanged(&before, &after)?;
+    Ok(())
+}
+
+async fn record_signal_cycle(
+    db: &DatabaseConnection,
+    model_version_id: ModelVersionId,
+    label_cutoff: DateTime<Utc>,
+) -> Result<FeedbackCycleInfo> {
+    let models = PgModelRegistryRepository::new(db.clone());
+    let model = models
+        .find_model_version(&model_version_id)
+        .await?
+        .context("feedback coverage champion")?;
+    let dataset_id = model
+        .training_dataset_id
+        .context("feedback coverage champion Training Dataset")?;
+    let dataset = PgTrainingDatasetRepository::new(db.clone())
+        .find_by_id(&dataset_id)
+        .await?
+        .context("feedback coverage champion Dataset row")?;
+    let profile = model
+        .profile_ref
+        .resolve_builtin_research_profile()
+        .map_err(AnyhowError::msg)?;
+    let feedback_policy_hash = profile.spec.feedback_policy.content_hash()?;
+    let candidate_family = signal_candidate_family(&dataset, &model.profile_ref, label_cutoff)?;
+    let cycle = NewFeedbackCycle::try_seal(FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
+        trigger_family: FeedbackTriggerFamily::Scheduled,
+        profile_ref: model.profile_ref,
+        feedback_policy_hash,
+        label_cutoff,
+        capability_registry_hashes: dataset.source_lineage.capability_registry_hashes,
+        champion_model_version_id: model.model_version_id,
+        champion_serving_contract_hash: model.serving_contract_hash,
+        candidate_family,
+    })?)?;
+    let cycle_id = cycle.feedback_cycle_id();
+    let trigger = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+        feedback_cycle_id: cycle_id,
+        event_sequence: 1,
+        stage: FeedbackStage::Trigger,
+        event_kind: FeedbackStageEventKind::Triggered,
+        research_job_id: None,
+        actor: Some("feedback-dataset-e2e".to_owned()),
+        reason_code: Some("w2_f06_real_coverage".to_owned()),
+        evidence_uri: None,
+        evidence_hash: None,
+        occurred_at: label_cutoff,
+    })?;
+    let cycles = PgFeedbackCycleRepository::new(db.clone());
+    cycles.record_trigger(cycle, trigger).await?;
+    let claim = cycles
+        .claim_cycle(WorkerId::from_v7(), 90)
+        .await?
+        .context("claim real feedback coverage cycle")?;
+    ensure!(
+        claim.cycle.feedback_cycle_id == cycle_id,
+        "feedback coordinator claimed another cycle"
+    );
+    Ok(claim.cycle)
+}
+
+fn signal_candidate_family(
+    seed: &TrainingDatasetInfo,
+    profile_ref: &ResearchProfileRef,
+    label_cutoff: DateTime<Utc>,
+) -> Result<FeedbackCandidateFamily> {
+    let policy_id = seed.source_lineage.decision_policy_snapshot_id;
+    let request = |purpose, window_start, cutoff| -> Result<FeedbackDatasetBuildRequest> {
+        let mut source_lineage = seed.source_lineage.clone();
+        source_lineage.source_window_start = window_start;
+        source_lineage.source_window_end = cutoff;
+        source_lineage.pit_cutoff = cutoff;
+        Ok(FeedbackDatasetBuildRequest {
+            training_dataset_id: TrainingDatasetId::from_v7(),
+            model_spec_id: seed.model_spec_id,
+            model_spec_definition_hash: seed.model_spec_definition_hash,
+            source_lineage,
+            window: FeedbackCohortWindow::try_new(profile_ref.clone(), window_start, cutoff)?,
+            purpose,
+        })
+    };
+    let recipe = FeedbackCandidateRecipe::try_seal(
+        request(
+            DatasetPurpose::Training,
+            label_cutoff - Duration::days(9),
+            label_cutoff - Duration::days(7),
+        )?,
+        request(
+            DatasetPurpose::Calibration,
+            label_cutoff - Duration::days(6),
+            label_cutoff - Duration::days(4),
+        )?,
+        CalibrationMethod::Platt,
+        DownsideSource::MfeMae,
+        policy_id,
+    )?;
+    let comparison_contract = FeedbackComparisonContract::try_from_policy(
+        &profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(AnyhowError::msg)?
+            .spec
+            .feedback_policy,
+    )?;
+    FeedbackCandidateFamily::try_seal(FeedbackCandidateFamilyInput {
+        shared_evaluation: request(
+            DatasetPurpose::Evaluation,
+            label_cutoff - Duration::days(3),
+            label_cutoff,
+        )?,
+        comparison_contract,
+        candidates: vec![recipe],
+    })
+    .map_err(Into::into)
+}
+
+fn signal_service(
+    db: &DatabaseConnection,
+    store: Arc<dyn ArtifactStore>,
+) -> Result<FeedbackSignalService> {
+    let preimages = ModelServingRegistryFixture {
+        db: db.clone(),
+        artifact_store: Arc::clone(&store),
+        evidence_scope: PublishedTradePolicyFixture::evidence_scope()?,
+        evidence_attestor: Some(PublishedTradePolicyFixture::evidence_attestor()?),
+    }
+    .build_preimages();
+    Ok(FeedbackSignalService::new(FeedbackSignalServiceDeps {
+        cycles: Arc::new(PgFeedbackCycleRepository::new(db.clone())),
+        models: Arc::new(PgModelRegistryRepository::new(db.clone())),
+        preimages,
+        cohort_repository: Arc::new(PgFeedbackCohortRepository::new(db.clone())),
+        feature_repository: Arc::new(PgFeatureRepository::new(db.clone())),
+        factor_repository: Arc::new(PgFactorRepository::new(db.clone())),
+        artifact_store: store,
+    }))
+}
+
+fn assert_parity_unchanged(
+    before: &FeatureParityStateInfo,
+    after: &FeatureParityStateInfo,
+) -> Result<()> {
+    ensure!(
+        after.state_id == before.state_id
+            && after.state == before.state
+            && after.transition == before.transition
+            && after.cause_run_id == before.cause_run_id
+            && after.recovery_run_id == before.recovery_run_id
+            && after.previous_state_id == before.previous_state_id,
+        "coverage execution mutated the deterministic parity latch"
+    );
+    Ok(())
 }
 
 async fn reconcile_outcomes(

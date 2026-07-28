@@ -698,6 +698,27 @@ pg_enum! {
         CpcvBacktest => "cpcv_backtest",
         /// Deterministic training/serving feature replay.
         FeatureParity => "feature_parity",
+        /// Freeze cohort coverage and decide whether statistical drift may run.
+        FeedbackCoverage => "feedback_coverage",
+        /// Compute data/concept/label drift from immutable coverage evidence.
+        FeedbackDrift => "feedback_drift",
+        /// Seal the bounded Training/Calibration/Evaluation Dataset batch.
+        FeedbackDatasetSeal => "feedback_dataset_seal",
+        /// Train the predeclared candidate batch.
+        FeedbackTraining => "feedback_training",
+        /// Fit and bind the candidate calibration batch.
+        FeedbackCalibration => "feedback_calibration",
+        /// Run and bind the candidate CPCV evidence batch.
+        FeedbackCpcv => "feedback_cpcv",
+        /// Compare every CPCV-eligible challenger with the champion over the
+        /// one-time reserved Evaluation holdout.
+        FeedbackComparison => "feedback_comparison",
+        /// Evaluate one F09-eligible challenger against exact production
+        /// shadow observations from a published serving generation.
+        FeedbackShadowReplay => "feedback_shadow_replay",
+        /// Seal the evidence-only terminal decision from exact F06/F09/F10
+        /// predecessors. This job has no route-promotion authority.
+        FeedbackDecision => "feedback_decision",
         /// Fit a governed executable entry/exit policy artifact.
         TradePolicyFit => "trade_policy_fit",
         /// Independently re-read and validate a Draft trade policy before CAS
@@ -735,6 +756,12 @@ pg_enum! {
         BacktestPathSet => "backtest_path_set",
         CalibrationArtifact => "calibration_artifact",
         FeatureParityRun => "feature_parity_run",
+        FeedbackCoverageArtifact => "feedback_coverage_artifact",
+        FeedbackDriftArtifact => "feedback_drift_artifact",
+        FeedbackLearningStageArtifact => "feedback_learning_stage_artifact",
+        FeedbackComparisonArtifact => "feedback_comparison_artifact",
+        FeedbackShadowReplayArtifact => "feedback_shadow_replay_artifact",
+        FeedbackDecisionArtifact => "feedback_decision_artifact",
         TradePolicyArtifact => "trade_policy_artifact",
         TradePolicyValidationRun => "trade_policy_validation_run",
     }
@@ -1089,6 +1116,25 @@ pg_enum! {
         Comparison => "comparison",
         ShadowReplay => "shadow_replay",
         Decision => "decision",
+    }
+}
+
+impl FeedbackStage {
+    /// Return the next executable stage in the closed feedback DAG.
+    #[must_use]
+    pub const fn next(self) -> Option<Self> {
+        match self {
+            Self::Trigger => Some(Self::Coverage),
+            Self::Coverage => Some(Self::Drift),
+            Self::Drift => Some(Self::DatasetSeal),
+            Self::DatasetSeal => Some(Self::Training),
+            Self::Training => Some(Self::Calibration),
+            Self::Calibration => Some(Self::Cpcv),
+            Self::Cpcv => Some(Self::Comparison),
+            Self::Comparison => Some(Self::ShadowReplay),
+            Self::ShadowReplay => Some(Self::Decision),
+            Self::Decision => None,
+        }
     }
 }
 

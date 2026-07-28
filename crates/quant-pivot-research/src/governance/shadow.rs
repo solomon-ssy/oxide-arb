@@ -16,9 +16,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    enums::quant::{ModelWeightSource, OutcomeSide},
+    enums::{
+        common::MarketCategory,
+        quant::{ModelWeightSource, OutcomeSide},
+    },
     types::{
-        ModelVersionId, Probability, ShadowComparisonId,
+        ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration, Probability,
+        ResearchProfileArtifactId, ShadowComparisonId,
         shadow::{ShadowComparison, ShadowRankDelta, ShadowScoreDelta},
     },
 };
@@ -34,6 +38,13 @@ use crate::{
 struct ComparisonHashInput<'a> {
     active_model_version_id: &'a ModelVersionId,
     shadow_model_version_id: &'a ModelVersionId,
+    active_serving_contract_hash: ContentHash,
+    shadow_serving_contract_hash: ContentHash,
+    research_profile_artifact_id: &'a ResearchProfileArtifactId,
+    category_scope: Option<MarketCategory>,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    decision_policy_snapshot_hash: ContentHash,
+    policy_bundle_generation: PolicyBundleGeneration,
     weight_source: ModelWeightSource,
     decision_at: DateTime<Utc>,
     topn_overlap: &'a Probability,
@@ -53,6 +64,13 @@ struct Ranked {
 pub struct ShadowComparisonRequest<'a> {
     pub active_model_version_id: ModelVersionId,
     pub shadow_model_version_id: ModelVersionId,
+    pub active_serving_contract_hash: ContentHash,
+    pub shadow_serving_contract_hash: ContentHash,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    pub category_scope: Option<MarketCategory>,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub decision_policy_snapshot_hash: ContentHash,
+    pub policy_bundle_generation: PolicyBundleGeneration,
     pub weight_source: ModelWeightSource,
     pub decision_at: DateTime<Utc>,
     pub active: &'a [SignalCandidate],
@@ -75,6 +93,13 @@ pub fn compute_shadow_comparison(
 ) -> QuantResult<ShadowComparison> {
     let active_model_version_id = request.active_model_version_id;
     let shadow_model_version_id = request.shadow_model_version_id;
+    let active_serving_contract_hash = request.active_serving_contract_hash;
+    let shadow_serving_contract_hash = request.shadow_serving_contract_hash;
+    let research_profile_artifact_id = request.research_profile_artifact_id.clone();
+    let category_scope = request.category_scope;
+    let decision_policy_snapshot_id = request.decision_policy_snapshot_id;
+    let decision_policy_snapshot_hash = request.decision_policy_snapshot_hash;
+    let policy_bundle_generation = request.policy_bundle_generation;
     let weight_source = request.weight_source;
     let decision_at = request.decision_at;
     let active = request.active;
@@ -142,6 +167,13 @@ pub fn compute_shadow_comparison(
     let comparison_hash = ResearchHasher::canonical(&ComparisonHashInput {
         active_model_version_id: &active_model_version_id,
         shadow_model_version_id: &shadow_model_version_id,
+        active_serving_contract_hash,
+        shadow_serving_contract_hash,
+        research_profile_artifact_id: &research_profile_artifact_id,
+        category_scope,
+        decision_policy_snapshot_id,
+        decision_policy_snapshot_hash,
+        policy_bundle_generation,
         weight_source,
         decision_at,
         topn_overlap: &topn_overlap,
@@ -154,6 +186,13 @@ pub fn compute_shadow_comparison(
         shadow_comparison_id: ShadowComparisonId::from_v7(),
         active_model_version_id,
         shadow_model_version_id,
+        active_serving_contract_hash,
+        shadow_serving_contract_hash,
+        research_profile_artifact_id,
+        category_scope,
+        decision_policy_snapshot_id,
+        decision_policy_snapshot_hash,
+        policy_bundle_generation,
         weight_source,
         decision_at,
         topn_overlap,
@@ -233,7 +272,9 @@ mod tests {
     use quant_pivot_models::{
         enums::quant::{ModelWeightSource, OutcomeSide},
         types::{
-            MarketId, ModelRunId, ModelVersionId, Price, Probability, SignalCandidateId, TokenId,
+            ContentHash, DecisionPolicySnapshotId, MarketId, ModelRunId, ModelVersionId,
+            PolicyBundleGeneration, Price, Probability, ResearchProfileArtifactId,
+            SignalCandidateId, TokenId, builtin_research_profiles,
         },
     };
     use rust_decimal::Decimal;
@@ -276,6 +317,39 @@ mod tests {
         }
     }
 
+    fn request<'a>(
+        active: &'a [SignalCandidate],
+        shadow: &'a [SignalCandidate],
+        top_n: usize,
+        score_divergence_threshold: Decimal,
+    ) -> ShadowComparisonRequest<'a> {
+        let profile = builtin_research_profiles()
+            .expect("built-in profiles")
+            .remove(0)
+            .profile_ref;
+        ShadowComparisonRequest {
+            active_model_version_id: ModelVersionId::from_v7(),
+            shadow_model_version_id: ModelVersionId::from_v7(),
+            active_serving_contract_hash: ContentHash::from_bytes([1; 32]),
+            shadow_serving_contract_hash: ContentHash::from_bytes([2; 32]),
+            research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile),
+            category_scope: profile
+                .resolve_builtin_research_profile()
+                .expect("profile")
+                .spec
+                .category,
+            decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+            decision_policy_snapshot_hash: ContentHash::from_bytes([3; 32]),
+            policy_bundle_generation: PolicyBundleGeneration::FIRST,
+            weight_source: ModelWeightSource::Artifact,
+            decision_at: Utc::now(),
+            active,
+            shadow,
+            top_n,
+            score_divergence_threshold,
+        }
+    }
+
     #[test]
     fn identical_rankings_no_divergence() {
         let active = vec![
@@ -293,17 +367,8 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let comparison = compute_shadow_comparison(&ShadowComparisonRequest {
-            active_model_version_id: ModelVersionId::from_v7(),
-            shadow_model_version_id: ModelVersionId::from_v7(),
-            weight_source: ModelWeightSource::Artifact,
-            decision_at: Utc::now(),
-            active: &active,
-            shadow: &shadow,
-            top_n: 5,
-            score_divergence_threshold: dec!(0.10),
-        })
-        .expect("comparison");
+        let comparison = compute_shadow_comparison(&request(&active, &shadow, 5, dec!(0.10)))
+            .expect("comparison");
         assert_eq!(comparison.topn_overlap, Probability::new(dec!(1)));
         assert_eq!(comparison.score_delta.mean_abs_score_delta, dec!(0));
         assert_eq!(comparison.rank_delta.max_rank_delta, 0);
@@ -314,17 +379,8 @@ mod tests {
     fn large_score_gap_divergence() {
         let active = vec![candidate("a", 1, dec!(0.90), OutcomeSide::Yes)];
         let shadow = vec![candidate("a", 1, dec!(0.40), OutcomeSide::No)];
-        let comparison = compute_shadow_comparison(&ShadowComparisonRequest {
-            active_model_version_id: ModelVersionId::from_v7(),
-            shadow_model_version_id: ModelVersionId::from_v7(),
-            weight_source: ModelWeightSource::Artifact,
-            decision_at: Utc::now(),
-            active: &active,
-            shadow: &shadow,
-            top_n: 5,
-            score_divergence_threshold: dec!(0.10),
-        })
-        .expect("comparison");
+        let comparison = compute_shadow_comparison(&request(&active, &shadow, 5, dec!(0.10)))
+            .expect("comparison");
         assert!(comparison.hard_divergence);
         assert_eq!(comparison.score_delta.mean_abs_score_delta, dec!(0.5));
         assert_eq!(comparison.score_delta.side_disagreement_rate, dec!(1));
@@ -343,17 +399,8 @@ mod tests {
             candidate("a", 2, dec!(0.72), OutcomeSide::Yes),
             candidate("d", 3, dec!(0.40), OutcomeSide::Yes),
         ];
-        let comparison = compute_shadow_comparison(&ShadowComparisonRequest {
-            active_model_version_id: ModelVersionId::from_v7(),
-            shadow_model_version_id: ModelVersionId::from_v7(),
-            weight_source: ModelWeightSource::Artifact,
-            decision_at: Utc::now(),
-            active: &active,
-            shadow: &shadow,
-            top_n: 2,
-            score_divergence_threshold: dec!(0.10),
-        })
-        .expect("comparison");
+        let comparison = compute_shadow_comparison(&request(&active, &shadow, 2, dec!(0.10)))
+            .expect("comparison");
         // a and b are common; both moved one rank.
         assert_eq!(comparison.rank_delta.common_markets, 2);
         assert_eq!(comparison.rank_delta.max_rank_delta, 1);
@@ -368,17 +415,8 @@ mod tests {
     fn disjoint_topn_zero_overlap() {
         let active = vec![candidate("a", 1, dec!(0.9), OutcomeSide::Yes)];
         let shadow = vec![candidate("b", 1, dec!(0.9), OutcomeSide::Yes)];
-        let comparison = compute_shadow_comparison(&ShadowComparisonRequest {
-            active_model_version_id: ModelVersionId::from_v7(),
-            shadow_model_version_id: ModelVersionId::from_v7(),
-            weight_source: ModelWeightSource::Artifact,
-            decision_at: Utc::now(),
-            active: &active,
-            shadow: &shadow,
-            top_n: 5,
-            score_divergence_threshold: dec!(0.10),
-        })
-        .expect("comparison");
+        let comparison = compute_shadow_comparison(&request(&active, &shadow, 5, dec!(0.10)))
+            .expect("comparison");
         assert_eq!(comparison.topn_overlap, Probability::new(dec!(0)));
         assert_eq!(comparison.rank_delta.common_markets, 0);
     }

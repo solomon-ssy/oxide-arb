@@ -15,7 +15,7 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::{DataQualityStatus, FillRequirement, OutcomeSide},
     types::{
-        ContentHash, ExposureBreakdown, Usd,
+        Bps, ContentHash, ExposureBreakdown, Usd,
         backtest::{BacktestReportHashInput, PnlCurvePoint, PnlSimulation},
     },
 };
@@ -25,7 +25,7 @@ use crate::{
     backtest::{
         BacktestExecutionSnapshot, BacktestInputs, BacktestMarketMeta, BacktestReport,
         BacktestRequest, BacktestRunResult, BacktestTick, Backtester, MarketOutcome, PortfolioCaps,
-        SampleOutcome, metrics, simulator,
+        PortfolioReturnObservation, SampleOutcome, metrics, simulator,
     },
     execution_semantics::{BookWalkOutcome, LiquidityRole, walk_buy_cash_budget},
     model::runtime::{MarketInferenceContext, ModelInputAuditState, ModelRuntimeOutput},
@@ -74,6 +74,7 @@ struct RunAccumulator {
     /// Per-tick return (`tick_pnl / tick_allocated`), `0` for a tick with no
     /// allocation — the Sharpe-ratio input series.
     tick_returns: Vec<Decimal>,
+    portfolio_returns: Vec<PortfolioReturnObservation>,
     missing_feature_count: u64,
     total_emitted: u64,
     total_allocated: Decimal,
@@ -113,6 +114,7 @@ impl Backtester for PortfolioReplayBacktester {
         Ok(BacktestRunResult {
             report,
             sample_outcomes: acc.samples,
+            portfolio_returns: acc.portfolio_returns,
         })
     }
 }
@@ -269,12 +271,37 @@ fn process_tick(
         decision_at: tick.decision_at,
         cumulative_realized_pnl_usd: acc.realized_pnl.round_dp(RESEARCH_DECIMAL_SCALE),
     });
+    record_portfolio_return(tick, tick_pnl, caps, acc)?;
     // A tick with no allocation contributes no return observation (never a
     // silent zero-return sample, which would bias the Sharpe ratio's
     // variance downward).
     if tick_allocated > Decimal::ZERO {
         acc.tick_returns.push(tick_pnl / tick_allocated);
     }
+    Ok(())
+}
+
+fn record_portfolio_return(
+    tick: &BacktestTick,
+    tick_pnl: Decimal,
+    caps: &PortfolioCaps,
+    acc: &mut RunAccumulator,
+) -> QuantResult<()> {
+    if caps.total_budget_usd <= Decimal::ZERO {
+        return Ok(());
+    }
+    let net_return_bps = Bps::relative(tick_pnl, caps.total_budget_usd).ok_or_else(|| {
+        ResearchError::ValidationMethodology {
+            detail: "positive governed backtest capital unexpectedly produced no return ratio"
+                .to_owned(),
+        }
+    })?;
+    acc.portfolio_returns.push(PortfolioReturnObservation {
+        decision_at: tick.decision_at,
+        realized_pnl_usd: Usd::new(tick_pnl.round_dp(RESEARCH_DECIMAL_SCALE)),
+        capital_base_usd: Usd::new(caps.total_budget_usd),
+        net_return_bps: Bps::new(net_return_bps.inner().round_dp(RESEARCH_DECIMAL_SCALE)),
+    });
     Ok(())
 }
 
@@ -642,6 +669,24 @@ mod tests {
         }
     }
 
+    fn empty_tick(idx: i64, model_run_id: ModelRunId) -> BacktestTick {
+        let decision_at = Utc
+            .timestamp_opt(1_700_000_000 + idx * 3600, 0)
+            .single()
+            .expect("valid empty-tick timestamp");
+        BacktestTick {
+            decision_at,
+            model_input: ModelRuntimeInput::FactorTable(FactorInferenceTable {
+                model_run_id,
+                decision_at,
+                rows: Vec::new(),
+            }),
+            outcomes: Vec::new(),
+            market_meta: Vec::new(),
+            execution: Vec::new(),
+        }
+    }
+
     fn execution_snapshot(
         market_id: &str,
         token_id: &str,
@@ -774,5 +819,43 @@ mod tests {
             .await
             .expect("b");
         assert_eq!(a.report.report_hash, b.report.report_hash);
+    }
+
+    #[tokio::test]
+    async fn no_allocation_retains_observation() {
+        let model = WeightedFactorRuntime::backtest_fixture();
+        let run_id = ModelRunId::from_v7();
+        let request = BacktestRequest::test_fixture();
+        let active = PortfolioReplayBacktester::new()
+            .run(BacktestInputs {
+                request: request.clone(),
+                model: &model,
+                ticks: vec![tick(0, &run_id), tick(1, &run_id)],
+                caps: PortfolioCaps::backtest_fixture(),
+            })
+            .await
+            .expect("active-only replay");
+        let with_empty = PortfolioReplayBacktester::new()
+            .run(BacktestInputs {
+                request,
+                model: &model,
+                ticks: vec![tick(0, &run_id), tick(1, &run_id), empty_tick(2, run_id)],
+                caps: PortfolioCaps::backtest_fixture(),
+            })
+            .await
+            .expect("replay with genuine no-allocation tick");
+
+        assert_eq!(with_empty.portfolio_returns.len(), 3);
+        let empty = with_empty
+            .portfolio_returns
+            .last()
+            .expect("no-allocation observation");
+        assert_eq!(empty.realized_pnl_usd, Usd::ZERO);
+        assert_eq!(empty.capital_base_usd, Usd::new(dec!(1000)));
+        assert_eq!(empty.net_return_bps, Bps::ZERO);
+        assert_eq!(
+            with_empty.report.sharpe, active.report.sharpe,
+            "report Sharpe remains an active-allocation statistic"
+        );
     }
 }

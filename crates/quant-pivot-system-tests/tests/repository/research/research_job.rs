@@ -1,23 +1,43 @@
 //! Research-job ledger persistence system contracts.
 
 use chrono::{Duration as ChronoDuration, Utc};
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::{
+    feedback::FeedbackError,
+    storage::{StorageError, entity},
+};
 use quant_pivot_models::{
-    domain::{api::BuildTrainingDatasetRequest, quant::NewResearchJob},
-    enums::quant::{DatasetPurpose, ResearchJobKind, ResearchJobStatus},
+    domain::{
+        api::BuildTrainingDatasetRequest,
+        quant::{
+            FeedbackStageEventInput, FeedbackStageJobIdentity, NewFeedbackStageEvent,
+            NewResearchJob, ResearchJobFinalization,
+        },
+    },
+    enums::quant::{
+        DatasetPurpose, FeedbackStage, FeedbackStageEventKind, ResearchJobErrorCode,
+        ResearchJobKind, ResearchJobStatus,
+    },
     types::{
-        DecisionPolicySnapshotId, ModelSpecId, ResearchJobId, ResearchJobParams, RoleCode,
-        SchemaVersion, TrainingDatasetId, TrainingSampleSources, WorkerId,
+        DecisionPolicySnapshotId, FeedbackCycleId, ModelSpecId, ResearchJobError, ResearchJobId,
+        ResearchJobParams, RoleCode, SchemaVersion, TrainingDatasetId, TrainingSampleSources,
+        WorkerId,
     },
 };
-use quant_pivot_repository::{postgres::PgResearchJobRepository, traits::ResearchJobRepository};
+use quant_pivot_repository::{
+    postgres::{PgFeedbackCycleRepository, PgResearchJobRepository},
+    traits::{FeedbackCycleRepository, ResearchJobEnqueueOutcome, ResearchJobRepository},
+};
 use quant_pivot_system_tests::{postgres::setup_pg, support::execution_pg_seed};
-use sea_orm::{ConnectionTrait, DbBackend, Statement};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, DbBackend, IntoActiveModel, Statement};
+
+use super::feedback_boot_schema::{FeedbackSchemaFixture, prepare_fixture};
 
 fn new_job(job_id: ResearchJobId) -> NewResearchJob {
     let window_end = Utc::now();
     NewResearchJob {
         job_id,
+        feedback_cycle_id: None,
+        feedback_stage: None,
         kind: ResearchJobKind::DatasetBuild,
         status: ResearchJobStatus::Queued,
         model_spec_id: None,
@@ -44,6 +64,310 @@ fn new_job(job_id: ResearchJobId) -> NewResearchJob {
         recovery_attempt: 0,
         max_recovery_attempts: 3,
     }
+}
+
+async fn record_feedback_cycles(repo: &PgFeedbackCycleRepository, fixture: &FeedbackSchemaFixture) {
+    repo.record_trigger(
+        fixture.cycle.clone(),
+        fixture.stage_event(fixture.cycle_id, "scheduler"),
+    )
+    .await
+    .expect("record first feedback cycle");
+    repo.record_trigger(
+        fixture.second_cycle.clone(),
+        fixture.stage_event(fixture.second_cycle_id, "operator"),
+    )
+    .await
+    .expect("record second feedback cycle");
+}
+
+fn feedback_event(
+    fixture: &FeedbackSchemaFixture,
+    feedback_cycle_id: FeedbackCycleId,
+    job_id: ResearchJobId,
+) -> NewFeedbackStageEvent {
+    NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+        feedback_cycle_id,
+        event_sequence: 2,
+        stage: FeedbackStage::Coverage,
+        event_kind: FeedbackStageEventKind::JobLinked,
+        research_job_id: Some(job_id),
+        actor: None,
+        reason_code: None,
+        evidence_uri: None,
+        evidence_hash: None,
+        occurred_at: fixture.observed_at,
+    })
+    .expect("seal feedback job-link event")
+}
+
+pub async fn feedback_enqueue_exact_retry() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let fixture = Box::pin(prepare_fixture(&db)).await;
+    let cycles = PgFeedbackCycleRepository::new(db.clone());
+    record_feedback_cycles(&cycles, &fixture).await;
+    let repo = PgResearchJobRepository::new(db.clone());
+
+    let first_identity =
+        FeedbackStageJobIdentity::try_root(fixture.cycle_id, FeedbackStage::Coverage)
+            .expect("freeze feedback-stage identity");
+    let repeated_identity =
+        FeedbackStageJobIdentity::try_root(fixture.cycle_id, FeedbackStage::Coverage)
+            .expect("repeat feedback-stage identity");
+    assert!(matches!(
+        FeedbackStageJobIdentity::try_root(fixture.cycle_id, FeedbackStage::Trigger),
+        Err(FeedbackError::InvalidJobIdentity { .. })
+    ));
+    assert_eq!(first_identity.job_id(), repeated_identity.job_id());
+    assert_ne!(
+        first_identity.job_id(),
+        FeedbackStageJobIdentity::try_root(fixture.cycle_id, FeedbackStage::Drift)
+            .expect("different feedback stage")
+            .job_id()
+    );
+    assert_ne!(
+        first_identity.job_id(),
+        FeedbackStageJobIdentity::try_root(fixture.second_cycle_id, FeedbackStage::Coverage)
+            .expect("different feedback cycle")
+            .job_id()
+    );
+
+    let job = new_job(ResearchJobId::from_v7())
+        .try_bind_feedback(first_identity)
+        .expect("bind feedback identity");
+    let inserted = repo.enqueue(job.clone()).await.expect("enqueue stage job");
+    assert!(matches!(
+        inserted,
+        ResearchJobEnqueueOutcome::Inserted(ref info)
+            if info.job_id == first_identity.job_id()
+                && info.feedback_cycle_id == Some(fixture.cycle_id)
+                && info.feedback_stage == Some(FeedbackStage::Coverage)
+    ));
+    assert!(matches!(
+        repo.enqueue(job.clone()).await.expect("exact enqueue retry"),
+        ResearchJobEnqueueOutcome::AlreadyPresent(ref info)
+            if info.job_id == first_identity.job_id()
+    ));
+
+    let mut invalid_status = job.clone();
+    invalid_status.status = ResearchJobStatus::Running;
+    assert!(matches!(
+        repo.enqueue(invalid_status)
+            .await
+            .expect_err("enqueue retry cannot smuggle mutable status"),
+        StorageError::InvariantViolation {
+            entity: Some(owner),
+            ..
+        } if owner == entity::QUANT_RESEARCH_JOB
+    ));
+
+    let mut invalid_attempt = job.clone();
+    invalid_attempt.recovery_attempt = 1;
+    assert!(matches!(
+        repo.enqueue(invalid_attempt)
+            .await
+            .expect_err("enqueue retry cannot smuggle recovery state"),
+        StorageError::InvariantViolation {
+            entity: Some(owner),
+            ..
+        } if owner == entity::QUANT_RESEARCH_JOB
+    ));
+
+    let mut drifted = job;
+    drifted.requested_by = Some("different-actor".to_owned());
+    let drift_error = repo
+        .enqueue(drifted)
+        .await
+        .expect_err("same stage identity cannot change immutable input");
+    assert!(matches!(
+        drift_error,
+        StorageError::StateConflict {
+            entity: owner,
+            ..
+        } if owner == entity::QUANT_RESEARCH_JOB
+    ));
+
+    let missing_cycle = FeedbackCycleId::from_v7();
+    let missing_job = new_job(ResearchJobId::from_v7())
+        .try_bind_feedback(
+            FeedbackStageJobIdentity::try_root(missing_cycle, FeedbackStage::Coverage)
+                .expect("freeze missing-cycle identity"),
+        )
+        .expect("bind missing-cycle identity");
+    let missing_error = repo
+        .enqueue(missing_job)
+        .await
+        .expect_err("feedback job requires an existing cycle");
+    assert!(
+        missing_error
+            .to_string()
+            .contains("fk_quant_research_job_cycle"),
+        "unexpected missing-cycle error: {missing_error}"
+    );
+
+    let mutation_error = db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE quant_research_job SET feedback_stage = NULL WHERE job_id = $1",
+            [first_identity.job_id().as_uuid().into()],
+        ))
+        .await
+        .expect_err("feedback lineage must be immutable");
+    assert!(
+        mutation_error
+            .to_string()
+            .contains("research-job immutable identity and enqueue contract cannot change"),
+        "unexpected lineage-mutation error: {mutation_error}"
+    );
+
+    let partial_job_id = ResearchJobId::from_v7();
+    let pair_error = db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO quant_research_job (
+                job_id, feedback_cycle_id, feedback_stage, kind, status, model_spec_id,
+                decision_policy_snapshot_id, params_json, progress_json, result_kind, result_ref,
+                error_json, coverage_json, requested_by, acting_role, parent_job_id,
+                recovery_attempt, max_recovery_attempts, lease_owner, lease_expires_at, started_at,
+                finished_at, heartbeat_at
+             )
+             SELECT
+                $1, feedback_cycle_id, NULL, kind, status, model_spec_id,
+                decision_policy_snapshot_id, params_json, progress_json, result_kind, result_ref,
+                error_json, coverage_json, requested_by, acting_role, parent_job_id,
+                recovery_attempt, max_recovery_attempts, lease_owner, lease_expires_at, started_at,
+                finished_at, heartbeat_at
+             FROM quant_research_job
+             WHERE job_id = $2",
+            [
+                partial_job_id.as_uuid().into(),
+                first_identity.job_id().as_uuid().into(),
+            ],
+        ))
+        .await
+        .expect_err("feedback cycle and stage must be paired on insert");
+    assert!(
+        pair_error
+            .to_string()
+            .contains("ck_quant_research_job_feedback_lineage"),
+        "unexpected lineage-pair error: {pair_error}"
+    );
+}
+
+pub async fn feedback_retry_lineage() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let fixture = Box::pin(prepare_fixture(&db)).await;
+    let cycles = PgFeedbackCycleRepository::new(db.clone());
+    record_feedback_cycles(&cycles, &fixture).await;
+    let repo = PgResearchJobRepository::new(db.clone());
+
+    let root_identity =
+        FeedbackStageJobIdentity::try_root(fixture.cycle_id, FeedbackStage::Coverage)
+            .expect("freeze root stage identity");
+    let root = new_job(ResearchJobId::from_v7())
+        .try_bind_feedback(root_identity)
+        .expect("bind root identity");
+    assert!(matches!(
+        repo.enqueue(root).await.expect("enqueue root stage job"),
+        ResearchJobEnqueueOutcome::Inserted(_)
+    ));
+
+    let retry_identity = FeedbackStageJobIdentity::try_retry(
+        fixture.cycle_id,
+        FeedbackStage::Coverage,
+        root_identity.job_id(),
+    )
+    .expect("freeze retry identity");
+    let retry = new_job(ResearchJobId::from_v7())
+        .try_bind_feedback(retry_identity)
+        .expect("bind retry identity");
+    let active_parent_error = repo
+        .enqueue(retry.clone())
+        .await
+        .expect_err("active parent cannot be retried");
+    assert!(matches!(
+        active_parent_error,
+        StorageError::StateConflict {
+            entity: owner,
+            ..
+        } if owner == entity::QUANT_RESEARCH_JOB
+    ));
+
+    let worker = WorkerId::from_v7();
+    let lease_expires = Utc::now() + ChronoDuration::seconds(90);
+    repo.lease_next(&[ResearchJobKind::DatasetBuild], &worker, lease_expires)
+        .await
+        .expect("lease root")
+        .expect("root job");
+    repo.finalize(
+        &root_identity.job_id(),
+        &worker,
+        ResearchJobFinalization::succeeded(None, None, None),
+    )
+    .await
+    .expect("finalize root");
+
+    assert!(matches!(
+        repo.enqueue(retry.clone()).await.expect("enqueue retry"),
+        ResearchJobEnqueueOutcome::Inserted(ref info)
+            if info.parent_job_id == Some(root_identity.job_id())
+                && info.job_id == retry_identity.job_id()
+    ));
+    assert!(matches!(
+        repo.enqueue(retry).await.expect("exact retry enqueue"),
+        ResearchJobEnqueueOutcome::AlreadyPresent(ref info)
+            if info.job_id == retry_identity.job_id()
+    ));
+
+    for invalid_identity in [
+        FeedbackStageJobIdentity::try_retry(
+            fixture.cycle_id,
+            FeedbackStage::Drift,
+            root_identity.job_id(),
+        )
+        .expect("freeze cross-stage retry"),
+        FeedbackStageJobIdentity::try_retry(
+            fixture.second_cycle_id,
+            FeedbackStage::Coverage,
+            root_identity.job_id(),
+        )
+        .expect("freeze cross-cycle retry"),
+    ] {
+        let error = repo
+            .enqueue(
+                new_job(ResearchJobId::from_v7())
+                    .try_bind_feedback(invalid_identity)
+                    .expect("bind invalid retry identity"),
+            )
+            .await
+            .expect_err("retry parent must own the same cycle and stage");
+        assert!(matches!(
+            error,
+            StorageError::StateConflict {
+                entity: owner,
+                ..
+            } if owner == entity::QUANT_RESEARCH_JOB
+        ));
+    }
+
+    feedback_event(&fixture, fixture.cycle_id, root_identity.job_id())
+        .into_active_model()
+        .insert(&db)
+        .await
+        .expect("same-cycle stage event links the root job");
+    let event_error = feedback_event(&fixture, fixture.second_cycle_id, root_identity.job_id())
+        .into_active_model()
+        .insert(&db)
+        .await
+        .expect_err("stage event cannot cross feedback-cycle lineage");
+    assert!(
+        event_error
+            .to_string()
+            .contains("fk_quant_feedback_stage_job_lineage"),
+        "unexpected stage-job lineage error: {event_error}"
+    );
 }
 
 pub async fn job_kind_match_params() {
@@ -88,10 +412,7 @@ pub async fn finalize_requires_running_owner() {
         .finalize(
             &job_id,
             &worker,
-            ResearchJobStatus::Succeeded,
-            None,
-            None,
-            None,
+            ResearchJobFinalization::succeeded(None, None, None),
         )
         .await
         .expect("finalize");
@@ -132,10 +453,10 @@ pub async fn stale_rejected_after_reclaim() {
         .finalize(
             &job_id,
             &worker_a,
-            ResearchJobStatus::Cancelled,
-            None,
-            None,
-            None,
+            ResearchJobFinalization::cancelled(ResearchJobError::new(
+                ResearchJobErrorCode::Cancelled,
+                "stale worker cancellation",
+            )),
         )
         .await
         .expect_err("stale owner must not finalize");
@@ -155,10 +476,7 @@ pub async fn stale_rejected_after_reclaim() {
         .finalize(
             &job_id,
             &worker_b,
-            ResearchJobStatus::Succeeded,
-            None,
-            None,
-            None,
+            ResearchJobFinalization::succeeded(None, None, None),
         )
         .await
         .expect("current owner finalize");
@@ -229,10 +547,8 @@ pub async fn requeue_inflight_quarantines_cap() {
     let db = pool.connection().clone();
     let repo = PgResearchJobRepository::new(db);
     let job_id = ResearchJobId::from_v7();
-    // A job that has already exhausted its recovery budget.
     let mut job = new_job(job_id);
-    job.recovery_attempt = 3;
-    job.max_recovery_attempts = 3;
+    job.max_recovery_attempts = 1;
     repo.enqueue(job).await.expect("enqueue");
 
     let worker = WorkerId::from_v7();
@@ -241,6 +557,17 @@ pub async fn requeue_inflight_quarantines_cap() {
         .await
         .expect("lease")
         .expect("job");
+    let first = repo
+        .requeue_inflight(&worker)
+        .await
+        .expect("consume recovery budget");
+    assert_eq!(first.requeued, 1);
+    assert_eq!(first.quarantined, 0);
+
+    repo.lease_next(&[ResearchJobKind::DatasetBuild], &worker, lease_expires)
+        .await
+        .expect("re-lease")
+        .expect("requeued job");
 
     let outcome = repo.requeue_inflight(&worker).await.expect("requeue");
     assert_eq!(outcome.requeued, 0);
@@ -250,6 +577,7 @@ pub async fn requeue_inflight_quarantines_cap() {
     );
     let row = repo.find_by_id(&job_id).await.expect("find").expect("row");
     assert_eq!(row.status, ResearchJobStatus::Failed);
+    assert_eq!(row.recovery_attempt, 1);
     assert!(row.lease_owner.is_none());
     assert!(
         row.error_json.is_some(),
@@ -274,10 +602,7 @@ pub async fn double_finalize_returns_conflict() {
     repo.finalize(
         &job_id,
         &worker,
-        ResearchJobStatus::Succeeded,
-        None,
-        None,
-        None,
+        ResearchJobFinalization::succeeded(None, None, None),
     )
     .await
     .expect("first finalize");
@@ -286,10 +611,10 @@ pub async fn double_finalize_returns_conflict() {
         .finalize(
             &job_id,
             &worker,
-            ResearchJobStatus::Failed,
-            None,
-            None,
-            None,
+            ResearchJobFinalization::failed(ResearchJobError::new(
+                ResearchJobErrorCode::ExecutionFailed,
+                "second finalization",
+            )),
         )
         .await
         .expect_err("second finalize");

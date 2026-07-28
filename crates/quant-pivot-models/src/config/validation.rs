@@ -135,6 +135,7 @@ impl DeployConfig {
             });
         }
 
+        validate_research_jobs(self, &mut report);
         validate_databases(self, &mut report);
         validate_cache_redis(self, &mut report);
         validate_model_serving_registry(self, &mut report);
@@ -153,6 +154,146 @@ impl DeployConfig {
         validate_domain_sources(self, &mut report);
 
         report
+    }
+}
+
+fn validate_research_jobs(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
+    let jobs = &deploy.quant.research_jobs;
+    if !(1..=32).contains(&jobs.global_concurrency) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.global_concurrency",
+            detail: "must be between 1 and 32 inclusive".to_owned(),
+        });
+    }
+    let kind_caps = [
+        ("dataset_build_concurrency", jobs.dataset_build_concurrency),
+        ("model_train_concurrency", jobs.model_train_concurrency),
+        ("backtest_concurrency", jobs.backtest_concurrency),
+        (
+            "bias_table_fit_concurrency",
+            jobs.bias_table_fit_concurrency,
+        ),
+        (
+            "model_calibration_fit_concurrency",
+            jobs.model_calibration_fit_concurrency,
+        ),
+        ("cpcv_backtest_concurrency", jobs.cpcv_backtest_concurrency),
+        (
+            "feature_parity_concurrency",
+            jobs.feature_parity_concurrency,
+        ),
+        (
+            "feedback_coverage_concurrency",
+            jobs.feedback_coverage_concurrency,
+        ),
+        (
+            "feedback_drift_concurrency",
+            jobs.feedback_drift_concurrency,
+        ),
+        (
+            "feedback_learning_concurrency",
+            jobs.feedback_learning_concurrency,
+        ),
+        (
+            "trade_policy_fit_concurrency",
+            jobs.trade_policy_fit_concurrency,
+        ),
+        (
+            "trade_policy_validation_concurrency",
+            jobs.trade_policy_validation_concurrency,
+        ),
+    ];
+    for (field, cap) in kind_caps {
+        if cap == 0 || cap > jobs.global_concurrency {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "quant.research_jobs.kind_concurrency",
+                detail: format!("{field} must be positive and no greater than global_concurrency"),
+            });
+        }
+    }
+    if jobs.feedback_cycle_concurrency == 0
+        || jobs.feedback_cycle_concurrency > jobs.global_concurrency
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.feedback_cycle_concurrency",
+            detail: "must be positive and no greater than global_concurrency".to_owned(),
+        });
+    }
+    if !(3..=3_600).contains(&jobs.lease_ttl_secs) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.lease_ttl_secs",
+            detail: "must be between 3 and 3600 seconds inclusive".to_owned(),
+        });
+    }
+    let heartbeat_valid = jobs.lease_ttl_secs.try_into().is_ok_and(|lease_ttl: u64| {
+        jobs.heartbeat_secs > 0 && jobs.heartbeat_secs <= lease_ttl / 3
+    });
+    if !heartbeat_valid {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.heartbeat_secs",
+            detail: "must be positive and no greater than lease_ttl_secs / 3".to_owned(),
+        });
+    }
+    if !(1..=300).contains(&jobs.poll_secs) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.poll_secs",
+            detail: "must be between 1 and 300 seconds inclusive".to_owned(),
+        });
+    }
+    if !(0..=32).contains(&jobs.max_recovery_attempts) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.max_recovery_attempts",
+            detail: "must be between 0 and 32 inclusive".to_owned(),
+        });
+    }
+    if jobs.max_spine_samples == 0 || jobs.max_spine_samples > 100_000_000 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.max_spine_samples",
+            detail: "must be between 1 and 100000000 inclusive".to_owned(),
+        });
+    }
+    if jobs.plan_sample_slices > 64 || !(1..=10_000).contains(&jobs.plan_sample_markets) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.plan_sample_budget",
+            detail: "plan_sample_slices must be <= 64 and plan_sample_markets within 1..=10000"
+                .to_owned(),
+        });
+    }
+    if !(50..=60_000).contains(&jobs.progress_min_interval_ms) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.progress_min_interval_ms",
+            detail: "must be between 50 and 60000 ms inclusive".to_owned(),
+        });
+    }
+    let stuck_valid = jobs.lease_ttl_secs.try_into().is_ok_and(|lease_ttl: u64| {
+        jobs.feedback_stuck_secs > lease_ttl && jobs.feedback_stuck_secs <= 2_592_000
+    });
+    if !stuck_valid {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.feedback_stuck_secs",
+            detail: "must be greater than lease_ttl_secs and no greater than 30 days".to_owned(),
+        });
+    }
+    if !(1..=jobs.shutdown_drain_secs).contains(&jobs.feedback_alert_timeout_secs) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.feedback_alert_timeout_secs",
+            detail: "must be positive and no greater than shutdown_drain_secs".to_owned(),
+        });
+    }
+    if jobs.feedback_alert_dedupe_secs == 0
+        || jobs.feedback_alert_dedupe_secs < jobs.feedback_alert_timeout_secs
+        || jobs.feedback_alert_dedupe_secs > 86_400
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.feedback_alert_dedupe_secs",
+            detail: "must be at least the alert timeout and no greater than one day".to_owned(),
+        });
+    }
+    if !(1..=3).contains(&jobs.shutdown_drain_secs) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quant.research_jobs.shutdown_drain_secs",
+            detail: "must be between 1 and 3 seconds inclusive".to_owned(),
+        });
     }
 }
 
@@ -837,6 +978,39 @@ mod tests {
         let deploy = DeployConfig::default();
         let report = deploy.validate_deploy_common();
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
+    }
+
+    #[test]
+    fn research_job_budgets_bounded() {
+        let mut deploy = DeployConfig::default();
+        let jobs = &mut deploy.quant.research_jobs;
+        jobs.global_concurrency = 0;
+        jobs.feedback_cycle_concurrency = 0;
+        jobs.heartbeat_secs = jobs.lease_ttl_secs.unsigned_abs();
+        jobs.feedback_stuck_secs = 1;
+        jobs.feedback_alert_timeout_secs = 0;
+        jobs.feedback_alert_dedupe_secs = 0;
+        jobs.shutdown_drain_secs = 5;
+
+        let report = deploy.validate_deploy_common();
+        for field in [
+            "global_concurrency",
+            "feedback_cycle_concurrency",
+            "heartbeat_secs",
+            "feedback_stuck_secs",
+            "feedback_alert_timeout_secs",
+            "feedback_alert_dedupe_secs",
+            "shutdown_drain_secs",
+        ] {
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .any(|error| error.to_string().contains(field)),
+                "invalid research-job field {field} was accepted: {:?}",
+                report.errors
+            );
+        }
     }
 
     #[test]

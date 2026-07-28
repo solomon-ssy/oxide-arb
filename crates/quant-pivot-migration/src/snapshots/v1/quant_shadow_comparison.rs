@@ -2,6 +2,8 @@
 
 use sea_orm::entity::prelude::*;
 
+use super::sea_orm_active_enums::{QpMarketCategory, QpModelWeightSource};
+
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_shadow_comparison")]
@@ -10,7 +12,19 @@ pub struct Model {
     pub shadow_comparison_id: Uuid,
     pub active_model_version_id: Uuid,
     pub shadow_model_version_id: Uuid,
-    pub weight_source: super::sea_orm_active_enums::QpModelWeightSource,
+    #[sea_orm(column_type = "Text")]
+    pub active_serving_contract_hash: String,
+    #[sea_orm(column_type = "Text")]
+    pub shadow_serving_contract_hash: String,
+    #[sea_orm(column_type = "Text")]
+    pub research_profile_artifact_id: String,
+    #[sea_orm(column_type = r#"custom("qp_market_category")"#)]
+    pub category_scope: Option<QpMarketCategory>,
+    pub decision_policy_snapshot_id: Uuid,
+    #[sea_orm(column_type = "Text")]
+    pub decision_policy_snapshot_hash: String,
+    pub policy_bundle_generation: i64,
+    pub weight_source: QpModelWeightSource,
     pub decision_at: DateTimeWithTimeZone,
     pub topn_overlap: Decimal,
     #[sea_orm(column_type = "JsonBinary")]
@@ -41,6 +55,14 @@ pub struct Model {
         on_delete = "NoAction"
     )]
     pub quant_model_version_1: BelongsTo<super::quant_model_version::Entity>,
+    #[sea_orm(
+        belongs_to,
+        from = "research_profile_artifact_id",
+        to = "research_profile_artifact_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub research_profile_artifact: BelongsTo<super::research_profile_artifact::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

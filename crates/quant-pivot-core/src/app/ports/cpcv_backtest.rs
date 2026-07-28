@@ -7,7 +7,7 @@ use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        api::{BacktestPathSetView, RunCpcvBacktestRequest},
+        api::{BacktestPathSetView, CpcvBacktestJobParams},
         ports::CpcvBacktestPort,
         quant::{
             BacktestPathSetInfo, JobProgressSink, ModelRunInfo, ModelVersionInfo,
@@ -21,8 +21,8 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    BacktestPathSetRepository, CalibrationArtifactRepository, ModelRegistryRepository,
-    ModelRunRepository,
+    BacktestPathSetRepository, CalibrationArtifactRepository, CpcvPathSetCommit,
+    ModelRegistryRepository, ModelRunRepository,
 };
 use quant_pivot_research::artifact::ArtifactStore;
 use tokio_util::sync::CancellationToken;
@@ -51,6 +51,17 @@ pub struct CoreCpcvBacktestPort {
     serving_preimages: Arc<ModelServingPreimageService>,
 }
 
+/// Explicit dependencies for the canonical CPCV execution adapter.
+pub struct CoreCpcvBacktestPortDeps {
+    pub compute: Arc<ComputeExecutor>,
+    pub artifact_store: Arc<dyn ArtifactStore>,
+    pub path_set_repo: Arc<dyn BacktestPathSetRepository>,
+    pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
+    pub model_run_repo: Arc<dyn ModelRunRepository>,
+    pub bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
+    pub serving_preimages: Arc<ModelServingPreimageService>,
+}
+
 struct ResolvedCpcvRun {
     version: ModelVersionInfo,
     service: CpcvBacktestService,
@@ -58,10 +69,24 @@ struct ResolvedCpcvRun {
 }
 
 impl CoreCpcvBacktestPort {
+    /// Assemble the port from explicit, already-owned infrastructure.
+    #[must_use]
+    pub fn new(deps: CoreCpcvBacktestPortDeps) -> Self {
+        Self {
+            compute: deps.compute,
+            artifact_store: deps.artifact_store,
+            path_set_repo: deps.path_set_repo,
+            model_registry_repo: deps.model_registry_repo,
+            model_run_repo: deps.model_run_repo,
+            bias_table_repo: deps.bias_table_repo,
+            serving_preimages: deps.serving_preimages,
+        }
+    }
+
     /// Assemble the port from an already-wired research bundle.
     #[must_use]
     pub fn from_research(research: &ResearchBundle) -> Self {
-        Self {
+        Self::new(CoreCpcvBacktestPortDeps {
             compute: Arc::clone(&research.compute),
             artifact_store: Arc::clone(&research.artifact_store),
             path_set_repo: Arc::clone(&research.backtest_path_set_repo),
@@ -69,7 +94,7 @@ impl CoreCpcvBacktestPort {
             model_run_repo: Arc::clone(&research.model_run_repo),
             bias_table_repo: Arc::clone(&research.calibration_artifact_repo),
             serving_preimages: Arc::clone(&research.serving_preimages),
-        }
+        })
     }
 
     async fn service_for(
@@ -216,7 +241,7 @@ impl CoreCpcvBacktestPort {
             .policy_snapshot()
             .decision_policy_snapshot_id;
         self.model_run_repo
-            .create(NewModelRun {
+            .start_exact(NewModelRun {
                 model_run_id: *model_run_id,
                 run_kind: ModelRunKind::Cpcv,
                 model_version_id: Some(resolved.version.model_version_id),
@@ -285,7 +310,10 @@ impl CoreCpcvBacktestPort {
         })?;
         let info = self
             .path_set_repo
-            .create(new_path_set)
+            .commit_cpcv(CpcvPathSetCommit {
+                path_set: new_path_set,
+                input_hash: resolved.prepared.input_hash(),
+            })
             .await
             .map_err(QuantError::from)?;
 
@@ -297,13 +325,12 @@ impl CoreCpcvBacktestPort {
     async fn execute_cpcv_job(
         &self,
         resolved: ResolvedCpcvRun,
+        model_run_id: ModelRunId,
         path_set_id: BacktestPathSetId,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<BacktestPathSetView> {
-        let model_version_id = resolved.version.model_version_id;
         let coord_search_effective_n = Self::coord_search_effective_n(&resolved.version);
-        let model_run_id = ModelRunId::from_v7();
         let cpcv_input = CpcvBacktestInput::from_prepared(
             &resolved.prepared,
             model_run_id,
@@ -335,10 +362,6 @@ impl CoreCpcvBacktestPort {
             }
         };
 
-        self.model_run_repo
-            .succeed(&model_run_id, view.path_set_hash, Some(model_version_id))
-            .await
-            .map_err(QuantError::from)?;
         Ok(view)
     }
 
@@ -458,11 +481,15 @@ fn verify_path_set_run(
 impl CpcvBacktestPort for CoreCpcvBacktestPort {
     async fn run(
         &self,
-        model_version_id: ModelVersionId,
-        request: RunCpcvBacktestRequest,
+        params: CpcvBacktestJobParams,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<BacktestPathSetView> {
+        let CpcvBacktestJobParams {
+            model_version_id,
+            model_run_id,
+            request,
+        } = params;
         let resolved = Box::pin(self.resolve_run(
             &model_version_id,
             &request.training_dataset_id,
@@ -472,12 +499,21 @@ impl CpcvBacktestPort for CoreCpcvBacktestPort {
         if let Some(path_set_id) = &request.path_set_id
             && let Some(view) = self.find_version_path_set(path_set_id, &resolved).await?
         {
+            if view.model_run_id != model_run_id {
+                return Err(ResearchError::ValidationMethodology {
+                    detail: format!(
+                        "cached CPCV path set {path_set_id} belongs to run {}, not exact run {model_run_id}",
+                        view.model_run_id
+                    ),
+                }
+                .into());
+            }
             return Ok(view);
         }
         let path_set_id = request
             .path_set_id
             .unwrap_or_else(BacktestPathSetId::from_v7);
-        Box::pin(self.execute_cpcv_job(resolved, path_set_id, progress, cancel)).await
+        Box::pin(self.execute_cpcv_job(resolved, model_run_id, path_set_id, progress, cancel)).await
     }
 
     async fn find_path_set(

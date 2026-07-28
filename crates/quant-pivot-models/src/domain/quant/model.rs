@@ -387,6 +387,35 @@ info_from_model!(ModelRunInfo, crate::entities::quant_model_run::Model, {
     error_code, error_message, started_at, finished_at,
 });
 
+impl ModelRunInfo {
+    /// Compare the immutable run subject used by exact durable-job recovery.
+    ///
+    /// A Training run begins before its model-version row exists, so its
+    /// subject is `None` while Running and is atomically enriched with the
+    /// preassigned version only when the training commit succeeds. Every
+    /// other run kind has an already-existing model subject and must match it
+    /// exactly at start and terminal read-back.
+    #[must_use]
+    pub fn matches_new(&self, run: &NewModelRun) -> bool {
+        self.model_run_id == run.model_run_id
+            && self.run_kind == run.run_kind
+            && self.matches_model_subject(run)
+            && self.decision_policy_snapshot_id == run.decision_policy_snapshot_id
+            && self.market_selection_id == run.market_selection_id
+            && self.window_start == run.window_start
+            && self.window_end == run.window_end
+            && self.input_hash == run.input_hash
+    }
+
+    fn matches_model_subject(&self, run: &NewModelRun) -> bool {
+        self.model_version_id == run.model_version_id
+            || (self.run_kind == ModelRunKind::Training
+                && self.status == ModelRunStatus::Succeeded
+                && run.model_version_id.is_none()
+                && self.model_version_id.is_some())
+    }
+}
+
 /// Insert payload for `quant_model_run`.
 ///
 /// Contains immutable run lineage only. `PostgreSQL` owns the initial `Running`

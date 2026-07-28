@@ -21,7 +21,7 @@ use quant_pivot_models::{
             ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
         },
         quant::{
-            CalibrationArtifactPayload, JobProgressSink, ModelScoreCalibrationCommit,
+            CalibrationArtifactPayload, JobProgressSink, ModelRunInfo, ModelScoreCalibrationCommit,
             NewCalibrationArtifact,
         },
         query::TimeWindow,
@@ -30,10 +30,14 @@ use quant_pivot_models::{
         CalibrationKind, CalibrationMethod, DatasetPurpose, ModelRunErrorCode, ModelRunKind,
         ModelRunStatus, TrainingDatasetStatus,
     },
+    hashing::CanonicalDigest,
     types::{
-        CalibrationArtifactId, DecisionPolicySnapshotId, ModelVersionId, PayoutRatio,
-        TrainingDatasetId,
-        calibration::{MODEL_SCORE_CALIBRATION_FORMAT_VERSION, ModelScoreCalibrationPayload},
+        CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
+        PayoutRatio, TrainingDatasetId,
+        calibration::{
+            MODEL_SCORE_CALIBRATION_FORMAT_VERSION, ModelScoreCalibrationFitContract,
+            ModelScoreCalibrationPayload,
+        },
         model_serving::ModelServingPolicySnapshotBinding,
     },
 };
@@ -41,11 +45,15 @@ use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, ModelRegistryRepository, ModelRunRepository, PolicyRepository,
     TrainingDatasetRepository,
 };
-use quant_pivot_research::model::{
-    IsotonicCalibrator, PlattCalibrator, ProbabilityCalibrator, ReliabilitySample,
-    compute_reliability,
+use quant_pivot_research::{
+    backtest::SampleOutcome,
+    model::{
+        IsotonicCalibrator, PlattCalibrator, ProbabilityCalibrator, ReliabilitySample,
+        compute_reliability,
+    },
 };
 use rust_decimal::Decimal;
+use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -60,6 +68,9 @@ use crate::{
     },
 };
 
+const INSUFFICIENT_CALIBRATION_DOMAIN: &str = "quant-pivot/model-score-calibration-insufficient";
+const INSUFFICIENT_CALIBRATION_VERSION: u32 = 1;
+
 /// Governed knobs the fit needs from the frozen `model.calibration` config
 /// section, resolved from the pinned runtime-config version at
 /// fit time — deterministic on replay, mirrors the bias-table fit's
@@ -69,6 +80,206 @@ struct CalibrationFitPolicy {
     min_samples_isotonic: usize,
     embargo_secs: i64,
     ci_confidence: Decimal,
+}
+
+#[derive(Serialize)]
+struct InsufficientCalibrationCommitment<'a> {
+    fit_contract: &'a ModelScoreCalibrationFitContract,
+    fit_window: TimeWindow,
+    method: CalibrationMethod,
+    calibration_split_hash: ContentHash,
+    sample_count: u64,
+    total_sample_count: u64,
+    minimum_sample_count: u64,
+}
+
+struct CalibrationFitSamples<'a> {
+    binary: Vec<&'a SampleOutcome>,
+    split_hash: ContentHash,
+    sample_count: u64,
+    total_sample_count: u64,
+    minimum_sample_count: u64,
+}
+
+impl<'a> CalibrationFitSamples<'a> {
+    fn new(
+        request: &FitModelCalibratorRequest,
+        policy: &CalibrationFitPolicy,
+        evidence: &'a CalibrationReplayEvidence,
+    ) -> QuantResult<Self> {
+        let binary = evidence
+            .samples
+            .iter()
+            .filter(|sample| {
+                sample.token_payout_ratio == PayoutRatio::ZERO
+                    || sample.token_payout_ratio == PayoutRatio::ONE
+            })
+            .collect::<Vec<_>>();
+        let minimum = match request.method {
+            CalibrationMethod::Isotonic => policy.min_samples_isotonic,
+            CalibrationMethod::Platt => 10,
+        };
+        let sample_count =
+            u64::try_from(binary.len()).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("calibration sample count exceeds u64: {error}"),
+            })?;
+        let total_sample_count =
+            u64::try_from(evidence.samples.len()).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("total calibration sample count exceeds u64: {error}"),
+            })?;
+        let minimum_sample_count =
+            u64::try_from(minimum).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("calibration sample floor exceeds u64: {error}"),
+            })?;
+        let split_hash = calibration_split_hash(
+            &evidence.fit_window,
+            binary.iter().map(|sample| {
+                CalibrationSampleKey::for_instrument(
+                    sample.market_id.clone(),
+                    sample.token_id.clone(),
+                    sample.decision_at,
+                )
+            }),
+        )?;
+        Ok(Self {
+            binary,
+            split_hash,
+            sample_count,
+            total_sample_count,
+            minimum_sample_count,
+        })
+    }
+
+    const fn is_insufficient(&self) -> bool {
+        self.sample_count < self.minimum_sample_count
+    }
+
+    fn insufficient_hash(
+        &self,
+        evidence: &CalibrationReplayEvidence,
+        method: CalibrationMethod,
+    ) -> QuantResult<ContentHash> {
+        CanonicalDigest::content_hash_typed(
+            INSUFFICIENT_CALIBRATION_DOMAIN,
+            INSUFFICIENT_CALIBRATION_VERSION,
+            &InsufficientCalibrationCommitment {
+                fit_contract: &evidence.fit_contract,
+                fit_window: evidence.fit_window,
+                method,
+                calibration_split_hash: self.split_hash,
+                sample_count: self.sample_count,
+                total_sample_count: self.total_sample_count,
+                minimum_sample_count: self.minimum_sample_count,
+            },
+        )
+        .map_err(Into::into)
+    }
+
+    fn fit_payload(
+        &self,
+        method: CalibrationMethod,
+        policy: &CalibrationFitPolicy,
+        fit_contract: &ModelScoreCalibrationFitContract,
+    ) -> QuantResult<ModelScoreCalibrationPayload> {
+        let scores = self
+            .binary
+            .iter()
+            .map(|sample| sample.composite_score.inner())
+            .collect::<Vec<_>>();
+        let outcomes = self
+            .binary
+            .iter()
+            .map(|sample| sample.token_payout_ratio == PayoutRatio::ONE)
+            .collect::<Vec<_>>();
+        let mapping = match method {
+            CalibrationMethod::Isotonic => {
+                IsotonicCalibrator::new(policy.min_samples_isotonic).fit(&scores, &outcomes)?
+            }
+            CalibrationMethod::Platt => PlattCalibrator.fit(&scores, &outcomes)?,
+        };
+        let reliability_samples = self
+            .binary
+            .iter()
+            .zip(&outcomes)
+            .map(|(sample, &won)| ReliabilitySample {
+                score: sample.composite_score.inner(),
+                won,
+                max_adverse_excursion_bps: sample.max_adverse_excursion_bps,
+            })
+            .collect::<Vec<_>>();
+        let reliability =
+            compute_reliability(&mapping, &reliability_samples, policy.ci_confidence)?;
+        let payload = ModelScoreCalibrationPayload {
+            format_version: MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
+            fit_contract: fit_contract.clone(),
+            mapping,
+            reliability,
+        };
+        payload.validate(self.sample_count).map_err(|detail| {
+            ResearchError::InvalidModelArtifact {
+                detail: format!("model-score calibration payload is invalid: {detail}"),
+            }
+        })?;
+        Ok(payload)
+    }
+}
+
+struct CalibrationRunExpectation {
+    model_run_id: ModelRunId,
+    model_version_id: ModelVersionId,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    window: TimeWindow,
+    input_hash: ContentHash,
+    output_hash: ContentHash,
+}
+
+impl CalibrationRunExpectation {
+    const fn new(
+        request: &FitModelCalibratorRequest,
+        evidence: &CalibrationReplayEvidence,
+        output_hash: ContentHash,
+    ) -> Self {
+        Self {
+            model_run_id: evidence.model_run_id,
+            model_version_id: request.model_version_id,
+            decision_policy_snapshot_id: evidence
+                .fit_contract
+                .policy_snapshot
+                .decision_policy_snapshot_id,
+            window: evidence.fit_window,
+            input_hash: evidence.fit_contract.calibration_dataset.dataset_hash,
+            output_hash,
+        }
+    }
+
+    fn validate(&self, terminal: &ModelRunInfo) -> QuantResult<()> {
+        let identity_matches = terminal.model_run_id == self.model_run_id
+            && terminal.run_kind == ModelRunKind::Calibration
+            && terminal.model_version_id == Some(self.model_version_id);
+        let preimage_matches = terminal.decision_policy_snapshot_id
+            == self.decision_policy_snapshot_id
+            && terminal.market_selection_id.is_none()
+            && terminal.window_start == self.window.from
+            && terminal.window_end == self.window.to
+            && terminal.input_hash == self.input_hash;
+        let terminal_matches = terminal.status == ModelRunStatus::Succeeded
+            && terminal.output_hash == Some(self.output_hash)
+            && terminal.error_code.is_none()
+            && terminal.error_message.is_none()
+            && terminal
+                .finished_at
+                .is_some_and(|finished_at| finished_at >= terminal.started_at);
+        if !identity_matches || !preimage_matches || !terminal_matches {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "calibration terminal run {} differs from its exact producer preimage",
+                    terminal.model_run_id
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
 }
 
 /// Core model-score calibrator fitter.
@@ -293,6 +504,7 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
         cancel: CancellationToken,
     ) -> QuantResult<ModelCalibrationFitOutcome> {
         let ModelCalibrationFitJobParams {
+            model_run_id,
             request,
             decision_policy_snapshot_id,
         } = params;
@@ -300,6 +512,7 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
         self.validate_split(&request.model_version_id, &request, &policy)
             .await?;
         let evidence = Box::pin(self.harvest_calibration_samples(
+            model_run_id,
             &request,
             &decision_policy_snapshot_id,
             Arc::clone(&progress),
@@ -431,6 +644,7 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
 impl ModelCalibrationFitService {
     async fn harvest_calibration_samples(
         &self,
+        model_run_id: ModelRunId,
         request: &FitModelCalibratorRequest,
         decision_policy_snapshot_id: &DecisionPolicySnapshotId,
         progress: Arc<dyn JobProgressSink>,
@@ -445,6 +659,7 @@ impl ModelCalibrationFitService {
             .await?;
         let evidence = Box::pin(backtest.run_for_calibration(
             CalibrationReplayInput {
+                model_run_id,
                 source_model: request.model_version_id,
                 calibration_dataset: request.calibration_dataset_id,
                 policy_snapshot: *decision_policy_snapshot_id,
@@ -462,93 +677,55 @@ impl ModelCalibrationFitService {
         policy: &CalibrationFitPolicy,
         evidence: &CalibrationReplayEvidence,
     ) -> QuantResult<ModelCalibrationFitOutcome> {
-        let samples = &evidence.samples;
-        let binary_samples = samples
-            .iter()
-            .filter(|sample| {
-                sample.token_payout_ratio == PayoutRatio::ZERO
-                    || sample.token_payout_ratio == PayoutRatio::ONE
-            })
-            .collect::<Vec<_>>();
-        let min_samples = match request.method {
-            CalibrationMethod::Isotonic => policy.min_samples_isotonic,
-            CalibrationMethod::Platt => 10,
-        };
-        if binary_samples.len() < min_samples {
-            return Err(QuantError::from(ResearchError::DatasetBuild {
-                detail: format!(
-                    "calibration split has {} binary-payout samples ({} total), below the {} floor \
-                     for method `{}`",
-                    binary_samples.len(),
-                    samples.len(),
-                    min_samples,
-                    request.method.as_str()
-                ),
-            }));
+        let samples = CalibrationFitSamples::new(request, policy, evidence)?;
+        if samples.is_insufficient() {
+            return self.commit_insufficient(request, evidence, &samples).await;
         }
+        self.commit_calibrated(request, policy, evidence, &samples)
+            .await
+    }
 
-        let scores: Vec<Decimal> = binary_samples
-            .iter()
-            .map(|sample| sample.composite_score.inner())
-            .collect();
-        let outcomes: Vec<bool> = binary_samples
-            .iter()
-            .map(|sample| sample.token_payout_ratio == PayoutRatio::ONE)
-            .collect();
+    async fn commit_insufficient(
+        &self,
+        request: &FitModelCalibratorRequest,
+        evidence: &CalibrationReplayEvidence,
+        samples: &CalibrationFitSamples<'_>,
+    ) -> QuantResult<ModelCalibrationFitOutcome> {
+        let outcome_hash = samples.insufficient_hash(evidence, request.method)?;
+        let terminal = self
+            .model_run_repo
+            .succeed_exact(
+                &evidence.model_run_id,
+                outcome_hash,
+                Some(request.model_version_id),
+            )
+            .await?;
+        CalibrationRunExpectation::new(request, evidence, outcome_hash).validate(&terminal)?;
+        Ok(ModelCalibrationFitOutcome::Insufficient {
+            sample_count: samples.sample_count,
+            total_sample_count: samples.total_sample_count,
+            minimum_sample_count: samples.minimum_sample_count,
+            outcome_hash,
+        })
+    }
 
-        let mapping = match request.method {
-            CalibrationMethod::Isotonic => {
-                IsotonicCalibrator::new(policy.min_samples_isotonic).fit(&scores, &outcomes)?
-            }
-            CalibrationMethod::Platt => PlattCalibrator.fit(&scores, &outcomes)?,
-        };
-
-        let reliability_samples: Vec<ReliabilitySample> = binary_samples
-            .iter()
-            .zip(&outcomes)
-            .map(|(sample, &won)| ReliabilitySample {
-                score: sample.composite_score.inner(),
-                won,
-                max_adverse_excursion_bps: sample.max_adverse_excursion_bps,
-            })
-            .collect();
-        let reliability =
-            compute_reliability(&mapping, &reliability_samples, policy.ci_confidence)?;
-
-        let split_hash = calibration_split_hash(
-            &evidence.fit_window,
-            binary_samples.iter().map(|sample| {
-                CalibrationSampleKey::for_instrument(
-                    sample.market_id.clone(),
-                    sample.token_id.clone(),
-                    sample.decision_at,
-                )
-            }),
-        )?;
-
-        let payload = ModelScoreCalibrationPayload {
-            format_version: MODEL_SCORE_CALIBRATION_FORMAT_VERSION,
-            fit_contract: evidence.fit_contract.clone(),
-            mapping,
-            reliability,
-        };
-        let sample_count =
-            i64::try_from(binary_samples.len()).map_err(|error| ResearchError::DatasetBuild {
+    async fn commit_calibrated(
+        &self,
+        request: &FitModelCalibratorRequest,
+        policy: &CalibrationFitPolicy,
+        evidence: &CalibrationReplayEvidence,
+        samples: &CalibrationFitSamples<'_>,
+    ) -> QuantResult<ModelCalibrationFitOutcome> {
+        let payload = samples.fit_payload(request.method, policy, &evidence.fit_contract)?;
+        let sample_count_i64 =
+            i64::try_from(samples.sample_count).map_err(|error| ResearchError::DatasetBuild {
                 detail: format!("calibration sample count exceeds Postgres bigint: {error}"),
             })?;
-        let outcome_sample_count =
-            u64::try_from(binary_samples.len()).map_err(|error| ResearchError::DatasetBuild {
-                detail: format!("calibration sample count exceeds u64: {error}"),
-            })?;
-        payload.validate(outcome_sample_count).map_err(|detail| {
-            ResearchError::InvalidModelArtifact {
-                detail: format!("model-score calibration payload is invalid: {detail}"),
-            }
-        })?;
         // Self-contained hash (fit_window + split_hash + the full,
         // provenance-carrying payload) — recomputable by the repository and
         // loader from the persisted row alone.
-        let content_hash = model_score_content_hash(&evidence.fit_window, &split_hash, &payload)?;
+        let content_hash =
+            model_score_content_hash(&evidence.fit_window, &samples.split_hash, &payload)?;
 
         let artifact_id = CalibrationArtifactId::from_v7();
         let artifact_payload = CalibrationArtifactPayload::ModelScore(Box::new(payload));
@@ -560,10 +737,10 @@ impl ModelCalibrationFitService {
                     artifact_id,
                     kind: CalibrationKind::ModelScore,
                     content_hash,
-                    calibration_split_hash: split_hash,
+                    calibration_split_hash: samples.split_hash,
                     fit_window_start: evidence.fit_window.from,
                     fit_window_end: evidence.fit_window.to,
-                    sample_count,
+                    sample_count: sample_count_i64,
                     payload: artifact_payload.clone(),
                     active: false,
                 },
@@ -576,43 +753,25 @@ impl ModelCalibrationFitService {
         let identity_matches = created.kind == CalibrationKind::ModelScore
             && created.content_hash == content_hash
             && !created.active;
-        let evidence_matches = created.calibration_split_hash == split_hash
+        let evidence_matches = created.calibration_split_hash == samples.split_hash
             && created.fit_window_start == evidence.fit_window.from
             && created.fit_window_end == evidence.fit_window.to
-            && created.sample_count == sample_count
+            && created.sample_count == sample_count_i64
             && created.payload == artifact_payload;
-        let terminal_matches = terminal.model_run_id == evidence.model_run_id
-            && terminal.run_kind == ModelRunKind::Calibration
-            && terminal.model_version_id == Some(request.model_version_id)
-            && terminal.decision_policy_snapshot_id
-                == evidence
-                    .fit_contract
-                    .policy_snapshot
-                    .decision_policy_snapshot_id
-            && terminal.market_selection_id.is_none()
-            && terminal.window_start == evidence.fit_window.from
-            && terminal.window_end == evidence.fit_window.to
-            && terminal.status == ModelRunStatus::Succeeded
-            && terminal.input_hash == evidence.fit_contract.calibration_dataset.dataset_hash
-            && terminal.output_hash == Some(content_hash)
-            && terminal.error_code.is_none()
-            && terminal.error_message.is_none()
-            && terminal
-                .finished_at
-                .is_some_and(|finished_at| finished_at >= terminal.started_at);
-        if !identity_matches || !evidence_matches || !terminal_matches {
+        if !identity_matches || !evidence_matches {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: format!(
-                    "persisted model-score calibration artifact {} or terminal run {} differs \
-                     from its exact producer preimage",
-                    created.artifact_id, terminal.model_run_id
+                    "persisted model-score calibration artifact {} differs from its exact \
+                     producer preimage",
+                    created.artifact_id
                 ),
             }
             .into());
         }
-        Ok(ModelCalibrationFitOutcome {
-            artifact_id: Some(created.artifact_id),
-            sample_count: outcome_sample_count,
+        CalibrationRunExpectation::new(request, evidence, content_hash).validate(terminal)?;
+        Ok(ModelCalibrationFitOutcome::Calibrated {
+            artifact_id: created.artifact_id,
+            sample_count: samples.sample_count,
         })
     }
 }

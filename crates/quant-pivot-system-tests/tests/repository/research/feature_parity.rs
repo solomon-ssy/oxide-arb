@@ -140,6 +140,8 @@ pub async fn cold_not_no_job() {
     let job_id = ResearchJobId::from_v7();
     let job = NewResearchJob {
         job_id,
+        feedback_cycle_id: None,
+        feedback_stage: None,
         kind: ResearchJobKind::FeatureParity,
         status: ResearchJobStatus::Queued,
         model_spec_id: None,

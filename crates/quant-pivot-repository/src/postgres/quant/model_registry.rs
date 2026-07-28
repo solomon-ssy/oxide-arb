@@ -13,16 +13,19 @@ use quant_pivot_models::{
         api::{ModelPickerSide, ModelSpecListQuery, ModelVersionListQuery},
         pagination::{PageWindow, Paginated},
         quant::{
-            CalibrationArtifactPayload, ModelSpecInfo, ModelVersionInfo,
-            ModelVersionParityEvidence, NewModelSpec, NewModelVersion, PublishedModelCatalogInfo,
+            CalibrationArtifactPayload, ModelGovernanceAuditDetail, ModelGovernanceAuditInfo,
+            ModelSpecInfo, ModelVersionInfo, ModelVersionParityEvidence, NewModelSpec,
+            NewModelVersion, PublishedModelCatalogInfo,
         },
     },
     entities::{
+        quant_backtest_path_set::Entity as QuantBacktestPathSetEntity,
         quant_calibration_artifact::Entity as QuantCalibrationArtifactEntity,
         quant_feature_parity_run::Entity as QuantFeatureParityRunEntity,
         quant_feature_parity_subject::{
             Column as QuantFeatureParitySubjectColumn, Entity as QuantFeatureParitySubjectEntity,
         },
+        quant_model_governance_audit::Entity as QuantModelGovernanceAuditEntity,
         quant_model_run::{
             Column as QuantModelRunColumn, Entity as QuantModelRunEntity,
             Model as QuantModelRunModel,
@@ -37,8 +40,8 @@ use quant_pivot_models::{
         model::ModelFamily,
         quant::{
             CalibrationKind, DatasetPurpose, FeatureParityRunKind, FeatureParityRunStatus,
-            ModelRunErrorCode, ModelRunKind, ModelRunStatus, ParitySubjectKind, PublicationStatus,
-            TrainingDatasetStatus,
+            ModelGovernanceAction, ModelRunErrorCode, ModelRunKind, ModelRunStatus,
+            ParitySubjectKind, PublicationStatus, TrainingDatasetStatus,
         },
     },
     types::{
@@ -59,7 +62,10 @@ use crate::{
         quant::feature_parity::PgFeatureParityRepository,
         query::{paginate_into_model, paginate_mapped},
     },
-    traits::{ModelRegistryRepository, PublishModelVersionCommit, PublishModelVersionResult},
+    traits::{
+        BindPublishPathSetCommit, ModelRegistryRepository, PublishModelVersionCommit,
+        PublishModelVersionResult,
+    },
 };
 /// Postgres-backed model registry repository.
 pub struct PgModelRegistryRepository {
@@ -1096,6 +1102,94 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         active.publish_path_set_id = ActiveValue::Set(publish_path_set_id);
         active.update(&txn).await.map_err(StorageError::from)?;
         let info = Self::require_version_info(&txn, model_version_id).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(info)
+    }
+
+    async fn commit_publish_path_binding(
+        &self,
+        commit: BindPublishPathSetCommit,
+    ) -> Result<ModelVersionInfo, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let Some(row) = Entity::find_by_id(commit.model_version_id)
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Err(StorageError::not_found(
+                QUANT_MODEL_VERSION,
+                commit.model_version_id,
+            ));
+        };
+        verify_model_version_row(&row)?;
+        let path_set = QuantBacktestPathSetEntity::find_by_id(commit.path_set_id)
+            .lock_shared()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::not_found("quant_backtest_path_set", commit.path_set_id)
+            })?;
+        let audit_valid = commit.audit.model_version_id == Some(commit.model_version_id)
+            && commit.audit.training_dataset_id == row.training_dataset_id
+            && commit.audit.action == ModelGovernanceAction::BindPublishPathSet
+            && commit.audit.before_status == row.publication_status
+            && commit.audit.after_status == row.publication_status
+            && matches!(
+                &commit.audit.detail,
+                ModelGovernanceAuditDetail::BindPublishPathSet {
+                    previous_path_set_id,
+                    path_set_id,
+                    path_set_hash,
+                } if previous_path_set_id == &commit.expected_path_set_id
+                    && path_set_id == &commit.path_set_id
+                    && path_set_hash == &path_set.path_set_hash
+            )
+            && path_set.model_version_id == commit.model_version_id;
+        if !audit_valid {
+            return Err(StorageError::invariant_violation(
+                Some("quant_model_governance_audit"),
+                "publish-path commit audit does not exactly bind model, path set, and previous value",
+            ));
+        }
+        if row.publish_path_set_id == Some(commit.path_set_id) {
+            let stored = QuantModelGovernanceAuditEntity::find_by_id(commit.audit.audit_id)
+                .one(&txn)
+                .await
+                .map_err(StorageError::from)?
+                .map(ModelGovernanceAuditInfo::from)
+                .filter(|stored| stored.matches_new(&commit.audit))
+                .ok_or_else(|| {
+                    StorageError::state_conflict(
+                        "quant_model_governance_audit",
+                        Some(&commit.audit.audit_id),
+                        "publish path is already bound without its exact audit",
+                    )
+                })?;
+            drop(stored);
+            let info = Self::require_version_info(&txn, &commit.model_version_id).await?;
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(info);
+        }
+        if row.publish_path_set_id != commit.expected_path_set_id {
+            return Err(StorageError::state_conflict(
+                QUANT_MODEL_VERSION,
+                Some(&commit.model_version_id),
+                format!(
+                    "publish path CAS expected {:?}, found {:?}",
+                    commit.expected_path_set_id, row.publish_path_set_id
+                ),
+            ));
+        }
+        let mut active = row.into_active_model();
+        active.publish_path_set_id = ActiveValue::Set(Some(commit.path_set_id));
+        active.update(&txn).await.map_err(StorageError::from)?;
+        QuantModelGovernanceAuditEntity::insert(commit.audit.into_active_model())
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        let info = Self::require_version_info(&txn, &commit.model_version_id).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(info)
     }

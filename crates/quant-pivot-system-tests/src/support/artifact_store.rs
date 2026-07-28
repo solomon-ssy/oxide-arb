@@ -1,6 +1,13 @@
 //! Artifact-store adapters owned by cross-crate system fixtures.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
@@ -46,6 +53,44 @@ pub struct ReadTamperArtifactStoreFixture {
     inner: Arc<dyn ArtifactStore>,
     target: ArtifactUri,
     replacement: Vec<u8>,
+}
+
+/// Targeted byte-read counter for proving shared immutable input reuse.
+pub struct ReadCountingArtifactStoreFixture {
+    inner: Arc<dyn ArtifactStore>,
+    reads: BTreeMap<String, AtomicUsize>,
+}
+
+impl ReadCountingArtifactStoreFixture {
+    #[must_use]
+    pub fn new(inner: Arc<dyn ArtifactStore>, targets: Vec<ArtifactUri>) -> Self {
+        Self {
+            inner,
+            reads: targets
+                .into_iter()
+                .map(|uri| (uri.as_str().to_owned(), AtomicUsize::new(0)))
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn reads(&self, uri: &ArtifactUri) -> usize {
+        self.reads
+            .get(uri.as_str())
+            .map_or(0, |count| count.load(Ordering::SeqCst))
+    }
+
+    pub fn reset(&self) {
+        for count in self.reads.values() {
+            count.store(0, Ordering::SeqCst);
+        }
+    }
+
+    fn count(&self, uri: &ArtifactUri) {
+        if let Some(count) = self.reads.get(uri.as_str()) {
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }
 
 impl ReadTamperArtifactStoreFixture {
@@ -97,6 +142,54 @@ impl ArtifactStore for ReadTamperArtifactStoreFixture {
         if uri == &self.target {
             return Ok(self.replacement.clone());
         }
+        self.inner.get(uri).await
+    }
+
+    async fn exists(&self, uri: &ArtifactUri) -> QuantResult<bool> {
+        self.inner.exists(uri).await
+    }
+
+    async fn get_by_key(&self, key: &ArtifactKey) -> QuantResult<Vec<u8>> {
+        self.inner.get_by_key(key).await
+    }
+
+    async fn exists_by_key(&self, key: &ArtifactKey) -> QuantResult<bool> {
+        self.inner.exists_by_key(key).await
+    }
+}
+
+#[async_trait]
+impl ArtifactStore for ReadCountingArtifactStoreFixture {
+    async fn put_stream(
+        &self,
+        key: ArtifactKey,
+        stream: ArtifactByteStream,
+    ) -> QuantResult<ArtifactUri> {
+        self.inner.put_stream(key, stream).await
+    }
+
+    async fn get_stream(&self, uri: &ArtifactUri) -> QuantResult<ArtifactByteStream> {
+        self.inner.get_stream(uri).await
+    }
+
+    async fn durability(&self, uri: &ArtifactUri) -> QuantResult<ArtifactDurability> {
+        self.inner.durability(uri).await
+    }
+
+    async fn metadata(&self, uri: &ArtifactUri) -> QuantResult<ArtifactObjectMetadata> {
+        self.inner.metadata(uri).await
+    }
+
+    async fn signed_download_url(
+        &self,
+        uri: &ArtifactUri,
+        valid_for: Duration,
+    ) -> QuantResult<String> {
+        self.inner.signed_download_url(uri, valid_for).await
+    }
+
+    async fn get(&self, uri: &ArtifactUri) -> QuantResult<Vec<u8>> {
+        self.count(uri);
         self.inner.get(uri).await
     }
 

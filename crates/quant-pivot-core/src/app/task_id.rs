@@ -145,6 +145,8 @@ pub enum TaskId {
     /// Leases + executes durable research jobs (dataset build / model train /
     /// backtest) off the HTTP hot path, with crash recovery.
     ResearchJobWorker,
+    /// Advances durable feedback cycles from `ResearchJob` ledger truth.
+    FeedbackCoordinator,
     /// Captures signed `ClickHouse` retention and `ReportOnly` latency evidence.
     ResearchReadinessEvidenceWorker,
     /// Idempotently enqueues the frozen daily 24-hour full parity replay.
@@ -220,6 +222,7 @@ impl TaskId {
             | Self::BookSnapshotPublisher => TaskKind::AnalyticsWriter,
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,
             Self::ResearchJobWorker
+            | Self::FeedbackCoordinator
             | Self::ResearchReadinessEvidenceWorker
             | Self::FeatureParityScheduler => TaskKind::ResearchJob,
         }

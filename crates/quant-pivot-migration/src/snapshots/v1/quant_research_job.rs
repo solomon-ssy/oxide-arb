@@ -3,7 +3,7 @@
 use sea_orm::entity::prelude::*;
 
 use super::sea_orm_active_enums::{
-    QpResearchJobKind, QpResearchJobResultKind, QpResearchJobStatus,
+    QpFeedbackStage, QpResearchJobKind, QpResearchJobResultKind, QpResearchJobStatus,
 };
 
 #[sea_orm::model]
@@ -12,6 +12,8 @@ use super::sea_orm_active_enums::{
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub job_id: Uuid,
+    pub feedback_cycle_id: Option<Uuid>,
+    pub feedback_stage: Option<QpFeedbackStage>,
     pub kind: QpResearchJobKind,
     pub status: QpResearchJobStatus,
     pub model_spec_id: Option<Uuid>,
@@ -22,6 +24,10 @@ pub struct Model {
     pub progress_json: Option<Json>,
     pub result_kind: Option<QpResearchJobResultKind>,
     pub result_ref: Option<Uuid>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub result_artifact_uri: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub result_artifact_hash: Option<String>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub error_json: Option<Json>,
     #[sea_orm(column_type = "JsonBinary", nullable)]

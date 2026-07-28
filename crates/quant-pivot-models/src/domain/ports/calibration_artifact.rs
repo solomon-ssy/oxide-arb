@@ -20,7 +20,10 @@ use crate::{
         pagination::Paginated,
         quant::{CalibrationArtifactInfo, JobProgressSink},
     },
-    types::{CalibrationArtifactId, DecisionPolicySnapshotId, ModelVersionId, TrainingDatasetId},
+    types::{
+        CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
+        TrainingDatasetId,
+    },
 };
 
 /// Frozen params for a durable `BiasTableFit` research job.
@@ -94,6 +97,8 @@ pub trait CalibrationArtifactFitPort: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCalibrationFitJobParams {
+    /// Pre-assigned run id frozen in the durable outer job for exact lease recovery.
+    pub model_run_id: ModelRunId,
     /// The operator's fit request (target model + calibration dataset + method).
     pub request: FitModelCalibratorRequest,
     /// Frozen runtime-config version the backtest-replay harness runs under
@@ -104,11 +109,21 @@ pub struct ModelCalibrationFitJobParams {
 
 /// Terminal outcome of a model-score calibrator fit.
 ///
-/// `artifact_id` is `None` when the fit was **fail-closed** (e.g. the isotonic
-/// sample-count floor was not met and no fallback is silently substituted).
-pub struct ModelCalibrationFitOutcome {
-    pub artifact_id: Option<CalibrationArtifactId>,
-    pub sample_count: u64,
+/// An underpowered split is a successful, reproducible computation with no
+/// calibrator artifact. It carries its own exact output commitment so durable
+/// retries cannot confuse “insufficient evidence” with an execution failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCalibrationFitOutcome {
+    Calibrated {
+        artifact_id: CalibrationArtifactId,
+        sample_count: u64,
+    },
+    Insufficient {
+        sample_count: u64,
+        total_sample_count: u64,
+        minimum_sample_count: u64,
+        outcome_hash: ContentHash,
+    },
 }
 
 /// Dependency-inversion boundary between the HTTP / job layer and the core

@@ -11,7 +11,7 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storag
 use quant_pivot_models::{
     domain::{
         api::{BuildTrainingDatasetRequest, TrainingDatasetPlanView, TrainingDatasetView},
-        ports::{PolicyFitDatasetBuildRequest, TrainingDatasetPort},
+        ports::{FeedbackDatasetBuildRequest, PolicyFitDatasetBuildRequest, TrainingDatasetPort},
         quant::{
             JobProgressSink, SourceSliceIdentity, SourceSliceIdentityInput, SourceSliceInfo,
             TrainingDatasetInfo,
@@ -29,8 +29,9 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
-    MarketLinkageRepository, MarketRepository, ModelRegistryRepository, PolicyRepository,
-    PositionRepository, QuantFactReadRepository, SourceSliceRepository, TradePolicyRepository,
+    FactorRepository, FeatureRepository, FeedbackCohortRepository, MarketLinkageRepository,
+    MarketRepository, ModelRegistryRepository, PolicyRepository, PositionRepository,
+    QuantFactReadRepository, SourceSliceRepository, TradePolicyRepository,
     TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, training::DatasetPlanRequest};
@@ -43,6 +44,7 @@ use crate::{
     },
     service::{
         bias_table_fit::resolve_frozen_bias_table,
+        feedback_dataset::{FeedbackDatasetService, FeedbackDatasetServiceDeps},
         training_dataset::{
             TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
             default_labelers,
@@ -66,6 +68,9 @@ pub struct CoreTrainingDatasetPort {
     bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     source_slice_repo: Arc<dyn SourceSliceRepository>,
     clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
+    feedback_cohort_repo: Arc<dyn FeedbackCohortRepository>,
+    feature_repo: Arc<dyn FeatureRepository>,
+    factor_repo: Arc<dyn FactorRepository>,
     /// Deploy guard: hard cap on the deterministic historical spine.
     max_spine_samples: u64,
 }
@@ -92,6 +97,7 @@ impl CoreTrainingDatasetPort {
         research: &ResearchBundle,
         runtime_config: Arc<dyn PolicyRepository>,
         bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
+        feedback_cohort_repo: Arc<dyn FeedbackCohortRepository>,
         max_spine_samples: u64,
         _plan_sample_slices: u32,
         _plan_sample_markets: u32,
@@ -111,6 +117,9 @@ impl CoreTrainingDatasetPort {
             bias_table_repo,
             source_slice_repo: Arc::clone(&research.source_slice_repo),
             clob_market_info_repo: Arc::clone(&research.clob_market_info_repo),
+            feedback_cohort_repo,
+            feature_repo: Arc::clone(&research.feature_repo),
+            factor_repo: Arc::clone(&research.factor_repo),
             max_spine_samples,
         }
     }
@@ -687,5 +696,34 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
                 id: training_dataset_id.to_string(),
             })?;
         Ok(TrainingDatasetView::from(info))
+    }
+
+    async fn build_feedback(
+        &self,
+        request: FeedbackDatasetBuildRequest,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<TrainingDatasetInfo> {
+        request.validate().map_err(QuantError::from)?;
+        let training_dataset_id = request.training_dataset_id;
+        let decision_policy_snapshot_id = request.source_lineage.decision_policy_snapshot_id;
+        let dataset_service = Arc::new(self.service_for(&decision_policy_snapshot_id).await?);
+        Box::pin(
+            FeedbackDatasetService::new(FeedbackDatasetServiceDeps {
+                cohort_repository: Arc::clone(&self.feedback_cohort_repo),
+                feature_repository: Arc::clone(&self.feature_repo),
+                factor_repository: Arc::clone(&self.factor_repo),
+                artifact_store: Arc::clone(&self.artifact_store),
+                dataset_service,
+            })
+            .build(request, progress, cancel),
+        )
+        .await?;
+        self.dataset_repo
+            .find_by_id(&training_dataset_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found("quant_training_dataset", training_dataset_id).into()
+            })
     }
 }

@@ -37,9 +37,9 @@ pub struct ModelServingRegistryFixture {
 }
 
 impl ModelServingRegistryFixture {
-    /// Assemble the same deep-preimage loader and bounded registry as production.
+    /// Assemble the same deep-preimage loader used by production.
     #[must_use]
-    pub fn build(self) -> Arc<ModelServingRuntimeRegistry> {
+    pub fn build_preimages(self) -> Arc<ModelServingPreimageService> {
         let model_registry_repo = Arc::new(PgModelRegistryRepository::new(self.db.clone()))
             as Arc<dyn ModelRegistryRepository>;
         let dataset_repo = Arc::new(PgTrainingDatasetRepository::new(self.db.clone()))
@@ -72,16 +72,21 @@ impl ModelServingRegistryFixture {
                 evidence,
             },
         ));
-        let serving_preimages =
-            Arc::new(ModelServingPreimageService::new(ModelServingPreimageDeps {
-                model_registry_repo,
-                dataset_repo,
-                source_slice_repo: Arc::new(PgSourceSliceRepository::new(self.db.clone())),
-                policy_repo: Arc::new(PgPolicyRepository::new(self.db)),
-                calibration_repo,
-                trade_policy_preimages,
-                artifact_store: Arc::clone(&self.artifact_store),
-            }));
+        Arc::new(ModelServingPreimageService::new(ModelServingPreimageDeps {
+            model_registry_repo,
+            dataset_repo,
+            source_slice_repo: Arc::new(PgSourceSliceRepository::new(self.db.clone())),
+            policy_repo: Arc::new(PgPolicyRepository::new(self.db)),
+            calibration_repo,
+            trade_policy_preimages,
+            artifact_store: Arc::clone(&self.artifact_store),
+        }))
+    }
+
+    /// Assemble the same deep-preimage loader and bounded registry as production.
+    #[must_use]
+    pub fn build(self) -> Arc<ModelServingRuntimeRegistry> {
+        let serving_preimages = self.build_preimages();
         Arc::new(
             ModelServingRuntimeRegistry::new(
                 ModelServingRegistryConfig::default(),

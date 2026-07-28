@@ -3,7 +3,10 @@
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
     domain::quant::{NewBacktestPathSet, NewBacktestPathSetInput, NewModelRun},
-    enums::{model::ModelFamily, quant::ModelRunKind},
+    enums::{
+        model::ModelFamily,
+        quant::{ModelRunKind, ModelRunStatus},
+    },
     types::{
         BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, ModelInputContract, ModelRunId,
         ModelSpecId, ModelTrainingContract, ModelVersionId, TrainingDatasetId,
@@ -15,7 +18,9 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{PgBacktestPathSetRepository, PgModelRegistryRepository, PgModelRunRepository},
-    traits::{BacktestPathSetRepository, ModelRegistryRepository, ModelRunRepository},
+    traits::{
+        BacktestPathSetRepository, CpcvPathSetCommit, ModelRegistryRepository, ModelRunRepository,
+    },
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
@@ -98,21 +103,157 @@ async fn seed_model_version_run(
         .expect("model version");
 
     let model_run_id = ModelRunId::from_v7();
-    PgModelRunRepository::new(db.clone())
-        .create(NewModelRun {
-            model_run_id,
-            run_kind: ModelRunKind::Cpcv,
-            model_version_id: Some(model_version_id),
-            decision_policy_snapshot_id: *rc_id,
-            market_selection_id: None,
-            window_start,
-            window_end: window_start + ChronoDuration::hours(1),
-            input_hash: content_hash('b'),
-        })
+    let runs = PgModelRunRepository::new(db.clone());
+    let run = NewModelRun {
+        model_run_id,
+        run_kind: ModelRunKind::Cpcv,
+        model_version_id: Some(model_version_id),
+        decision_policy_snapshot_id: *rc_id,
+        market_selection_id: None,
+        window_start,
+        window_end: window_start + ChronoDuration::hours(1),
+        input_hash: content_hash('b'),
+    };
+    let started = runs
+        .start_exact(run.clone())
         .await
-        .expect("model run");
+        .expect("start exact model run");
+    let replayed = runs
+        .start_exact(run.clone())
+        .await
+        .expect("replay exact model run");
+    assert_eq!(started.model_run_id, replayed.model_run_id);
+    assert_eq!(replayed.status, ModelRunStatus::Running);
+    let mut drifted = run;
+    drifted.input_hash = content_hash('c');
+    assert!(
+        runs.start_exact(drifted).await.is_err(),
+        "same run id with another immutable input must fail closed"
+    );
 
     (model_version_id, model_run_id, training_dataset_id)
+}
+
+struct PathSetContract<'a> {
+    db: &'a DatabaseConnection,
+    repo: &'a PgBacktestPathSetRepository,
+    path_set: &'a NewBacktestPathSet,
+    path_set_id: BacktestPathSetId,
+    model_version_id: ModelVersionId,
+    model_run_id: ModelRunId,
+}
+
+impl PathSetContract<'_> {
+    async fn assert_rollback(&self) {
+        let error = self
+            .repo
+            .commit_cpcv(CpcvPathSetCommit {
+                path_set: self.path_set.clone(),
+                input_hash: content_hash('c'),
+            })
+            .await
+            .expect_err("wrong run input must roll back the whole CPCV commit");
+        assert!(error.to_string().contains("canonical path-set subject"));
+        assert!(
+            self.repo
+                .find_by_id(&self.path_set_id)
+                .await
+                .expect("find after rollback")
+                .is_none(),
+            "failed commit must not leave a path-set row"
+        );
+        let running = PgModelRunRepository::new(self.db.clone())
+            .find_by_id(&self.model_run_id)
+            .await
+            .expect("find run after rollback")
+            .expect("run after rollback");
+        assert_eq!(running.status, ModelRunStatus::Running);
+    }
+
+    async fn assert_exact_commit(&self) {
+        let created = self
+            .repo
+            .commit_cpcv(CpcvPathSetCommit {
+                path_set: self.path_set.clone(),
+                input_hash: content_hash('b'),
+            })
+            .await
+            .expect("atomic CPCV commit");
+        let replayed = self
+            .repo
+            .commit_cpcv(CpcvPathSetCommit {
+                path_set: self.path_set.clone(),
+                input_hash: content_hash('b'),
+            })
+            .await
+            .expect("exact CPCV commit replay");
+        assert_eq!(replayed.path_set_id, created.path_set_id);
+        assert_eq!(replayed.path_set_hash, created.path_set_hash);
+        assert_eq!(created.path_set_id, self.path_set_id);
+        assert_eq!(created.trial_count, 1);
+        assert_eq!(created.trial_grid_count, 1);
+        assert_eq!(created.coord_search_effective_n, 2);
+        assert_eq!(created.median_rank_ic, dec!(0.12));
+        let terminal = PgModelRunRepository::new(self.db.clone())
+            .find_by_id(&self.model_run_id)
+            .await
+            .expect("find terminal CPCV run")
+            .expect("terminal CPCV run");
+        assert_eq!(terminal.status, ModelRunStatus::Succeeded);
+        assert_eq!(terminal.output_hash, Some(created.path_set_hash));
+
+        let found = self
+            .repo
+            .find_by_id(&self.path_set_id)
+            .await
+            .expect("find")
+            .expect("row");
+        assert_eq!(found.deflated_sharpe, dec!(0.96));
+        assert_eq!(found.pbo, dec!(0.25));
+        assert_eq!(found.path_count, 1);
+        assert_eq!(found.combination_count, 1);
+
+        let listed = self
+            .repo
+            .list_by_model_version(&self.model_version_id)
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path_set_id, self.path_set_id);
+    }
+
+    async fn assert_worm(&self) {
+        let mut tampered = serde_json::to_value(self.path_set).expect("serialize sealed path set");
+        tampered["median_rank_ic"] = serde_json::json!("0.99");
+        let tampered: NewBacktestPathSet =
+            serde_json::from_value(tampered).expect("decode structurally valid tamper");
+        let error = self
+            .repo
+            .create(tampered)
+            .await
+            .expect_err("repository must reject a caller-forged path-set hash");
+        assert!(error.to_string().contains("hash mismatch"));
+
+        let update = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE quant_backtest_path_set SET pbo = pbo \
+                 WHERE path_set_id = $1",
+                [self.path_set_id.as_uuid().into()],
+            ))
+            .await;
+        assert!(update.is_err(), "path-set UPDATE must be rejected");
+        let delete = self
+            .db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "DELETE FROM quant_backtest_path_set WHERE path_set_id = $1",
+                [self.path_set_id.as_uuid().into()],
+            ))
+            .await;
+        assert!(delete.is_err(), "path-set DELETE must be rejected");
+    }
 }
 
 pub async fn quant_backtest_set_crud() {
@@ -123,7 +264,12 @@ pub async fn quant_backtest_set_crud() {
         seed_model_and_dataset(&db, &rc_id).await;
     let repo = PgBacktestPathSetRepository::new(db.clone());
     let path_set_id = BacktestPathSetId::from_v7();
-    let window_start = Utc::now() - ChronoDuration::hours(2);
+    let run = PgModelRunRepository::new(db.clone())
+        .find_by_id(&model_run_id)
+        .await
+        .expect("find CPCV run")
+        .expect("CPCV run");
+    let window_start = run.window_start;
 
     let new_path_set = NewBacktestPathSet::try_seal(NewBacktestPathSetInput {
         path_set_id,
@@ -199,59 +345,15 @@ pub async fn quant_backtest_set_crud() {
         coord_search_effective_n: 2,
     })
     .expect("seal path set");
-    let created = repo.create(new_path_set.clone()).await.expect("create");
-    assert_eq!(created.path_set_id, path_set_id);
-    assert_eq!(created.trial_count, 1);
-    assert_eq!(created.trial_grid_count, 1);
-    assert_eq!(created.coord_search_effective_n, 2);
-    assert_eq!(created.median_rank_ic, dec!(0.12));
-    PgModelRunRepository::new(db.clone())
-        .succeed(&model_run_id, created.path_set_hash, Some(model_version_id))
-        .await
-        .expect("bind successful CPCV run to exact path-set hash");
-
-    let found = repo
-        .find_by_id(&path_set_id)
-        .await
-        .expect("find")
-        .expect("row");
-    assert_eq!(found.deflated_sharpe, dec!(0.96));
-    assert_eq!(found.pbo, dec!(0.25));
-    assert_eq!(found.path_count, 1);
-    assert_eq!(found.combination_count, 1);
-
-    let listed = repo
-        .list_by_model_version(&model_version_id)
-        .await
-        .expect("list");
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].path_set_id, path_set_id);
-
-    let mut tampered = serde_json::to_value(new_path_set).expect("serialize sealed path set");
-    tampered["median_rank_ic"] = serde_json::json!("0.99");
-    let tampered: NewBacktestPathSet =
-        serde_json::from_value(tampered).expect("decode structurally valid tamper");
-    let error = repo
-        .create(tampered)
-        .await
-        .expect_err("repository must reject a caller-forged path-set hash");
-    assert!(error.to_string().contains("hash mismatch"));
-
-    let update = db
-        .execute_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE quant_backtest_path_set SET pbo = pbo \
-             WHERE path_set_id = $1",
-            [path_set_id.as_uuid().into()],
-        ))
-        .await;
-    assert!(update.is_err(), "path-set UPDATE must be rejected");
-    let delete = db
-        .execute_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "DELETE FROM quant_backtest_path_set WHERE path_set_id = $1",
-            [path_set_id.as_uuid().into()],
-        ))
-        .await;
-    assert!(delete.is_err(), "path-set DELETE must be rejected");
+    let contract = PathSetContract {
+        db: &db,
+        repo: &repo,
+        path_set: &new_path_set,
+        path_set_id,
+        model_version_id,
+        model_run_id,
+    };
+    contract.assert_rollback().await;
+    contract.assert_exact_commit().await;
+    contract.assert_worm().await;
 }

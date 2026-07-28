@@ -23,13 +23,15 @@ use crate::{
             RunFullFeatureParityRequest, TrainModelRequest,
         },
         pagination::PageRequest,
-        quant::{ResearchJobInfo, ResearchJobResultRef},
+        quant::{ResearchJobArtifactRef, ResearchJobInfo, ResearchJobResultRef},
     },
     enums::quant::{ResearchJobKind, ResearchJobResultKind, ResearchJobStatus},
     types::{
-        DatasetCoverage, DecisionPolicySnapshotId, FeatureParityRunId, ModelSpecId, ModelVersionId,
-        ResearchJobError, ResearchJobId, ResearchJobParams, ResearchJobProgress, RoleCode,
-        TradePolicyArtifactId, TradePolicyValidationRunId, TrainingDatasetId, UserId,
+        ArtifactUri, ContentHash, DatasetCoverage, DecisionPolicySnapshotId, FeatureParityRunId,
+        FeedbackCoverageArtifactId, FeedbackCycleId, FeedbackDriftArtifactId, ModelRunId,
+        ModelSpecId, ModelVersionId, ResearchJobError, ResearchJobId, ResearchJobParams,
+        ResearchJobProgress, RoleCode, TradePolicyArtifactId, TradePolicyValidationRunId,
+        TrainingDatasetId, UserId,
     },
 };
 
@@ -66,12 +68,35 @@ pub struct FeatureParityJobParams {
     pub request: RunFullFeatureParityRequest,
 }
 
+/// Frozen inputs for the first feedback-cycle coverage stage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackCoverageJobParams {
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub cycle_idempotency_hash: ContentHash,
+    pub artifact_id: FeedbackCoverageArtifactId,
+}
+
+/// Frozen inputs for drift computation over one accepted coverage artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackDriftJobParams {
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub cycle_idempotency_hash: ContentHash,
+    pub artifact_id: FeedbackDriftArtifactId,
+    pub coverage_job_id: ResearchJobId,
+    pub coverage_artifact_id: FeedbackCoverageArtifactId,
+    pub coverage_artifact_uri: ArtifactUri,
+    pub coverage_artifact_hash: ContentHash,
+}
+
 /// Internal durable envelope for model training. The public request contains
 /// only dataset id + reason; the worker-owned result id is assigned at enqueue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelTrainJobParams {
     pub model_version_id: ModelVersionId,
+    pub model_run_id: ModelRunId,
     pub request: TrainModelRequest,
 }
 
@@ -92,6 +117,7 @@ pub struct BacktestJobParams {
 #[serde(deny_unknown_fields)]
 pub struct CpcvBacktestJobParams {
     pub model_version_id: ModelVersionId,
+    pub model_run_id: ModelRunId,
     pub request: RunCpcvBacktestRequest,
 }
 
@@ -111,6 +137,8 @@ pub struct ResearchJobView {
     pub progress_pct: Option<f64>,
     /// Namespace-tagged terminal artifact reference.
     pub result: Option<ResearchJobResultRef>,
+    /// Canonical object identity for artifact-producing result kinds.
+    pub result_artifact: Option<ResearchJobArtifactRef>,
     /// Structured failure payload on terminal `failed`.
     pub error: Option<ResearchJobError>,
     /// Build/backtest coverage diagnostics.
@@ -135,6 +163,7 @@ impl From<ResearchJobInfo> for ResearchJobView {
         let progress_pct = progress.as_ref().and_then(ResearchJobProgress::pct);
         let error = info.error_json.clone();
         let result = info.result();
+        let result_artifact = info.result_artifact();
         Self {
             job_id: info.job_id,
             kind: info.kind,
@@ -145,6 +174,7 @@ impl From<ResearchJobInfo> for ResearchJobView {
             progress,
             progress_pct,
             result,
+            result_artifact,
             error,
             coverage_json: info.coverage_json,
             requested_by: info.requested_by,
