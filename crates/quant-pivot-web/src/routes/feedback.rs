@@ -1,0 +1,297 @@
+//! Protected feedback-cycle and promotion-permit endpoints.
+
+use actix_web::{
+    http::Method,
+    web::{Data, Path, Query},
+};
+use quant_pivot_models::{
+    domain::{
+        api::{
+            CancelFeedbackCycleRequest, DriftReportListQuery, DriftReportView,
+            FeedbackCycleDetailView, FeedbackCycleListQuery, FeedbackCycleMutationView,
+            FeedbackCycleView, FeedbackOverviewView, IssuePromotionPermitRequest,
+            PromotionPermitListQuery, PromotionPermitMutationView, PromotionPermitView,
+            RevokePromotionPermitRequest, TriggerFeedbackCycleRequest,
+        },
+        pagination::Paginated,
+        quant::FeedbackCycleActor,
+    },
+    enums::{
+        operation_log::OperationCategory,
+        rbac::{Operation, ResourceType},
+    },
+    hashing::CanonicalDigest,
+    types::{ContentHash, FeedbackCycleId, PromotionPermitId, RoleCode},
+};
+use serde::Serialize;
+
+use crate::{
+    audit::OperationCtx,
+    auth::casbin::Rule,
+    error::WebError,
+    extractors::{ActingRole, AuthedActor, RequestId, ValidatedJson},
+    response::WebResponse,
+    routes::registry::{RouteSpec, spec},
+    state::AppState,
+};
+
+/// Feedback workbench routes.
+pub(crate) fn route_specs() -> Vec<RouteSpec> {
+    vec![
+        spec(
+            Method::GET,
+            "/research/feedback-overview",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            overview,
+        ),
+        spec(
+            Method::GET,
+            "/research/feedback-cycles",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            list_cycles,
+        ),
+        spec(
+            Method::POST,
+            "/research/feedback-cycles",
+            Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Create),
+            trigger_cycle,
+        ),
+        spec(
+            Method::GET,
+            "/research/feedback-cycles/{cycle_id}",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            get_cycle,
+        ),
+        spec(
+            Method::POST,
+            "/research/feedback-cycles/{cycle_id}/cancel",
+            Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Create),
+            cancel_cycle,
+        ),
+        spec(
+            Method::GET,
+            "/research/drift-reports",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            list_drift_reports,
+        ),
+        spec(
+            Method::GET,
+            "/research/feedback-promotion-permits",
+            Rule::ResourceOp(ResourceType::Publication, Operation::Read),
+            list_permits,
+        ),
+        spec(
+            Method::POST,
+            "/research/feedback-promotion-permits",
+            Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
+            issue_permit,
+        ),
+        spec(
+            Method::POST,
+            "/research/feedback-promotion-permits/{permit_id}/revoke",
+            Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Retire),
+            revoke_permit,
+        ),
+    ]
+}
+
+/// `GET /api/research/feedback-overview`.
+pub async fn overview(
+    state: Data<AppState>,
+) -> Result<WebResponse<FeedbackOverviewView>, WebError> {
+    Ok(WebResponse::ok(state.feedback_read.overview().await?))
+}
+
+/// `GET /api/research/feedback-cycles`.
+pub async fn list_cycles(
+    state: Data<AppState>,
+    query: Query<FeedbackCycleListQuery>,
+) -> Result<WebResponse<Paginated<FeedbackCycleView>>, WebError> {
+    let page = state.feedback_read.list_cycles(query.into_inner()).await?;
+    Ok(WebResponse::ok(page))
+}
+
+/// `GET /api/research/feedback-cycles/{cycle_id}`.
+pub async fn get_cycle(
+    state: Data<AppState>,
+    cycle_id: Path<FeedbackCycleId>,
+) -> Result<WebResponse<FeedbackCycleDetailView>, WebError> {
+    let cycle_id = cycle_id.into_inner();
+    let view = state
+        .feedback_read
+        .get_cycle(&cycle_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("feedback cycle not found: {cycle_id}")))?;
+    Ok(WebResponse::ok(view))
+}
+
+/// `GET /api/research/drift-reports`.
+pub async fn list_drift_reports(
+    state: Data<AppState>,
+    query: Query<DriftReportListQuery>,
+) -> Result<WebResponse<Paginated<DriftReportView>>, WebError> {
+    let page = state
+        .feedback_read
+        .list_drift_reports(query.into_inner())
+        .await?;
+    Ok(WebResponse::ok(page))
+}
+
+/// `POST /api/research/feedback-cycles`.
+pub async fn trigger_cycle(
+    state: Data<AppState>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<TriggerFeedbackCycleRequest>,
+) -> Result<WebResponse<FeedbackCycleMutationView>, WebError> {
+    let request = body.into_inner();
+    let profile_id = request.profile_id.clone();
+    let view = state
+        .feedback_mutation
+        .trigger_cycle(request, feedback_actor(&actor, &acting_role)?)
+        .await?;
+    let cycle_id = view.cycle.feedback_cycle_id;
+    let after_hash = canonical_state_hash(&view.cycle)?;
+    op_ctx.set_action(OperationCategory::Governance, "feedback.cycle.trigger");
+    op_ctx.set_resource(ResourceType::Materialization, cycle_id.to_string());
+    op_ctx.set_state_hashes(None, Some(after_hash));
+    op_ctx.set_detail(serde_json::json!({
+        "feedback_cycle_id": cycle_id.to_string(),
+        "profile_id": profile_id.to_string(),
+        "status": view.cycle.status,
+        "replayed": view.replayed,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }))?;
+    Ok(WebResponse::accepted(view))
+}
+
+/// `POST /api/research/feedback-cycles/{cycle_id}/cancel`.
+pub async fn cancel_cycle(
+    state: Data<AppState>,
+    cycle_id: Path<FeedbackCycleId>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<CancelFeedbackCycleRequest>,
+) -> Result<WebResponse<FeedbackCycleMutationView>, WebError> {
+    let cycle_id = cycle_id.into_inner();
+    let view = state
+        .feedback_mutation
+        .cancel_cycle(
+            cycle_id,
+            body.into_inner(),
+            feedback_actor(&actor, &acting_role)?,
+        )
+        .await?;
+    let after_hash = canonical_state_hash(&view.cycle)?;
+    op_ctx.set_action(OperationCategory::Governance, "feedback.cycle.cancel");
+    op_ctx.set_resource(ResourceType::Materialization, cycle_id.to_string());
+    op_ctx.set_state_hashes(None, Some(after_hash));
+    op_ctx.set_detail(serde_json::json!({
+        "feedback_cycle_id": cycle_id.to_string(),
+        "status": view.cycle.status,
+        "replayed": view.replayed,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }))?;
+    Ok(WebResponse::accepted(view))
+}
+
+/// `GET /api/research/feedback-promotion-permits`.
+pub async fn list_permits(
+    state: Data<AppState>,
+    query: Query<PromotionPermitListQuery>,
+) -> Result<WebResponse<Paginated<PromotionPermitView>>, WebError> {
+    let page = state
+        .feedback_mutation
+        .list_permits(query.into_inner())
+        .await?;
+    Ok(WebResponse::ok(page))
+}
+
+/// `POST /api/research/feedback-promotion-permits`.
+pub async fn issue_permit(
+    state: Data<AppState>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<IssuePromotionPermitRequest>,
+) -> Result<WebResponse<PromotionPermitMutationView>, WebError> {
+    let request = body.into_inner();
+    let feedback_cycle_id = request.feedback_cycle_id;
+    let view = state
+        .feedback_mutation
+        .issue_permit(request, feedback_actor(&actor, &acting_role)?)
+        .await?;
+    let permit_id = view.permit.promotion_permit_id;
+    let after_hash = canonical_state_hash(&view.permit)?;
+    op_ctx.set_action(OperationCategory::Governance, "feedback.permit.issue");
+    op_ctx.set_resource(ResourceType::Publication, permit_id.to_string());
+    op_ctx.set_state_hashes(None, Some(after_hash));
+    op_ctx.set_detail(serde_json::json!({
+        "promotion_permit_id": permit_id.to_string(),
+        "feedback_cycle_id": feedback_cycle_id.to_string(),
+        "status": view.permit.status,
+        "replayed": view.replayed,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }))?;
+    Ok(WebResponse::created(view))
+}
+
+/// `POST /api/research/feedback-promotion-permits/{permit_id}/revoke`.
+pub async fn revoke_permit(
+    state: Data<AppState>,
+    permit_id: Path<PromotionPermitId>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<RevokePromotionPermitRequest>,
+) -> Result<WebResponse<PromotionPermitMutationView>, WebError> {
+    let permit_id = permit_id.into_inner();
+    let view = state
+        .feedback_mutation
+        .revoke_permit(
+            permit_id,
+            body.into_inner(),
+            feedback_actor(&actor, &acting_role)?,
+        )
+        .await?;
+    let after_hash = canonical_state_hash(&view.permit)?;
+    op_ctx.set_action(OperationCategory::Governance, "feedback.permit.revoke");
+    op_ctx.set_resource(ResourceType::Publication, permit_id.to_string());
+    op_ctx.set_state_hashes(None, Some(after_hash));
+    op_ctx.set_detail(serde_json::json!({
+        "promotion_permit_id": permit_id.to_string(),
+        "revision": view.permit.revision,
+        "status": view.permit.status,
+        "replayed": view.replayed,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }))?;
+    Ok(WebResponse::ok(view))
+}
+
+fn feedback_actor(
+    actor: &AuthedActor,
+    acting_role: &ActingRole,
+) -> Result<FeedbackCycleActor, WebError> {
+    let user_id = actor.user_id().map_err(|error| {
+        WebError::Internal(format!("authenticated subject is invalid: {error}"))
+    })?;
+    Ok(FeedbackCycleActor {
+        user_id,
+        acting_role: RoleCode::new(acting_role.0.clone()),
+    })
+}
+
+fn canonical_state_hash<T: Serialize>(state: &T) -> Result<ContentHash, WebError> {
+    CanonicalDigest::content_hash_json(state)
+        .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
+}

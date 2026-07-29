@@ -16,8 +16,9 @@ use crate::{
     domain::{
         api::{
             BacktestPathSetListQuery, BacktestReportListQuery, ComparisonReportListQuery,
-            FactorCollinearitySource, FactorCollinearityView, FactorDefinitionListQuery,
-            ModelPublishedCatalogQuery, ModelSpecListQuery, ModelVersionListQuery,
+            FactorCollinearitySource, FactorCollinearityView, FactorDefinitionDetailQuery,
+            FactorDefinitionDetailView, FactorDefinitionListQuery, ModelDetailQuery,
+            ModelDetailView, ModelPublishedCatalogQuery, ModelSpecListQuery, ModelVersionListQuery,
             PublishedModelOptionView, TrainingDatasetListQuery,
         },
         pagination::Paginated,
@@ -26,7 +27,7 @@ use crate::{
             ModelComparisonReportInfo, ModelSpecInfo, ModelVersionInfo, TrainingDatasetInfo,
         },
     },
-    types::FactorDefinitionId,
+    types::{FactorDefinitionId, ModelVersionId},
 };
 
 /// Dependency-inversion boundary between the HTTP layer and the core research
@@ -46,6 +47,13 @@ pub trait ResearchCatalogPort: Send + Sync {
         &self,
         query: ModelVersionListQuery,
     ) -> QuantResult<Paginated<ModelVersionInfo>>;
+
+    /// Load one verified model plus immutable serving/evaluation/promotion lineage.
+    async fn find_model_detail(
+        &self,
+        model_version_id: &ModelVersionId,
+        query: ModelDetailQuery,
+    ) -> QuantResult<Option<ModelDetailView>>;
 
     /// Page the model-spec catalog (dataset/training selector source), newest first.
     async fn list_model_specs(
@@ -92,6 +100,13 @@ pub trait ResearchCatalogPort: Send + Sync {
         &self,
         factor_definition_id: &FactorDefinitionId,
     ) -> QuantResult<Option<FactorDefinitionInfo>>;
+
+    /// Load one immutable factor plus independently paginated serving usages.
+    async fn find_factor_detail(
+        &self,
+        factor_definition_id: &FactorDefinitionId,
+        query: FactorDefinitionDetailQuery,
+    ) -> QuantResult<Option<FactorDefinitionDetailView>>;
 
     /// Analyze pairwise factor collinearity over the recent factor-value window.
     ///

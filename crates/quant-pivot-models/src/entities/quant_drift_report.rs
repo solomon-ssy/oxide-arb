@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 
+use super::quant_feedback_cycle;
 use crate::{
     enums::quant::{FeedbackDriftAssessment, FeedbackDriftKind, FeedbackDriftMetric},
     types::{ArtifactUri, ContentHash, DriftReportId, FeedbackCycleId},
@@ -34,6 +35,14 @@ pub struct Model {
     pub observed_at: DateTime<Utc>,
     pub report_hash: ContentHash,
     pub created_at: DateTime<Utc>,
+
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "FeedbackCycle",
+        from = "feedback_cycle_id",
+        to = "feedback_cycle_id"
+    )]
+    pub feedback_cycle: BelongsTo<quant_feedback_cycle::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

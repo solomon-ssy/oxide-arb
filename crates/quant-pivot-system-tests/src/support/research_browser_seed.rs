@@ -7,34 +7,45 @@ use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
         data_plane::DecisionClock,
-        quant::{NewBacktestReport, NewModelRun},
+        ports::{
+            FeedbackCandidateFamily, FeedbackCandidateFamilyInput, FeedbackCandidateRecipe,
+            FeedbackComparisonContract, FeedbackDatasetBuildRequest,
+        },
+        quant::{
+            FeedbackCohortWindow, FeedbackCycleKey, FeedbackCycleKeyInput, FeedbackStageEventInput,
+            NewBacktestReport, NewFeedbackCycle, NewFeedbackStageEvent, NewModelRun,
+        },
     },
     enums::{
         common::MarketCategory,
         model::ModelFamily,
-        quant::{DataQualityStatus, DatasetPurpose, ModelRunKind, TrainingDatasetStatus},
+        quant::{
+            CalibrationMethod, DataQualityStatus, DatasetPurpose, DownsideSource, FeedbackStage,
+            FeedbackStageEventKind, FeedbackTriggerFamily, ModelRunKind, TrainingDatasetStatus,
+        },
     },
     hashing::CanonicalDigest,
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, EventId, FeatureCell,
-        FeatureStaleness, FeatureValue, MarketId, ModelRunId, ModelSpecId, ModelVersionId,
-        Probability, ResearchEvaluationTrack, SchemaVersion, TokenId, TrainingDatasetId,
-        TrainingExampleId, TrainingSampleSource, TrainingSampleSources, Usd,
+        FeatureStaleness, FeatureValue, FeedbackCycleId, MarketId, ModelRunId, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, Probability, ResearchEvaluationTrack, SchemaVersion,
+        TokenId, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, TrainingSampleSources,
+        Usd,
         backtest::{
             CategoryMetric, CategoryMetrics, ExpectedVsRealized, PnlCurvePoint, PnlSimulation,
         },
         factor::{FactorExplanation, FactorServingPlane},
-        model_serving::ModelServingTradePolicyBinding,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgBacktestReportRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgTrainingDatasetRepository,
+        PgBacktestReportRepository, PgFeedbackCycleRepository, PgModelRegistryRepository,
+        PgModelRunRepository, PgTrainingDatasetRepository,
     },
     traits::{
-        BacktestReportRepository, ModelRegistryRepository, ModelRunRepository,
-        TrainingDatasetRepository,
+        BacktestReportRepository, FeedbackCycleCasOutcome, FeedbackCycleGeneration,
+        FeedbackCycleRepository, FeedbackCycleWriteOutcome, FeedbackStageWriteOutcome,
+        ModelRegistryRepository, ModelRunRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -44,10 +55,11 @@ use quant_pivot_research::{
         FeatureVector,
         names::{book::MID, market::CATEGORY},
     },
+    hashing::ResearchHasher,
     selection::SelectedMarket,
     training::{
         DatasetHashContract, DatasetParquetCodec, TOKEN_PAYOUT_RATIO, TrainingDatasetArtifact,
-        TrainingExample, TrainingLabel, dataset_source_fingerprint,
+        TrainingExample, TrainingLabel, dataset_source_fingerprint, label_names_for_sources,
     },
 };
 use rust_decimal::Decimal;
@@ -58,11 +70,13 @@ use super::{
     execution_pg_seed::{
         CalibratedModelSeed, SharedDemoInfra, fixture_profile_ref, seed_calibrated_model,
     },
+    model_spec_fixtures::new_model_spec_fixture,
     research_fixtures::{
         DatasetLedgerFixture, DatasetLedgerSeed, ReplayableSourceSliceFixture,
-        bind_fixture_decision_capture, fixture_factor_plane, model_learning_cohort,
-        persist_replayable_source_slice, seed_source_manifest,
+        bind_fixture_decision_capture, model_learning_cohort, persist_replayable_source_slice,
+        seed_source_manifest,
     },
+    seeded_uuid,
 };
 
 const TICK_COUNT: i64 = 4;
@@ -74,12 +88,81 @@ const KNOWLEDGE_LAG_SECS: u64 = 10;
 pub struct BrowserResearchFixture {
     pub evaluation_dataset_id: TrainingDatasetId,
     pub backtest_report_id: BacktestReportId,
+    pub feedback_cycle_id: FeedbackCycleId,
     pub model_version_id: ModelVersionId,
 }
 
 struct PersistedDataset {
     id: TrainingDatasetId,
     semantic_hash: ContentHash,
+    feedback_request: FeedbackDatasetBuildRequest,
+}
+
+struct FeedbackCycleSeed<'a> {
+    training: &'a PersistedDataset,
+    evaluation: &'a PersistedDataset,
+    champion_model_version_id: ModelVersionId,
+    champion_serving_contract_hash: ContentHash,
+    observed_at: DateTime<Utc>,
+}
+
+impl PersistedDataset {
+    fn try_new(
+        id: TrainingDatasetId,
+        semantic_hash: ContentHash,
+        fixture: &DatasetLedgerFixture,
+    ) -> QuantResult<Self> {
+        let feedback_request = FeedbackDatasetBuildRequest {
+            training_dataset_id: id,
+            model_spec_id: fixture.plan.model_spec_id,
+            model_spec_definition_hash: fixture.plan.model_spec_definition_hash,
+            source_lineage: fixture.plan.source_lineage.clone(),
+            window: FeedbackCohortWindow::try_new(
+                fixture.plan.research_profile_artifact_id.profile_ref(),
+                fixture.plan.window_start,
+                fixture.plan.window_end,
+            )
+            .map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("freeze browser Dataset feedback window: {error}"),
+            })?,
+            purpose: fixture.plan.purpose,
+        };
+        feedback_request.validate()?;
+        Ok(Self {
+            id,
+            semantic_hash,
+            feedback_request,
+        })
+    }
+
+    fn calibration_request(&self) -> QuantResult<FeedbackDatasetBuildRequest> {
+        let window_start = self.feedback_request.window.cutoff() + Duration::seconds(1);
+        let window_end = self.feedback_request.source_lineage.pit_cutoff;
+        if window_start >= window_end {
+            return Err(ResearchError::DatasetBuild {
+                detail: "browser Training source lineage has no calibration embargo window"
+                    .to_owned(),
+            }
+            .into());
+        }
+        let request = FeedbackDatasetBuildRequest {
+            training_dataset_id: TrainingDatasetId::from_v7(),
+            model_spec_id: self.feedback_request.model_spec_id,
+            model_spec_definition_hash: self.feedback_request.model_spec_definition_hash,
+            source_lineage: self.feedback_request.source_lineage.clone(),
+            window: FeedbackCohortWindow::try_new(
+                self.feedback_request.window.profile_ref().clone(),
+                window_start,
+                window_end,
+            )
+            .map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("freeze browser Calibration window: {error}"),
+            })?,
+            purpose: DatasetPurpose::Calibration,
+        };
+        request.validate()?;
+        Ok(request)
+    }
 }
 
 struct DatasetSeed {
@@ -90,7 +173,6 @@ struct DatasetSeed {
     factor_serving_plane: FactorServingPlane,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     runtime_config_hash: ContentHash,
-    trade_policy: ModelServingTradePolicyBinding,
     purpose: DatasetPurpose,
     examples: Vec<TrainingExample>,
     feature_schema_hash: ContentHash,
@@ -160,44 +242,41 @@ pub async fn seed_browser_research(
                 template.model_spec_id
             ),
         })?;
-    let feature_schema_hash =
-        CanonicalDigest::content_hash_json(&"browser-research-feature-schema-v1")?;
-    let factor_serving_plane = if model_spec.model_family.is_classical() {
-        FactorServingPlane::try_empty().map_err(|error| ResearchError::DatasetBuild {
-            detail: format!("browser classical factor plane is invalid: {error}"),
-        })?
-    } else {
-        fixture_factor_plane(feature_schema_hash, SchemaVersion::FIRST)?
-    };
+    let browser_model_spec_id = ModelSpecId::from_v7();
+    let browser_model_spec = new_model_spec_fixture(
+        browser_model_spec_id,
+        "browser-research-model",
+        model_spec.model_family,
+        model_spec.prediction_horizon_secs,
+        model_spec.input_contract.clone(),
+        ModelTrainingContract::settlement_default(),
+    );
+    let browser_model_spec_definition_hash = browser_model_spec.definition_hash;
+    registry.create_model_spec(browser_model_spec).await?;
+    let template_bindings = template.serving_contract.bindings();
+    let feature_schema_hash = template_bindings.schemas.feature_schema_hash;
+    let factor_serving_plane = template_bindings.factors.plane.clone();
+    let sample_sources = TrainingSampleSources::default();
     let label_schema_hash =
-        CanonicalDigest::content_hash_json(&"browser-research-label-schema-v1")?;
+        ResearchHasher::label_schema(&label_names_for_sources(sample_sources.as_slice(), false))?;
     let observed_at = Utc::now();
     let now = DateTime::from_timestamp_millis(observed_at.timestamp_millis()).ok_or_else(|| {
         ResearchError::DatasetBuild {
             detail: "browser research fixture time does not fit millisecond precision".to_owned(),
         }
     })?;
-    let policy_snapshot_hash = template
-        .serving_contract
-        .bindings()
-        .policy_snapshot
-        .snapshot_hash;
-    let trade_policy = ModelServingTradePolicyBinding {
-        artifact_id: infra.trade_policy.artifact_id,
-        content_hash: infra.trade_policy.artifact_hash,
-    };
+    let policy_snapshot_hash = template_bindings.policy_snapshot.snapshot_hash;
     let training = persist_dataset(
         db,
         store,
         DatasetSeed {
             scope: "browser-research-training".to_owned(),
-            model_spec_id: template.model_spec_id,
+            model_spec_id: browser_model_spec_id,
             model_family: model_spec.model_family,
-            model_spec_definition_hash: model_spec.definition_hash,
+            model_spec_definition_hash: browser_model_spec_definition_hash,
             factor_serving_plane: factor_serving_plane.clone(),
             decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
             runtime_config_hash: policy_snapshot_hash,
-            trade_policy: trade_policy.clone(),
             purpose: DatasetPurpose::Training,
             examples: model_examples("training", now - Duration::days(120), &factor_serving_plane)?,
             feature_schema_hash,
@@ -210,8 +289,8 @@ pub async fn seed_browser_research(
             db,
             store,
             registry: &registry,
-            model_spec_id: template.model_spec_id,
-            model_spec_definition_hash: model_spec.definition_hash,
+            model_spec_id: browser_model_spec_id,
+            model_spec_definition_hash: browser_model_spec_definition_hash,
             training: &training,
         }
         .persist(),
@@ -222,13 +301,12 @@ pub async fn seed_browser_research(
         store,
         DatasetSeed {
             scope: "browser-research-evaluation".to_owned(),
-            model_spec_id: template.model_spec_id,
+            model_spec_id: browser_model_spec_id,
             model_family: model_spec.model_family,
-            model_spec_definition_hash: model_spec.definition_hash,
+            model_spec_definition_hash: browser_model_spec_definition_hash,
             factor_serving_plane: factor_serving_plane.clone(),
             decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
             runtime_config_hash: policy_snapshot_hash,
-            trade_policy,
             purpose: DatasetPurpose::Evaluation,
             examples: model_examples(
                 "evaluation",
@@ -243,16 +321,146 @@ pub async fn seed_browser_research(
     let report = seed_backtest_report(
         db,
         model_version_id,
-        evaluation.id,
+        &evaluation,
         infra.decision_policy_snapshot_id,
         now,
     )
     .await?;
+    let candidate = registry
+        .find_model_version(&model_version_id)
+        .await?
+        .ok_or_else(|| ResearchError::DatasetBuild {
+            detail: format!("browser candidate model {model_version_id} is missing"),
+        })?;
+    let feedback_cycle_id = FeedbackCycleSeed {
+        training: &training,
+        evaluation: &evaluation,
+        champion_model_version_id: candidate.model_version_id,
+        champion_serving_contract_hash: candidate.serving_contract_hash,
+        observed_at: now,
+    }
+    .persist(db)
+    .await?;
     Ok(BrowserResearchFixture {
         evaluation_dataset_id: evaluation.id,
         backtest_report_id: report,
+        feedback_cycle_id,
         model_version_id,
     })
+}
+
+impl FeedbackCycleSeed<'_> {
+    async fn persist(self, db: &DatabaseConnection) -> QuantResult<FeedbackCycleId> {
+        let profile_ref = fixture_profile_ref();
+        let profile = profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(|detail| ResearchError::DatasetBuild {
+                detail: format!("resolve browser feedback profile: {detail}"),
+            })?;
+        let comparison_contract =
+            FeedbackComparisonContract::try_from_policy(&profile.spec.feedback_policy)?;
+        let recipe = FeedbackCandidateRecipe::try_seal(
+            self.training.feedback_request.clone(),
+            self.training.calibration_request()?,
+            CalibrationMethod::Platt,
+            DownsideSource::MfeMae,
+            self.training
+                .feedback_request
+                .source_lineage
+                .decision_policy_snapshot_id,
+        )?;
+        let candidate_family = FeedbackCandidateFamily::try_seal(FeedbackCandidateFamilyInput {
+            shared_evaluation: self.evaluation.feedback_request.clone(),
+            comparison_contract,
+            candidates: vec![recipe],
+        })?;
+        let feedback_policy_hash =
+            profile
+                .spec
+                .feedback_policy
+                .content_hash()
+                .map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!("hash browser feedback policy: {error}"),
+                })?;
+        let cycle =
+            NewFeedbackCycle::try_seal(FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
+                trigger_family: FeedbackTriggerFamily::Manual,
+                profile_ref,
+                feedback_policy_hash,
+                label_cutoff: self.evaluation.feedback_request.source_lineage.pit_cutoff,
+                capability_registry_hashes: self
+                    .evaluation
+                    .feedback_request
+                    .source_lineage
+                    .capability_registry_hashes
+                    .clone(),
+                champion_model_version_id: self.champion_model_version_id,
+                champion_serving_contract_hash: self.champion_serving_contract_hash,
+                candidate_family,
+            })?)?;
+        let feedback_cycle_id = cycle.feedback_cycle_id();
+        let trigger = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+            feedback_cycle_id,
+            event_sequence: 1,
+            stage: FeedbackStage::Trigger,
+            event_kind: FeedbackStageEventKind::Triggered,
+            research_job_id: None,
+            actor: Some("browser_fixture".to_owned()),
+            reason_code: Some("browser_fixture".to_owned()),
+            evidence_uri: None,
+            evidence_hash: None,
+            occurred_at: self.observed_at,
+        })?;
+        let repository = PgFeedbackCycleRepository::new(db.clone());
+        let (cycle_outcome, stage_outcome) = repository.record_trigger(cycle, trigger).await?;
+        let (
+            (
+                FeedbackCycleWriteOutcome::Inserted(persisted),
+                FeedbackStageWriteOutcome::Inserted(_),
+            )
+            | (
+                FeedbackCycleWriteOutcome::AlreadyPresent(persisted),
+                FeedbackStageWriteOutcome::AlreadyPresent(_),
+            ),
+        ) = ((cycle_outcome, stage_outcome),)
+        else {
+            return Err(ResearchError::DatasetBuild {
+                detail: "browser feedback trigger outcomes are inconsistent".to_owned(),
+            }
+            .into());
+        };
+        let cancellation = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+            feedback_cycle_id,
+            event_sequence: 2,
+            stage: FeedbackStage::Coverage,
+            event_kind: FeedbackStageEventKind::CancellationRequested,
+            research_job_id: None,
+            actor: Some("browser_fixture".to_owned()),
+            reason_code: Some("browser_fixture_cancelled".to_owned()),
+            evidence_uri: None,
+            evidence_hash: None,
+            occurred_at: self.observed_at,
+        })?;
+        let (cycle_outcome, stage_outcome) = repository
+            .request_cancel(FeedbackCycleGeneration::from(&persisted), cancellation)
+            .await?;
+        if !matches!(
+            (cycle_outcome, stage_outcome),
+            (
+                FeedbackCycleCasOutcome::Applied(_),
+                FeedbackStageWriteOutcome::Inserted(_)
+            ) | (
+                FeedbackCycleCasOutcome::AlreadyApplied(_),
+                FeedbackStageWriteOutcome::AlreadyPresent(_)
+            )
+        ) {
+            return Err(ResearchError::DatasetBuild {
+                detail: "browser feedback cancellation outcomes are inconsistent".to_owned(),
+            }
+            .into());
+        }
+        Ok(feedback_cycle_id)
+    }
 }
 
 fn model_examples(
@@ -298,8 +506,16 @@ fn model_example(
         })? * 1_000,
     );
     let market_id = MarketId::new(format!("browser-{scope}-market-{tick}-{ordinal}"));
-    let token_id = TokenId::new(format!("browser-{scope}-token-{tick}-{ordinal}"));
-    let secondary_token_id = TokenId::new(format!("browser-{scope}-token-no-{tick}-{ordinal}"));
+    let token_id = TokenId::new(
+        seeded_uuid(&format!("browser:{scope}:token:{tick}:{ordinal}"))
+            .as_u128()
+            .to_string(),
+    );
+    let secondary_token_id = TokenId::new(
+        seeded_uuid(&format!("browser:{scope}:token:no:{tick}:{ordinal}"))
+            .as_u128()
+            .to_string(),
+    );
     let feature_vector = FeatureVector {
         market_id: market_id.clone(),
         token_id: Some(token_id.clone()),
@@ -480,7 +696,7 @@ async fn persist_dataset(
         None
     };
     let dataset_id = TrainingDatasetId::from_v7();
-    let mut fixture = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
+    let fixture = DatasetLedgerFixture::try_new(DatasetLedgerSeed {
         training_dataset_id: dataset_id,
         model_spec_id: seed.model_spec_id,
         model_family: seed.model_family,
@@ -506,8 +722,6 @@ async fn persist_dataset(
         source_fingerprint: dataset_source_fingerprint(&seed.examples)?,
         sample_count,
     })?;
-    fixture.manifest.trade_policy_artifact_id = Some(seed.trade_policy.artifact_id);
-    fixture.manifest.trade_policy_hash = Some(seed.trade_policy.content_hash);
     fixture
         .manifest
         .validate()
@@ -537,27 +751,19 @@ async fn persist_dataset(
             )?,
         )
         .await?;
-    Ok(PersistedDataset {
-        id: dataset_id,
-        semantic_hash,
-    })
+    PersistedDataset::try_new(dataset_id, semantic_hash, &fixture)
 }
 
 async fn seed_backtest_report(
     db: &DatabaseConnection,
     model_version_id: ModelVersionId,
-    evaluation_dataset_id: TrainingDatasetId,
+    evaluation: &PersistedDataset,
     decision_policy_snapshot_id: DecisionPolicySnapshotId,
     now: DateTime<Utc>,
 ) -> QuantResult<BacktestReportId> {
     let model_run_id = ModelRunId::from_v7();
     let window_start = now - Duration::days(30);
     let window_end = window_start + Duration::hours(TICK_COUNT * TICK_INTERVAL_SECS / 3_600);
-    let input_hash = CanonicalDigest::content_hash_json(&(
-        "browser-research-backtest-input-v1",
-        model_version_id,
-        evaluation_dataset_id,
-    ))?;
     let model_runs = PgModelRunRepository::new(db.clone());
     model_runs
         .create(NewModelRun {
@@ -568,15 +774,10 @@ async fn seed_backtest_report(
             market_selection_id: None,
             window_start,
             window_end,
-            input_hash,
+            input_hash: evaluation.semantic_hash,
         })
         .await?;
     let backtest_report_id = BacktestReportId::from_v7();
-    let report_hash = CanonicalDigest::content_hash_json(&(
-        "browser-research-backtest-report-v1",
-        backtest_report_id,
-        input_hash,
-    ))?;
     let curve = [(0, -18), (45, 4), (90, 16), (135, 11), (180, 31), (225, 47)]
         .into_iter()
         .map(|(minutes, pnl)| PnlCurvePoint {
@@ -584,50 +785,96 @@ async fn seed_backtest_report(
             cumulative_realized_pnl_usd: Decimal::from(pnl),
         })
         .collect();
-    PgBacktestReportRepository::new(db.clone())
-        .create(NewBacktestReport {
-            backtest_report_id,
-            model_version_id,
-            evaluation_dataset_id,
-            model_run_id,
-            decision_policy_snapshot_id,
-            window_start,
-            window_end,
-            coverage: dec!(0.975),
+    let mut report = NewBacktestReport {
+        backtest_report_id,
+        model_version_id,
+        evaluation_dataset_id: evaluation.id,
+        model_run_id,
+        decision_policy_snapshot_id,
+        window_start,
+        window_end,
+        coverage: dec!(0.975),
+        sample_count: 80,
+        missing_feature_count: 0,
+        rank_ic: dec!(0.143),
+        sharpe: dec!(1.18),
+        hit_rate: Probability::new(dec!(0.625)),
+        expected_vs_realized: ExpectedVsRealized {
+            mean_expected_bps: dec!(92),
+            mean_realized_bps: dec!(84),
+            correlation: dec!(0.61),
+            bias_bps: dec!(8),
+        },
+        max_drawdown: dec!(0.072),
+        turnover: dec!(0.19),
+        liquidity_feasibility: Probability::new(dec!(0.94)),
+        category_breakdown: CategoryMetrics::from(vec![CategoryMetric {
+            category: MarketCategory::Weather,
             sample_count: 80,
-            missing_feature_count: 0,
             rank_ic: dec!(0.143),
-            sharpe: dec!(1.18),
             hit_rate: Probability::new(dec!(0.625)),
-            expected_vs_realized: ExpectedVsRealized {
-                mean_expected_bps: dec!(92),
-                mean_realized_bps: dec!(84),
-                correlation: dec!(0.61),
-                bias_bps: dec!(8),
-            },
-            max_drawdown: dec!(0.072),
-            turnover: dec!(0.19),
-            liquidity_feasibility: Probability::new(dec!(0.94)),
-            category_breakdown: CategoryMetrics::from(vec![CategoryMetric {
-                category: MarketCategory::Weather,
-                sample_count: 80,
-                rank_ic: dec!(0.143),
-                hit_rate: Probability::new(dec!(0.625)),
-                mean_realized_bps: dec!(84),
-            }]),
-            tail_loss: dec!(-42),
-            report_pnl_simulation: PnlSimulation {
-                total_allocated_usd: dec!(1_000),
-                realized_pnl_usd: dec!(47),
-                gross_return: dec!(0.047),
-                pnl_curve: curve,
-            },
-            report_hash,
-            parquet_uri: None,
-        })
+            mean_realized_bps: dec!(84),
+        }]),
+        tail_loss: dec!(-42),
+        report_pnl_simulation: PnlSimulation {
+            total_allocated_usd: dec!(1_000),
+            realized_pnl_usd: dec!(47),
+            gross_return: dec!(0.047),
+            pnl_curve: curve,
+        },
+        report_hash: ContentHash::from_bytes([0; 32]),
+        parquet_uri: None,
+    };
+    report.report_hash =
+        report
+            .recomputed_hash()
+            .map_err(|detail| ResearchError::DatasetBuild {
+                detail: format!("seal browser backtest report: {detail}"),
+            })?;
+    let report_hash = report.report_hash;
+    PgBacktestReportRepository::new(db.clone())
+        .create(report)
         .await?;
     model_runs
         .succeed(&model_run_id, report_hash, Some(model_version_id))
         .await?;
     Ok(backtest_report_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::{FactorServingPlane, model_example};
+    use quant_pivot_models::{
+        clickhouse::{MarketResolutionFactInput, MarketResolutionRow},
+        types::{ContentHash, EvmBlockHash, EvmTransactionHash, PayoutRatio},
+    };
+
+    #[test]
+    fn resolution_tokens_are_canonical() {
+        let factor_serving_plane = FactorServingPlane::try_empty().expect("empty factor plane");
+        let example = model_example("contract", 0, 0, Utc::now(), &factor_serving_plane)
+            .expect("browser research example");
+        let secondary_token_id = example
+            .selected_market
+            .secondary_token_id
+            .expect("secondary token");
+
+        MarketResolutionRow::seal(MarketResolutionFactInput {
+            market_id: example.market_id,
+            token_ids: [example.token_id, secondary_token_id],
+            payout_ratios: [PayoutRatio::ONE, PayoutRatio::ZERO],
+            resolved_at: 100,
+            observed_at: 110,
+            source_block_number: 42,
+            source_block_hash: EvmBlockHash::parse(format!("0x{}", "11".repeat(32)))
+                .expect("block hash"),
+            source_transaction_hash: EvmTransactionHash::parse(format!("0x{}", "22".repeat(32)))
+                .expect("transaction hash"),
+            source_log_index: 3,
+            source_checkpoint_hash: ContentHash::from_bytes([0x33; 32]),
+        })
+        .expect("canonical resolution tokens");
+    }
 }

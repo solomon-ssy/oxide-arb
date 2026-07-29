@@ -5,6 +5,8 @@ pub mod backtest;
 pub mod cpcv_backtest;
 pub mod execution_read;
 pub mod execution_recovery;
+pub mod feedback_mutation;
+pub mod feedback_read;
 pub mod market_data;
 pub mod metrics_scrape;
 pub mod model_training;

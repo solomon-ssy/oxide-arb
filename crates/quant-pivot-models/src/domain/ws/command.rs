@@ -15,7 +15,7 @@ use crate::{domain::ws::channel::WsChannel, types::MarketId};
 
 /// A client-to-server command.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientCommand {
     /// Subscribe to a channel (optionally scoped to a market).
     Subscribe {
@@ -24,6 +24,9 @@ pub enum ClientCommand {
         /// Optional market scope for market-scoped channels.
         #[serde(default)]
         market_id: Option<MarketId>,
+        /// Durable cursor used only by `research.feedback`.
+        #[serde(default)]
+        after_revision: Option<i64>,
     },
     /// Unsubscribe from a channel.
     Unsubscribe {
@@ -51,9 +54,14 @@ mod tests {
         )
         .expect("valid subscribe");
         match cmd {
-            ClientCommand::Subscribe { channel, market_id } => {
+            ClientCommand::Subscribe {
+                channel,
+                market_id,
+                after_revision,
+            } => {
                 assert_eq!(channel, WsChannel::MarketBookUpdate);
                 assert_eq!(market_id, Some(MarketId::new("0xabc")));
+                assert_eq!(after_revision, None);
             }
             _ => panic!("expected subscribe"),
         }
@@ -65,9 +73,14 @@ mod tests {
             serde_json::from_str(r#"{ "action": "subscribe", "channel": "quant.report" }"#)
                 .expect("valid subscribe");
         match cmd {
-            ClientCommand::Subscribe { channel, market_id } => {
+            ClientCommand::Subscribe {
+                channel,
+                market_id,
+                after_revision,
+            } => {
                 assert_eq!(channel, WsChannel::QuantReport);
                 assert_eq!(market_id, None);
+                assert_eq!(after_revision, None);
             }
             _ => panic!("expected subscribe"),
         }
@@ -82,6 +95,36 @@ mod tests {
         assert!(
             err.to_string().contains("market.bogus"),
             "error should name the offending channel: {err}"
+        );
+    }
+
+    #[test]
+    fn feedback_subscribe_parses_cursor() {
+        let cmd: ClientCommand = serde_json::from_str(
+            r#"{ "action": "subscribe", "channel": "research.feedback", "after_revision": 41 }"#,
+        )
+        .expect("valid feedback subscribe");
+        match cmd {
+            ClientCommand::Subscribe {
+                channel,
+                market_id,
+                after_revision,
+            } => {
+                assert_eq!(channel, WsChannel::ResearchFeedback);
+                assert_eq!(market_id, None);
+                assert_eq!(after_revision, Some(41));
+            }
+            _ => panic!("expected subscribe"),
+        }
+    }
+
+    #[test]
+    fn subscribe_rejects_unknown_fields() {
+        assert!(
+            serde_json::from_str::<ClientCommand>(
+                r#"{ "action": "subscribe", "channel": "quant.report", "revision": 1 }"#,
+            )
+            .is_err()
         );
     }
 }

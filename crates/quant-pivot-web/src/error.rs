@@ -19,8 +19,8 @@
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use quant_pivot_error::{
     QuantError, auth::AuthError, control::ControlError, execution::ExecutionError,
-    governance::GovernanceError, infra::InfraError, query::QueryError, rbac::RbacError,
-    report::ReportError, research::ResearchError, storage::StorageError,
+    feedback::FeedbackError, governance::GovernanceError, infra::InfraError, query::QueryError,
+    rbac::RbacError, report::ReportError, research::ResearchError, storage::StorageError,
 };
 use thiserror::Error;
 
@@ -255,6 +255,7 @@ impl From<QuantError> for WebError {
                 | ResearchError::LabelResolution { detail }
                 | ResearchError::DatasetBuild { detail },
             ) => Self::BadRequest(detail),
+            QuantError::Feedback(feedback) => feedback.into(),
             QuantError::Config(_) => Self::BadRequest(error.to_string()),
             QuantError::Governance(governance) => governance.into(),
             QuantError::Report(ReportError::IncomparableReports { detail }) => {
@@ -277,6 +278,25 @@ impl From<QuantError> for WebError {
             },
             QuantError::Control(control) => control.into(),
             other => Self::Internal(other.to_string()),
+        }
+    }
+}
+
+impl From<FeedbackError> for WebError {
+    fn from(error: FeedbackError) -> Self {
+        let message = error.to_string();
+        match error {
+            FeedbackError::InvalidPromotionPermit { .. } => Self::BadRequest(message),
+            FeedbackError::InvalidCycleIdentity { .. }
+            | FeedbackError::InvalidCycleState { .. }
+            | FeedbackError::IllegalCycleTransition { .. }
+            | FeedbackError::StaleCycleGeneration { .. }
+            | FeedbackError::EvaluationReuse { .. }
+            | FeedbackError::SameWindowMismatch { .. }
+            | FeedbackError::PromotionPermitConflict { .. }
+            | FeedbackError::InvalidPromotionPreflight { .. }
+            | FeedbackError::PromotionTransactionConflict { .. } => Self::Conflict(message),
+            _ => Self::Internal(message),
         }
     }
 }
@@ -305,6 +325,7 @@ mod tests {
         QuantError,
         control::{ControlError, RuntimeApplyStage},
         execution::ExecutionError,
+        feedback::FeedbackError,
         rbac::RbacError,
         research::ResearchError,
         storage::{
@@ -355,6 +376,24 @@ mod tests {
     fn sell_oof_maps_422() {
         let web = WebError::from(QuantError::from(ResearchError::SellOofEstimatorRequired));
         assert_eq!(web.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn permit_contract_maps_400() {
+        let web = WebError::from(QuantError::from(FeedbackError::InvalidPromotionPermit {
+            detail: "allowed modes are not canonical".to_owned(),
+        }));
+
+        assert_eq!(web.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn feedback_conflict_maps_409() {
+        let web = WebError::from(QuantError::from(FeedbackError::PromotionPermitConflict {
+            detail: "revision differs".to_owned(),
+        }));
+
+        assert_eq!(web.status(), StatusCode::CONFLICT);
     }
 
     #[test]

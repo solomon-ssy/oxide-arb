@@ -7,8 +7,8 @@ use actix_web::{
 use quant_pivot_models::{
     domain::{
         api::{
-            FactorCollinearityQuery, FactorCollinearityView, FactorDefinitionListQuery,
-            FactorDefinitionView,
+            FactorCollinearityQuery, FactorCollinearityView, FactorDefinitionDetailQuery,
+            FactorDefinitionDetailView, FactorDefinitionListQuery, FactorDefinitionView,
         },
         pagination::Paginated,
     },
@@ -118,11 +118,13 @@ pub async fn collinearity(
 pub async fn get_by_id(
     state: Data<AppState>,
     id: Path<FactorDefinitionId>,
-) -> Result<WebResponse<FactorDefinitionView>, WebError> {
-    let info = state
+    query: Query<FactorDefinitionDetailQuery>,
+) -> Result<WebResponse<FactorDefinitionDetailView>, WebError> {
+    let id = id.into_inner();
+    let view = state
         .research_catalog
-        .find_factor(&id)
+        .find_factor_detail(&id, query.into_inner())
         .await?
         .ok_or_else(|| WebError::NotFound(format!("factor_definition not found: {id}")))?;
-    Ok(WebResponse::ok(FactorDefinitionView::from(info)))
+    Ok(WebResponse::ok(view))
 }

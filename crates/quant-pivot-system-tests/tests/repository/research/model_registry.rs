@@ -23,9 +23,9 @@ use quant_pivot_models::{
         quant::{ModelRunKind, ModelRunStatus, PublicationStatus},
     },
     types::{
-        CRYPTO_PRICE_15M_HORIZON_SECS, ContentHash, ModelInputContract, ModelRunId, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, POOLED_1H_HORIZON_SECS, TrainingDatasetId,
-        WEATHER_FORECAST_24H_HORIZON_SECS,
+        CRYPTO_PRICE_15M_HORIZON_SECS, ContentHash, FactorDefinitionId, ModelInputContract,
+        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, POOLED_1H_HORIZON_SECS,
+        TrainingDatasetId, WEATHER_FORECAST_24H_HORIZON_SECS,
         model_metrics::ModelVersionMetrics,
         model_quality::{
             GateIntent, GateSubject, QUALITY_GATE_REPORT_FORMAT_VERSION, QualityGateReport,
@@ -750,6 +750,33 @@ impl ModelVersionBoundaryFixture {
                 .expect("persisted contract and scalar projections are exact"),
             &expected_contract
         );
+        let factor_definition_id = expected_contract
+            .bindings()
+            .factors
+            .plane
+            .definitions()
+            .first()
+            .expect("model fixture has an immutable factor revision")
+            .factor_definition_id();
+        let usage = repo
+            .page_factor_usages(&factor_definition_id, PageRequest::new(0, 1_000))
+            .await
+            .expect("page exact factor serving usage");
+        assert_eq!(
+            (usage.total, usage.page, usage.size),
+            (1, 1, PageRequest::MAX_SIZE)
+        );
+        assert_eq!(usage.items[0].model_version_id, version.model_version_id);
+        assert_eq!(
+            usage.items[0].serving_contract_hash,
+            version.serving_contract_hash
+        );
+        let missing = repo
+            .page_factor_usages(&FactorDefinitionId::from_v7(), PageRequest::default())
+            .await
+            .expect("filter absent factor serving usage");
+        assert!(missing.items.is_empty());
+        assert_eq!(missing.total, 0);
         Self { db, version }
     }
 

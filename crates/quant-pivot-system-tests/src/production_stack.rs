@@ -327,15 +327,17 @@ async fn start_at(
         .join(Uuid::now_v7().to_string());
     fs::create_dir_all(&run_dir)
         .with_context(|| format!("create production-stack run {}", run_dir.display()))?;
-    let inner: Arc<dyn ArtifactStore> =
+    let runtime_artifact_store: Arc<dyn ArtifactStore> =
         Arc::new(LocalArtifactStore::new(run_dir.join("artifacts")));
-    let artifact_store: Arc<dyn ArtifactStore> =
-        Arc::new(VersionedArtifactStoreFixture::new(inner));
+    let artifact_store: Arc<dyn ArtifactStore> = Arc::new(VersionedArtifactStoreFixture::new(
+        Arc::clone(&runtime_artifact_store),
+    ));
     let browser_report_id = if browser_fixture {
         Some(
             Box::pin(seed_browser_fixture(
                 infrastructure.postgres.connection(),
                 &artifact_store,
+                &runtime_artifact_store,
             ))
             .await
             .with_context(|| {
@@ -412,12 +414,16 @@ async fn start_at(
 async fn seed_browser_fixture(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
+    runtime_artifact_store: &Arc<dyn ArtifactStore>,
 ) -> Result<RecommendationReportId> {
     let infra = Box::pin(seed_demo_with_store(db, artifact_store)).await;
-    let research = Box::pin(seed_browser_research(db, artifact_store, &infra)).await?;
+    let research = Box::pin(seed_browser_research(db, runtime_artifact_store, &infra)).await?;
     println!(
-        "browser research fixture: model_version_id={} evaluation_dataset_id={} backtest_report_id={}",
-        research.model_version_id, research.evaluation_dataset_id, research.backtest_report_id,
+        "browser research fixture: model_version_id={} evaluation_dataset_id={} backtest_report_id={} feedback_cycle_id={}",
+        research.model_version_id,
+        research.evaluation_dataset_id,
+        research.backtest_report_id,
+        research.feedback_cycle_id,
     );
     enable_test_admission(db, "browser-e2e-fixture").await;
     let settlement_report = seed_report_on_infra(

@@ -81,22 +81,25 @@ use quant_pivot_models::{
     },
     types::{
         ArtifactUri, ContentHash, FeatureValue, FeedbackCoverageArtifactId, FeedbackCycleId,
-        FeedbackDriftArtifactId, PolicyIdempotencyKey, PromotionPermitId, ResearchJobId,
-        ResearchJobParams, RoleCode, TrainingDatasetId, WorkerId, stable_name::FeatureName,
+        FeedbackDriftArtifactId, ModelVersionId, PolicyIdempotencyKey, PromotionPermitId,
+        ResearchJobId, ResearchJobParams, RoleCode, TrainingDatasetId, WorkerId,
+        stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgFeatureParityRepository, PgFeedbackCycleRepository, PgModelRegistryRepository,
-        PgModelRoutePromotionRepository, PgPolicyRepository, PgPromotionPermitRepository,
-        PgResearchJobRepository, PgRuntimeControlRepository, PgShadowComparisonRepository,
+        PgFeatureParityRepository, PgFeedbackCycleRepository, PgModelGovernanceAuditRepository,
+        PgModelRegistryRepository, PgModelRoutePromotionRepository, PgPolicyRepository,
+        PgPromotionPermitRepository, PgResearchJobRepository, PgRuntimeControlRepository,
+        PgShadowComparisonRepository,
     },
     traits::{
         FeatureParityRepository, FeedbackCycleClaim, FeedbackCycleLeaseGuard,
-        FeedbackCycleRepository, ModelRegistryRepository, ModelRoutePromotionCommit,
-        ModelRoutePromotionOutcome, ModelRoutePromotionRepository, PolicyRepository,
-        PromotionPermitIssueOutcome, PromotionPermitRepository, PromotionPermitRevokeOutcome,
-        ResearchJobEnqueueOutcome, ResearchJobRepository, RuntimeControlRepository,
+        FeedbackCycleRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
+        ModelRoutePromotionCommit, ModelRoutePromotionOutcome, ModelRoutePromotionRepository,
+        PolicyRepository, PromotionPermitIssueOutcome, PromotionPermitRepository,
+        PromotionPermitRevokeOutcome, ResearchJobEnqueueOutcome, ResearchJobRepository,
+        RuntimeControlRepository,
     },
 };
 use quant_pivot_research::{
@@ -2060,6 +2063,27 @@ impl AtomicPromotionCase {
                 .await
                 .expect("read P04 model audit")
                 .is_some()
+        );
+        let audits = PgModelGovernanceAuditRepository::new(self.db.clone());
+        for model_version_id in [
+            self.case.models.champion.model_version_id,
+            self.case.models.candidate.model_version_id,
+        ] {
+            let lineage = audits
+                .list_promotions_by_version(&model_version_id)
+                .await
+                .expect("read exact P04 model promotion lineage");
+            assert_eq!(lineage.len(), 1);
+            assert_eq!(lineage[0].audit_id, committed.audit.audit_id);
+            assert_eq!(lineage[0].audit_event_id, committed.audit.audit_event_id);
+            assert_eq!(lineage[0].detail, committed.audit.detail);
+        }
+        assert!(
+            audits
+                .list_promotions_by_version(&ModelVersionId::from_v7())
+                .await
+                .expect("filter unrelated P04 model promotion lineage")
+                .is_empty()
         );
     }
 

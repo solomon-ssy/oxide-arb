@@ -4,6 +4,7 @@
 //! wiring code can name it without threading the context path.
 
 // Crate-internal helpers.
+pub(crate) mod authorization;
 pub(crate) mod connection;
 pub(crate) mod error;
 pub(crate) mod primitives;

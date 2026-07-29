@@ -1,14 +1,19 @@
 //! Durable feedback-cycle orchestration and immutable evidence port.
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::{feedback::FeedbackCycleCommandError, storage::StorageError};
 use quant_pivot_models::{
-    domain::quant::{
-        DriftReportInfo, FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackEvaluationUseInfo,
-        FeedbackOutboxEntry, FeedbackQueueSnapshot, FeedbackStageEventInfo, NewDriftReport,
-        NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent,
+    domain::{
+        api::{DriftReportListQuery, FeedbackCycleListQuery},
+        pagination::{PageRequest, Paginated},
+        quant::{
+            DriftReportInfo, FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackEvaluationUseInfo,
+            FeedbackOutboxEntry, FeedbackQueueSnapshot, FeedbackStageEventInfo,
+            GovernedFeedbackCancellation, GovernedFeedbackTrigger, NewDriftReport,
+            NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent,
+        },
     },
-    types::{FeedbackCycleId, WorkerId},
+    types::{FeedbackCycleId, ModelVersionId, WorkerId},
 };
 
 /// Outcome of an idempotent cycle-identity insert.
@@ -95,9 +100,42 @@ pub struct FeedbackCycleClaim {
     pub lease: FeedbackCycleLeaseGuard,
 }
 
+/// Minimal durable publication/replay boundary for `research.feedback`.
+#[async_trait::async_trait]
+pub trait FeedbackOutboxRepository: Send + Sync {
+    /// Latest globally ordered durable event revision, or zero when empty.
+    async fn latest_outbox_revision(&self) -> Result<i64, StorageError>;
+
+    /// Claim globally ordered unpublished feedback events with `SKIP LOCKED`.
+    async fn claim_outbox(
+        &self,
+        worker_id: WorkerId,
+        lease_secs: u64,
+        limit: u64,
+    ) -> Result<Vec<FeedbackOutboxEntry>, StorageError>;
+
+    /// Mark one exact claimed revision published using the database clock.
+    async fn publish_outbox(&self, revision: i64, worker_id: WorkerId) -> Result<(), StorageError>;
+
+    /// Release one failed claim with a bounded diagnostic for retry.
+    async fn fail_outbox(
+        &self,
+        revision: i64,
+        worker_id: WorkerId,
+        detail: String,
+    ) -> Result<(), StorageError>;
+
+    /// Replay immutable events strictly after one global revision.
+    async fn list_outbox(
+        &self,
+        after_revision: i64,
+        limit: u64,
+    ) -> Result<Vec<FeedbackOutboxEntry>, StorageError>;
+}
+
 /// Persistence owner for cycle identity, leases, CAS, and WORM evidence.
 #[async_trait::async_trait]
-pub trait FeedbackCycleRepository: Send + Sync {
+pub trait FeedbackCycleRepository: FeedbackOutboxRepository {
     /// Return the same `PostgreSQL` clock used for every lease decision.
     async fn database_time(&self) -> Result<DateTime<Utc>, StorageError>;
 
@@ -111,10 +149,23 @@ pub trait FeedbackCycleRepository: Send + Sync {
         trigger: NewFeedbackStageEvent,
     ) -> Result<(FeedbackCycleWriteOutcome, FeedbackStageWriteOutcome), StorageError>;
 
+    /// Authorize an operator and atomically persist one server-frozen cycle
+    /// plus database-timestamped trigger evidence.
+    async fn record_governed_trigger(
+        &self,
+        command: GovernedFeedbackTrigger,
+    ) -> Result<(FeedbackCycleWriteOutcome, FeedbackStageWriteOutcome), FeedbackCycleCommandError>;
+
     async fn find_cycle(
         &self,
         cycle_id: &FeedbackCycleId,
     ) -> Result<Option<FeedbackCycleInfo>, StorageError>;
+
+    /// Page cycles newest first using hardened SQL pagination.
+    async fn page_cycles(
+        &self,
+        query: FeedbackCycleListQuery,
+    ) -> Result<Paginated<FeedbackCycleInfo>, StorageError>;
 
     /// Claim the oldest queued or expired-running cycle without waiting on a
     /// row another worker currently owns.
@@ -146,6 +197,13 @@ pub trait FeedbackCycleRepository: Send + Sync {
         generation: FeedbackCycleGeneration,
         event: NewFeedbackStageEvent,
     ) -> Result<(FeedbackCycleCasOutcome, FeedbackStageWriteOutcome), StorageError>;
+
+    /// Authorize and apply one exact governed cancellation against the current
+    /// generation and immutable event timeline.
+    async fn request_governed_cancel(
+        &self,
+        command: GovernedFeedbackCancellation,
+    ) -> Result<(FeedbackCycleCasOutcome, FeedbackStageWriteOutcome), FeedbackCycleCommandError>;
 
     /// Terminalize one live owned cycle under exact generation CAS.
     async fn finalize_cycle(
@@ -185,37 +243,24 @@ pub trait FeedbackCycleRepository: Send + Sync {
         cycle_id: &FeedbackCycleId,
     ) -> Result<Vec<DriftReportInfo>, StorageError>;
 
+    /// Page immutable drift headers newest first using their cycle/profile lineage.
+    async fn page_drift_reports(
+        &self,
+        query: DriftReportListQuery,
+    ) -> Result<Paginated<DriftReportInfo>, StorageError>;
+
     async fn list_evaluation_uses(
         &self,
         cycle_id: &FeedbackCycleId,
     ) -> Result<Vec<FeedbackEvaluationUseInfo>, StorageError>;
 
+    /// Page one-time evaluation uses for which this model was the exact champion.
+    async fn page_model_evaluation_uses(
+        &self,
+        model_version_id: &ModelVersionId,
+        page: PageRequest,
+    ) -> Result<Paginated<FeedbackEvaluationUseInfo>, StorageError>;
+
     /// Read bounded scheduler and feedback-publication backlog state.
     async fn queue_snapshot(&self) -> Result<FeedbackQueueSnapshot, StorageError>;
-
-    /// Claim globally ordered unpublished feedback events with `SKIP LOCKED`.
-    async fn claim_outbox(
-        &self,
-        worker_id: WorkerId,
-        lease_secs: u64,
-        limit: u64,
-    ) -> Result<Vec<FeedbackOutboxEntry>, StorageError>;
-
-    /// Mark one exact claimed revision published using the database clock.
-    async fn publish_outbox(&self, revision: i64, worker_id: WorkerId) -> Result<(), StorageError>;
-
-    /// Release one failed claim with a bounded diagnostic for retry.
-    async fn fail_outbox(
-        &self,
-        revision: i64,
-        worker_id: WorkerId,
-        detail: String,
-    ) -> Result<(), StorageError>;
-
-    /// Replay immutable events strictly after one global revision.
-    async fn list_outbox(
-        &self,
-        after_revision: i64,
-        limit: u64,
-    ) -> Result<Vec<FeedbackOutboxEntry>, StorageError>;
 }

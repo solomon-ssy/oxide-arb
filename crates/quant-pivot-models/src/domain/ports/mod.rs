@@ -9,6 +9,8 @@ pub mod execution_recovery;
 pub mod feature_integrity;
 pub mod feature_parity_execution;
 pub mod feedback_execution;
+pub mod feedback_mutation;
+pub mod feedback_read;
 pub mod market_linkage;
 pub mod model_governance;
 pub mod model_spec;
@@ -55,6 +57,8 @@ pub use feedback_execution::{
     FeedbackShadowObservationSource, FeedbackShadowReplayArtifactRef, FeedbackShadowSubject,
     FeedbackShadowUnavailableReason, FeedbackTrainingCommand, FeedbackTrainingJobParams,
 };
+pub use feedback_mutation::FeedbackMutationPort;
+pub use feedback_read::FeedbackReadPort;
 pub use market_linkage::MarketLinkageGovernancePort;
 pub use model_governance::{
     GovernanceActor, ModelGovernancePort, PublishModelCommand, RetireModelCommand,

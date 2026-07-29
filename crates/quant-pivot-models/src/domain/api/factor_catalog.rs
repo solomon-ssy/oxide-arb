@@ -6,9 +6,19 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::{pagination::PageRequest, quant::FactorDefinitionInfo},
-    enums::factor::{FactorDefinitionScope, FactorFamily},
-    types::factor::FactorOutputSemantics,
+    domain::{
+        pagination::{PageRequest, Paginated},
+        quant::FactorDefinitionInfo,
+    },
+    enums::{
+        common::MarketCategory,
+        factor::{FactorDefinitionScope, FactorFamily},
+        model::ModelFamily,
+        quant::PublicationStatus,
+    },
+    types::{
+        ContentHash, ModelSpecId, ModelVersionId, ResearchProfileRef, factor::FactorOutputSemantics,
+    },
 };
 
 /// Outbound projection of an immutable factor definition.
@@ -104,6 +114,38 @@ pub struct FactorDefinitionListQuery {
     #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
+}
+
+/// Pagination for the exact model-serving usages attached to one factor detail.
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct FactorDefinitionDetailQuery {
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+/// One verified model contract that consumes an immutable factor revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FactorServingUsageView {
+    pub model_version_id: ModelVersionId,
+    pub model_spec_id: ModelSpecId,
+    pub model_spec_name: String,
+    pub model_family: ModelFamily,
+    pub version: i32,
+    pub category_scope: Option<MarketCategory>,
+    pub profile_ref: ResearchProfileRef,
+    pub artifact_hash: ContentHash,
+    pub serving_contract_version: u32,
+    pub serving_contract_hash: ContentHash,
+    pub publication_status: PublicationStatus,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Immutable definition plus its independently paginated serving usage.
+#[derive(Debug, Clone, Serialize)]
+pub struct FactorDefinitionDetailView {
+    pub definition: FactorDefinitionView,
+    pub serving_usage: Paginated<FactorServingUsageView>,
 }
 
 impl From<FactorDefinitionInfo> for FactorDefinitionView {

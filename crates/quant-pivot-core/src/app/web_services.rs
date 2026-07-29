@@ -7,10 +7,10 @@ use quant_pivot_models::domain::{
     governance::NewOperationLog,
     ports::{
         CatalogStatusPort, CommittedPolicyApplyPort, DataQualityPort, ExecutionReadPort,
-        ExecutionRecoveryPort, FeatureIntegrityPort, MarketLinkageGovernancePort,
-        ModelCalibrationFitPort, OrderIntentPort, PolicySnapshotPort, ReconciliationPort,
-        ResearchJobPort, ResearchReadinessPort, TradePolicyPort, TrainingDatasetPort,
-        settlement_control::SettlementControlPort,
+        ExecutionRecoveryPort, FeatureIntegrityPort, FeedbackMutationPort, FeedbackReadPort,
+        MarketLinkageGovernancePort, ModelCalibrationFitPort, OrderIntentPort, PolicySnapshotPort,
+        ReconciliationPort, ResearchJobPort, ResearchReadinessPort, TradePolicyPort,
+        TrainingDatasetPort, settlement_control::SettlementControlPort,
     },
 };
 use quant_pivot_repository::{
@@ -19,8 +19,9 @@ use quant_pivot_repository::{
         AccountSnapshotRepository, BasisAlertRepository, CalibrationArtifactRepository,
         CatalogLedgerRepository, DomainSourceCursorRepository, DomainSourceExpectationRepository,
         EntryConditionRepository, EquitySnapshotRepository, ExecutionOrderRepository,
-        FeatureParityEventRepository, FeatureRepository, FeedbackCohortRepository, MenuRepository,
-        OperationLogRepository, OrderIntentRepository, PolicyRepository, PositionRepository,
+        FeatureParityEventRepository, FeatureRepository, FeedbackCohortRepository,
+        FeedbackCycleRepository, FeedbackOutboxRepository, MenuRepository, OperationLogRepository,
+        OrderIntentRepository, PolicyRepository, PositionRepository, PromotionPermitRepository,
         RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
         ReportRunRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
         ServingEvidenceRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
@@ -35,7 +36,9 @@ use quant_pivot_web::{
     readiness::PgRedisReadiness,
     spawn_web_server,
     state::AppState,
-    ws::{SessionHubMetrics, SessionRegistry, spawn_ws_broadcaster},
+    ws::{
+        SessionHubMetrics, SessionRegistry, feedback::FeedbackOutboxWorker, spawn_ws_broadcaster,
+    },
 };
 
 use super::AppContext;
@@ -47,6 +50,8 @@ use crate::{
             cpcv_backtest::CoreCpcvBacktestPort,
             execution_read::CoreExecutionReadPort,
             execution_recovery::CoreExecutionRecoveryPort,
+            feedback_mutation::{CoreFeedbackMutationDeps, CoreFeedbackMutationPort},
+            feedback_read::CoreFeedbackReadPort,
             market_data::CoreMarketData,
             metrics_scrape::CoreMetricsScrape,
             model_training::CoreModelTrainingPort,
@@ -62,6 +67,7 @@ use crate::{
     prefetch::feature_window::FeatureWindowProvider,
     service::{
         feature_integrity::{CatalogFeatureIntegrityCoverage, FeatureIntegrityService},
+        feedback_coordinator::FeedbackCoordinatorWake,
         model_calibration_fit::ModelCalibrationFitService,
         research_readiness::ResearchReadinessEvidenceService,
         trade_policy::{TradePolicyService, TradePolicyServiceDeps},
@@ -78,6 +84,7 @@ impl AppContext {
         runner: &mut AppRunner,
         order_intents: Arc<dyn OrderIntentPort>,
         research_jobs: Arc<dyn ResearchJobPort>,
+        feedback_wake: FeedbackCoordinatorWake,
     ) -> QuantResult<()> {
         let (operation_log, op_log_worker) = (self).build_operation_log_writer();
         let (ws_sessions, session_hub) = SessionRegistry::new(SessionHubMetrics {
@@ -90,10 +97,16 @@ impl AppContext {
             queue_oldest_age_seconds: self.infra.metrics.ws_hub_queue_oldest_age_seconds.clone(),
             frame_bytes: self.infra.metrics.ws_hub_frame_bytes.clone(),
         });
+        let feedback_outbox = FeedbackOutboxWorker::try_new(
+            Arc::clone(&self.infra.repos.feedback_cycle) as Arc<dyn FeedbackOutboxRepository>,
+            ws_sessions.clone(),
+            self.config.quant.research_jobs,
+        )?;
         let state = build_app_state(
             self,
             order_intents,
             research_jobs,
+            feedback_wake,
             operation_log,
             ws_sessions.clone(),
         )
@@ -109,6 +122,11 @@ impl AppContext {
         let ws_sessions = state.ws_sessions.clone();
 
         runner.spawn(TaskId::SessionHub, move |token| session_hub.run(token));
+        runner.spawn(TaskId::FeedbackOutboxWorker, move |token| async move {
+            if let Err(error) = feedback_outbox.run(token).await {
+                tracing::error!(%error, "FeedbackOutboxWorker exited with error");
+            }
+        });
 
         let web_config = self.config.web.clone();
         let shutdown = self.shutdown.clone();
@@ -139,6 +157,7 @@ async fn build_app_state(
     ctx: &AppContext,
     order_intents: Arc<dyn OrderIntentPort>,
     research_jobs: Arc<dyn ResearchJobPort>,
+    feedback_wake: FeedbackCoordinatorWake,
     operation_log: OperationLogBuffer,
     ws_sessions: SessionRegistry,
 ) -> QuantResult<AppState> {
@@ -195,9 +214,29 @@ async fn build_app_state(
         cpcv_backtests: research_ports.cpcv_backtests,
         model_governance: Arc::clone(&ctx.research.model_governance),
         model_spec: Arc::clone(&ctx.research.model_spec),
-        research_catalog: Arc::new(CoreResearchCatalogPort::from_research(&ctx.research)),
+        research_catalog: Arc::new(CoreResearchCatalogPort::from_research(
+            &ctx.research,
+            Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
+        )),
         research_jobs,
         research_readiness: Arc::clone(&research_readiness) as Arc<dyn ResearchReadinessPort>,
+        feedback_read: Arc::new(CoreFeedbackReadPort::new(
+            Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
+            Arc::clone(&research_readiness) as Arc<dyn ResearchReadinessPort>,
+            Arc::clone(&ctx.research.artifact_store),
+        )) as Arc<dyn FeedbackReadPort>,
+        feedback_outbox: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackOutboxRepository>,
+        feedback_mutation: Arc::new(CoreFeedbackMutationPort::new(CoreFeedbackMutationDeps {
+            cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
+            permits: Arc::clone(&repos.promotion_permit) as Arc<dyn PromotionPermitRepository>,
+            permit_service: Arc::clone(&ctx.governance.promotion_permits),
+            promotion_preflight: Arc::clone(&ctx.research.promotion_preflight),
+            serving_preimages: Arc::clone(&ctx.research.serving_preimages),
+            serving_generations: Arc::clone(&ctx.research.serving_generations),
+            training_datasets: Arc::clone(&research_ports.training_datasets),
+            feedback_wake,
+            shutdown: ctx.shutdown.clone(),
+        })) as Arc<dyn FeedbackMutationPort>,
         feature_integrity: (ctx).build_feature_integrity(),
         calibration_artifacts: Arc::clone(&ctx.research.calibration_artifact_fit),
         model_calibration_fit: research_ports.model_calibration_fit

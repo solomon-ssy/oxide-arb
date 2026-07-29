@@ -1126,7 +1126,7 @@ impl RecoveryMarker {
 }
 
 #[derive(Debug)]
-struct FeedbackTimeline {
+pub(crate) struct FeedbackTimeline {
     position: TimelinePosition,
     next_sequence: i64,
     cancel_reason: Option<String>,
@@ -1134,7 +1134,7 @@ struct FeedbackTimeline {
 }
 
 impl FeedbackTimeline {
-    fn parse(events: &[FeedbackStageEventInfo]) -> Result<Self, FeedbackError> {
+    pub(crate) fn parse(events: &[FeedbackStageEventInfo]) -> Result<Self, FeedbackError> {
         let Some(trigger) = events.first() else {
             return Err(FeedbackError::InvalidCoordinatorState {
                 detail: "feedback cycle has no trigger evidence".to_owned(),
@@ -1189,6 +1189,21 @@ impl FeedbackTimeline {
             cancel_reason,
             events: events.to_vec(),
         })
+    }
+
+    #[must_use]
+    pub(crate) const fn next_sequence(&self) -> i64 {
+        self.next_sequence
+    }
+
+    #[must_use]
+    pub(crate) const fn stage(&self) -> FeedbackStage {
+        match &self.position {
+            TimelinePosition::Active { stage, .. }
+            | TimelinePosition::Succeeded { stage, .. }
+            | TimelinePosition::Failed { stage, .. }
+            | TimelinePosition::Cancelled { stage, .. } => *stage,
+        }
     }
 
     fn require_job(

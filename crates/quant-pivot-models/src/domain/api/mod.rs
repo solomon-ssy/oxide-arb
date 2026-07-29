@@ -11,6 +11,7 @@ mod execution_recovery;
 mod factor_catalog;
 mod feature_contract;
 mod feature_integrity;
+mod feedback;
 mod health;
 mod market;
 mod market_linkage;
@@ -59,7 +60,8 @@ pub use execution_recovery::{
 };
 pub use factor_catalog::{
     CollinearPairView, FactorCollinearityQuery, FactorCollinearitySource, FactorCollinearityView,
-    FactorDefinitionListQuery, FactorDefinitionView,
+    FactorDefinitionDetailQuery, FactorDefinitionDetailView, FactorDefinitionListQuery,
+    FactorDefinitionView, FactorServingUsageView,
 };
 pub use feature_contract::{FeatureContractEntryView, FeatureContractView, FeatureNullPolicyView};
 pub use feature_integrity::{
@@ -67,6 +69,15 @@ pub use feature_integrity::{
     FeatureIntegritySummaryView, FeatureParityEventListQuery, FeatureParityEventView,
     FeatureParityEvidenceView, FeatureParityRunListQuery, FeatureParityRunView,
     RunFullFeatureParityRequest,
+};
+pub use feedback::{
+    CancelFeedbackCycleRequest, DriftReportListQuery, DriftReportView, FeedbackCohortCountsView,
+    FeedbackCoverageDecision, FeedbackCoverageView, FeedbackCycleDetailView,
+    FeedbackCycleListQuery, FeedbackCycleMutationView, FeedbackCycleView,
+    FeedbackEvaluationUseView, FeedbackOverviewView, FeedbackProfileOverviewView,
+    FeedbackQueueView, FeedbackReadinessView, FeedbackStageEventView, IssuePromotionPermitRequest,
+    PromotionPermitListQuery, PromotionPermitMutationView, PromotionPermitView,
+    RevokePromotionPermitRequest, TriggerFeedbackCycleRequest,
 };
 pub use health::{DependencyCheck, HealthStatus, ReadinessReport, ReadinessStatus};
 pub use market::{
@@ -83,7 +94,10 @@ pub use market_linkage::{
 };
 pub use menu::{CreateMenuRequest, UpdateMenuRequest};
 pub use model_governance::{BindPublishPathSetRequest, PublishModelRequest, RetireModelRequest};
-pub use model_training::{ModelVersionListQuery, TrainModelRequest, TrainedModelView};
+pub use model_training::{
+    ModelDetailQuery, ModelDetailView, ModelPromotionLineageView, ModelPromotionRole,
+    ModelVersionListQuery, TrainModelRequest, TrainedModelView,
+};
 pub use operation_log::{OperationLogQuery, OperationLogView};
 pub use permission::PermissionCatalogEntry;
 pub use quality_gate::{

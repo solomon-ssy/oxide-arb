@@ -7,6 +7,8 @@ use quant_pivot_core::governance::PromotionPermitService;
 use quant_pivot_error::{QuantError, feedback::FeedbackError, rbac::RbacError};
 use quant_pivot_models::{
     domain::{
+        api::PromotionPermitListQuery,
+        pagination::PageRequest,
         quant::{
             IssuePromotionPermit, NewPromotionPermit, PromotionPermitActor, PromotionPermitInfo,
             PromotionPermitIssueInput, PromotionPermitScope, PromotionPermitScopeInput,
@@ -29,7 +31,8 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration,
-        PolicyIdempotencyKey, PromotionPermitId, ResearchProfileRef, RoleCode, RoleId, UserId,
+        PolicyIdempotencyKey, PromotionPermitId, ResearchProfileId, ResearchProfileRef, RoleCode,
+        RoleId, UserId,
     },
 };
 use quant_pivot_repository::{
@@ -617,6 +620,59 @@ impl PermitServiceFixture {
                     && permit.issued_by_role.as_str() == "super_admin"
         ));
     }
+
+    async fn verify_page_contracts(&self) {
+        let repository = PgPromotionPermitRepository::new(self.db.clone());
+        let active = repository
+            .page_permits(PromotionPermitListQuery {
+                profile_id: Some(self.context.profile_ref.id.clone()),
+                category: Some(MarketCategory::Crypto),
+                status: Some(PromotionPermitStatus::Active),
+                page: PageRequest::new(0, 1_000),
+            })
+            .await
+            .expect("page active permits");
+        assert!(!active.permits.items.is_empty());
+        assert_eq!(
+            (active.permits.page, active.permits.size),
+            (1, PageRequest::MAX_SIZE)
+        );
+        assert!(active.permits.items.iter().all(|permit| {
+            matches!(
+                permit.status_at(active.observed_at),
+                Ok(PromotionPermitStatus::Active)
+            )
+        }));
+
+        let revoked = repository
+            .page_permits(PromotionPermitListQuery {
+                profile_id: Some(self.context.profile_ref.id.clone()),
+                category: Some(MarketCategory::Crypto),
+                status: Some(PromotionPermitStatus::Revoked),
+                page: PageRequest::default(),
+            })
+            .await
+            .expect("page revoked permits");
+        assert!(!revoked.permits.items.is_empty());
+        assert!(revoked.permits.items.iter().all(|permit| {
+            matches!(
+                permit.status_at(revoked.observed_at),
+                Ok(PromotionPermitStatus::Revoked)
+            )
+        }));
+
+        let missing = repository
+            .page_permits(PromotionPermitListQuery {
+                profile_id: Some(ResearchProfileId::new("missing_profile")),
+                category: None,
+                status: None,
+                page: PageRequest::default(),
+            })
+            .await
+            .expect("page missing profile permits");
+        assert_eq!(missing.permits.total, 0);
+        assert!(missing.permits.items.is_empty());
+    }
 }
 
 async fn load_permit(db: &DatabaseConnection, permit_id: PromotionPermitId) -> PromotionPermitInfo {
@@ -796,4 +852,5 @@ pub async fn governed_service_contracts() {
     let (issue_command, permit) = Box::pin(fixture.race_issue(&owner, database_now)).await;
     Box::pin(fixture.race_revoke(&owner, issue_command, permit, database_now)).await;
     Box::pin(fixture.verify_rbac_state(database_now)).await;
+    Box::pin(fixture.verify_page_contracts()).await;
 }

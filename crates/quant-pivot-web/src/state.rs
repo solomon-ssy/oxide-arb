@@ -14,13 +14,13 @@ use quant_pivot_models::{
         ports::{
             AccountReadPort, BacktestPort, CalibrationArtifactFitPort, CatalogStatusPort,
             CommittedPolicyApplyPort, CpcvBacktestPort, DataQualityPort, ExecutionReadPort,
-            ExecutionRecoveryPort, FeatureIntegrityPort, KillSwitchPort, MarketDataPort,
-            MarketLinkageGovernancePort, MetricsScrapePort, ModelCalibrationFitPort,
-            ModelGovernancePort, ModelSpecPort, ModelTrainingPort, OrderIntentPort,
-            PolicySnapshotPort, QuantReportPort, ReadinessPort, ReconciliationPort,
-            ResearchCatalogPort, ResearchJobPort, ResearchReadinessPort, RuntimeControlPort,
-            StructuralMonitorPort, SystemCapabilityPort, TradePolicyPort, TrainingDatasetPort,
-            settlement_control::SettlementControlPort,
+            ExecutionRecoveryPort, FeatureIntegrityPort, FeedbackMutationPort, FeedbackReadPort,
+            KillSwitchPort, MarketDataPort, MarketLinkageGovernancePort, MetricsScrapePort,
+            ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort, ModelTrainingPort,
+            OrderIntentPort, PolicySnapshotPort, QuantReportPort, ReadinessPort,
+            ReconciliationPort, ResearchCatalogPort, ResearchJobPort, ResearchReadinessPort,
+            RuntimeControlPort, StructuralMonitorPort, SystemCapabilityPort, TradePolicyPort,
+            TrainingDatasetPort, settlement_control::SettlementControlPort,
         },
         runtime::{
             CoreEvent, CoreEventPublisher, MaterializationRunEvent, MaterializationRunKind,
@@ -30,9 +30,10 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     BasisAlertRepository, DomainSourceCursorRepository, DomainSourceExpectationRepository,
-    EntryConditionRepository, MarketLinkageRepository, MarketRepository, MenuRepository,
-    OperationLogRepository, PolicyRepository, QuantFactReadRepository, RoleMenuRepository,
-    RolePermissionRepository, RoleRepository, UserRepository, UserRoleRepository,
+    EntryConditionRepository, FeedbackOutboxRepository, MarketLinkageRepository, MarketRepository,
+    MenuRepository, OperationLogRepository, PolicyRepository, QuantFactReadRepository,
+    RoleMenuRepository, RolePermissionRepository, RoleRepository, UserRepository,
+    UserRoleRepository,
 };
 
 /// Dependency bundle shared by all handlers and middleware.
@@ -89,6 +90,12 @@ pub struct AppState {
     pub research_jobs: Arc<dyn ResearchJobPort>,
     /// Verified operational evidence for the research-readiness dashboard gate.
     pub research_readiness: Arc<dyn ResearchReadinessPort>,
+    /// Feedback overview, cycle catalog, and immutable evidence detail.
+    pub feedback_read: Arc<dyn FeedbackReadPort>,
+    /// Durable feedback revision claim/replay owner used by the WebSocket adapter.
+    pub feedback_outbox: Arc<dyn FeedbackOutboxRepository>,
+    /// Governed manual-cycle and promotion-permit mutations.
+    pub feedback_mutation: Arc<dyn FeedbackMutationPort>,
     /// Deterministic feature replay evidence and governed parity latch.
     pub feature_integrity: Arc<dyn FeatureIntegrityPort>,
     /// Favorite-longshot bias-table fit enqueue plus unified calibration-artifact

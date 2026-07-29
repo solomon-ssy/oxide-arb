@@ -120,7 +120,7 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_system_tests::{
-    postgres::{setup_pg, with_postgres_suite},
+    postgres::{PostgresClock, setup_pg, with_postgres_suite},
     support::{
         catalog_fixtures::{make_event, make_market},
         execution_pg_seed::{
@@ -895,7 +895,7 @@ async fn settlement_confirmation_scenario() {
     let (pool, mismatch_database) = setup_pg().await;
     let db = pool.connection().clone();
     let fixture = prepare_confirmation_fixture(&db).await;
-    let confirmed_at = Utc::now();
+    let confirmed_at = db.statement_time().await;
     let settlement = PgSettlementRedeemRepository::new(db.clone());
     let confirmation_worker = WorkerId::from_v7();
     settlement
@@ -947,7 +947,7 @@ async fn settlement_confirmation_scenario() {
     let (pool, _confirmation_container) = setup_pg().await;
     let db = pool.connection().clone();
     let fixture = prepare_confirmation_fixture(&db).await;
-    let confirmed_at = Utc::now();
+    let confirmed_at = db.statement_time().await;
     let position_repository = PgPositionRepository::new(db.clone());
     let settlement = PgSettlementRedeemRepository::new(db.clone());
     let confirmation_worker = WorkerId::from_v7();
@@ -1015,7 +1015,7 @@ async fn partial_exchange_resolution_scenario() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let fixture = prepare_partial_exchange_fixture(&db).await;
-    let confirmed_at = Utc::now();
+    let confirmed_at = db.statement_time().await;
     let settlement = PgSettlementRedeemRepository::new(db.clone());
     let confirmation_worker = WorkerId::from_v7();
     settlement
@@ -1108,7 +1108,7 @@ async fn prepare_confirmation_fixture_shape(
         )
         .await;
     }
-    let observed_at = Utc::now();
+    let observed_at = db.statement_time().await;
     let (raw_balance, redeem_shares, payout_usd) = match shape {
         ConfirmationFixtureShape::ResolutionOnly => (
             WINNING_TOKEN_RAW_BALANCE,

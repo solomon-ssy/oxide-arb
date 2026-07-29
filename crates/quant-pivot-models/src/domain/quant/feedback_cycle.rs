@@ -21,7 +21,8 @@ use crate::{
     types::{
         ArtifactUri, CapabilityRegistryHashes, ContentHash, DriftReportId, FeedbackCycleId,
         FeedbackEvaluationUseId, FeedbackStageEventId, ModelVersionId, ResearchJobId,
-        ResearchProfileArtifactId, ResearchProfileRef, TrainingDatasetId, WorkerId,
+        ResearchProfileArtifactId, ResearchProfileId, ResearchProfileRef, RoleCode,
+        TrainingDatasetId, UserId, WorkerId,
     },
 };
 
@@ -37,6 +38,7 @@ const EVALUATION_USE_DOMAIN: &str = "quant-pivot/feedback-evaluation-use";
 const MAX_ARTIFACT_URI_BYTES: usize = 4_096;
 const MAX_ACTOR_BYTES: usize = 256;
 const MAX_REASON_BYTES: usize = 128;
+const MAX_ROLE_BYTES: usize = 64;
 
 /// Complete immutable preimage of one cycle's typed idempotency hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
@@ -278,6 +280,82 @@ impl NewFeedbackCycle {
     #[must_use]
     pub const fn label_cutoff(&self) -> DateTime<Utc> {
         self.label_cutoff
+    }
+}
+
+/// Authenticated principal and explicit role for a governed cycle mutation.
+///
+/// Username is deliberately absent. The transaction-owning repository resolves
+/// the active database username after locking the authorization preimage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedbackCycleActor {
+    pub user_id: UserId,
+    pub acting_role: RoleCode,
+}
+
+impl FeedbackCycleActor {
+    fn validate(&self) -> Result<(), FeedbackError> {
+        let role = self.acting_role.as_str();
+        if role.is_empty()
+            || role.len() > MAX_ROLE_BYTES
+            || !role
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(FeedbackError::InvalidStageEvent {
+                detail: "acting role violates the governed feedback contract".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Server-frozen cycle plus the operator intent recorded as trigger evidence.
+#[derive(Debug, Clone)]
+pub struct GovernedFeedbackTrigger {
+    pub actor: FeedbackCycleActor,
+    pub cycle: NewFeedbackCycle,
+    pub reason_code: String,
+}
+
+impl GovernedFeedbackTrigger {
+    pub fn validate(&self) -> Result<(), FeedbackError> {
+        self.actor.validate()?;
+        if !valid_reason(&self.reason_code) {
+            return Err(FeedbackError::InvalidStageEvent {
+                detail: "trigger reason code violates the governed feedback contract".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Exact timeline precondition for one governed cancellation request.
+#[derive(Debug, Clone)]
+pub struct GovernedFeedbackCancellation {
+    pub actor: FeedbackCycleActor,
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub expected_generation: i64,
+    pub expected_event_sequence: i64,
+    pub stage: FeedbackStage,
+    pub reason_code: String,
+}
+
+impl GovernedFeedbackCancellation {
+    pub fn validate(&self) -> Result<(), FeedbackError> {
+        self.actor.validate()?;
+        if self.expected_generation < 0
+            || self.expected_event_sequence <= 1
+            || self.stage == FeedbackStage::Trigger
+            || !valid_reason(&self.reason_code)
+        {
+            return Err(FeedbackError::InvalidStageEvent {
+                detail:
+                    "cancellation generation, sequence, stage, or reason violates the governed feedback contract"
+                        .to_owned(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -710,6 +788,7 @@ pub struct FeedbackStageEventInfo {
 pub struct FeedbackOutboxEntry {
     pub revision: i64,
     pub publish_attempts: i32,
+    pub profile_id: ResearchProfileId,
     pub event: FeedbackStageEventInfo,
 }
 
@@ -719,6 +798,11 @@ impl FeedbackOutboxEntry {
             return Err(FeedbackError::InvalidCoordinatorState {
                 detail: "feedback outbox revision and publish attempts must be non-negative"
                     .to_owned(),
+            });
+        }
+        if self.profile_id.as_str().trim().is_empty() {
+            return Err(FeedbackError::InvalidCoordinatorState {
+                detail: "feedback outbox profile id must not be empty".to_owned(),
             });
         }
         self.event.validate()

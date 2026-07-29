@@ -28,4 +28,11 @@ pub trait ModelGovernanceAuditRepository: Send + Sync {
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<Vec<ModelGovernanceAuditInfo>, StorageError>;
+
+    /// List route promotions where this version was either the exact champion
+    /// being replaced or the promoted candidate.
+    async fn list_promotions_by_version(
+        &self,
+        model_version_id: &ModelVersionId,
+    ) -> Result<Vec<ModelGovernanceAuditInfo>, StorageError>;
 }

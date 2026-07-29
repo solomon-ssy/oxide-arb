@@ -77,7 +77,8 @@ pub use feedback_cohort::FeedbackCohortRepository;
 pub use feedback_cycle::{
     DriftReportWriteOutcome, FeedbackCycleCasOutcome, FeedbackCycleClaim, FeedbackCycleClaimMode,
     FeedbackCycleGeneration, FeedbackCycleLeaseGuard, FeedbackCycleRepository,
-    FeedbackCycleWriteOutcome, FeedbackEvaluationWriteOutcome, FeedbackStageWriteOutcome,
+    FeedbackCycleWriteOutcome, FeedbackEvaluationWriteOutcome, FeedbackOutboxRepository,
+    FeedbackStageWriteOutcome,
 };
 pub use governance_audit::ModelGovernanceAuditRepository;
 pub use market_linkage::MarketLinkageRepository;
@@ -93,7 +94,8 @@ pub use order_intent::OrderIntentRepository;
 pub use portfolio_plan::PortfolioPlanRepository;
 pub use position::PositionRepository;
 pub use promotion_permit::{
-    PromotionPermitIssueOutcome, PromotionPermitRepository, PromotionPermitRevokeOutcome,
+    PromotionPermitIssueOutcome, PromotionPermitPage, PromotionPermitRepository,
+    PromotionPermitRevokeOutcome,
 };
 pub use recommendation::RecommendationRepository;
 pub use recommendation_execution_outcome::RecommendationExecutionOutcomeRepository;

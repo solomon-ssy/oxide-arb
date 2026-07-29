@@ -18,6 +18,8 @@ pub enum TaskId {
     WebServer,
     /// Fans `CoreEvent`s out to subscribed WebSocket sessions.
     WsBroadcaster,
+    /// Claims and publishes durable feedback revisions to `research.feedback`.
+    FeedbackOutboxWorker,
     /// Single writer for WebSocket sessions and reverse subscription indexes.
     SessionHub,
     /// Periodic + nudged `SystemStatusChanged` pushes for dashboard clients.
@@ -160,6 +162,7 @@ impl TaskId {
         match self {
             Self::WebServer
             | Self::WsBroadcaster
+            | Self::FeedbackOutboxWorker
             | Self::SessionHub
             | Self::BookUpdateCoalescer
             | Self::SystemStatusBroadcaster => TaskKind::ApiIngress,

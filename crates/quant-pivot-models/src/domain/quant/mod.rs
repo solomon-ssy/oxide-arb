@@ -124,11 +124,12 @@ pub use feedback_cohort::{
     FeedbackExecutionEvidence, FeedbackRecommendationContext, FeedbackResolutionEvidence,
 };
 pub use feedback_cycle::{
-    DriftReportInfo, DriftReportInput, FeedbackCycleInfo, FeedbackCycleKey, FeedbackCycleKeyInput,
-    FeedbackCycleTerminal, FeedbackEvaluationUseInfo, FeedbackEvaluationUseInput,
-    FeedbackEvaluationUseKey, FeedbackOutboxEntry, FeedbackQueueSnapshot, FeedbackStageEventInfo,
-    FeedbackStageEventInput, NewDriftReport, NewFeedbackCycle, NewFeedbackEvaluationUse,
-    NewFeedbackStageEvent,
+    DriftReportInfo, DriftReportInput, FeedbackCycleActor, FeedbackCycleInfo, FeedbackCycleKey,
+    FeedbackCycleKeyInput, FeedbackCycleTerminal, FeedbackEvaluationUseInfo,
+    FeedbackEvaluationUseInput, FeedbackEvaluationUseKey, FeedbackOutboxEntry,
+    FeedbackQueueSnapshot, FeedbackStageEventInfo, FeedbackStageEventInput,
+    GovernedFeedbackCancellation, GovernedFeedbackTrigger, NewDriftReport, NewFeedbackCycle,
+    NewFeedbackEvaluationUse, NewFeedbackStageEvent,
 };
 pub use governance_audit::{
     ModelGovernanceAuditDetail, ModelGovernanceAuditInfo, NewModelGovernanceAudit,

@@ -17,14 +17,21 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::{pagination::PageRequest, quant::ModelVersionInfo},
+    domain::{
+        pagination::{PageRequest, Paginated},
+        quant::{ModelRoutePromotionRecord, ModelVersionInfo},
+    },
     enums::quant::PublicationStatus,
     types::{
-        BacktestPathSetId, ContentHash, ModelRunId, ModelSpecId, ModelVersionId,
-        TradePolicyArtifactId, TrainingDatasetId, model_metrics::ModelVersionMetrics,
+        AuditEventId, BacktestPathSetId, ContentHash, FeedbackCycleId, ModelGovernanceAuditId,
+        ModelRunId, ModelSpecId, ModelVersionId, PromotionPermitId, RoleCode,
+        TradePolicyArtifactId, TrainingDatasetId, model_lineage::ModelVersionDerivation,
+        model_metrics::ModelVersionMetrics, model_serving::ModelServingContract,
         model_spec::ModelSpecThesis, model_training::ModelTrainingObjective,
     },
 };
+
+use super::FeedbackEvaluationUseView;
 
 /// Inbound body for `POST /research/models/train`.
 ///
@@ -115,6 +122,52 @@ pub struct ModelVersionListQuery {
     #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
+}
+
+/// Pagination for the one-time evaluation lineage embedded in model detail.
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct ModelDetailQuery {
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+/// Whether one governed route-promotion record consumed or replaced this model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelPromotionRole {
+    Champion,
+    Candidate,
+}
+
+/// Exact WORM route-promotion lineage for one model version.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelPromotionLineageView {
+    pub audit_id: ModelGovernanceAuditId,
+    pub audit_event_id: AuditEventId,
+    pub promotion_permit_id: PromotionPermitId,
+    pub promotion_transaction_hash: ContentHash,
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub role: ModelPromotionRole,
+    pub actor_username: String,
+    pub actor_role: Option<RoleCode>,
+    pub reason: String,
+    pub before_status: PublicationStatus,
+    pub after_status: PublicationStatus,
+    pub record: ModelRoutePromotionRecord,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Registered model summary plus complete immutable serving/evaluation/promotion lineage.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelDetailView {
+    #[serde(flatten)]
+    pub summary: TrainedModelView,
+    pub serving_contract: ModelServingContract,
+    pub serving_contract_hash: ContentHash,
+    pub derivation: ModelVersionDerivation,
+    pub evaluation_lineage: Paginated<FeedbackEvaluationUseView>,
+    pub promotion_lineage: Vec<ModelPromotionLineageView>,
 }
 
 impl From<ModelVersionInfo> for TrainedModelView {

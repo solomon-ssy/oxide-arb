@@ -2,7 +2,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
         api::{ModelPickerSide, ModelSpecListQuery, ModelVersionListQuery},
-        pagination::Paginated,
+        pagination::{PageRequest, Paginated},
         quant::{
             ModelSpecInfo, ModelVersionInfo, NewModelGovernanceAudit, NewModelSpec,
             NewModelVersion, PublishedModelCatalogInfo,
@@ -10,8 +10,8 @@ use quant_pivot_models::{
     },
     enums::common::MarketCategory,
     types::{
-        BacktestPathSetId, FeatureParityRunId, FeatureParityStateId, ModelRunId, ModelSpecId,
-        ModelVersionId, RoleCode, model_quality::QualityGateReport,
+        BacktestPathSetId, FactorDefinitionId, FeatureParityRunId, FeatureParityStateId,
+        ModelRunId, ModelSpecId, ModelVersionId, RoleCode, model_quality::QualityGateReport,
     },
 };
 
@@ -105,6 +105,14 @@ pub trait ModelRegistryRepository: Send + Sync {
     async fn page_versions(
         &self,
         query: ModelVersionListQuery,
+    ) -> Result<Paginated<ModelVersionInfo>, StorageError>;
+
+    /// Page verified model contracts whose exact serving plane contains one
+    /// immutable factor revision.
+    async fn page_factor_usages(
+        &self,
+        factor_definition_id: &FactorDefinitionId,
+        page: PageRequest,
     ) -> Result<Paginated<ModelVersionInfo>, StorageError>;
 
     /// Return the complete published picker catalog using one typed joined

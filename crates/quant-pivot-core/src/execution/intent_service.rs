@@ -1519,7 +1519,7 @@ mod tests {
         use quant_pivot_models::{
             domain::{
                 api::{ModelPickerSide, ModelSpecListQuery, ModelVersionListQuery},
-                pagination::Paginated,
+                pagination::{PageRequest, Paginated},
                 quant::{
                     ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion,
                     PublishedModelCatalogInfo,
@@ -1530,7 +1530,8 @@ mod tests {
                 quant::{DownsideSource, PublicationStatus},
             },
             types::{
-                BacktestPathSetId, CalibrationArtifactId, ModelRunId, ModelSpecId, ModelVersionId,
+                BacktestPathSetId, CalibrationArtifactId, FactorDefinitionId, ModelRunId,
+                ModelSpecId, ModelVersionId,
                 calibration::{MonotoneMapping, ReliabilityReport},
                 model_quality::QualityGateReport,
             },
@@ -1609,6 +1610,13 @@ mod tests {
             async fn page_versions(
                 &self,
                 _query: ModelVersionListQuery,
+            ) -> Result<Paginated<ModelVersionInfo>, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn page_factor_usages(
+                &self,
+                _factor_definition_id: &FactorDefinitionId,
+                _page: PageRequest,
             ) -> Result<Paginated<ModelVersionInfo>, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }

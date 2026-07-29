@@ -13,28 +13,33 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
         api::{
             BacktestPathSetListQuery, BacktestReportListQuery, CollinearPairView,
             ComparisonReportListQuery, FactorCollinearitySource, FactorCollinearityView,
-            FactorDefinitionListQuery, ModelPublishedCatalogQuery, ModelSpecListQuery,
-            ModelVersionListQuery, PublishedModelOptionView, TrainingDatasetListQuery,
+            FactorDefinitionDetailQuery, FactorDefinitionDetailView, FactorDefinitionListQuery,
+            FactorDefinitionView, FactorServingUsageView, FeedbackEvaluationUseView,
+            ModelDetailQuery, ModelDetailView, ModelPromotionLineageView, ModelPromotionRole,
+            ModelPublishedCatalogQuery, ModelSpecListQuery, ModelVersionListQuery,
+            PublishedModelOptionView, TrainedModelView, TrainingDatasetListQuery,
         },
         pagination::{PageRequest, Paginated},
         ports::ResearchCatalogPort,
         quant::{
             BacktestPathSetInfo, BacktestReportInfo, FactorDefinitionInfo,
-            ModelComparisonReportInfo, ModelSpecInfo, ModelVersionInfo, TrainingDatasetInfo,
+            ModelComparisonReportInfo, ModelGovernanceAuditDetail, ModelSpecInfo, ModelVersionInfo,
+            TrainingDatasetInfo,
         },
     },
     enums::common::MarketCategory,
-    types::{FactorDefinitionId, MarketId, Probability, stable_name::FactorName},
+    types::{FactorDefinitionId, MarketId, ModelVersionId, Probability, stable_name::FactorName},
 };
 use quant_pivot_repository::traits::{
-    BacktestPathSetRepository, BacktestReportRepository, FactorRepository, MarketRepository,
-    ModelComparisonReportRepository, ModelRegistryRepository, TrainingDatasetRepository,
+    BacktestPathSetRepository, BacktestReportRepository, FactorRepository, FeedbackCycleRepository,
+    MarketRepository, ModelComparisonReportRepository, ModelGovernanceAuditRepository,
+    ModelRegistryRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::factors::{
     FactorCollinearityAnalyzer, FactorObservationMatrix, neutralize_by_group,
@@ -54,6 +59,8 @@ pub struct CoreResearchCatalogPort {
     backtests: Arc<dyn BacktestReportRepository>,
     path_sets: Arc<dyn BacktestPathSetRepository>,
     comparisons: Arc<dyn ModelComparisonReportRepository>,
+    cycles: Arc<dyn FeedbackCycleRepository>,
+    governance_audits: Arc<dyn ModelGovernanceAuditRepository>,
     factors: Arc<dyn FactorRepository>,
     markets: Arc<dyn MarketRepository>,
 }
@@ -61,13 +68,18 @@ pub struct CoreResearchCatalogPort {
 impl CoreResearchCatalogPort {
     /// Assemble the port from an already-wired research bundle.
     #[must_use]
-    pub fn from_research(research: &ResearchBundle) -> Self {
+    pub fn from_research(
+        research: &ResearchBundle,
+        cycles: Arc<dyn FeedbackCycleRepository>,
+    ) -> Self {
         Self {
             datasets: Arc::clone(&research.training_dataset_repo),
             models: Arc::clone(&research.model_registry_repo),
             backtests: Arc::clone(&research.backtest_report_repo),
             path_sets: Arc::clone(&research.backtest_path_set_repo),
             comparisons: Arc::clone(&research.comparison_report_repo),
+            cycles,
+            governance_audits: Arc::clone(&research.governance_audit_repo),
             factors: Arc::clone(&research.factor_repo),
             markets: Arc::clone(&research.market_repo),
         }
@@ -125,6 +137,88 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
             .page_versions(query)
             .await
             .map_err(QuantError::from)
+    }
+
+    async fn find_model_detail(
+        &self,
+        model_version_id: &ModelVersionId,
+        query: ModelDetailQuery,
+    ) -> QuantResult<Option<ModelDetailView>> {
+        let Some(info) = self
+            .models
+            .find_model_version(model_version_id)
+            .await
+            .map_err(QuantError::from)?
+        else {
+            return Ok(None);
+        };
+        let serving_contract = info
+            .verified_serving_contract()
+            .map_err(|error| ResearchError::InvalidModelArtifact {
+                detail: format!("model detail serving contract is invalid: {error}"),
+            })?
+            .clone();
+        let derivation =
+            info.verified_derivation()
+                .map_err(|error| ResearchError::InvalidModelArtifact {
+                    detail: format!("model detail derivation is invalid: {error}"),
+                })?;
+        let (evaluations, audits) = tokio::try_join!(
+            self.cycles
+                .page_model_evaluation_uses(model_version_id, query.page),
+            self.governance_audits
+                .list_promotions_by_version(model_version_id),
+        )?;
+        let evaluation_lineage = evaluations.map(FeedbackEvaluationUseView::from);
+        let mut promotion_lineage = Vec::with_capacity(audits.len());
+        for audit in audits {
+            let ModelGovernanceAuditDetail::PromoteRoute { record } = audit.detail else {
+                return Err(ResearchError::InvalidModelArtifact {
+                    detail: "model promotion lineage contains a non-promotion record".to_owned(),
+                }
+                .into());
+            };
+            record
+                .validate()
+                .map_err(|error| ResearchError::InvalidModelArtifact {
+                    detail: format!("model promotion lineage is invalid: {error}"),
+                })?;
+            let route = record.route();
+            let role = if route.candidate_model_version_id == *model_version_id {
+                ModelPromotionRole::Candidate
+            } else if route.champion_model_version_id == *model_version_id {
+                ModelPromotionRole::Champion
+            } else {
+                return Err(ResearchError::InvalidModelArtifact {
+                    detail: "model promotion lineage references an unrelated version".to_owned(),
+                }
+                .into());
+            };
+            promotion_lineage.push(ModelPromotionLineageView {
+                audit_id: audit.audit_id,
+                audit_event_id: audit.audit_event_id,
+                promotion_permit_id: record.promotion_permit_id(),
+                promotion_transaction_hash: record.transaction_hash(),
+                feedback_cycle_id: record.preflight().feedback_cycle_id(),
+                role,
+                actor_username: audit.actor_username,
+                actor_role: audit.actor_role,
+                reason: audit.reason,
+                before_status: audit.before_status,
+                after_status: audit.after_status,
+                record: *record,
+                created_at: audit.created_at,
+            });
+        }
+        let serving_contract_hash = info.serving_contract_hash;
+        Ok(Some(ModelDetailView {
+            summary: TrainedModelView::from(info),
+            serving_contract,
+            serving_contract_hash,
+            derivation,
+            evaluation_lineage,
+            promotion_lineage,
+        }))
     }
 
     async fn list_model_specs(
@@ -200,6 +294,67 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
             .find_definition(factor_definition_id)
             .await
             .map_err(QuantError::from)
+    }
+
+    async fn find_factor_detail(
+        &self,
+        factor_definition_id: &FactorDefinitionId,
+        query: FactorDefinitionDetailQuery,
+    ) -> QuantResult<Option<FactorDefinitionDetailView>> {
+        let Some(definition) = self
+            .factors
+            .find_definition(factor_definition_id)
+            .await
+            .map_err(QuantError::from)?
+        else {
+            return Ok(None);
+        };
+        let page = self
+            .models
+            .page_factor_usages(factor_definition_id, query.page)
+            .await
+            .map_err(QuantError::from)?;
+        let mut usages = Vec::with_capacity(page.items.len());
+        for model in page.items {
+            let contract = model.verified_serving_contract().map_err(|error| {
+                ResearchError::InvalidModelArtifact {
+                    detail: format!("factor serving usage contract is invalid: {error}"),
+                }
+            })?;
+            if !contract
+                .bindings()
+                .factors
+                .plane
+                .definitions()
+                .iter()
+                .any(|factor| factor.factor_definition_id() == *factor_definition_id)
+            {
+                return Err(ResearchError::InvalidModelArtifact {
+                    detail: "factor serving usage omits the requested immutable revision"
+                        .to_owned(),
+                }
+                .into());
+            }
+            let serving_contract_version = contract.contract_version();
+            usages.push(FactorServingUsageView {
+                model_version_id: model.model_version_id,
+                model_spec_id: model.model_spec_id,
+                model_spec_name: model.model_spec_name,
+                model_family: model.model_family,
+                version: model.version,
+                category_scope: model.category_scope,
+                profile_ref: model.profile_ref,
+                artifact_hash: model.artifact_hash,
+                serving_contract_version,
+                serving_contract_hash: model.serving_contract_hash,
+                publication_status: model.publication_status,
+                created_at: model.created_at,
+            });
+        }
+        Ok(Some(FactorDefinitionDetailView {
+            definition: FactorDefinitionView::from(definition),
+            serving_usage: Paginated::new(usages, page.total, page.page, page.size),
+        }))
     }
 
     async fn factor_collinearity(

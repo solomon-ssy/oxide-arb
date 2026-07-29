@@ -11,7 +11,7 @@ use quant_pivot_error::storage::{
 use quant_pivot_models::{
     domain::{
         api::{ModelPickerSide, ModelSpecListQuery, ModelVersionListQuery},
-        pagination::{PageWindow, Paginated},
+        pagination::{PageRequest, PageWindow, Paginated},
         quant::{
             CalibrationArtifactPayload, ModelGovernanceAuditDetail, ModelGovernanceAuditInfo,
             ModelSpecInfo, ModelVersionInfo, ModelVersionParityEvidence, NewModelSpec,
@@ -48,15 +48,16 @@ use quant_pivot_models::{
         },
     },
     types::{
-        BacktestPathSetId, ContentHash, FeatureParityRunId, ModelRunId, ModelSpecId,
-        ModelVersionId, model_lineage::ModelVersionDerivation, model_quality::QualityGateReport,
-        model_spec::ModelSpecDefinition,
+        BacktestPathSetId, ContentHash, FactorDefinitionId, FeatureParityRunId, ModelRunId,
+        ModelSpecId, ModelVersionId, model_lineage::ModelVersionDerivation,
+        model_quality::QualityGateReport, model_spec::ModelSpecDefinition,
     },
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
     DatabaseTransaction, EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder,
-    QuerySelect, RelationTrait, Select, TransactionTrait, sea_query::Expr,
+    QuerySelect, RelationTrait, Select, TransactionTrait,
+    sea_query::{Expr, ExprTrait, extension::postgres::PgBinOper},
 };
 
 use crate::{
@@ -924,6 +925,57 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             .into_iter()
             .map(verify_model_version_info)
             .collect::<Result<Vec<_>, _>>()?;
+        Ok(Paginated::new(items, page.total, page.page, page.size))
+    }
+
+    async fn page_factor_usages(
+        &self,
+        factor_definition_id: &FactorDefinitionId,
+        page: PageRequest,
+    ) -> Result<Paginated<ModelVersionInfo>, StorageError> {
+        let factor_binding = serde_json::json!({
+            "bindings": {
+                "factors": {
+                    "plane": {
+                        "definitions": [{
+                            "factor_definition_id": factor_definition_id,
+                        }],
+                    },
+                },
+            },
+        });
+        let page = paginate_into_model(
+            select_version_with_family()
+                .filter(
+                    Expr::col((Entity, QuantModelVersionColumn::ServingContract))
+                        .binary(PgBinOper::Contains, factor_binding),
+                )
+                .order_by_desc(QuantModelVersionColumn::CreatedAt)
+                .order_by_desc(QuantModelVersionColumn::ModelVersionId),
+            &self.db,
+            PageWindow::harden(page),
+        )
+        .await?;
+        let items = page
+            .items
+            .into_iter()
+            .map(verify_model_version_info)
+            .collect::<Result<Vec<_>, _>>()?;
+        if items.iter().any(|model| {
+            !model
+                .serving_contract
+                .bindings()
+                .factors
+                .plane
+                .definitions()
+                .iter()
+                .any(|factor| factor.factor_definition_id() == *factor_definition_id)
+        }) {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_MODEL_VERSION),
+                "factor-serving usage query returned a contract without the requested revision",
+            ));
+        }
         Ok(Paginated::new(items, page.total, page.page, page.size))
     }
 

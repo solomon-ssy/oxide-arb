@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+use super::research_profile_artifact;
 use crate::{
     domain::{ports::FeedbackCandidateFamily, quant::FeedbackCycleKey},
     enums::quant::{FeedbackCycleStatus, FeedbackDecision, FeedbackTriggerFamily},
@@ -46,6 +47,14 @@ pub struct Model {
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "ResearchProfileArtifact",
+        from = "research_profile_artifact_id",
+        to = "research_profile_artifact_id"
+    )]
+    pub research_profile_artifact: BelongsTo<research_profile_artifact::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

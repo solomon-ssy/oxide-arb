@@ -37,6 +37,7 @@ pub mod domain_sources;
 pub mod execution_orders;
 pub mod factor_catalog;
 pub mod feature_integrity;
+pub mod feedback;
 pub mod health;
 pub mod market_linkages;
 pub mod markets;
@@ -106,6 +107,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(structural_monitor::route_specs());
     specs.extend(model_governance::route_specs());
     specs.extend(factor_catalog::route_specs());
+    specs.extend(feedback::route_specs());
     specs.extend(feature_integrity::route_specs());
     specs.extend(quant_reports::route_specs());
     specs.extend(quant_recommendations::route_specs());
@@ -249,6 +251,112 @@ mod tests {
                     Rule::ResourceOp(ResourceType::FactorDefinition, Operation::Read),
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn feedback_read_routes_manifest() {
+        let routes = protected_route_specs()
+            .into_iter()
+            .filter(|spec| {
+                matches!(
+                    spec.path,
+                    "/research/feedback-overview"
+                        | "/research/feedback-cycles"
+                        | "/research/feedback-cycles/{cycle_id}"
+                        | "/research/drift-reports"
+                ) && spec.method == Method::GET
+            })
+            .map(|spec| (spec.method, spec.path, spec.rule))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            routes,
+            [
+                (
+                    Method::GET,
+                    "/research/feedback-overview",
+                    Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+                ),
+                (
+                    Method::GET,
+                    "/research/feedback-cycles",
+                    Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+                ),
+                (
+                    Method::GET,
+                    "/research/feedback-cycles/{cycle_id}",
+                    Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+                ),
+                (
+                    Method::GET,
+                    "/research/drift-reports",
+                    Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn feedback_mutation_routes_manifest() {
+        let routes = protected_route_specs()
+            .into_iter()
+            .filter(|spec| {
+                matches!(
+                    spec.path,
+                    "/research/feedback-cycles"
+                        | "/research/feedback-cycles/{cycle_id}/cancel"
+                        | "/research/feedback-promotion-permits"
+                        | "/research/feedback-promotion-permits/{permit_id}/revoke"
+                ) && spec.method == Method::POST
+            })
+            .map(|spec| (spec.method, spec.path, spec.rule))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            routes,
+            [
+                (
+                    Method::POST,
+                    "/research/feedback-cycles",
+                    Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Create),
+                ),
+                (
+                    Method::POST,
+                    "/research/feedback-cycles/{cycle_id}/cancel",
+                    Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Create),
+                ),
+                (
+                    Method::POST,
+                    "/research/feedback-promotion-permits",
+                    Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
+                ),
+                (
+                    Method::POST,
+                    "/research/feedback-promotion-permits/{permit_id}/revoke",
+                    Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Retire),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn feedback_permit_read_manifest() {
+        let routes = protected_route_specs()
+            .into_iter()
+            .filter(|spec| {
+                spec.path == "/research/feedback-promotion-permits" && spec.method == Method::GET
+            })
+            .map(|spec| (spec.method, spec.path, spec.rule))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            routes,
+            [(
+                Method::GET,
+                "/research/feedback-promotion-permits",
+                Rule::ResourceOp(ResourceType::Publication, Operation::Read),
+            )]
         );
     }
 

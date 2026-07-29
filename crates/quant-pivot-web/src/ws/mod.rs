@@ -5,6 +5,7 @@
 //! queue; the event broadcaster serializes each envelope once into a shared
 //! [`ByteString`] before dispatch.
 
+pub mod feedback;
 pub mod handler;
 pub mod session;
 
@@ -48,6 +49,7 @@ const HUB_RELIABLE_CAPACITY: usize = 2_048;
 const HUB_BEST_EFFORT_TOPIC_CAPACITY: usize = 8_192;
 const HUB_FRAME_BUDGET_BYTES: usize = 64 * 1_024 * 1_024;
 const HUB_MAX_FRAME_BYTES: usize = 1_024 * 1_024;
+pub const SESSION_REPLAY_CAPACITY: usize = 128;
 
 /// Per-connection identifier within the process-local session hub.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -76,6 +78,7 @@ impl DeliveryClass {
             | WsChannel::QuantIntent
             | WsChannel::QuantCondition
             | WsChannel::MaterializationRunUpdate
+            | WsChannel::ResearchFeedback
             | WsChannel::QuantReconciliation
             | WsChannel::QuantSettlement => Self::Reliable,
         }
@@ -184,6 +187,15 @@ pub enum SessionControlCommand {
     Unsubscribe {
         session_id: SessionId,
         key: SubscriptionKey,
+        completion: OneshotSender<bool>,
+    },
+    Replay {
+        session_id: SessionId,
+        frames: Vec<SharedFrame>,
+        completion: OneshotSender<bool>,
+    },
+    CloseSession {
+        session_id: SessionId,
         completion: OneshotSender<bool>,
     },
     CloseSubject {
@@ -332,6 +344,33 @@ impl SessionRegistry {
         .await
     }
 
+    /// Queue one bounded durable replay batch for an exact session.
+    pub async fn replay(&self, session_id: SessionId, frames: Vec<ByteString>) -> bool {
+        if frames.len() > SESSION_REPLAY_CAPACITY {
+            self.close_session(session_id).await;
+            return false;
+        }
+        let Some(charged) = self.charge_replay(frames).await else {
+            self.close_session(session_id).await;
+            return false;
+        };
+        self.confirm(move |completion| SessionControlCommand::Replay {
+            session_id,
+            frames: charged,
+            completion,
+        })
+        .await
+    }
+
+    /// Close one exact session after a fail-closed protocol condition.
+    pub async fn close_session(&self, session_id: SessionId) {
+        self.confirm(|completion| SessionControlCommand::CloseSession {
+            session_id,
+            completion,
+        })
+        .await;
+    }
+
     /// Close every live socket owned by one user.
     pub async fn close_subject(&self, subject: UserId) {
         self.confirm(|completion| SessionControlCommand::CloseSubject {
@@ -450,6 +489,38 @@ impl SessionRegistry {
             permit,
             self.metrics.frame_bytes.clone(),
         ))
+    }
+
+    async fn charge_replay(&self, frames: Vec<ByteString>) -> Option<Vec<SharedFrame>> {
+        let total_bytes = frames.iter().try_fold(0usize, |total, frame| {
+            if frame.len() > HUB_MAX_FRAME_BYTES {
+                None
+            } else {
+                total.checked_add(frame.len())
+            }
+        })?;
+        if total_bytes > HUB_FRAME_BUDGET_BYTES {
+            return None;
+        }
+        let permits = u32::try_from(total_bytes).ok()?;
+        let mut batch_permit = timeout(
+            CONTROL_TIMEOUT,
+            Arc::clone(&self.frame_budget).acquire_many_owned(permits),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)?;
+        let mut charged = Vec::with_capacity(frames.len());
+        for frame in frames {
+            let permit = batch_permit.split(frame.len())?;
+            charged.push(SharedFrame::new(
+                frame,
+                permit,
+                self.metrics.frame_bytes.clone(),
+            ));
+        }
+        drop(batch_permit);
+        Some(charged)
     }
 
     async fn disconnect_topic(&self, key: SubscriptionKey) -> bool {
@@ -680,6 +751,21 @@ impl SessionHub {
                 let applied = self.unsubscribe(session_id, &key);
                 let _ = completion.send(applied);
             }
+            SessionControlCommand::Replay {
+                session_id,
+                frames,
+                completion,
+            } => {
+                let applied = self.replay(session_id, frames);
+                let _ = completion.send(applied);
+            }
+            SessionControlCommand::CloseSession {
+                session_id,
+                completion,
+            } => {
+                self.remove_session(session_id, true);
+                let _ = completion.send(true);
+            }
             SessionControlCommand::CloseSubject {
                 subject,
                 completion,
@@ -758,6 +844,22 @@ impl SessionHub {
         }
         self.remove_subscription_indexes(session_id, key);
         true
+    }
+
+    fn replay(&mut self, session_id: SessionId, frames: Vec<SharedFrame>) -> bool {
+        let accepted = self.sessions.get(&session_id).is_some_and(|record| {
+            if record.outbound.capacity() < frames.len() {
+                return false;
+            }
+            frames
+                .into_iter()
+                .all(|frame| record.outbound.try_send(frame).is_ok())
+        });
+        if !accepted {
+            self.metrics.reliable_disconnects.inc();
+            self.remove_session(session_id, true);
+        }
+        accepted
     }
 
     fn close_subject(&mut self, subject: UserId) {
@@ -998,8 +1100,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        CONTROL_TIMEOUT, DeliveryClass, HUB_MAX_FRAME_BYTES, HUB_RELIABLE_CAPACITY, SessionHub,
-        SessionHubMetrics, SessionId, SessionRegistration, SessionRegistry, SharedFrame,
+        CONTROL_TIMEOUT, DeliveryClass, HUB_MAX_FRAME_BYTES, HUB_RELIABLE_CAPACITY,
+        SESSION_REPLAY_CAPACITY, SessionHub, SessionHubMetrics, SessionId, SessionRegistration,
+        SessionRegistry, SharedFrame,
     };
 
     static METRIC_ID: AtomicU64 = AtomicU64::new(1);
@@ -1092,6 +1195,60 @@ mod tests {
         let recipient = frame.clone();
         assert_eq!(frame.as_ptr(), allocation);
         assert_eq!(recipient.as_ptr(), frame.as_ptr());
+    }
+
+    #[test]
+    fn feedback_delivery_is_reliable() {
+        assert_eq!(
+            DeliveryClass::for_channel(WsChannel::ResearchFeedback),
+            DeliveryClass::Reliable
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_targets_exact_session() {
+        let (registry, hub, _metrics, shutdown) = test_hub();
+        let task = tokio::spawn(hub.run(shutdown.clone()));
+        let (first, mut first_rx, _) = registration(8, user(1), "family-1", false);
+        let first_id = registry.register(first).await.expect("register first");
+        let (second, mut second_rx, _) = registration(8, user(2), "family-2", false);
+        registry.register(second).await.expect("register second");
+
+        assert!(
+            registry
+                .replay(
+                    first_id,
+                    vec![
+                        ByteString::from_static("revision-1"),
+                        ByteString::from_static("revision-2"),
+                    ],
+                )
+                .await
+        );
+        assert_eq!(first_rx.recv().await.as_deref(), Some("revision-1"));
+        assert_eq!(first_rx.recv().await.as_deref(), Some("revision-2"));
+        assert!(second_rx.try_recv().is_err());
+        shutdown.cancel();
+        task.await.expect("hub task");
+    }
+
+    #[tokio::test]
+    async fn oversized_replay_disconnects() {
+        let (registry, hub, metrics, shutdown) = test_hub();
+        let task = tokio::spawn(hub.run(shutdown.clone()));
+        let (registration, _receiver, cancellation) =
+            registration(8, user(1), "replay-overflow", false);
+        let session_id = registry.register(registration).await.expect("register");
+        let frames = (0..=SESSION_REPLAY_CAPACITY)
+            .map(|_| ByteString::from_static("revision"))
+            .collect();
+
+        assert!(!registry.replay(session_id, frames).await);
+        assert!(cancellation.is_cancelled());
+        assert_eq!(metrics.reliable_disconnects.get(), 0);
+        assert_eq!(registry.session_count(), 0);
+        shutdown.cancel();
+        task.await.expect("hub task");
     }
 
     #[tokio::test]

@@ -14,10 +14,12 @@
 pub mod channel;
 pub mod command;
 pub mod envelope;
+pub mod feedback;
 pub mod mapping;
 pub mod sync;
 
 pub use channel::{ChannelScope, SubscriptionKey, UnknownChannel, WsChannel};
 pub use command::ClientCommand;
 pub use envelope::{ServerMessageKind, WsEnvelope};
+pub use feedback::{ResearchFeedbackEvent, ResearchFeedbackSubjectKind};
 pub use sync::SyncSnapshot;

@@ -70,6 +70,24 @@ impl ApiClient {
         request.send().await.with_context(|| format!("POST {path}"))
     }
 
+    async fn post_governed(
+        &self,
+        path: &str,
+        token: &str,
+        acting_role: &str,
+        body: Value,
+    ) -> Result<Response> {
+        self.http
+            .post(format!("{}{path}", self.base_url))
+            .header(API_VERSION.0, API_VERSION.1)
+            .header("x-acting-role", acting_role)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("POST {path}"))
+    }
+
     async fn put(&self, path: &str, token: &str, body: Value) -> Result<Response> {
         self.http
             .put(format!("{}{path}", self.base_url))
@@ -141,6 +159,7 @@ async fn exercise_web_boundary(base_url: &str) -> Result<()> {
     let viewer = create_viewer(&api, &admin.access_token).await?;
     assert_authorization_boundary(&api, &viewer.access_token).await?;
     assert_read_models(&api, &admin.access_token, &viewer.access_token).await?;
+    assert_feedback_mutations(&api, &admin.access_token, &viewer.access_token).await?;
     assert_websocket_contract(&api, base_url, &admin.access_token).await?;
     Ok(())
 }
@@ -373,6 +392,10 @@ async fn assert_read_models(api: &ApiClient, admin: &str, viewer: &str) -> Resul
         "/api/research/training-datasets?page=1&size=10",
         "/api/research/model-specs?page=1&size=10",
         "/api/research/models?page=1&size=10",
+        "/api/research/feedback-cycles?page=1&size=10",
+        "/api/research/drift-reports?page=0&size=1000",
+        "/api/research/feedback-promotion-permits?page=1&size=10",
+        "/api/research/factors?page=1&size=10",
     ] {
         let response =
             ensure_status(api.get(path, Some(admin)).await?, StatusCode::OK, path).await?;
@@ -395,6 +418,59 @@ async fn assert_read_models(api: &ApiClient, admin: &str, viewer: &str) -> Resul
     )
     .await?;
     ensure!(feature_contract.json::<Value>().await?["data"].is_object());
+
+    let feedback = ensure_status(
+        api.get("/api/research/feedback-overview", Some(viewer))
+            .await?,
+        StatusCode::OK,
+        "feedback overview",
+    )
+    .await?
+    .json::<Value>()
+    .await?;
+    ensure!(
+        feedback["data"]["revision"].is_number()
+            && feedback["data"]["queue"]["oldest_queued_at"].is_null()
+            && feedback["data"]["queue"]["oldest_running_at"].is_null(),
+        "feedback overview lost revision or nullable queue facts: {feedback}"
+    );
+    let profiles = feedback["data"]["profiles"]
+        .as_array()
+        .context("feedback overview profiles are not an array")?;
+    ensure!(
+        profiles.len() == 3
+            && profiles
+                .iter()
+                .all(|profile| profile["minimum_coverage"].is_string()),
+        "feedback overview profile registry or decimal wire is invalid: {feedback}"
+    );
+    ensure_status(
+        api.get(
+            "/api/research/feedback-cycles/00000000-0000-7000-8000-000000000001",
+            Some(admin),
+        )
+        .await?,
+        StatusCode::NOT_FOUND,
+        "missing feedback cycle",
+    )
+    .await?;
+    for (path, operation) in [
+        (
+            "/api/research/models/00000000-0000-7000-8000-000000000001?page=0&size=1000",
+            "missing model detail",
+        ),
+        (
+            "/api/research/factors/00000000-0000-7000-8000-000000000001?page=0&size=1000",
+            "missing factor detail",
+        ),
+    ] {
+        ensure_status(
+            api.get(path, Some(admin)).await?,
+            StatusCode::NOT_FOUND,
+            operation,
+        )
+        .await?;
+    }
 
     for path in [
         "/api/quant/structural/negrisk-events",
@@ -444,6 +520,85 @@ async fn assert_read_models(api: &ApiClient, admin: &str, viewer: &str) -> Resul
     Ok(())
 }
 
+async fn assert_feedback_mutations(api: &ApiClient, admin: &str, viewer: &str) -> Result<()> {
+    let denied = ensure_status(
+        api.post_governed(
+            "/api/research/feedback-cycles",
+            viewer,
+            "viewer",
+            json!({
+                "profile_id": "crypto_price_15m",
+                "reason": "operator_retrain",
+            }),
+        )
+        .await?,
+        StatusCode::FORBIDDEN,
+        "viewer feedback trigger",
+    )
+    .await?
+    .json::<Value>()
+    .await?;
+    ensure!(
+        denied["message"] == "forbidden" && denied["data"].is_null(),
+        "feedback denial leaked details: {denied}"
+    );
+
+    ensure_status(
+        api.post(
+            "/api/research/feedback-cycles",
+            Some(admin),
+            json!({
+                "profile_id": "crypto_price_15m",
+                "reason": "Invalid reason",
+            }),
+        )
+        .await?,
+        StatusCode::BAD_REQUEST,
+        "invalid feedback trigger",
+    )
+    .await?;
+    ensure_status(
+        api.post(
+            "/api/research/feedback-cycles",
+            Some(admin),
+            json!({
+                "profile_id": "missing_profile",
+                "reason": "operator_retrain",
+            }),
+        )
+        .await?,
+        StatusCode::NOT_FOUND,
+        "missing feedback profile",
+    )
+    .await?;
+    ensure_status(
+        api.post(
+            "/api/research/feedback-cycles/00000000-0000-7000-8000-000000000001/cancel",
+            Some(admin),
+            json!({ "reason": "operator_cancelled" }),
+        )
+        .await?,
+        StatusCode::NOT_FOUND,
+        "missing feedback cancellation",
+    )
+    .await?;
+    ensure_status(
+        api.post(
+            "/api/research/feedback-promotion-permits/00000000-0000-7000-8000-000000000001/revoke",
+            Some(admin),
+            json!({
+                "expected_revision": 0,
+                "reason": "withdraw exact authority",
+            }),
+        )
+        .await?,
+        StatusCode::NOT_FOUND,
+        "missing feedback permit",
+    )
+    .await?;
+    Ok(())
+}
+
 async fn assert_websocket_contract(api: &ApiClient, base_url: &str, admin: &str) -> Result<()> {
     let ticket = ensure_status(
         api.post("/api/ws/tickets", Some(admin), json!({})).await?,
@@ -474,6 +629,44 @@ async fn assert_websocket_contract(api: &ApiClient, base_url: &str, admin: &str)
             == Some(protocol.as_str()),
         "WebSocket ticket protocol was not echoed"
     );
+    socket
+        .send(Message::Text(
+            json!({
+                "action": "subscribe",
+                "channel": "research.feedback",
+                "after_revision": 0,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    socket
+        .send(Message::Text(
+            json!({ "action": "sync" }).to_string().into(),
+        ))
+        .await?;
+    let sync_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = sync_deadline.saturating_duration_since(Instant::now());
+        ensure!(
+            !remaining.is_zero(),
+            "WebSocket feedback subscription barrier timed out"
+        );
+        let message = tokio::time::timeout(remaining, socket.next())
+            .await
+            .context("WebSocket feedback subscription timeout")?
+            .context("WebSocket closed before feedback subscription barrier")??;
+        if let Message::Text(text) = message {
+            let body: Value = serde_json::from_str(&text)?;
+            ensure!(
+                body["type"] != "error",
+                "feedback subscription failed closed unexpectedly: {body}"
+            );
+            if body["type"] == "sync" {
+                break;
+            }
+        }
+    }
     socket
         .send(Message::Text(
             json!({ "action": "ping" }).to_string().into(),

@@ -30,10 +30,11 @@ use quant_pivot_models::{
         api::{
             BacktestPathSetListQuery, BacktestPathSetView, BacktestReportListQuery,
             BacktestReportView, ComparisonReportListQuery, CreateModelSpecRequest,
-            FeatureContractView, ModelComparisonReportView, ModelPublishedCatalogQuery,
-            ModelSpecListQuery, ModelVersionListQuery, PublishedModelOptionView,
-            QualityGatePreviewQuery, QualityGateReportView, QuantModelSpecView, ResearchJobView,
-            RunBacktestRequest, RunCpcvBacktestRequest, TrainModelRequest, TrainedModelView,
+            FeatureContractView, ModelComparisonReportView, ModelDetailQuery, ModelDetailView,
+            ModelPublishedCatalogQuery, ModelSpecListQuery, ModelVersionListQuery,
+            PublishedModelOptionView, QualityGatePreviewQuery, QualityGateReportView,
+            QuantModelSpecView, ResearchJobView, RunBacktestRequest, RunCpcvBacktestRequest,
+            TrainModelRequest, TrainedModelView,
         },
         pagination::Paginated,
         ports::{CreateModelSpecCommand, GovernanceActor, JobSubmitContext},
@@ -382,13 +383,15 @@ pub async fn train(
 pub async fn get_version(
     state: Data<AppState>,
     id: Path<ModelVersionId>,
-) -> Result<WebResponse<TrainedModelView>, WebError> {
-    let info = state
-        .model_training
-        .find_version(&id)
+    query: Query<ModelDetailQuery>,
+) -> Result<WebResponse<ModelDetailView>, WebError> {
+    let id = id.into_inner();
+    let view = state
+        .research_catalog
+        .find_model_detail(&id, query.into_inner())
         .await?
         .ok_or_else(|| WebError::NotFound(format!("model version not found: {id}")))?;
-    Ok(WebResponse::ok(TrainedModelView::from(info)))
+    Ok(WebResponse::ok(view))
 }
 
 /// `GET /api/research/models/{id}/quality-gate` — read-only publish-readiness dry-run.

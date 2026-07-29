@@ -3,22 +3,36 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_error::storage::{
-    StorageError,
-    entity::{
-        QUANT_DRIFT_REPORT, QUANT_FEEDBACK_CYCLE, QUANT_FEEDBACK_EVALUATION_USE,
-        QUANT_FEEDBACK_EVENT_OUTBOX, QUANT_FEEDBACK_STAGE_EVENT,
+use quant_pivot_error::{
+    feedback::FeedbackCycleCommandError,
+    storage::{
+        StorageError,
+        entity::{
+            QUANT_DRIFT_REPORT, QUANT_FEEDBACK_CYCLE, QUANT_FEEDBACK_EVALUATION_USE,
+            QUANT_FEEDBACK_EVENT_OUTBOX, QUANT_FEEDBACK_STAGE_EVENT,
+        },
     },
 };
 use quant_pivot_models::{
-    domain::quant::{
-        DriftReportInfo, FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackEvaluationUseInfo,
-        FeedbackOutboxEntry, FeedbackQueueSnapshot, FeedbackStageEventInfo, NewDriftReport,
-        NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent,
+    domain::{
+        api::{DriftReportListQuery, FeedbackCycleListQuery},
+        pagination::{PageRequest, PageWindow, Paginated},
+        quant::{
+            DriftReportInfo, FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackEvaluationUseInfo,
+            FeedbackOutboxEntry, FeedbackQueueSnapshot, FeedbackStageEventInfo,
+            FeedbackStageEventInput, GovernedFeedbackCancellation, GovernedFeedbackTrigger,
+            NewDriftReport, NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent,
+        },
     },
     entities::{
-        quant_drift_report::{Column as DriftColumn, Entity as DriftEntity, Model as DriftModel},
-        quant_feedback_cycle::{Column as CycleColumn, Entity as CycleEntity, Model as CycleModel},
+        quant_drift_report::{
+            Column as DriftColumn, Entity as DriftEntity, Model as DriftModel,
+            Relation as DriftRelation,
+        },
+        quant_feedback_cycle::{
+            Column as CycleColumn, Entity as CycleEntity, Model as CycleModel,
+            Relation as CycleRelation,
+        },
         quant_feedback_evaluation_use::{
             Column as EvaluationColumn, Entity as EvaluationEntity, Model as EvaluationModel,
         },
@@ -29,26 +43,30 @@ use quant_pivot_models::{
         quant_feedback_stage_event::{
             Column as StageColumn, Entity as StageEntity, Model as StageModel,
         },
+        research_profile_artifact::Column as ProfileColumn,
     },
-    enums::quant::{FeedbackCycleStatus, FeedbackStageEventKind},
-    types::{FeedbackCycleId, FeedbackStageEventId, WorkerId},
+    enums::{
+        quant::{FeedbackCycleStatus, FeedbackStage, FeedbackStageEventKind},
+        rbac::{Operation, ResourceType},
+    },
+    types::{FeedbackCycleId, FeedbackStageEventId, ModelVersionId, ResearchProfileId, WorkerId},
 };
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::{NotSet, Set},
     ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    ExprTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
-    TransactionTrait, TryInsertResult,
+    ExprTrait, IntoActiveModel, JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, TransactionTrait, TryInsertResult,
     sea_query::{Expr, LockBehavior, LockType, OnConflict},
 };
 
 use crate::{
-    postgres::primitives,
+    postgres::{authorization, primitives, query::paginate_mapped},
     traits::{
         DriftReportWriteOutcome, FeedbackCycleCasOutcome, FeedbackCycleClaim,
         FeedbackCycleClaimMode, FeedbackCycleGeneration, FeedbackCycleLeaseGuard,
         FeedbackCycleRepository, FeedbackCycleWriteOutcome, FeedbackEvaluationWriteOutcome,
-        FeedbackStageWriteOutcome,
+        FeedbackOutboxRepository, FeedbackStageWriteOutcome,
     },
 };
 
@@ -189,6 +207,22 @@ impl PgFeedbackCycleRepository {
                 Ok((event.feedback_stage_event_id, event))
             })
             .collect::<Result<HashMap<_, _>, StorageError>>()?;
+        let cycle_ids = events
+            .values()
+            .map(|event| event.feedback_cycle_id)
+            .collect::<Vec<_>>();
+        let cycles = CycleEntity::find()
+            .filter(CycleColumn::FeedbackCycleId.is_in(cycle_ids))
+            .all(connection)
+            .await
+            .map_err(StorageError::from)?;
+        let profiles = cycles
+            .into_iter()
+            .map(|row| {
+                let cycle = Self::cycle_info(row)?;
+                Ok((cycle.feedback_cycle_id, cycle.profile_ref.id))
+            })
+            .collect::<Result<HashMap<FeedbackCycleId, ResearchProfileId>, StorageError>>()?;
         let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
             let event = events.remove(&row.feedback_stage_event_id).ok_or_else(|| {
@@ -200,9 +234,22 @@ impl PgFeedbackCycleRepository {
                     ),
                 )
             })?;
+            let profile_id = profiles
+                .get(&event.feedback_cycle_id)
+                .cloned()
+                .ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some(QUANT_FEEDBACK_EVENT_OUTBOX),
+                        format!(
+                            "outbox revision {} references a missing feedback cycle",
+                            row.revision
+                        ),
+                    )
+                })?;
             let entry = FeedbackOutboxEntry {
                 revision: row.revision,
                 publish_attempts: row.publish_attempts,
+                profile_id,
                 event,
             };
             entry.validate().map_err(|error| {
@@ -627,6 +674,79 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
         Ok((cycle_outcome, event_outcome))
     }
 
+    async fn record_governed_trigger(
+        &self,
+        command: GovernedFeedbackTrigger,
+    ) -> Result<(FeedbackCycleWriteOutcome, FeedbackStageWriteOutcome), FeedbackCycleCommandError>
+    {
+        command.validate()?;
+        let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        let authorized = authorization::authorize_actor::<FeedbackCycleCommandError>(
+            &transaction,
+            command.actor.user_id,
+            &command.actor.acting_role,
+            ResourceType::Materialization,
+            Operation::Create,
+        )
+        .await?;
+        let now = primitives::statement_timestamp(&transaction).await?;
+        if command.cycle.label_cutoff() > now {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_FEEDBACK_CYCLE),
+                "governed cycle cutoff cannot be in the database future",
+            )
+            .into());
+        }
+        let cycle_outcome = Self::persist_cycle(&transaction, &command.cycle).await?;
+        let cycle_id = command.cycle.feedback_cycle_id();
+        let _cycle_lock = Self::lock_cycle(&transaction, &cycle_id).await?;
+        let actor = format!("{}@{}", authorized.username, authorized.role);
+        let stored = StageEntity::find()
+            .filter(StageColumn::FeedbackCycleId.eq(cycle_id))
+            .filter(StageColumn::EventSequence.eq(1))
+            .lock_exclusive()
+            .one(&transaction)
+            .await
+            .map_err(StorageError::from)?
+            .map(Self::stage_info)
+            .transpose()?;
+        if let Some(stored) = stored {
+            if stored.stage != FeedbackStage::Trigger
+                || stored.event_kind != FeedbackStageEventKind::Triggered
+                || stored.actor.as_deref() != Some(actor.as_str())
+                || stored.reason_code.as_deref() != Some(command.reason_code.as_str())
+            {
+                return Err(StorageError::state_conflict(
+                    QUANT_FEEDBACK_STAGE_EVENT,
+                    Some(stored.feedback_stage_event_id),
+                    "governed trigger retry differs in actor, reason, or trigger semantics",
+                )
+                .into());
+            }
+            Self::persist_outbox(&transaction, stored.feedback_stage_event_id).await?;
+            transaction.commit().await.map_err(StorageError::from)?;
+            return Ok((
+                cycle_outcome,
+                FeedbackStageWriteOutcome::AlreadyPresent(stored),
+            ));
+        }
+        let trigger = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+            feedback_cycle_id: cycle_id,
+            event_sequence: 1,
+            stage: FeedbackStage::Trigger,
+            event_kind: FeedbackStageEventKind::Triggered,
+            research_job_id: None,
+            actor: Some(actor),
+            reason_code: Some(command.reason_code),
+            evidence_uri: None,
+            evidence_hash: None,
+            occurred_at: now,
+        })?;
+        let event_outcome = Self::persist_stage(&transaction, &trigger).await?;
+        transaction.commit().await.map_err(StorageError::from)?;
+        Ok((cycle_outcome, event_outcome))
+    }
+
     async fn find_cycle(
         &self,
         cycle_id: &FeedbackCycleId,
@@ -637,6 +757,50 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             .map_err(StorageError::from)?
             .map(Self::cycle_info)
             .transpose()
+    }
+
+    async fn page_cycles(
+        &self,
+        query: FeedbackCycleListQuery,
+    ) -> Result<Paginated<FeedbackCycleInfo>, StorageError> {
+        let window = PageWindow::from_query(&query);
+        let condition = Condition::all()
+            .add_option(query.status.map(|status| CycleColumn::Status.eq(status)))
+            .add_option(
+                query
+                    .trigger_family
+                    .map(|family| CycleColumn::TriggerFamily.eq(family)),
+            );
+        let mut select = CycleEntity::find().filter(condition);
+        if let Some(profile_id) = query.profile_id {
+            select = select
+                .join(
+                    JoinType::InnerJoin,
+                    CycleRelation::ResearchProfileArtifact.def(),
+                )
+                .filter(ProfileColumn::ResearchProfileId.eq(profile_id));
+        }
+        let page = paginate_mapped(
+            select
+                .order_by_desc(CycleColumn::CreatedAt)
+                .order_by_desc(CycleColumn::FeedbackCycleId),
+            &self.db,
+            window,
+            |row| row,
+        )
+        .await?;
+        let items = page
+            .items
+            .into_iter()
+            .map(Self::cycle_info)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Paginated {
+            items,
+            total: page.total,
+            page: page.page,
+            size: page.size,
+            has_next: page.has_next,
+        })
     }
 
     async fn claim_cycle(
@@ -753,6 +917,146 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
         Self::request_cancelled(&self.db, generation, event).await
     }
 
+    async fn request_governed_cancel(
+        &self,
+        command: GovernedFeedbackCancellation,
+    ) -> Result<(FeedbackCycleCasOutcome, FeedbackStageWriteOutcome), FeedbackCycleCommandError>
+    {
+        command.validate()?;
+        let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        let authorized = authorization::authorize_actor::<FeedbackCycleCommandError>(
+            &transaction,
+            command.actor.user_id,
+            &command.actor.acting_role,
+            ResourceType::Materialization,
+            Operation::Create,
+        )
+        .await?;
+        let actor = format!("{}@{}", authorized.username, authorized.role);
+        let row = Self::lock_cycle(&transaction, &command.feedback_cycle_id).await?;
+        let current = Self::cycle_info(row.clone())?;
+        let cancellations = StageEntity::find()
+            .filter(StageColumn::FeedbackCycleId.eq(command.feedback_cycle_id))
+            .filter(StageColumn::EventKind.eq(FeedbackStageEventKind::CancellationRequested))
+            .order_by_asc(StageColumn::EventSequence)
+            .lock_exclusive()
+            .all(&transaction)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(Self::stage_info)
+            .collect::<Result<Vec<_>, _>>()?;
+        if cancellations.len() > 1 {
+            return Err(StorageError::state_conflict(
+                QUANT_FEEDBACK_STAGE_EVENT,
+                Some(command.feedback_cycle_id),
+                "feedback timeline contains more than one governed cancellation request",
+            )
+            .into());
+        }
+        if let Some(stored) = cancellations.into_iter().next() {
+            if stored.actor.as_deref() != Some(actor.as_str())
+                || stored.reason_code.as_deref() != Some(command.reason_code.as_str())
+            {
+                return Err(StorageError::state_conflict(
+                    QUANT_FEEDBACK_STAGE_EVENT,
+                    Some(stored.feedback_stage_event_id),
+                    "governed cancellation retry differs in actor or reason",
+                )
+                .into());
+            }
+            if current.cancel_requested_at.is_none()
+                && current.status != FeedbackCycleStatus::Cancelled
+            {
+                return Err(StorageError::invariant_violation(
+                    Some(QUANT_FEEDBACK_CYCLE),
+                    "governed cancellation evidence exists without cycle cancellation state",
+                )
+                .into());
+            }
+            Self::persist_outbox(&transaction, stored.feedback_stage_event_id).await?;
+            transaction.commit().await.map_err(StorageError::from)?;
+            return Ok((
+                FeedbackCycleCasOutcome::AlreadyApplied(current),
+                FeedbackStageWriteOutcome::AlreadyPresent(stored),
+            ));
+        }
+
+        Self::ensure_generation(&current, command.expected_generation)?;
+        let events = StageEntity::find()
+            .filter(StageColumn::FeedbackCycleId.eq(command.feedback_cycle_id))
+            .order_by_asc(StageColumn::EventSequence)
+            .lock_shared()
+            .all(&transaction)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(Self::stage_info)
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected_existing =
+            usize::try_from(command.expected_event_sequence - 1).map_err(|error| {
+                StorageError::invariant_violation(
+                    Some(QUANT_FEEDBACK_STAGE_EVENT),
+                    format!("cancellation event sequence exceeds platform capacity: {error}"),
+                )
+            })?;
+        if events.len() != expected_existing
+            || events
+                .iter()
+                .enumerate()
+                .any(|(index, event)| i64::try_from(index + 1) != Ok(event.event_sequence))
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_FEEDBACK_STAGE_EVENT,
+                Some(command.feedback_cycle_id),
+                "governed cancellation sequence does not match the locked WORM timeline",
+            )
+            .into());
+        }
+
+        let now = primitives::statement_timestamp(&transaction).await?;
+        let event = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+            feedback_cycle_id: command.feedback_cycle_id,
+            event_sequence: command.expected_event_sequence,
+            stage: command.stage,
+            event_kind: FeedbackStageEventKind::CancellationRequested,
+            research_job_id: None,
+            actor: Some(actor),
+            reason_code: Some(command.reason_code.clone()),
+            evidence_uri: None,
+            evidence_hash: None,
+            occurred_at: now,
+        })?;
+        let mut active = row.into_active_model();
+        active.generation = Set(Self::next_generation(current.generation)?);
+        active.cancel_requested_at = Set(Some(now));
+        match current.status {
+            FeedbackCycleStatus::Queued => {
+                active.status = Set(FeedbackCycleStatus::Cancelled);
+                active.terminal_reason_code = Set(Some(command.reason_code));
+                active.completed_at = Set(Some(now));
+            }
+            FeedbackCycleStatus::Running => {}
+            status => {
+                return Err(StorageError::illegal_transition(
+                    QUANT_FEEDBACK_CYCLE,
+                    Some(current.feedback_cycle_id),
+                    status,
+                    FeedbackCycleStatus::Cancelled,
+                )
+                .into());
+            }
+        }
+        let updated = active
+            .update(&transaction)
+            .await
+            .map_err(StorageError::from)?;
+        let updated = Self::cycle_info(updated)?;
+        let event_outcome = Self::persist_stage(&transaction, &event).await?;
+        transaction.commit().await.map_err(StorageError::from)?;
+        Ok((FeedbackCycleCasOutcome::Applied(updated), event_outcome))
+    }
+
     async fn finalize_cycle(
         &self,
         lease: FeedbackCycleLeaseGuard,
@@ -817,6 +1121,46 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             .collect()
     }
 
+    async fn page_drift_reports(
+        &self,
+        query: DriftReportListQuery,
+    ) -> Result<Paginated<DriftReportInfo>, StorageError> {
+        let window = PageWindow::from_query(&query);
+        let condition = Condition::all()
+            .add_option(
+                query
+                    .feedback_cycle_id
+                    .map(|cycle_id| DriftColumn::FeedbackCycleId.eq(cycle_id)),
+            )
+            .add_option(query.kind.map(|kind| DriftColumn::Kind.eq(kind)))
+            .add_option(query.metric.map(|metric| DriftColumn::Metric.eq(metric)));
+        let mut select = DriftEntity::find().filter(condition);
+        if let Some(profile_id) = query.profile_id {
+            select = select
+                .join(JoinType::InnerJoin, DriftRelation::FeedbackCycle.def())
+                .join(
+                    JoinType::InnerJoin,
+                    CycleRelation::ResearchProfileArtifact.def(),
+                )
+                .filter(ProfileColumn::ResearchProfileId.eq(profile_id));
+        }
+        let page = paginate_mapped(
+            select
+                .order_by_desc(DriftColumn::ObservedAt)
+                .order_by_desc(DriftColumn::DriftReportId),
+            &self.db,
+            window,
+            |row| row,
+        )
+        .await?;
+        let items = page
+            .items
+            .into_iter()
+            .map(Self::drift_info)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Paginated::new(items, page.total, page.page, page.size))
+    }
+
     async fn list_evaluation_uses(
         &self,
         cycle_id: &FeedbackCycleId,
@@ -831,6 +1175,30 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             .into_iter()
             .map(Self::evaluation_info)
             .collect()
+    }
+
+    async fn page_model_evaluation_uses(
+        &self,
+        model_version_id: &ModelVersionId,
+        page: PageRequest,
+    ) -> Result<Paginated<FeedbackEvaluationUseInfo>, StorageError> {
+        let window = PageWindow::harden(page);
+        let page = paginate_mapped(
+            EvaluationEntity::find()
+                .filter(EvaluationColumn::ChampionModelVersionId.eq(*model_version_id))
+                .order_by_desc(EvaluationColumn::ReservedAt)
+                .order_by_desc(EvaluationColumn::FeedbackEvaluationUseId),
+            &self.db,
+            window,
+            |row| row,
+        )
+        .await?;
+        let items = page
+            .items
+            .into_iter()
+            .map(Self::evaluation_info)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Paginated::new(items, page.total, page.page, page.size))
     }
 
     async fn queue_snapshot(&self) -> Result<FeedbackQueueSnapshot, StorageError> {
@@ -870,6 +1238,18 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             oldest_queued_at,
             oldest_running_at,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl FeedbackOutboxRepository for PgFeedbackCycleRepository {
+    async fn latest_outbox_revision(&self) -> Result<i64, StorageError> {
+        OutboxEntity::find()
+            .order_by_desc(OutboxColumn::Revision)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|row| row.map_or(0, |entry| entry.revision))
     }
 
     async fn claim_outbox(

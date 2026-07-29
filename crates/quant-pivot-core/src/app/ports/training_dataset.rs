@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Duration as StdDuration};
 
 use async_trait::async_trait;
 use blake3::Hasher;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use futures_util::StreamExt;
 use quant_pivot_compute::ComputeExecutor;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
@@ -23,8 +23,8 @@ use quant_pivot_models::{
     types::{
         ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
         DatasetSourceLineage, DecisionPolicySnapshotId, ResearchEvaluationTrack,
-        ResearchProfileArtifact, SourceSliceManifest, SourceSliceManifestRef, TrainingDatasetId,
-        TrainingSampleSource, TrainingSampleSources,
+        ResearchProfileArtifact, ResearchProfileRef, SourceSliceManifest, SourceSliceManifestRef,
+        TrainingDatasetId, TrainingSampleSource, TrainingSampleSources,
     },
 };
 use quant_pivot_repository::traits::{
@@ -35,6 +35,7 @@ use quant_pivot_repository::traits::{
     TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, training::DatasetPlanRequest};
+use tokio::time::{Instant, sleep};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -51,6 +52,22 @@ use crate::{
         },
     },
 };
+
+const SOURCE_SLICE_JOIN_TIMEOUT: StdDuration = StdDuration::from_mins(5);
+const SOURCE_SLICE_JOIN_POLL: StdDuration = StdDuration::from_millis(250);
+
+/// Complete server-frozen identity of the Source Slice shared by one feedback
+/// cycle's Training, Calibration, and Evaluation Dataset plans.
+pub(crate) struct FeedbackSourceFreeze<'a> {
+    pub profile: &'a ResearchProfileArtifact,
+    pub runtime: &'a DecisionPolicySnapshot,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub runtime_config_hash: ContentHash,
+    pub research_program_hash: ContentHash,
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub pit_cutoff: DateTime<Utc>,
+}
 
 /// Admin port wired from [`ResearchBundle`] plus runtime-config catalog reads.
 pub struct CoreTrainingDatasetPort {
@@ -259,9 +276,16 @@ impl CoreTrainingDatasetPort {
             .find_by_identity(&identity.identity_hash)
             .await?;
         let source_slice = match (source_slice, materialize) {
+            (Some(source_slice), Some(cancel))
+                if source_slice.status == SourceSliceStatus::Materializing =>
+            {
+                self.join_source_slice(identity.identity_hash, cancel)
+                    .await?
+            }
             (Some(source_slice), _) => source_slice,
             (None, Some(cancel)) => {
-                SourceSliceMaterializer::new(
+                let identity_hash = identity.identity_hash;
+                let materialized = SourceSliceMaterializer::new(
                     SourceSliceMaterializerDeps {
                         facts: Arc::clone(&self.fact_read),
                         catalog: Arc::clone(&self.catalog_repo),
@@ -281,7 +305,23 @@ impl CoreTrainingDatasetPort {
                     ),
                 )
                 .materialize(identity, profile, cancel)
-                .await?
+                .await;
+                match materialized {
+                    Ok(source_slice) => source_slice,
+                    Err(error) => {
+                        let concurrent = self
+                            .source_slice_repo
+                            .find_by_identity(&identity_hash)
+                            .await?;
+                        if concurrent.is_some_and(|source_slice| {
+                            source_slice.status == SourceSliceStatus::Materializing
+                        }) {
+                            self.join_source_slice(identity_hash, cancel).await?
+                        } else {
+                            return Err(error);
+                        }
+                    }
+                }
             }
             (None, None) => {
                 return Err(ResearchError::DatasetPlan {
@@ -302,6 +342,133 @@ impl CoreTrainingDatasetPort {
             .into());
         }
         Ok(source_slice)
+    }
+
+    async fn join_source_slice(
+        &self,
+        identity_hash: ContentHash,
+        cancel: &CancellationToken,
+    ) -> QuantResult<SourceSliceInfo> {
+        let deadline = Instant::now() + SOURCE_SLICE_JOIN_TIMEOUT;
+        loop {
+            let source_slice = self
+                .source_slice_repo
+                .find_by_identity(&identity_hash)
+                .await?
+                .ok_or_else(|| {
+                    StorageError::not_found("quant_source_slice", identity_hash.to_string())
+                })?;
+            match source_slice.status {
+                SourceSliceStatus::Ready => return Ok(source_slice),
+                SourceSliceStatus::Failed => {
+                    return Err(StorageError::state_conflict(
+                        "quant_source_slice",
+                        Some(source_slice.source_slice_id),
+                        "concurrent Source Slice materialization failed",
+                    )
+                    .into());
+                }
+                SourceSliceStatus::Materializing => {}
+            }
+            if Instant::now() >= deadline {
+                return Err(StorageError::state_conflict(
+                    "quant_source_slice",
+                    Some(source_slice.source_slice_id),
+                    "timed out joining concurrent Source Slice materialization",
+                )
+                .into());
+            }
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: "Source Slice join cancelled".to_owned(),
+                    }
+                    .into());
+                }
+                () = sleep(SOURCE_SLICE_JOIN_POLL) => {}
+            }
+        }
+    }
+
+    fn source_lineage(
+        profile_ref: &ResearchProfileRef,
+        research_program_hash: ContentHash,
+        source_slice: &SourceSliceInfo,
+    ) -> QuantResult<DatasetSourceLineage> {
+        let source_slice_ref = SourceSliceManifestRef {
+            manifest_uri: source_slice.manifest_uri.clone().ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some("quant_source_slice"),
+                    "ready source slice has no manifest URI",
+                )
+            })?,
+            manifest_hash: source_slice.manifest_hash.ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some("quant_source_slice"),
+                    "ready source slice has no manifest hash",
+                )
+            })?,
+        };
+        let source_manifest = source_slice.manifest.as_ref().ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some("quant_source_slice"),
+                "ready source slice has no typed manifest",
+            )
+        })?;
+        let source_lineage = DatasetSourceLineage {
+            format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
+            source_slice_id: source_slice.source_slice_id,
+            source_slice_identity_hash: source_slice.identity_hash,
+            research_profile_artifact_id: profile_ref.artifact_id(),
+            research_program_hash,
+            source_slice: source_slice_ref,
+            source_window_start: source_slice.window_start,
+            source_window_end: source_slice.window_end,
+            pit_cutoff: source_slice.pit_cutoff,
+            decision_policy_snapshot_id: source_slice.decision_policy_snapshot_id,
+            runtime_config_hash: source_slice.runtime_config_hash,
+            reader_contract_version: source_slice.reader_contract_version.clone(),
+            schema_contract_version: source_slice.schema_contract_version.clone(),
+            source_schema_hash: DatasetSourceLineage::derive_schema_hash(source_manifest).map_err(
+                |error| ResearchError::DatasetPlan {
+                    detail: error.to_string(),
+                },
+            )?,
+            capability_registry_hashes: source_manifest.capability_registry_hashes.clone(),
+        };
+        source_lineage
+            .validate()
+            .map_err(|error| ResearchError::DatasetPlan {
+                detail: error.to_string(),
+            })?;
+        Ok(source_lineage)
+    }
+
+    /// Materialize and verify the real content-addressed Source Slice used by
+    /// all three feedback Dataset plans.
+    pub(crate) async fn freeze_feedback_source(
+        &self,
+        request: FeedbackSourceFreeze<'_>,
+        cancel: &CancellationToken,
+    ) -> QuantResult<DatasetSourceLineage> {
+        let identity = SourceSliceIdentity::derive(SourceSliceIdentityInput {
+            profile_ref: request.profile.profile_ref.clone(),
+            evaluation_track: request.profile.spec.activation_eligibility,
+            research_program_hash: request.research_program_hash,
+            decision_policy_snapshot_id: request.decision_policy_snapshot_id,
+            runtime_config_hash: request.runtime_config_hash,
+            window_start: request.window_start,
+            window_end: request.window_end,
+            pit_cutoff: request.pit_cutoff,
+        })?;
+        let source_slice = self
+            .resolve_source_slice(identity, request.profile, request.runtime, Some(cancel))
+            .await?;
+        Self::source_lineage(
+            &request.profile.profile_ref,
+            request.research_program_hash,
+            &source_slice,
+        )
     }
 
     async fn resolve_plan_request(
@@ -358,52 +525,8 @@ impl CoreTrainingDatasetPort {
         let source_slice = self
             .resolve_source_slice(identity, &profile, &frozen_runtime, materialize)
             .await?;
-        let source_slice_ref = SourceSliceManifestRef {
-            manifest_uri: source_slice.manifest_uri.clone().ok_or_else(|| {
-                StorageError::invariant_violation(
-                    Some("quant_source_slice"),
-                    "ready source slice has no manifest URI",
-                )
-            })?,
-            manifest_hash: source_slice.manifest_hash.ok_or_else(|| {
-                StorageError::invariant_violation(
-                    Some("quant_source_slice"),
-                    "ready source slice has no manifest hash",
-                )
-            })?,
-        };
-        let source_manifest = source_slice.manifest.as_ref().ok_or_else(|| {
-            StorageError::invariant_violation(
-                Some("quant_source_slice"),
-                "ready source slice has no typed manifest",
-            )
-        })?;
-        let source_lineage = DatasetSourceLineage {
-            format_version: DATASET_SOURCE_LINEAGE_FORMAT_VERSION,
-            source_slice_id: source_slice.source_slice_id,
-            source_slice_identity_hash: source_slice.identity_hash,
-            research_profile_artifact_id: body.profile_ref.artifact_id(),
-            research_program_hash,
-            source_slice: source_slice_ref,
-            source_window_start: source_slice.window_start,
-            source_window_end: source_slice.window_end,
-            pit_cutoff: source_slice.pit_cutoff,
-            decision_policy_snapshot_id: source_slice.decision_policy_snapshot_id,
-            runtime_config_hash: source_slice.runtime_config_hash,
-            reader_contract_version: source_slice.reader_contract_version.clone(),
-            schema_contract_version: source_slice.schema_contract_version.clone(),
-            source_schema_hash: DatasetSourceLineage::derive_schema_hash(source_manifest).map_err(
-                |error| ResearchError::DatasetPlan {
-                    detail: error.to_string(),
-                },
-            )?,
-            capability_registry_hashes: source_manifest.capability_registry_hashes.clone(),
-        };
-        source_lineage
-            .validate()
-            .map_err(|error| ResearchError::DatasetPlan {
-                detail: error.to_string(),
-            })?;
+        let source_lineage =
+            Self::source_lineage(&body.profile_ref, research_program_hash, &source_slice)?;
         Ok((
             DatasetPlanRequest {
                 model_spec_id: body.model_spec_id,

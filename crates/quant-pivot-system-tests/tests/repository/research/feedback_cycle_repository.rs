@@ -2,32 +2,46 @@
 
 use std::time::Duration as StdDuration;
 
-use quant_pivot_error::storage::{StorageError, entity};
+use quant_pivot_error::{
+    feedback::FeedbackCycleCommandError,
+    rbac::RbacError,
+    storage::{StorageError, entity},
+};
 use quant_pivot_models::{
     domain::{
-        api::BuildTrainingDatasetRequest,
+        api::{BuildTrainingDatasetRequest, DriftReportListQuery, FeedbackCycleListQuery},
+        pagination::PageRequest,
         quant::{
-            FeedbackCycleTerminal, FeedbackStageEventInput, FeedbackStageJobIdentity,
+            FeedbackCycleActor, FeedbackCycleTerminal, FeedbackStageEventInput,
+            FeedbackStageJobIdentity, GovernedFeedbackCancellation, GovernedFeedbackTrigger,
             NewFeedbackStageEvent, NewResearchJob,
         },
+        rbac::{AssignPermissions, AssignRoles, NewRole, NewUser, Permission},
     },
     entities::quant_feedback_cycle::Entity as QuantFeedbackCycleEntity,
     enums::quant::{
-        DatasetPurpose, FeedbackCycleStatus, FeedbackDecision, FeedbackStage,
-        FeedbackStageEventKind, ResearchJobKind, ResearchJobStatus,
+        DatasetPurpose, FeedbackCycleStatus, FeedbackDecision, FeedbackDriftKind,
+        FeedbackDriftMetric, FeedbackStage, FeedbackStageEventKind, FeedbackTriggerFamily,
+        ResearchJobKind, ResearchJobStatus,
     },
+    enums::rbac::{Operation, ResourceType, RoleKind, RoleStatus, UserStatus},
     types::{
-        DecisionPolicySnapshotId, FeedbackCycleId, ModelSpecId, ResearchJobId, ResearchJobParams,
-        RoleCode, SchemaVersion, TrainingDatasetId, TrainingSampleSources, WorkerId,
+        DecisionPolicySnapshotId, FeedbackCycleId, ModelSpecId, ModelVersionId, ResearchJobId,
+        ResearchJobParams, ResearchProfileId, RoleCode, RoleId, SchemaVersion, TrainingDatasetId,
+        TrainingSampleSources, UserId, WorkerId,
     },
 };
 use quant_pivot_repository::{
-    postgres::{PgFeedbackCycleRepository, PgResearchJobRepository},
+    postgres::{
+        PgFeedbackCycleRepository, PgResearchJobRepository, PgRolePermissionRepository,
+        PgRoleRepository, PgUserRepository, PgUserRoleRepository,
+    },
     traits::{
         DriftReportWriteOutcome, FeedbackCycleCasOutcome, FeedbackCycleClaim,
         FeedbackCycleClaimMode, FeedbackCycleGeneration, FeedbackCycleRepository,
-        FeedbackCycleWriteOutcome, FeedbackEvaluationWriteOutcome, FeedbackStageWriteOutcome,
-        ResearchJobRepository,
+        FeedbackCycleWriteOutcome, FeedbackEvaluationWriteOutcome, FeedbackOutboxRepository,
+        FeedbackStageWriteOutcome, ResearchJobRepository, RolePermissionRepository, RoleRepository,
+        UserRepository, UserRoleRepository,
     },
 };
 use quant_pivot_system_tests::postgres::setup_pg;
@@ -155,6 +169,11 @@ impl FeedbackSchemaFixture {
         );
         assert_eq!(replay[0].event.feedback_cycle_id, self.cycle_id);
         assert_eq!(replay[1].event.feedback_cycle_id, self.second_cycle_id);
+        assert!(
+            replay
+                .iter()
+                .all(|entry| entry.profile_id == self.profile_ref.id)
+        );
         let snapshot = repo.queue_snapshot().await.expect("read queue snapshot");
         assert_eq!((snapshot.queued, snapshot.running), (2, 0));
         assert_eq!(snapshot.pending_outbox, 2);
@@ -194,6 +213,63 @@ async fn record_cycles(repo: &PgFeedbackCycleRepository, fixture: &FeedbackSchem
     ));
 }
 
+async fn feedback_actor(
+    db: &DatabaseConnection,
+    code: &str,
+    operations: &[Operation],
+) -> FeedbackCycleActor {
+    let users = PgUserRepository::new(db.clone());
+    let roles = PgRoleRepository::new(db.clone());
+    let memberships = PgUserRoleRepository::new(db.clone());
+    let permissions = PgRolePermissionRepository::new(db.clone());
+    let role = roles
+        .create(NewRole {
+            id: RoleId::from_v7(),
+            code: RoleCode::new(code),
+            name: code.to_owned(),
+            description: None,
+            kind: RoleKind::Custom,
+            status: RoleStatus::Enabled,
+            sort: 0,
+        })
+        .await
+        .expect("create feedback role");
+    permissions
+        .set_permissions_for_role(AssignPermissions {
+            role_id: role.id,
+            permissions: operations
+                .iter()
+                .map(|operation| Permission::new(ResourceType::Materialization, *operation))
+                .collect(),
+        })
+        .await
+        .expect("assign feedback permissions");
+    let user = users
+        .create(NewUser {
+            id: UserId::from_v7(),
+            username: format!("{code}_user"),
+            password_hash: "argon2id$feedback-test".to_owned(),
+            nickname: format!("{code} user"),
+            avatar: None,
+            email: None,
+            phone: None,
+            status: UserStatus::Active,
+        })
+        .await
+        .expect("create feedback actor");
+    memberships
+        .set_roles_for_user(AssignRoles {
+            user_id: user.id,
+            role_ids: vec![role.id],
+        })
+        .await
+        .expect("assign feedback role");
+    FeedbackCycleActor {
+        user_id: user.id,
+        acting_role: role.code,
+    }
+}
+
 pub async fn trigger_exact_retry() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -230,6 +306,213 @@ pub async fn trigger_exact_retry() {
             ..
         } if owner == entity::QUANT_FEEDBACK_STAGE_EVENT
     ));
+}
+
+pub async fn governed_mutation_contracts() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let fixture = Box::pin(prepare_fixture(&db)).await;
+    let repo = PgFeedbackCycleRepository::new(db.clone());
+    let owner = feedback_actor(&db, "feedback_owner", &[Operation::Create]).await;
+    let second_owner = feedback_actor(&db, "feedback_backup", &[Operation::Create]).await;
+    let reader = feedback_actor(&db, "feedback_reader", &[Operation::Read]).await;
+    let trigger = GovernedFeedbackTrigger {
+        actor: owner.clone(),
+        cycle: fixture.second_cycle.clone(),
+        reason_code: "operator_retrain".to_owned(),
+    };
+
+    assert!(matches!(
+        repo.record_governed_trigger(GovernedFeedbackTrigger {
+            actor: reader.clone(),
+            cycle: fixture.second_cycle.clone(),
+            reason_code: "operator_retrain".to_owned(),
+        })
+        .await,
+        Err(FeedbackCycleCommandError::Authorization(
+            RbacError::PermissionDenied { .. }
+        ))
+    ));
+    assert!(
+        repo.find_cycle(&fixture.second_cycle_id)
+            .await
+            .expect("check denied trigger")
+            .is_none(),
+        "RBAC denial must persist no cycle"
+    );
+
+    let before_trigger = repo.database_time().await.expect("read database time");
+    let first = repo
+        .record_governed_trigger(trigger.clone())
+        .await
+        .expect("record governed trigger");
+    let (
+        FeedbackCycleWriteOutcome::Inserted(triggered),
+        FeedbackStageWriteOutcome::Inserted(event),
+    ) = first
+    else {
+        panic!("first governed trigger must insert cycle and event");
+    };
+    assert_eq!(
+        event.actor.as_deref(),
+        Some("feedback_owner_user@feedback_owner")
+    );
+    assert_eq!(event.reason_code.as_deref(), Some("operator_retrain"));
+    assert!(event.occurred_at >= before_trigger);
+
+    sleep(StdDuration::from_millis(2)).await;
+    assert!(matches!(
+        repo.record_governed_trigger(trigger.clone())
+            .await
+            .expect("retry governed trigger across database time"),
+        (
+            FeedbackCycleWriteOutcome::AlreadyPresent(_),
+            FeedbackStageWriteOutcome::AlreadyPresent(_)
+        )
+    ));
+    assert!(matches!(
+        repo.record_governed_trigger(GovernedFeedbackTrigger {
+            actor: second_owner,
+            cycle: fixture.second_cycle.clone(),
+            reason_code: "operator_retrain".to_owned(),
+        })
+        .await,
+        Err(FeedbackCycleCommandError::Storage(
+            StorageError::StateConflict { .. }
+        ))
+    ));
+
+    let cancellation = GovernedFeedbackCancellation {
+        actor: owner,
+        feedback_cycle_id: fixture.second_cycle_id,
+        expected_generation: triggered.generation,
+        expected_event_sequence: 2,
+        stage: FeedbackStage::Coverage,
+        reason_code: "operator_cancelled".to_owned(),
+    };
+    assert!(matches!(
+        repo.request_governed_cancel(GovernedFeedbackCancellation {
+            actor: reader,
+            ..cancellation.clone()
+        })
+        .await,
+        Err(FeedbackCycleCommandError::Authorization(
+            RbacError::PermissionDenied { .. }
+        ))
+    ));
+    let first_cancel = repo
+        .request_governed_cancel(cancellation.clone())
+        .await
+        .expect("request governed cancellation");
+    let (
+        FeedbackCycleCasOutcome::Applied(cancelled),
+        FeedbackStageWriteOutcome::Inserted(cancel_event),
+    ) = first_cancel
+    else {
+        panic!("first governed cancellation must apply");
+    };
+    assert_eq!(cancelled.status, FeedbackCycleStatus::Cancelled);
+    assert_eq!(cancelled.generation, triggered.generation + 1);
+    assert_eq!(
+        cancel_event.actor.as_deref(),
+        Some("feedback_owner_user@feedback_owner")
+    );
+    assert_eq!(
+        cancel_event.reason_code.as_deref(),
+        Some("operator_cancelled")
+    );
+    assert!(matches!(
+        repo.request_governed_cancel(cancellation)
+            .await
+            .expect("retry governed cancellation"),
+        (
+            FeedbackCycleCasOutcome::AlreadyApplied(_),
+            FeedbackStageWriteOutcome::AlreadyPresent(_)
+        )
+    ));
+    let events = repo
+        .list_stage_events(&fixture.second_cycle_id)
+        .await
+        .expect("read governed timeline");
+    let outbox = repo.list_outbox(0, 10).await.expect("read governed outbox");
+    assert_eq!((events.len(), outbox.len()), (2, 2));
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.event_sequence)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+}
+
+pub async fn read_page_contracts() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let fixture = Box::pin(prepare_fixture(&db)).await;
+    let repo = PgFeedbackCycleRepository::new(db);
+    record_cycles(&repo, &fixture).await;
+
+    let first = repo
+        .page_cycles(FeedbackCycleListQuery {
+            profile_id: Some(fixture.profile_ref.id.clone()),
+            status: Some(FeedbackCycleStatus::Queued),
+            trigger_family: None,
+            page: PageRequest::new(1, 1),
+        })
+        .await
+        .expect("page first feedback cycle");
+    let second = repo
+        .page_cycles(FeedbackCycleListQuery {
+            profile_id: Some(fixture.profile_ref.id.clone()),
+            status: Some(FeedbackCycleStatus::Queued),
+            trigger_family: None,
+            page: PageRequest::new(2, 1),
+        })
+        .await
+        .expect("page second feedback cycle");
+    assert_eq!((first.total, first.page, first.size), (2, 1, 1));
+    assert!(first.has_next);
+    assert_eq!((second.total, second.page, second.size), (2, 2, 1));
+    assert!(!second.has_next);
+    assert_ne!(
+        first.items[0].feedback_cycle_id,
+        second.items[0].feedback_cycle_id
+    );
+
+    let manual = repo
+        .page_cycles(FeedbackCycleListQuery {
+            profile_id: None,
+            status: None,
+            trigger_family: Some(FeedbackTriggerFamily::Manual),
+            page: PageRequest::default(),
+        })
+        .await
+        .expect("filter manual feedback cycle");
+    assert_eq!(manual.total, 1);
+    assert_eq!(manual.items[0].feedback_cycle_id, fixture.second_cycle_id);
+
+    let missing = repo
+        .page_cycles(FeedbackCycleListQuery {
+            profile_id: Some(ResearchProfileId::new("missing_profile")),
+            status: None,
+            trigger_family: None,
+            page: PageRequest::new(0, 1_000),
+        })
+        .await
+        .expect("filter missing feedback profile");
+    assert!(missing.items.is_empty());
+    assert_eq!((missing.total, missing.page, missing.size), (0, 1, 100));
+
+    let outbox = repo
+        .list_outbox(0, 10)
+        .await
+        .expect("read durable revisions");
+    assert_eq!(
+        repo.latest_outbox_revision()
+            .await
+            .expect("read latest durable revision"),
+        outbox.last().expect("trigger outbox is non-empty").revision
+    );
 }
 
 pub async fn outbox_delivery_contracts() {
@@ -335,6 +618,7 @@ pub async fn outbox_delivery_contracts() {
         stage_replay[0].event.event_kind,
         FeedbackStageEventKind::Started
     );
+    assert_eq!(stage_replay[0].profile_id, fixture.profile_ref.id);
     assert_eq!(
         repo.queue_snapshot()
             .await
@@ -725,4 +1009,58 @@ pub async fn evidence_append_contracts() {
         .await
         .expect("read evaluation uses");
     assert_eq!((events.len(), reports.len(), uses.len()), (2, 1, 1));
+
+    let drift_page = repo
+        .page_drift_reports(DriftReportListQuery {
+            feedback_cycle_id: Some(fixture.cycle_id),
+            profile_id: Some(fixture.profile_ref.id.clone()),
+            kind: Some(FeedbackDriftKind::Data),
+            metric: Some(FeedbackDriftMetric::PopulationStabilityIndex),
+            page: PageRequest::new(0, 1_000),
+        })
+        .await
+        .expect("page exact drift lineage");
+    assert_eq!(
+        (drift_page.total, drift_page.page, drift_page.size),
+        (1, 1, PageRequest::MAX_SIZE)
+    );
+    assert_eq!(drift_page.items[0].detail_hash, content_hash('1'));
+    let missing_drift = repo
+        .page_drift_reports(DriftReportListQuery {
+            feedback_cycle_id: None,
+            profile_id: Some(ResearchProfileId::new("missing_profile")),
+            kind: None,
+            metric: None,
+            page: PageRequest::default(),
+        })
+        .await
+        .expect("filter absent drift profile");
+    assert!(missing_drift.items.is_empty());
+    assert_eq!(missing_drift.total, 0);
+
+    let evaluation_page = repo
+        .page_model_evaluation_uses(
+            &fixture.champion_model_version_id,
+            PageRequest::new(0, 1_000),
+        )
+        .await
+        .expect("page champion evaluation lineage");
+    assert_eq!(
+        (
+            evaluation_page.total,
+            evaluation_page.page,
+            evaluation_page.size,
+        ),
+        (1, 1, PageRequest::MAX_SIZE)
+    );
+    assert_eq!(
+        evaluation_page.items[0].champion_model_version_id,
+        fixture.champion_model_version_id
+    );
+    let missing_evaluation = repo
+        .page_model_evaluation_uses(&ModelVersionId::from_v7(), PageRequest::default())
+        .await
+        .expect("filter absent model evaluation lineage");
+    assert!(missing_evaluation.items.is_empty());
+    assert_eq!(missing_evaluation.total, 0);
 }

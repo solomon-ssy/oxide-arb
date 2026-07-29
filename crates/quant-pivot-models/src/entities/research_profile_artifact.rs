@@ -4,7 +4,8 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    quant_model_version, quant_order_intent, quant_recommendation, quant_recommendation_report,
+    quant_feedback_cycle, quant_model_version, quant_order_intent, quant_recommendation,
+    quant_recommendation_report,
 };
 use crate::types::{
     ContentHash, ResearchProfileArtifactId, ResearchProfileId, ResearchProfileSpec,
@@ -37,6 +38,8 @@ pub struct Model {
     pub model_version: HasMany<quant_model_version::Entity>,
     #[sea_orm(has_many, relation_enum = "OrderIntent")]
     pub order_intent: HasMany<quant_order_intent::Entity>,
+    #[sea_orm(has_many, relation_enum = "FeedbackCycle")]
+    pub feedback_cycle: HasMany<quant_feedback_cycle::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

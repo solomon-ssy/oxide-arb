@@ -56,7 +56,9 @@ use config::ConfigError;
 use config_validation::{ConfigValidationError, ConfigValidationReport};
 use control::ControlError;
 use execution::ExecutionError;
-use feedback::{FeedbackError, PromotionCommitError, PromotionPermitCommandError};
+use feedback::{
+    FeedbackCycleCommandError, FeedbackError, PromotionCommitError, PromotionPermitCommandError,
+};
 use governance::GovernanceError;
 use hashing::CanonicalDigestError;
 use infra::InfraError;
@@ -226,6 +228,16 @@ impl From<PromotionPermitCommandError> for QuantError {
             PromotionPermitCommandError::Contract(error) => Self::Feedback(error),
             PromotionPermitCommandError::Authorization(error) => Self::Rbac(error),
             PromotionPermitCommandError::Storage(error) => Self::Storage(error),
+        }
+    }
+}
+
+impl From<FeedbackCycleCommandError> for QuantError {
+    fn from(error: FeedbackCycleCommandError) -> Self {
+        match error {
+            FeedbackCycleCommandError::Contract(error) => Self::Feedback(error),
+            FeedbackCycleCommandError::Authorization(error) => Self::Rbac(error),
+            FeedbackCycleCommandError::Storage(error) => Self::Storage(error),
         }
     }
 }

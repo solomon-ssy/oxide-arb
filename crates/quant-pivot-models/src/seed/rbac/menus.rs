@@ -603,6 +603,7 @@ impl MenuTree {
         });
         build_research_jobs(self, &research);
         build_research_feature_integrity(self, &research);
+        self.build_research_feedback(&research);
         self.page(PageSpec {
             parent: &research,
             name: "research-factors",
@@ -624,6 +625,19 @@ impl MenuTree {
             component: "research/comparisons/detail",
             permission_code: Some(perm(ResourceType::Replay, Operation::Read)),
             icon: "lucide:git-compare",
+        });
+    }
+
+    /// Feedback-cycle observability and governed retraining workbench.
+    fn build_research_feedback(&mut self, research: &MenuId) {
+        self.page(PageSpec {
+            parent: research,
+            name: "research-feedback",
+            title: "page.menu.researchFeedback",
+            path: "/research/feedback",
+            component: "research/feedback/index",
+            permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
+            icon: "lucide:refresh-cw",
         });
     }
 }
@@ -928,6 +942,7 @@ mod tests {
             "research-datasets",
             "research-models",
             "research-backtests",
+            "research-feedback",
             "research-jobs",
             "research-feature-integrity",
             "feature_integrity:govern",
@@ -995,6 +1010,34 @@ mod tests {
             action.permission_code,
             sea_orm::ActiveValue::Set(Some("materialization:create".to_owned()))
         );
+    }
+
+    #[test]
+    fn feedback_workbench_page() {
+        let tree = MenuTree::bootstrap();
+        let page = tree
+            .models
+            .iter()
+            .find(|model| {
+                matches!(
+                    &model.name,
+                    sea_orm::ActiveValue::Set(name) if name == "research-feedback"
+                )
+            })
+            .expect("feedback workbench menu page");
+        assert_eq!(
+            page.permission_code,
+            sea_orm::ActiveValue::Set(Some("materialization:read".to_owned()))
+        );
+        assert_eq!(
+            page.path,
+            sea_orm::ActiveValue::Set(Some("/research/feedback".to_owned()))
+        );
+        assert_eq!(
+            page.component,
+            sea_orm::ActiveValue::Set(Some("research/feedback/index".to_owned()))
+        );
+        assert_eq!(page.hide_in_menu, sea_orm::ActiveValue::Set(false));
     }
 
     #[test]

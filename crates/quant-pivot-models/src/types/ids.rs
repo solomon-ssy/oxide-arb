@@ -376,6 +376,15 @@ pub struct SignalCandidateId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TrainingDatasetId(Uuid);
 
+impl TrainingDatasetId {
+    /// Project one server-frozen feedback Dataset plan into a stable identity.
+    #[must_use]
+    pub fn from_feedback_plan_hash(plan_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f210);
+        Self::new(uuid_v5_for_content(&NAMESPACE, plan_hash))
+    }
+}
+
 /// One materialized training example (row) within a training dataset.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TrainingExampleId(Uuid);

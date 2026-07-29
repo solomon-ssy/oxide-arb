@@ -1476,6 +1476,7 @@
       "enum": [
         "initial",
         "promote",
+        "model_promotion",
         "rollback"
       ]
     },

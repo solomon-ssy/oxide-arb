@@ -2,47 +2,41 @@
 
 use quant_pivot_error::{
     feedback::{FeedbackError, PromotionPermitCommandError},
-    rbac::RbacError,
     storage::{StorageError, entity::QUANT_FEEDBACK_PROMOTION_PERMIT},
 };
 use quant_pivot_models::{
-    domain::quant::{
-        IssuePromotionPermit, NewPromotionPermit, PromotionPermitActor, PromotionPermitInfo,
-        PromotionPermitIssueInput, PromotionPermitRevocation, PromotionPermitRevocationCheck,
-        RevokePromotionPermit,
+    domain::{
+        api::PromotionPermitListQuery,
+        pagination::{PageWindow, Paginated},
+        quant::{
+            IssuePromotionPermit, NewPromotionPermit, PromotionPermitInfo,
+            PromotionPermitIssueInput, PromotionPermitRevocation, PromotionPermitRevocationCheck,
+            PromotionPermitStatus, RevokePromotionPermit,
+        },
     },
     entities::{
-        casbin_rule::{Column as CasbinColumn, Entity as CasbinEntity},
-        quant_feedback_promotion_permit::{Column as PermitColumn, Entity as PermitEntity},
-        role::{Column as RoleColumn, Entity as RoleEntity},
-        user::Entity as UserEntity,
-        user_role::Entity as UserRoleEntity,
+        quant_feedback_promotion_permit::{
+            Column as PermitColumn, Entity as PermitEntity, Relation as PermitRelation,
+        },
+        research_profile_artifact::Column as ProfileColumn,
     },
-    enums::rbac::{
-        Operation, ResourceType, RoleStatus, UserStatus,
-        casbin::{OBJECT_TYPE_RESOURCE, PTYPE_GROUPING, PTYPE_POLICY},
-    },
-    seed::rbac::ROLE_SUPER_ADMIN,
-    types::{PromotionPermitId, RoleCode, UserId},
+    enums::rbac::{Operation, ResourceType},
+    types::PromotionPermitId,
 };
 use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction, EntityTrait, ExprTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait, TryInsertResult,
+    IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    TransactionTrait, TryInsertResult,
     sea_query::{Expr, OnConflict},
 };
 
 use crate::{
-    postgres::primitives,
+    postgres::{authorization, primitives, query::paginate_into_model},
     traits::{
-        PromotionPermitIssueOutcome, PromotionPermitRepository, PromotionPermitRevokeOutcome,
+        PromotionPermitIssueOutcome, PromotionPermitPage, PromotionPermitRepository,
+        PromotionPermitRevokeOutcome,
     },
 };
-
-struct AuthorizedPromotionActor {
-    user_id: UserId,
-    username: String,
-    role: RoleCode,
-}
 
 /// `PostgreSQL` owner of atomic permit authorization and mutation.
 pub struct PgPromotionPermitRepository {
@@ -53,95 +47,6 @@ impl PgPromotionPermitRepository {
     #[must_use]
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
-    }
-
-    async fn authorize_actor(
-        transaction: &DatabaseTransaction,
-        actor: &PromotionPermitActor,
-        operation: Operation,
-    ) -> Result<AuthorizedPromotionActor, PromotionPermitCommandError> {
-        let denied = || {
-            PromotionPermitCommandError::from(RbacError::PermissionDenied {
-                actor_user_id: actor.user_id.to_string(),
-                acting_role: actor.acting_role.to_string(),
-                resource: ResourceType::Publication.as_str(),
-                operation: operation.as_str(),
-            })
-        };
-        let Some(user) = UserEntity::find_by_id(actor.user_id)
-            .lock_shared()
-            .one(transaction)
-            .await
-            .map_err(StorageError::from)?
-        else {
-            return Err(denied());
-        };
-        if user.status != UserStatus::Active {
-            return Err(denied());
-        }
-
-        let Some(role) = RoleEntity::find()
-            .filter(RoleColumn::Code.eq(actor.acting_role.as_str()))
-            .lock_shared()
-            .one(transaction)
-            .await
-            .map_err(StorageError::from)?
-        else {
-            return Err(denied());
-        };
-        if role.status != RoleStatus::Enabled {
-            return Err(denied());
-        }
-
-        let membership = UserRoleEntity::find_by_id((actor.user_id, role.id))
-            .lock_shared()
-            .one(transaction)
-            .await
-            .map_err(StorageError::from)?;
-        if membership.is_none() {
-            return Err(denied());
-        }
-
-        let subject = actor.user_id.to_string();
-        let grouping = CasbinEntity::find()
-            .filter(CasbinColumn::Ptype.eq(PTYPE_GROUPING))
-            .filter(CasbinColumn::V0.eq(&subject))
-            .filter(CasbinColumn::V1.eq(actor.acting_role.as_str()))
-            .filter(CasbinColumn::V2.eq(""))
-            .filter(CasbinColumn::V3.eq(""))
-            .filter(CasbinColumn::V4.eq(""))
-            .filter(CasbinColumn::V5.eq(""))
-            .lock_shared()
-            .one(transaction)
-            .await
-            .map_err(StorageError::from)?;
-        if grouping.is_none() {
-            return Err(denied());
-        }
-
-        if actor.acting_role.as_str() != ROLE_SUPER_ADMIN {
-            let policy = CasbinEntity::find()
-                .filter(CasbinColumn::Ptype.eq(PTYPE_POLICY))
-                .filter(CasbinColumn::V0.eq(actor.acting_role.as_str()))
-                .filter(CasbinColumn::V1.eq(ResourceType::Publication.as_str()))
-                .filter(CasbinColumn::V2.eq(operation.as_str()))
-                .filter(CasbinColumn::V3.eq(OBJECT_TYPE_RESOURCE))
-                .filter(CasbinColumn::V4.eq(""))
-                .filter(CasbinColumn::V5.eq(""))
-                .lock_shared()
-                .one(transaction)
-                .await
-                .map_err(StorageError::from)?;
-            if policy.is_none() {
-                return Err(denied());
-            }
-        }
-
-        Ok(AuthorizedPromotionActor {
-            user_id: user.id,
-            username: user.username,
-            role: role.code,
-        })
     }
 
     async fn permit_candidates(
@@ -243,14 +148,72 @@ impl PromotionPermitRepository for PgPromotionPermitRepository {
         Ok(permit)
     }
 
+    async fn page_permits(
+        &self,
+        query: PromotionPermitListQuery,
+    ) -> Result<PromotionPermitPage, PromotionPermitCommandError> {
+        let window = PageWindow::from_query(&query);
+        let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        let observed_at = primitives::statement_timestamp(&transaction).await?;
+        let condition = Condition::all().add_option(
+            query
+                .category
+                .map(|category| PermitColumn::Category.eq(category)),
+        );
+        let mut select = PermitEntity::find().filter(condition);
+        if let Some(profile_id) = query.profile_id {
+            select = select
+                .join(
+                    JoinType::InnerJoin,
+                    PermitRelation::ResearchProfileArtifact.def(),
+                )
+                .filter(ProfileColumn::ResearchProfileId.eq(profile_id));
+        }
+        select = match query.status {
+            Some(PromotionPermitStatus::Active) => select
+                .filter(PermitColumn::RevokedAt.is_null())
+                .filter(PermitColumn::ExpiresAt.gt(observed_at)),
+            Some(PromotionPermitStatus::Expired) => select
+                .filter(PermitColumn::RevokedAt.is_null())
+                .filter(PermitColumn::ExpiresAt.lte(observed_at)),
+            Some(PromotionPermitStatus::Revoked) => {
+                select.filter(PermitColumn::RevokedAt.is_not_null())
+            }
+            None => select,
+        };
+        let permits: Paginated<PromotionPermitInfo> = paginate_into_model(
+            select
+                .order_by_desc(PermitColumn::IssuedAt)
+                .order_by_desc(PermitColumn::PromotionPermitId),
+            &transaction,
+            window,
+        )
+        .await?;
+        for permit in &permits.items {
+            permit.validate()?;
+            permit.status_at(observed_at)?;
+        }
+        transaction.commit().await.map_err(StorageError::from)?;
+        Ok(PromotionPermitPage {
+            observed_at,
+            permits,
+        })
+    }
+
     async fn issue(
         &self,
         command: IssuePromotionPermit,
     ) -> Result<PromotionPermitIssueOutcome, PromotionPermitCommandError> {
         command.validate()?;
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let authorized =
-            Self::authorize_actor(&transaction, &command.actor, Operation::Publish).await?;
+        let authorized = authorization::authorize_actor::<PromotionPermitCommandError>(
+            &transaction,
+            command.actor.user_id,
+            &command.actor.acting_role,
+            ResourceType::Publication,
+            Operation::Publish,
+        )
+        .await?;
         let expected = NewPromotionPermit::try_seal(PromotionPermitIssueInput {
             idempotency_key: command.idempotency_key,
             scope: command.scope,
@@ -302,8 +265,14 @@ impl PromotionPermitRepository for PgPromotionPermitRepository {
     ) -> Result<PromotionPermitRevokeOutcome, PromotionPermitCommandError> {
         command.validate()?;
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
-        let authorized =
-            Self::authorize_actor(&transaction, &command.actor, Operation::Retire).await?;
+        let authorized = authorization::authorize_actor::<PromotionPermitCommandError>(
+            &transaction,
+            command.actor.user_id,
+            &command.actor.acting_role,
+            ResourceType::Publication,
+            Operation::Retire,
+        )
+        .await?;
         let stored = Self::lock_permit(&transaction, command.promotion_permit_id).await?;
         stored.validate()?;
 

@@ -65,6 +65,8 @@ pub enum WsChannel {
     QuantCondition,
     /// Materialization / replay run lifecycle update for dashboard clients.
     MaterializationRunUpdate,
+    /// Durable feedback-cycle stage-event revision hint.
+    ResearchFeedback,
     /// Reconciliation row detect/update lifecycle (worker + operator resolve),
     /// discriminated by the payload; a revision hint for the reconciliation
     /// queue + recovery panel (the list is always re-fetched over REST).
@@ -76,7 +78,7 @@ pub enum WsChannel {
 
 impl WsChannel {
     /// Every channel, used by exhaustiveness tests and reverse lookup.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::SystemStatus,
         Self::SystemAlert,
         Self::MarketResolved,
@@ -87,6 +89,7 @@ impl WsChannel {
         Self::QuantIntent,
         Self::QuantCondition,
         Self::MaterializationRunUpdate,
+        Self::ResearchFeedback,
         Self::QuantReconciliation,
         Self::QuantSettlement,
     ];
@@ -105,6 +108,7 @@ impl WsChannel {
             Self::QuantIntent => "quant.intent",
             Self::QuantCondition => "quant.condition",
             Self::MaterializationRunUpdate => "materialization.run_update",
+            Self::ResearchFeedback => "research.feedback",
             Self::QuantReconciliation => "quant.reconciliation",
             Self::QuantSettlement => "quant.settlement",
         }
@@ -123,7 +127,9 @@ impl WsChannel {
                 ResourceType::QuantReport
             }
             Self::QuantIntent => ResourceType::OrderIntent,
-            Self::MaterializationRunUpdate => ResourceType::Materialization,
+            Self::MaterializationRunUpdate | Self::ResearchFeedback => {
+                ResourceType::Materialization
+            }
             Self::ConfigActivated => ResourceType::DecisionPolicySnapshot,
             Self::QuantReconciliation => ResourceType::Reconciliation,
             Self::QuantSettlement => ResourceType::SettlementRedeem,
@@ -241,6 +247,13 @@ mod tests {
             WsChannel::MaterializationRunUpdate.resource(),
             ResourceType::Materialization
         );
+    }
+
+    #[test]
+    fn research_feedback_channel_contract() {
+        let channel = WsChannel::from_str("research.feedback").expect("canonical feedback channel");
+        assert_eq!(channel.resource(), ResourceType::Materialization);
+        assert_eq!(channel.scope(), ChannelScope::Global);
     }
 
     #[test]

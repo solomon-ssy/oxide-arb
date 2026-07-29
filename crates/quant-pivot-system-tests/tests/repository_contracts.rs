@@ -432,6 +432,8 @@ async fn feedback_cycle_repository_contracts() {
     Box::pin(with_postgres_suite(async {
         run_scenarios!(
             feedback_cycle_repository::trigger_exact_retry,
+            feedback_cycle_repository::governed_mutation_contracts,
+            feedback_cycle_repository::read_page_contracts,
             feedback_cycle_repository::outbox_delivery_contracts,
             feedback_cycle_repository::skip_locked_claims,
             feedback_cycle_repository::lease_cas_recovery,

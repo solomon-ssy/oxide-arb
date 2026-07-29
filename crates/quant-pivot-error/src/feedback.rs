@@ -89,6 +89,23 @@ pub enum PromotionPermitCommandError {
     Storage(#[from] StorageError),
 }
 
+/// Failures from a transaction-owned feedback trigger or cancellation.
+///
+/// Governed cycle mutations authorize the actor and append immutable evidence
+/// in the same transaction, so callers must retain contract, authorization,
+/// and persistence failures as distinct typed causes.
+#[derive(Debug, Error)]
+pub enum FeedbackCycleCommandError {
+    #[error(transparent)]
+    Contract(#[from] FeedbackError),
+
+    #[error(transparent)]
+    Authorization(#[from] RbacError),
+
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
 /// Failures from the atomic model-route promotion transaction.
 #[derive(Debug, Error)]
 pub enum PromotionCommitError {

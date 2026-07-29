@@ -458,6 +458,7 @@ async fn find_existing_demo_infra(
         .ok()??;
     let version = QuantModelVersionEntity::find()
         .filter(QuantModelVersionColumn::ModelSpecId.eq(spec.model_spec_id))
+        .filter(QuantModelVersionColumn::PublicationStatus.eq(PublicationStatus::Published))
         .order_by_desc(QuantModelVersionColumn::Version)
         .one(db)
         .await
