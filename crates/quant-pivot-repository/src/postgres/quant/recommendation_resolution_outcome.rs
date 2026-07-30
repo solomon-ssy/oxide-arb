@@ -1,6 +1,6 @@
 //! `PostgreSQL` WORM recommendation-resolution outcome repository.
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use quant_pivot_error::storage::{
     StorageError,
     entity::{QUANT_RECOMMENDATION, QUANT_RECOMMENDATION_RESOLUTION_OUTCOME},
@@ -82,8 +82,27 @@ impl RecommendationResolutionOutcomeRepository for PgRecommendationResolutionOut
             .transpose()
     }
 
+    async fn source_history_start(
+        &self,
+        available_through: DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, StorageError> {
+        QuantRecommendationEntity::find()
+            .select_only()
+            .column_as(
+                QuantRecommendationColumn::CreatedAt.min(),
+                "source_history_start",
+            )
+            .filter(QuantRecommendationColumn::CreatedAt.lte(available_through))
+            .into_tuple::<Option<DateTime<Utc>>>()
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(Option::flatten)
+    }
+
     async fn list_reconciliation_candidates(
         &self,
+        available_through: DateTime<Utc>,
         after: Option<RecommendationId>,
         limit: u64,
     ) -> Result<Vec<RecommendationResolutionReconciliationCandidate>, StorageError> {
@@ -104,6 +123,7 @@ impl RecommendationResolutionOutcomeRepository for PgRecommendationResolutionOut
             )
             .filter(MarketColumn::Status.eq(MarketStatus::Settled))
             .filter(Column::RecommendationId.is_null())
+            .filter(QuantRecommendationColumn::CreatedAt.lte(available_through))
             .filter(after.map_or_else(Condition::all, |cursor| {
                 Condition::all().add(QuantRecommendationColumn::RecommendationId.gt(cursor))
             }))

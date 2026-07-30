@@ -339,7 +339,12 @@ impl PromotionPreflightService {
         let identity = self
             .deps
             .serving_generations
-            .current_route(route)?
+            .current_route(route)
+            .ok_or_else(|| {
+                Self::invalid(format!(
+                    "current serving generation has no active route {route:?}"
+                ))
+            })?
             .published_shadow_identity()?;
         let contract = &evidence.shadow_contract;
         if identity.route != route

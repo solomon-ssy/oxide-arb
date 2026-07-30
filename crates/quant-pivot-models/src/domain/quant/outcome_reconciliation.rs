@@ -8,7 +8,8 @@ use thiserror::Error;
 
 use super::{
     ExecutionOrderInfo, NewRecommendationExecutionOutcome, OrderIntentInfo, PositionInfo,
-    RecommendationExecutionOutcomeInfo, ReconciliationInfo, settlement::SettlementRedeemLotInfo,
+    RecommendationExecutionOutcomeInfo, RecommendationResolutionOutcomeInfo, ReconciliationInfo,
+    settlement::SettlementRedeemLotInfo,
 };
 use crate::{
     enums::{
@@ -50,6 +51,7 @@ pub struct ExecutionOutcomeSourceGraph {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionOutcomeDeferredReason {
+    SourceAvailableAfterCutoff,
     EntryOrderMissing,
     EntryOrderNotSubmitted,
     EntryOrderNotTerminal,
@@ -78,6 +80,21 @@ pub enum ExecutionOutcomeReconciliationResult {
     Inserted(RecommendationExecutionOutcomeInfo),
     AlreadyPresent(RecommendationExecutionOutcomeInfo),
     Deferred(ExecutionOutcomeDeferredReason),
+}
+
+/// A canonical resolution fact may legitimately arrive after a frozen pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionOutcomeDeferredReason {
+    CanonicalFactUnavailableAtCutoff,
+}
+
+/// Result of one resolution reconciliation attempt at a frozen cutoff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolutionOutcomeReconciliationResult {
+    Inserted(RecommendationResolutionOutcomeInfo),
+    AlreadyPresent(RecommendationResolutionOutcomeInfo),
+    Deferred(ResolutionOutcomeDeferredReason),
 }
 
 /// One terminal catalog-backed recommendation missing its immutable resolution outcome.

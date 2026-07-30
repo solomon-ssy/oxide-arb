@@ -55,7 +55,7 @@ use quant_pivot_models::{
         rbac::ResourceType,
     },
     hashing::CanonicalDigest,
-    runtime_config::DecisionPolicySnapshot,
+    runtime_config::{DecisionPolicySnapshot, ModelVersionRef},
     types::{
         AccountPositions, AccountSnapshotId, ArtifactUri, BookSnapshotRef, Bps,
         CalibrationArtifactId, CapitalAllocationId, ConditionTruth, ConfidenceSummary,
@@ -287,6 +287,13 @@ pub struct SharedDemoInfra {
     pub factor_serving_plane: FactorServingPlane,
 }
 
+/// Template lineage plus the preselected model identity owned by the
+/// governed-feedback production fixture.
+pub struct GovernedFeedbackInfra {
+    pub template: SharedDemoInfra,
+    pub active_model_version_id: ModelVersionId,
+}
+
 /// Immutable inputs for one calibrated system-test model chain.
 pub struct CalibratedModelSeed {
     pub model_version_id: ModelVersionId,
@@ -408,6 +415,56 @@ pub async fn seed_demo_with_store(
     Box::pin(seed_demo_inner(db, Some(artifact_store))).await
 }
 
+/// Reserve one exact Weather route and seed the model-template lineage used to
+/// build its snapshot-bound research model before the production process starts.
+pub async fn seed_feedback_serving_infra(
+    db: &DatabaseConnection,
+    artifact_store: &Arc<dyn ArtifactStore>,
+) -> GovernedFeedbackInfra {
+    let policy = PgPolicyRepository::new(db.clone());
+    assert!(
+        policy
+            .load_current()
+            .await
+            .expect("load governed-feedback policy")
+            .is_none(),
+        "governed-feedback serving fixture requires a fresh policy database"
+    );
+    let active_model_version_id = ModelVersionId::from_v7();
+    let mut snapshot = DecisionPolicySnapshot::default();
+    snapshot.model_routing.model.category_model_pointers.insert(
+        MarketCategory::Weather,
+        ModelVersionRef::new(active_model_version_id),
+    );
+    let decision_policy_snapshot_id = bootstrap_policy_bundle(
+        &policy,
+        &snapshot,
+        "governed-feedback-fixture",
+        "publish an exact Weather serving route for governed feedback",
+    )
+    .await;
+    let (template_model_version_id, model_run_id, trade_policy, factor_serving_plane) =
+        Box::pin(seed_model_version_named(
+            db,
+            &decision_policy_snapshot_id,
+            ModelVersionId::from_v7(),
+            "governed-feedback-model",
+            Some(artifact_store),
+        ))
+        .await;
+    GovernedFeedbackInfra {
+        template: SharedDemoInfra {
+            feature_parity_state_id: clear_parity_state(db).await,
+            decision_policy_snapshot_id,
+            model_version_id: template_model_version_id,
+            model_run_id,
+            trade_policy,
+            factor_serving_plane,
+        },
+        active_model_version_id,
+    }
+}
+
 async fn seed_demo_inner(
     db: &DatabaseConnection,
     artifact_store: Option<&Arc<dyn ArtifactStore>>,
@@ -432,6 +489,7 @@ async fn seed_demo_inner(
         Box::pin(seed_model_version_named(
             db,
             &decision_policy_snapshot_id,
+            ModelVersionId::from_v7(),
             "ui-demo-seed-model",
             artifact_store,
         ))
@@ -2050,6 +2108,7 @@ pub async fn seed_calibrated_model(
 async fn seed_model_version_named(
     db: &DatabaseConnection,
     rc_id: &DecisionPolicySnapshotId,
+    model_version_id: ModelVersionId,
     model_name: &str,
     artifact_store: Option<&Arc<dyn ArtifactStore>>,
 ) -> (
@@ -2098,7 +2157,6 @@ async fn seed_model_version_named(
         registry.create_model_spec(spec).await.expect("model spec");
         (model_spec_id, definition_hash)
     };
-    let model_version_id = ModelVersionId::from_v7();
     let policy = PgPolicyRepository::new(db.clone())
         .load_snapshot(rc_id)
         .await

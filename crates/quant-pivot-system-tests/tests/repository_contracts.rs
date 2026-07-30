@@ -60,6 +60,8 @@ mod feedback_cohort;
 mod feedback_coordinator;
 #[path = "repository/research/feedback_cycle_repository.rs"]
 mod feedback_cycle_repository;
+#[path = "repository/research/feedback_decision_evidence.rs"]
+mod feedback_decision_evidence;
 #[path = "repository/research/feedback_decision_stage.rs"]
 mod feedback_decision_stage;
 #[path = "repository/research/feedback_learning_stage.rs"]
@@ -367,6 +369,7 @@ async fn recommendation_execution_outcome_contracts() {
             recommendation_execution_outcome::invalid_state_report_rejects,
             recommendation_execution_outcome::reconcile_idempotent_worm_evident,
             recommendation_execution_outcome::reconciliation_candidates_require_source,
+            recommendation_execution_outcome::late_source_defers,
         );
     }))
     .await
@@ -498,7 +501,6 @@ async fn feedback_shadow_stage_contracts() {
 async fn feedback_decision_stage_contracts() {
     Box::pin(with_postgres_suite(async {
         run_scenarios!(
-            feedback_decision_stage::terminal_restart_tamper,
             feedback_decision_stage::promotion_preflight_contracts,
             feedback_decision_stage::model_route_promotion_contracts,
             feedback_decision_stage::promotion_runtime_apply_contracts,
@@ -507,6 +509,24 @@ async fn feedback_decision_stage_contracts() {
     }))
     .await
     .expect("start feedback-decision stage PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_terminal_decision_contracts() {
+    Box::pin(with_postgres_suite(
+        feedback_decision_stage::terminal_decision_contracts(),
+    ))
+    .await
+    .expect("start feedback terminal-decision PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn decision_path_evidence_contracts() {
+    Box::pin(with_postgres_suite(
+        feedback_decision_stage::decision_path_evidence_contracts(),
+    ))
+    .await
+    .expect("start four-path decision evidence PostgreSQL suite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -136,16 +136,10 @@ impl SessionContext {
     async fn session_identity_active(&self) -> bool {
         if !self.state.casbin.is_healthy()
             || self.state.casbin.authorization_revision() != self.authorization_revision
-            || self
-                .state
-                .jwt
-                .is_revoked(&self.access_jti)
-                .await
-                .unwrap_or(true)
             || !self
                 .state
                 .jwt
-                .family_active(&self.family_id)
+                .session_active(&self.access_jti, &self.family_id)
                 .await
                 .unwrap_or(false)
         {

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::{
     Client as S3ControlClient,
-    config::{Builder, Region},
+    config::{Builder, Credentials, Region},
     presigning::PresigningConfig,
     types::ObjectLockRetentionMode,
 };
@@ -22,6 +22,7 @@ use url::Url;
 
 use super::{
     ArtifactByteStream, ArtifactDurability, ArtifactKey, ArtifactObjectMetadata, ArtifactStore,
+    S3StaticCredentials,
 };
 
 /// S3-compatible streaming artifact store using standard AWS credential sources.
@@ -34,6 +35,7 @@ pub struct S3ArtifactStore {
     region: String,
     endpoint: Option<String>,
     path_style: bool,
+    credentials: Option<S3StaticCredentials>,
     control_client: OnceCell<S3ControlClient>,
 }
 
@@ -44,6 +46,25 @@ struct S3ObjectRef {
 
 impl S3ArtifactStore {
     pub fn new(config: &ArtifactStoreDeployConfig) -> QuantResult<Self> {
+        Self::build(config, None)
+    }
+
+    /// Build an S3 store with caller-owned static credentials.
+    ///
+    /// This constructor does not read or mutate process-global AWS credential
+    /// state. Both the object data client and the Object Lock control client
+    /// receive the exact same credential identity.
+    pub fn new_with_credentials(
+        config: &ArtifactStoreDeployConfig,
+        credentials: S3StaticCredentials,
+    ) -> QuantResult<Self> {
+        Self::build(config, Some(credentials))
+    }
+
+    fn build(
+        config: &ArtifactStoreDeployConfig,
+        credentials: Option<S3StaticCredentials>,
+    ) -> QuantResult<Self> {
         if config.bucket.trim().is_empty() {
             return Err(ResearchError::ArtifactIo {
                 uri: "s3://".to_owned(),
@@ -59,7 +80,13 @@ impl S3ArtifactStore {
             }
             .into());
         }
-        let mut builder = AmazonS3Builder::from_env()
+        let mut builder = credentials
+            .as_ref()
+            .map_or_else(AmazonS3Builder::from_env, |credentials| {
+                AmazonS3Builder::new()
+                    .with_access_key_id(credentials.access_key_id.expose_secret())
+                    .with_secret_access_key(credentials.secret_access_key.expose_secret())
+            })
             .with_bucket_name(&config.bucket)
             .with_region(&config.region)
             .with_virtual_hosted_style_request(!config.path_style);
@@ -81,6 +108,7 @@ impl S3ArtifactStore {
             region: config.region.clone(),
             endpoint: config.endpoint.clone(),
             path_style: config.path_style,
+            credentials,
             control_client: OnceCell::const_new(),
         })
     }
@@ -173,10 +201,18 @@ impl S3ArtifactStore {
     async fn control_client(&self) -> &S3ControlClient {
         self.control_client
             .get_or_init(|| async {
-                let shared = aws_config::defaults(BehaviorVersion::latest())
-                    .region(Region::new(self.region.clone()))
-                    .load()
-                    .await;
+                let mut loader = aws_config::defaults(BehaviorVersion::latest())
+                    .region(Region::new(self.region.clone()));
+                if let Some(credentials) = &self.credentials {
+                    loader = loader.credentials_provider(Credentials::new(
+                        credentials.access_key_id.expose_secret(),
+                        credentials.secret_access_key.expose_secret(),
+                        None,
+                        None,
+                        "quant-pivot-explicit-s3-credentials",
+                    ));
+                }
+                let shared = loader.load().await;
                 let mut builder = Builder::from(&shared).force_path_style(self.path_style);
                 if let Some(endpoint) = &self.endpoint {
                     builder = builder.endpoint_url(endpoint);

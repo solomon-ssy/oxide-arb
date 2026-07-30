@@ -10,12 +10,14 @@ use quant_pivot_core::service::{
 use quant_pivot_models::{
     domain::quant::{
         CompleteFeatureParityRun, FeatureParityStateInfo, FeedbackCohortWindow, FeedbackCycleInfo,
-        FeedbackStageJobIdentity, NewDriftReport, NewFeatureParityRun, NewResearchJob,
-        ResearchJobArtifactRef, ResearchJobFinalization, ResearchJobInfo, ResearchJobResultRef,
+        FeedbackCycleKey, FeedbackCycleKeyInput, FeedbackStageJobIdentity, NewDriftReport,
+        NewFeatureParityRun, NewFeedbackCycle, NewResearchJob, ResearchJobArtifactRef,
+        ResearchJobFinalization, ResearchJobInfo, ResearchJobResultRef,
     },
     enums::quant::{
         DatasetPurpose, FeatureParityRunKind, FeatureParityRunStatus, FeedbackCycleStatus,
-        FeedbackDecision, FeedbackDriftMetric, FeedbackStage, ResearchJobResultKind,
+        FeedbackDecision, FeedbackDriftMetric, FeedbackStage, FeedbackTriggerFamily,
+        ResearchJobResultKind,
     },
     types::{
         ArtifactUri, DatasetCohortCounts, FeatureParityRunId, FeatureValue,
@@ -35,10 +37,10 @@ use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
     feedback::{
         ChampionBaselineRef, ConceptDriftDetail, CoverageGateInput, CoverageGateOutcome,
-        FEEDBACK_COVERAGE_ARTIFACT_FORMAT_VERSION, FEEDBACK_DRIFT_ARTIFACT_FORMAT_VERSION,
-        FeatureDriftDetail, FeedbackCoverageArtifact, FeedbackCoverageCodec,
-        FeedbackCoverageCohorts, FeedbackDriftArtifact, FeedbackDriftCodec, FeedbackMatureLabel,
-        LabelDriftDetail, drift_gate, drift_observations,
+        CoverageNoActionReason, FEEDBACK_COVERAGE_ARTIFACT_FORMAT_VERSION,
+        FEEDBACK_DRIFT_ARTIFACT_FORMAT_VERSION, FeatureDriftDetail, FeedbackCoverageArtifact,
+        FeedbackCoverageCodec, FeedbackCoverageCohorts, FeedbackDriftArtifact, FeedbackDriftCodec,
+        FeedbackMatureLabel, LabelDriftDetail, drift_gate, drift_observations,
     },
 };
 use quant_pivot_system_tests::{
@@ -74,6 +76,13 @@ fn empty_counts() -> DatasetCohortCounts {
     DatasetCohortCounts::try_new(0, 0, 0, Vec::new(), Vec::new()).expect("empty cohort counts")
 }
 
+#[derive(Clone, Copy)]
+enum CoverageScenario {
+    NoLabels,
+    LowCoverage,
+    Advance,
+}
+
 fn baseline_ref(evaluation_window: &FeedbackCohortWindow) -> ChampionBaselineRef {
     ChampionBaselineRef {
         training_dataset_id: TrainingDatasetId::from_v7(),
@@ -92,7 +101,10 @@ fn baseline_ref(evaluation_window: &FeedbackCohortWindow) -> ChampionBaselineRef
     }
 }
 
-fn coverage_artifact(cycle: &FeedbackCycleInfo, advances: bool) -> FeedbackCoverageArtifact {
+fn coverage_artifact(
+    cycle: &FeedbackCycleInfo,
+    scenario: CoverageScenario,
+) -> FeedbackCoverageArtifact {
     let profile = cycle
         .profile_ref
         .resolve_builtin_research_profile()
@@ -105,10 +117,21 @@ fn coverage_artifact(cycle: &FeedbackCycleInfo, advances: bool) -> FeedbackCover
     )
     .expect("feedback evaluation window");
     let champion_baseline = baseline_ref(&evaluation_window);
-    let mature_count = if advances {
-        policy.minimum_mature_labels
-    } else {
-        0
+    let (policy_count, mature_count, new_mature_count) = match scenario {
+        CoverageScenario::NoLabels => (0, 0, 0),
+        CoverageScenario::LowCoverage => (
+            policy
+                .minimum_mature_labels
+                .checked_mul(1_000)
+                .expect("low-coverage denominator fits u64"),
+            policy.minimum_mature_labels,
+            policy.minimum_mature_labels,
+        ),
+        CoverageScenario::Advance => (
+            policy.minimum_mature_labels,
+            policy.minimum_mature_labels,
+            policy.minimum_mature_labels,
+        ),
     };
     let other_model = ModelVersionId::from_v7();
     assert_ne!(other_model, cycle.champion_model_version_id);
@@ -132,17 +155,17 @@ fn coverage_artifact(cycle: &FeedbackCycleInfo, advances: bool) -> FeedbackCover
         DatasetCohortCounts::try_new(mature_count, mature_count, 0, Vec::new(), Vec::new())
             .expect("model-learning coverage counts");
     let policy_evaluation = DatasetCohortCounts::try_new(
-        mature_count,
-        mature_count,
-        mature_count,
+        policy_count,
+        policy_count,
+        policy_count,
         Vec::new(),
         Vec::new(),
     )
     .expect("policy-evaluation coverage counts");
     let gate_input = CoverageGateInput {
-        policy_evaluation_count: mature_count,
+        policy_evaluation_count: policy_count,
         mature_label_count: mature_count,
-        new_mature_label_count: mature_count,
+        new_mature_label_count: new_mature_count,
         minimum_mature_labels: policy.minimum_mature_labels,
         minimum_new_mature_labels: policy.minimum_new_mature_labels,
         minimum_coverage: policy.minimum_coverage,
@@ -167,7 +190,7 @@ fn coverage_artifact(cycle: &FeedbackCycleInfo, advances: bool) -> FeedbackCover
             policy_evaluation,
         },
         mature_labels,
-        new_mature_label_count: mature_count,
+        new_mature_label_count: new_mature_count,
         gate_input,
         gate_outcome: gate_input
             .evaluate()
@@ -379,18 +402,13 @@ async fn open_parity(parity: &PgFeatureParityRepository) -> FeatureParityStateIn
 async fn record_cycle(
     cycles: &PgFeedbackCycleRepository,
     fixture: &FeedbackSchemaFixture,
-    second: bool,
+    cycle: &NewFeedbackCycle,
     worker: WorkerId,
 ) -> (FeedbackCycleInfo, FeedbackCycleLeaseGuard) {
-    let cycle = if second {
-        fixture.second_cycle.clone()
-    } else {
-        fixture.cycle.clone()
-    };
     let cycle_id = cycle.feedback_cycle_id();
     cycles
         .record_trigger(
-            cycle,
+            cycle.clone(),
             fixture.stage_event(cycle_id, "feedback-signal-stage"),
         )
         .await
@@ -421,13 +439,24 @@ struct SignalStageHarness {
 }
 
 impl SignalStageHarness {
-    async fn verify_no_action(&self, fixture: &FeedbackSchemaFixture) {
-        let (cycle, lease) =
-            record_cycle(self.cycles.as_ref(), fixture, false, WorkerId::from_v7()).await;
-        let artifact = coverage_artifact(&cycle, false);
+    async fn verify_coverage_no_action(
+        &self,
+        fixture: &FeedbackSchemaFixture,
+        new_cycle: &NewFeedbackCycle,
+        scenario: CoverageScenario,
+        expected_reason: CoverageNoActionReason,
+    ) {
+        let (cycle, lease) = record_cycle(
+            self.cycles.as_ref(),
+            fixture,
+            new_cycle,
+            WorkerId::from_v7(),
+        )
+        .await;
+        let artifact = coverage_artifact(&cycle, scenario);
         assert!(matches!(
             artifact.gate_outcome,
-            CoverageGateOutcome::NoAction { .. }
+            CoverageGateOutcome::NoAction { reason, .. } if reason == expected_reason
         ));
         let artifact_ref = persist_coverage(&self.store, &artifact).await;
         let identity =
@@ -471,6 +500,10 @@ impl SignalStageHarness {
             .await
             .expect("validate terminal coverage NoAction");
         assert_no_action(&success);
+        let FeedbackStageDirective::Complete(terminal) = success.directive() else {
+            panic!("coverage NoAction must complete the cycle");
+        };
+        assert_eq!(terminal.reason_code(), expected_reason.as_str());
         let drift_identity =
             FeedbackStageJobIdentity::try_root(cycle.feedback_cycle_id, FeedbackStage::Drift)
                 .expect("drift root identity");
@@ -478,18 +511,21 @@ impl SignalStageHarness {
             .prepare_drift(&cycle, drift_identity)
             .await
             .expect_err("coverage NoAction cannot advance to drift");
-        if let FeedbackStageDirective::Complete(terminal) = success.directive() {
-            self.cycles
-                .finalize_cycle(lease, terminal.clone())
-                .await
-                .expect("finalize coverage NoAction cycle");
-        }
+        self.cycles
+            .finalize_cycle(lease, terminal.clone())
+            .await
+            .expect("finalize coverage NoAction cycle");
     }
 
     async fn verify_drift(&self, fixture: &FeedbackSchemaFixture) {
-        let (cycle, lease) =
-            record_cycle(self.cycles.as_ref(), fixture, true, WorkerId::from_v7()).await;
-        let coverage = coverage_artifact(&cycle, true);
+        let (cycle, lease) = record_cycle(
+            self.cycles.as_ref(),
+            fixture,
+            &fixture.second_cycle,
+            WorkerId::from_v7(),
+        )
+        .await;
+        let coverage = coverage_artifact(&cycle, CoverageScenario::Advance);
         assert!(matches!(
             coverage.gate_outcome,
             CoverageGateOutcome::Advance { .. }
@@ -577,6 +613,38 @@ impl SignalStageHarness {
     }
 }
 
+impl FeedbackSchemaFixture {
+    fn low_coverage_cycle(&self) -> NewFeedbackCycle {
+        let feedback_policy_hash = self
+            .profile_ref
+            .resolve_builtin_research_profile()
+            .expect("resolve low-coverage ResearchProfile")
+            .spec
+            .feedback_policy
+            .content_hash()
+            .expect("hash low-coverage policy");
+        NewFeedbackCycle::try_seal(
+            FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
+                trigger_family: FeedbackTriggerFamily::Manual,
+                profile_ref: self.profile_ref.clone(),
+                feedback_policy_hash,
+                label_cutoff: self.label_cutoff,
+                capability_registry_hashes: self
+                    .candidate_family
+                    .shared_evaluation()
+                    .source_lineage
+                    .capability_registry_hashes
+                    .clone(),
+                champion_model_version_id: self.champion_model_version_id,
+                champion_serving_contract_hash: self.champion_serving_contract_hash,
+                candidate_family: self.candidate_family.clone(),
+            })
+            .expect("freeze low-coverage cycle key"),
+        )
+        .expect("seal low-coverage cycle")
+    }
+}
+
 pub async fn signal_stages_isolate_parity() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -600,7 +668,23 @@ pub async fn signal_stages_isolate_parity() {
         adapter,
     };
     let parity_before = open_parity(&parity).await;
-    harness.verify_no_action(&fixture).await;
+    harness
+        .verify_coverage_no_action(
+            &fixture,
+            &fixture.cycle,
+            CoverageScenario::NoLabels,
+            CoverageNoActionReason::NoPolicyObservations,
+        )
+        .await;
+    let low_coverage = fixture.low_coverage_cycle();
+    harness
+        .verify_coverage_no_action(
+            &fixture,
+            &low_coverage,
+            CoverageScenario::LowCoverage,
+            CoverageNoActionReason::InsufficientCoverage,
+        )
+        .await;
     harness.verify_drift(&fixture).await;
     let parity_after = parity
         .current_state()

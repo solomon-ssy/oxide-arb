@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::quant::{
@@ -15,6 +16,7 @@ pub trait RecommendationExecutionOutcomeRepository: Send + Sync {
     async fn reconcile_intent(
         &self,
         order_intent_id: &OrderIntentId,
+        available_through: DateTime<Utc>,
     ) -> Result<ExecutionOutcomeReconciliationResult, StorageError>;
 
     async fn find_by_recommendation(
@@ -25,6 +27,7 @@ pub trait RecommendationExecutionOutcomeRepository: Send + Sync {
     /// Keyset page of submitted terminal intents that still lack A04 truth.
     async fn list_reconciliation_candidates(
         &self,
+        available_through: DateTime<Utc>,
         after: Option<OrderIntentId>,
         limit: u64,
     ) -> Result<Vec<RecommendationExecutionReconciliationCandidate>, StorageError>;

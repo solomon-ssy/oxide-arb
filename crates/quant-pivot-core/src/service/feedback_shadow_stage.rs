@@ -272,7 +272,12 @@ impl FeedbackShadowStageAdapter {
             .map_err(|error| Self::invalid(error.to_string()))?;
         let generation = self
             .serving_generations
-            .current_route(route)?
+            .current_route(route)
+            .ok_or_else(|| {
+                Self::invalid(format!(
+                    "current serving generation has no active route {route:?}"
+                ))
+            })?
             .published_shadow_identity()
             .map_err(QuantError::from)?;
         if feedback_policy_hash != cycle.feedback_policy_hash

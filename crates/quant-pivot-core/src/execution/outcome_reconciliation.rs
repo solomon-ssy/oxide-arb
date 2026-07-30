@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_api::settlement::resolution::{
     FinalizedResolutionBlock, FinalizedResolutionObservation, FinalizedResolutionScan,
     ResolutionSourceReader,
@@ -21,17 +21,22 @@ use quant_pivot_models::{
         market::MarketInfo,
         quant::{
             ExecutionOutcomeReconciliationResult, InsertResolutionOutcomeResult,
-            RecommendationResolutionReconciliationCandidate,
+            RecommendationResolutionReconciliationCandidate, ResolutionOutcomeDeferredReason,
+            ResolutionOutcomeReconciliationResult,
         },
     },
     hashing::CanonicalDigest,
     runtime_config::OutcomeReconciliationPolicy,
-    types::{ContentHash, DomainInstrumentKey, DomainSourceId, EvmBlockHash, MarketId},
+    types::{
+        ContentHash, DomainInstrumentKey, DomainSourceId, EvmBlockHash, MarketId, OrderIntentId,
+        RecommendationId,
+    },
 };
 use quant_pivot_repository::traits::{
     DomainSourceCursorRepository, FactWriter, MarketRepository, QuantFactReadRepository,
     RecommendationExecutionOutcomeRepository, RecommendationResolutionOutcomeRepository,
 };
+use tokio::sync::Mutex;
 
 /// Immutable inputs for one bounded reconciliation pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,10 +87,32 @@ pub struct OutcomeReconciliationPassSummary {
     pub resolution_candidates: u64,
     pub resolution_inserted: u64,
     pub resolution_existing: u64,
+    pub resolution_deferred: u64,
     pub execution_candidates: u64,
     pub execution_inserted: u64,
     pub execution_existing: u64,
     pub execution_deferred: u64,
+}
+
+/// Frozen frontier and aggregate proof for a complete resolution backfill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionOutcomeBackfillSummary {
+    pub frozen_at: DateTime<Utc>,
+    pub source_start_block: u64,
+    pub source_target_block: u64,
+    pub source_target_hash: EvmBlockHash,
+    pub source_target_time: DateTime<Utc>,
+    pub source_pages: u64,
+    pub outcome_pages: u64,
+    pub totals: OutcomeReconciliationPassSummary,
+}
+
+/// Frozen cutoff and aggregate proof for a complete execution backfill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionOutcomeBackfillSummary {
+    pub frozen_at: DateTime<Utc>,
+    pub outcome_pages: u64,
+    pub totals: OutcomeReconciliationPassSummary,
 }
 
 /// Runtime dependencies for [`OutcomeReconciliationService`].
@@ -108,6 +135,10 @@ pub struct OutcomeReconciliationService {
     markets: Arc<dyn MarketRepository>,
     resolution_outcomes: Arc<dyn RecommendationResolutionOutcomeRepository>,
     execution_outcomes: Arc<dyn RecommendationExecutionOutcomeRepository>,
+    // Process-local cursors provide bounded round-robin fairness. Durable
+    // outcomes remain the only progress truth, so restart safely repeats pages.
+    resolution_runtime_after: Mutex<Option<RecommendationId>>,
+    execution_runtime_after: Mutex<Option<OrderIntentId>>,
 }
 
 impl OutcomeReconciliationService {
@@ -121,6 +152,8 @@ impl OutcomeReconciliationService {
             markets: deps.markets,
             resolution_outcomes: deps.resolution_outcomes,
             execution_outcomes: deps.execution_outcomes,
+            resolution_runtime_after: Mutex::new(None),
+            execution_runtime_after: Mutex::new(None),
         }
     }
 
@@ -135,10 +168,17 @@ impl OutcomeReconciliationService {
     ) -> QuantResult<OutcomeReconciliationPassSummary> {
         let config = config.validate()?;
         let mut summary = OutcomeReconciliationPassSummary::default();
-        self.reconcile_resolution_source(config, &mut summary)
+        let target = self.frozen_source_target(config.pass_started_at).await?;
+        let cursor = self
+            .load_or_initialize_cursor(config.pass_started_at, &target, &mut summary)
             .await?;
-        self.reconcile_resolution_backlog(config, &mut summary)
+        self.reconcile_source_page(config, cursor, &target, &mut summary)
             .await?;
+        let mut runtime_after = self.resolution_runtime_after.lock().await;
+        *runtime_after = self
+            .reconcile_resolution_page(config, *runtime_after, &mut summary)
+            .await?;
+        drop(runtime_after);
         Ok(summary)
     }
 
@@ -150,26 +190,122 @@ impl OutcomeReconciliationService {
     ) -> QuantResult<OutcomeReconciliationPassSummary> {
         let config = config.validate()?;
         let mut summary = OutcomeReconciliationPassSummary::default();
-        self.reconcile_execution_backlog(config, &mut summary)
+        let mut runtime_after = self.execution_runtime_after.lock().await;
+        *runtime_after = self
+            .reconcile_execution_page(config, *runtime_after, &mut summary)
             .await?;
+        drop(runtime_after);
         Ok(summary)
     }
 
-    async fn reconcile_resolution_source(
+    /// Drain the resolution source and terminal recommendation backlog to one
+    /// immutable source and database cutoff.
+    pub async fn run_resolution_backfill(
         &self,
         config: OutcomeReconciliationPassConfig,
-        summary: &mut OutcomeReconciliationPassSummary,
-    ) -> QuantResult<()> {
-        let cursor = self
-            .load_or_initialize_cursor(config.pass_started_at, summary)
+    ) -> QuantResult<ResolutionOutcomeBackfillSummary> {
+        let config = config.validate()?;
+        let target = self.frozen_source_target(config.pass_started_at).await?;
+        let mut totals = OutcomeReconciliationPassSummary::default();
+        let mut cursor = self
+            .load_or_initialize_cursor(config.pass_started_at, &target, &mut totals)
             .await?;
+        let source_start_block = resolution_cursor_state(&cursor)?.block_number;
+        let mut source_pages = 0;
+        while resolution_cursor_state(&cursor)?.block_number < target.block_number {
+            cursor = self
+                .reconcile_source_page(config, cursor, &target, &mut totals)
+                .await?;
+            source_pages += 1;
+        }
+
+        let mut outcome_pages = 0;
+        let mut after = None;
+        while let Some(cursor) = self
+            .reconcile_resolution_page(config, after, &mut totals)
+            .await?
+        {
+            after = Some(cursor);
+            outcome_pages += 1;
+        }
+        Ok(ResolutionOutcomeBackfillSummary {
+            frozen_at: config.pass_started_at,
+            source_start_block,
+            source_target_block: target.block_number,
+            source_target_hash: target.block_hash,
+            source_target_time: target.block_time,
+            source_pages,
+            outcome_pages,
+            totals,
+        })
+    }
+
+    /// Drain actually submitted terminal execution facts to one immutable
+    /// database cutoff without synthesizing missing execution.
+    pub async fn run_execution_backfill(
+        &self,
+        config: OutcomeReconciliationPassConfig,
+    ) -> QuantResult<ExecutionOutcomeBackfillSummary> {
+        let config = config.validate()?;
+        let mut totals = OutcomeReconciliationPassSummary::default();
+        let mut outcome_pages = 0;
+        let mut after = None;
+        while let Some(cursor) = self
+            .reconcile_execution_page(config, after, &mut totals)
+            .await?
+        {
+            after = Some(cursor);
+            outcome_pages += 1;
+        }
+        Ok(ExecutionOutcomeBackfillSummary {
+            frozen_at: config.pass_started_at,
+            outcome_pages,
+            totals,
+        })
+    }
+
+    async fn frozen_source_target(
+        &self,
+        pass_started_at: DateTime<Utc>,
+    ) -> QuantResult<FinalizedResolutionBlock> {
+        let target = self
+            .resolution_source
+            .block_at_or_before(pass_started_at)
+            .await
+            .map_err(|source| ExecutionError::OutcomeReconciliationSource {
+                reason: source.to_string(),
+            })?;
+        validate_head(&target, pass_started_at)?;
+        Ok(target)
+    }
+
+    async fn reconcile_source_page(
+        &self,
+        config: OutcomeReconciliationPassConfig,
+        cursor: DomainSourceCursorInfo,
+        target: &FinalizedResolutionBlock,
+        summary: &mut OutcomeReconciliationPassSummary,
+    ) -> QuantResult<DomainSourceCursorInfo> {
         let current = resolution_cursor_state(&cursor)?;
+        if current.block_number >= target.block_number {
+            if current.block_number == target.block_number
+                && (current.block_hash != target.block_hash
+                    || current.block_time != target.block_time)
+            {
+                return Err(invariant_error(
+                    "resolution cursor conflicts with the frozen source target",
+                )
+                .into());
+            }
+            return Ok(cursor);
+        }
         let from_block = current.block_number.checked_add(1).ok_or_else(|| {
             invariant_error("resolution cursor block overflow while computing scan start")
         })?;
         let requested_to_block = from_block
             .checked_add(config.source_block_span - 1)
-            .ok_or_else(|| invariant_error("resolution scan block range overflow"))?;
+            .ok_or_else(|| invariant_error("resolution scan block range overflow"))?
+            .min(target.block_number);
         let Some(scan) = self
             .resolution_source
             .scan_finalized(from_block, requested_to_block)
@@ -178,9 +314,12 @@ impl OutcomeReconciliationService {
                 reason: source.to_string(),
             })?
         else {
-            return Ok(());
+            return Err(invariant_error(
+                "frozen resolution target became unavailable before the source scan completed",
+            )
+            .into());
         };
-        validate_scan(&scan, &current, requested_to_block, config.pass_started_at)?;
+        validate_scan(&scan, &current, requested_to_block, target)?;
         summary.source_scans += 1;
         summary.source_observations += usize_to_u64(scan.observations.len())?;
 
@@ -209,6 +348,7 @@ impl OutcomeReconciliationService {
     async fn load_or_initialize_cursor(
         &self,
         pass_started_at: DateTime<Utc>,
+        target: &FinalizedResolutionBlock,
         summary: &mut OutcomeReconciliationPassSummary,
     ) -> QuantResult<DomainSourceCursorInfo> {
         let source_id = resolution_source_id();
@@ -218,15 +358,36 @@ impl OutcomeReconciliationService {
             return Ok(cursor);
         }
 
-        let head = self
-            .resolution_source
-            .finalized_head()
-            .await
-            .map_err(|source| ExecutionError::OutcomeReconciliationSource {
-                reason: source.to_string(),
-            })?;
-        validate_head(&head, pass_started_at)?;
-        let cursor = cursor_update(&head)?;
+        let seed = match self
+            .resolution_outcomes
+            .source_history_start(pass_started_at)
+            .await?
+        {
+            Some(history_start) => {
+                let seed_at = history_start
+                    .checked_sub_signed(Duration::seconds(1))
+                    .ok_or_else(|| {
+                        invariant_error("resolution source history start underflowed UTC")
+                    })?;
+                self.resolution_source
+                    .block_at_or_before(seed_at)
+                    .await
+                    .map_err(|source| ExecutionError::OutcomeReconciliationSource {
+                        reason: source.to_string(),
+                    })?
+            }
+            None => target.clone(),
+        };
+        validate_head(&seed, pass_started_at)?;
+        if seed.block_number > target.block_number
+            || (seed.block_number == target.block_number
+                && (seed.block_hash != target.block_hash || seed.block_time != target.block_time))
+        {
+            return Err(
+                invariant_error("resolution source seed is ahead of its frozen target").into(),
+            );
+        }
+        let cursor = cursor_update(&seed)?;
         match self.cursors.compare_and_set(None, cursor).await? {
             DomainSourceCursorCasOutcome::Advanced(cursor) => {
                 summary.source_cursor_initialized = true;
@@ -291,7 +452,7 @@ impl OutcomeReconciliationService {
         current: &ResolutionCursorState,
         scan: &FinalizedResolutionScan,
         summary: &mut OutcomeReconciliationPassSummary,
-    ) -> QuantResult<()> {
+    ) -> QuantResult<DomainSourceCursorInfo> {
         let target = FinalizedResolutionBlock {
             block_number: scan.to_block,
             block_hash: scan.to_block_hash.clone(),
@@ -314,6 +475,7 @@ impl OutcomeReconciliationService {
                     .into());
                 }
                 summary.cursor_advanced = true;
+                Ok(cursor)
             }
             DomainSourceCursorCasOutcome::Conflict(cursor) => {
                 let winner = resolution_cursor_state(&cursor)?;
@@ -329,59 +491,106 @@ impl OutcomeReconciliationService {
                     .into());
                 }
                 summary.cursor_conflicted = true;
+                Ok(cursor)
             }
         }
-        Ok(())
     }
 
-    async fn reconcile_resolution_backlog(
+    async fn reconcile_resolution_page(
         &self,
         config: OutcomeReconciliationPassConfig,
+        after: Option<RecommendationId>,
         summary: &mut OutcomeReconciliationPassSummary,
-    ) -> QuantResult<()> {
+    ) -> QuantResult<Option<RecommendationId>> {
         let candidates = self
             .resolution_outcomes
-            .list_reconciliation_candidates(None, config.candidate_batch_size)
+            .list_reconciliation_candidates(
+                config.pass_started_at,
+                after,
+                config.candidate_batch_size,
+            )
             .await?;
+        let next = candidates
+            .last()
+            .map(|candidate| candidate.recommendation_id);
         summary.resolution_candidates += usize_to_u64(candidates.len())?;
         for candidate in candidates {
-            let fact = self
-                .resolution_facts
-                .resolution_at(
-                    &candidate.market_id,
-                    config.pass_started_at.timestamp_millis(),
-                    config.pass_started_at.timestamp_millis(),
-                )
-                .await?
-                .ok_or_else(|| missing_resolution_fact(&candidate))?;
             match self
-                .resolution_outcomes
-                .reconcile_fact(&candidate.recommendation_id, &fact)
+                .reconcile_resolution_candidate(config, &candidate)
                 .await?
             {
-                InsertResolutionOutcomeResult::Inserted(_) => summary.resolution_inserted += 1,
-                InsertResolutionOutcomeResult::AlreadyPresent(_) => {
+                ResolutionOutcomeReconciliationResult::Inserted(_) => {
+                    summary.resolution_inserted += 1;
+                }
+                ResolutionOutcomeReconciliationResult::AlreadyPresent(_) => {
                     summary.resolution_existing += 1;
+                }
+                ResolutionOutcomeReconciliationResult::Deferred(reason) => {
+                    summary.resolution_deferred += 1;
+                    tracing::debug!(
+                        recommendation_id = %candidate.recommendation_id,
+                        market_id = %candidate.market_id,
+                        ?reason,
+                        "resolution outcome source is unavailable at the frozen cutoff",
+                    );
                 }
             }
         }
-        Ok(())
+        Ok(next)
     }
 
-    async fn reconcile_execution_backlog(
+    async fn reconcile_resolution_candidate(
         &self,
         config: OutcomeReconciliationPassConfig,
+        candidate: &RecommendationResolutionReconciliationCandidate,
+    ) -> QuantResult<ResolutionOutcomeReconciliationResult> {
+        let Some(fact) = self
+            .resolution_facts
+            .resolution_at(
+                &candidate.market_id,
+                config.pass_started_at.timestamp_millis(),
+                config.pass_started_at.timestamp_millis(),
+            )
+            .await?
+        else {
+            return Ok(ResolutionOutcomeReconciliationResult::Deferred(
+                ResolutionOutcomeDeferredReason::CanonicalFactUnavailableAtCutoff,
+            ));
+        };
+        let result = self
+            .resolution_outcomes
+            .reconcile_fact(&candidate.recommendation_id, &fact)
+            .await?;
+        Ok(match result {
+            InsertResolutionOutcomeResult::Inserted(outcome) => {
+                ResolutionOutcomeReconciliationResult::Inserted(outcome)
+            }
+            InsertResolutionOutcomeResult::AlreadyPresent(outcome) => {
+                ResolutionOutcomeReconciliationResult::AlreadyPresent(outcome)
+            }
+        })
+    }
+
+    async fn reconcile_execution_page(
+        &self,
+        config: OutcomeReconciliationPassConfig,
+        after: Option<OrderIntentId>,
         summary: &mut OutcomeReconciliationPassSummary,
-    ) -> QuantResult<()> {
+    ) -> QuantResult<Option<OrderIntentId>> {
         let candidates = self
             .execution_outcomes
-            .list_reconciliation_candidates(None, config.candidate_batch_size)
+            .list_reconciliation_candidates(
+                config.pass_started_at,
+                after,
+                config.candidate_batch_size,
+            )
             .await?;
+        let next = candidates.last().map(|candidate| candidate.order_intent_id);
         summary.execution_candidates += usize_to_u64(candidates.len())?;
         for candidate in candidates {
             match self
                 .execution_outcomes
-                .reconcile_intent(&candidate.order_intent_id)
+                .reconcile_intent(&candidate.order_intent_id, config.pass_started_at)
                 .await?
             {
                 ExecutionOutcomeReconciliationResult::Inserted(_) => {
@@ -401,7 +610,7 @@ impl OutcomeReconciliationService {
                 }
             }
         }
-        Ok(())
+        Ok(next)
     }
 }
 
@@ -484,7 +693,7 @@ fn validate_scan(
     scan: &FinalizedResolutionScan,
     current: &ResolutionCursorState,
     requested_to_block: u64,
-    pass_started_at: DateTime<Utc>,
+    target: &FinalizedResolutionBlock,
 ) -> Result<(), ExecutionError> {
     let expected_from = current
         .block_number
@@ -492,10 +701,12 @@ fn validate_scan(
         .ok_or_else(|| invariant_error("resolution cursor block overflow"))?;
     let range_mismatch = scan.from_block != expected_from
         || scan.to_block < scan.from_block
-        || scan.to_block > requested_to_block;
+        || scan.to_block != requested_to_block;
     let timeline_mismatch =
-        scan.to_block_time < current.block_time || scan.to_block_time > pass_started_at;
-    if range_mismatch || timeline_mismatch {
+        scan.to_block_time < current.block_time || scan.to_block_time > target.block_time;
+    let target_mismatch = scan.to_block == target.block_number
+        && (scan.to_block_hash != target.block_hash || scan.to_block_time != target.block_time);
+    if range_mismatch || timeline_mismatch || target_mismatch {
         return Err(invariant_error(
             "finalized resolution scan range or timeline differs from its cursor request",
         ));
@@ -575,15 +786,6 @@ fn validate_fact_matches(
         ));
     }
     Ok(())
-}
-
-fn missing_resolution_fact(
-    candidate: &RecommendationResolutionReconciliationCandidate,
-) -> ExecutionError {
-    invariant_error(format!(
-        "terminal recommendation {} for market {} has no PIT-visible canonical resolution fact",
-        candidate.recommendation_id, candidate.market_id
-    ))
 }
 
 fn invariant_error(reason: impl Into<String>) -> ExecutionError {

@@ -2,6 +2,7 @@
 
 use std::{slice, sync::Arc, time::Duration};
 
+use crate::infrastructure_removal_catalog::CLICKHOUSE_REMOVED_TABLES_QUERY;
 use chrono::Utc;
 use clickhouse::Client;
 use prometheus::IntCounter;
@@ -276,6 +277,19 @@ pub async fn clickhouse_schema_idempotent() {
         .await
         .expect("second schema deployment should be idempotent");
     pool.verify_schema().await.expect("schema remains valid");
+}
+
+pub async fn removed_tables_absent() {
+    let (_pool, client, _config, _stack) = setup_clickhouse().await;
+    let residue_count: u64 = client
+        .query(CLICKHOUSE_REMOVED_TABLES_QUERY)
+        .fetch_one()
+        .await
+        .expect("inspect removed ClickHouse tables");
+    assert_eq!(
+        residue_count, 0,
+        "fresh ClickHouse catalog retained removed tables"
+    );
 }
 
 pub async fn native_query_limits_rejects() {

@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::MarketResolutionRow,
@@ -25,9 +26,17 @@ pub trait RecommendationResolutionOutcomeRepository: Send + Sync {
         recommendation_id: &RecommendationId,
     ) -> Result<Option<RecommendationResolutionOutcomeInfo>, StorageError>;
 
+    /// Earliest recommendation visibility that the canonical resolution
+    /// source cursor must cover at the frozen cutoff.
+    async fn source_history_start(
+        &self,
+        available_through: DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, StorageError>;
+
     /// Keyset page of terminal-market recommendations that still lack A03 truth.
     async fn list_reconciliation_candidates(
         &self,
+        available_through: DateTime<Utc>,
         after: Option<RecommendationId>,
         limit: u64,
     ) -> Result<Vec<RecommendationResolutionReconciliationCandidate>, StorageError>;

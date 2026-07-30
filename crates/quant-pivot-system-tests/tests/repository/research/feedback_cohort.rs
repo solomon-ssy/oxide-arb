@@ -451,7 +451,7 @@ async fn seed_unfilled_execution_outcome(
     active.update(db).await.expect("mark intent rejected");
 
     let outcome = match PgRecommendationExecutionOutcomeRepository::new(db.clone())
-        .reconcile_intent(&order_intent_id)
+        .reconcile_intent(&order_intent_id, db.statement_time().await)
         .await
         .expect("seal unfilled execution outcome")
     {

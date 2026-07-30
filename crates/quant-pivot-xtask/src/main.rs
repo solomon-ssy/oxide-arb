@@ -54,7 +54,10 @@ use quant_pivot_storage::{
         },
     },
 };
-use quant_pivot_system_tests::{performance::PerformanceProfile, production_stack};
+use quant_pivot_system_tests::{
+    performance::PerformanceProfile,
+    production_stack::{self, ProductionStackFixture},
+};
 use rustls::crypto::aws_lc_rs;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
 use serde::{Deserialize, Serialize};
@@ -199,9 +202,9 @@ struct PublicReadSmokeArgs {
 struct ProductionStackServeArgs {
     #[arg(long, default_value_t = 8088)]
     listen_port: u16,
-    /// Seed the smallest published-report/pending-intent/model lineage needed by browser E2E.
-    #[arg(long)]
-    browser_fixture: bool,
+    /// Select one coherent disposable-stack evidence graph.
+    #[arg(long, value_enum, default_value_t = ProductionStackFixture::Empty)]
+    fixture: ProductionStackFixture,
     /// Retain the isolated run directory so CI can archive backend logs after a failure.
     #[arg(long)]
     retain_artifacts: bool,
@@ -324,7 +327,7 @@ async fn run() -> Result<()> {
             ProductionStackCommand::Serve(args) => {
                 Box::pin(production_stack::serve(
                     args.listen_port,
-                    args.browser_fixture,
+                    args.fixture,
                     args.retain_artifacts,
                 ))
                 .await

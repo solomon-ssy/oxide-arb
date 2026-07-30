@@ -7,11 +7,11 @@ use quant_pivot_error::storage::{
 };
 use quant_pivot_models::{
     domain::quant::{
-        ExecutionOutcomeDerivation, ExecutionOutcomeReconciliationError,
-        ExecutionOutcomeReconciliationResult, ExecutionOutcomeSourceGraph,
-        NewRecommendationExecutionOutcome, OrderIntentInfo, PositionInfo,
-        RecommendationExecutionOutcomeInfo, RecommendationExecutionReconciliationCandidate,
-        settlement::SettlementRedeemLotInfo,
+        ExecutionOutcomeDeferredReason, ExecutionOutcomeDerivation,
+        ExecutionOutcomeReconciliationError, ExecutionOutcomeReconciliationResult,
+        ExecutionOutcomeSourceGraph, NewRecommendationExecutionOutcome, OrderIntentInfo,
+        PositionInfo, RecommendationExecutionOutcomeInfo,
+        RecommendationExecutionReconciliationCandidate, settlement::SettlementRedeemLotInfo,
     },
     entities::{
         quant_execution_order::{
@@ -67,10 +67,17 @@ impl RecommendationExecutionOutcomeRepository for PgRecommendationExecutionOutco
     async fn reconcile_intent(
         &self,
         order_intent_id: &OrderIntentId,
+        available_through: DateTime<Utc>,
     ) -> Result<ExecutionOutcomeReconciliationResult, StorageError> {
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
         let graph = Self::load_source_graph(&transaction, order_intent_id).await?;
         let source_observed_at = graph.source_observed_at();
+        if source_observed_at > available_through {
+            transaction.commit().await.map_err(StorageError::from)?;
+            return Ok(ExecutionOutcomeReconciliationResult::Deferred(
+                ExecutionOutcomeDeferredReason::SourceAvailableAfterCutoff,
+            ));
+        }
         let outcome = match graph.derive().map_err(|error| source_graph_error(&error))? {
             ExecutionOutcomeDerivation::Ready(outcome) => *outcome,
             ExecutionOutcomeDerivation::Deferred(reason) => {
@@ -98,6 +105,7 @@ impl RecommendationExecutionOutcomeRepository for PgRecommendationExecutionOutco
 
     async fn list_reconciliation_candidates(
         &self,
+        available_through: DateTime<Utc>,
         after: Option<OrderIntentId>,
         limit: u64,
     ) -> Result<Vec<RecommendationExecutionReconciliationCandidate>, StorageError> {
@@ -147,6 +155,7 @@ impl RecommendationExecutionOutcomeRepository for PgRecommendationExecutionOutco
             ]))
             .filter(source_terminal)
             .filter(Column::OrderIntentId.is_null())
+            .filter(QuantOrderIntentColumn::CreatedAt.lte(available_through))
             .filter(after.map_or_else(Condition::all, |cursor| {
                 Condition::all().add(QuantOrderIntentColumn::OrderIntentId.gt(cursor))
             }))

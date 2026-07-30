@@ -1045,8 +1045,8 @@ async fn partial_exchange_resolution_scenario() {
         .await
         .expect("confirm mixed exchange/settlement accounting");
 
-    let outcome = PgRecommendationExecutionOutcomeRepository::new(db)
-        .reconcile_intent(&fixture.intent_id)
+    let outcome = PgRecommendationExecutionOutcomeRepository::new(db.clone())
+        .reconcile_intent(&fixture.intent_id, db.statement_time().await)
         .await
         .expect("seal mixed execution outcome");
     let outcome = match outcome {
@@ -1333,7 +1333,7 @@ async fn assert_confirmed_accounting(
         ExitState::Exited
     );
     let execution_outcome = PgRecommendationExecutionOutcomeRepository::new(db.clone())
-        .reconcile_intent(intent_id)
+        .reconcile_intent(intent_id, db.statement_time().await)
         .await
         .expect("seal settled execution outcome");
     let execution_outcome = match execution_outcome {

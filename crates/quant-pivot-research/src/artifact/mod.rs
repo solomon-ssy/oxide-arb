@@ -24,6 +24,8 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt, stream};
 pub use local::LocalArtifactStore;
 use quant_pivot_error::{QuantResult, research::ResearchError};
+#[cfg(feature = "research-jobs")]
+use quant_pivot_models::config::secret::SecretText;
 use quant_pivot_models::{
     config::{ArtifactStoreDeployConfig, ArtifactStoreKind},
     types::ArtifactUri,
@@ -32,6 +34,43 @@ use quant_pivot_models::{
 pub use s3::S3ArtifactStore;
 
 pub type ArtifactByteStream = Pin<Box<dyn Stream<Item = QuantResult<Bytes>> + Send>>;
+
+/// Explicit static credentials for a caller-owned S3 credential boundary.
+///
+/// Normal deployments use [`S3ArtifactStore::new`] and the standard AWS
+/// provider chain. This value exists for isolated runtimes whose credentials
+/// are supplied by another secret owner instead of process-global environment
+/// mutation. Secret formatting stays redacted and plaintext is zeroized on
+/// drop.
+#[cfg(feature = "research-jobs")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct S3StaticCredentials {
+    access_key_id: SecretText,
+    secret_access_key: SecretText,
+}
+
+#[cfg(feature = "research-jobs")]
+impl S3StaticCredentials {
+    /// Build a non-empty static credential pair.
+    pub fn new(
+        access_key_id: impl Into<SecretText>,
+        secret_access_key: impl Into<SecretText>,
+    ) -> QuantResult<Self> {
+        let credentials = Self {
+            access_key_id: access_key_id.into(),
+            secret_access_key: secret_access_key.into(),
+        };
+        if credentials.access_key_id.is_empty() || credentials.secret_access_key.is_empty() {
+            return Err(ResearchError::ArtifactIo {
+                uri: "s3://".to_owned(),
+                detail: "explicit S3 credentials require a non-empty access key and secret"
+                    .to_owned(),
+            }
+            .into());
+        }
+        Ok(credentials)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactDurability {

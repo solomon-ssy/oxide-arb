@@ -136,6 +136,7 @@ impl OutcomeReconciliationPassSummary {
                 candidates = self.resolution_candidates,
                 inserted = self.resolution_inserted,
                 existing = self.resolution_existing,
+                deferred = self.resolution_deferred,
                 "resolution outcome reconciliation completed"
             );
         }

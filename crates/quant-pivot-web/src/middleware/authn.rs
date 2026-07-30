@@ -38,17 +38,9 @@ pub async fn authn<B: MessageBody>(
         .decode(&token, TokenUse::Access)
         .map_err(WebError::from)?;
 
-    if state
-        .jwt
-        .is_revoked(&claims.jti)
-        .await
-        .map_err(WebError::from)?
-    {
-        return Err(WebError::from(AuthError::Blacklisted).into());
-    }
     if !state
         .jwt
-        .family_active(&claims.family_id)
+        .session_active(&claims.jti, &claims.family_id)
         .await
         .map_err(WebError::from)?
     {

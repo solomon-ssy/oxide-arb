@@ -41,6 +41,7 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{Error, Visitor},
 };
+use url::Url;
 
 use crate::hashing::BLAKE3_PREFIX;
 
@@ -380,6 +381,22 @@ impl ArtifactUri {
         self.0.split_once("://").map_or("", |(scheme, _)| scheme)
     }
 
+    /// Whether the URI path has the exact final extension.
+    ///
+    /// Query parameters such as an immutable S3 `versionId` are intentionally
+    /// excluded from the path comparison.
+    #[must_use]
+    pub fn has_path_extension(&self, extension: &str) -> bool {
+        !extension.is_empty()
+            && !extension.contains('.')
+            && Url::parse(&self.0).is_ok_and(|url| {
+                url.path_segments()
+                    .and_then(Iterator::last)
+                    .and_then(|segment| segment.rsplit_once('.'))
+                    .is_some_and(|(_, actual)| actual == extension)
+            })
+    }
+
     /// Whether `value` has a non-empty `<scheme>://` prefix.
     fn has_scheme(value: &str) -> bool {
         value
@@ -651,6 +668,12 @@ mod tests {
     fn artifact_uri_requires_scheme() {
         let uri = ArtifactUri::parse("file:///var/artifacts/x.parquet").expect("valid");
         assert_eq!(uri.scheme(), "file");
+        assert!(uri.has_path_extension("parquet"));
+        let versioned = ArtifactUri::parse("s3://bucket/evidence/x.parquet?versionId=immutable")
+            .expect("valid");
+        assert!(versioned.has_path_extension("parquet"));
+        assert!(!versioned.has_path_extension("json"));
+        assert!(!versioned.has_path_extension(".parquet"));
         assert!(ArtifactUri::parse("/var/artifacts/x").is_err());
         assert!(ArtifactUri::parse("://nope").is_err());
     }

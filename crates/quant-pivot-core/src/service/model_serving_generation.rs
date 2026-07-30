@@ -87,21 +87,14 @@ impl ModelServingGeneration {
     fn route_snapshot(
         generation: Arc<Self>,
         route: BuyModelRoute,
-    ) -> QuantResult<ModelServingRouteSnapshot> {
-        let active = generation.active.get(&route).cloned().ok_or_else(|| {
-            QuantError::from(ResearchError::InvalidModelArtifact {
-                detail: format!(
-                    "serving generation {} has no exact active route {route:?}",
-                    generation.decision_policy_snapshot_id
-                ),
-            })
-        })?;
+    ) -> Option<ModelServingRouteSnapshot> {
+        let active = generation.active.get(&route).cloned()?;
         let shadow = generation
             .shadow
             .as_ref()
             .filter(|(shadow_route, _)| *shadow_route == route)
             .map(|(_, model)| Arc::clone(model));
-        Ok(ModelServingRouteSnapshot {
+        Some(ModelServingRouteSnapshot {
             generation,
             route,
             active,
@@ -587,7 +580,15 @@ impl ModelServingGenerationStore {
         };
         let route = BuyModelRoute::try_from(&request.snapshot.recommendation.selection)
             .map_err(|error| QuantError::config(error.to_string()))?;
-        ModelServingGeneration::route_snapshot(generation, route)
+        let generation_id = generation.decision_policy_snapshot_id;
+        ModelServingGeneration::route_snapshot(generation, route).ok_or_else(|| {
+            ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "serving generation {generation_id} has no exact active route {route:?}"
+                ),
+            }
+            .into()
+        })
     }
 
     /// Owned current generation for readiness and tests.
@@ -597,7 +598,8 @@ impl ModelServingGenerationStore {
     }
 
     /// Pin one route from the currently published all-route generation.
-    pub fn current_route(&self, route: BuyModelRoute) -> QuantResult<ModelServingRouteSnapshot> {
+    #[must_use]
+    pub fn current_route(&self, route: BuyModelRoute) -> Option<ModelServingRouteSnapshot> {
         ModelServingGeneration::route_snapshot(self.current.load_full(), route)
     }
 

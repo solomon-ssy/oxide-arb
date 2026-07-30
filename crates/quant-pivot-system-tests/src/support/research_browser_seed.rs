@@ -3,6 +3,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
+use quant_pivot_core::app::ports::feedback_mutation::FeedbackCycleFreezePlan;
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
@@ -12,8 +13,9 @@ use quant_pivot_models::{
             FeedbackComparisonContract, FeedbackDatasetBuildRequest,
         },
         quant::{
-            FeedbackCohortWindow, FeedbackCycleKey, FeedbackCycleKeyInput, FeedbackStageEventInput,
-            NewBacktestReport, NewFeedbackCycle, NewFeedbackStageEvent, NewModelRun,
+            FeedbackCohortWindow, FeedbackCycleInfo, FeedbackCycleKey, FeedbackCycleKeyInput,
+            FeedbackStageEventInput, NewBacktestReport, NewFeedbackCycle, NewFeedbackStageEvent,
+            NewModelRun,
         },
     },
     enums::{
@@ -70,6 +72,7 @@ use super::{
     execution_pg_seed::{
         CalibratedModelSeed, SharedDemoInfra, fixture_profile_ref, seed_calibrated_model,
     },
+    model_serving_fixtures::ModelVersionFixture,
     model_spec_fixtures::new_model_spec_fixture,
     research_fixtures::{
         DatasetLedgerFixture, DatasetLedgerSeed, ReplayableSourceSliceFixture,
@@ -78,6 +81,7 @@ use super::{
     },
     seeded_uuid,
 };
+use crate::postgres::PostgresClock;
 
 const TICK_COUNT: i64 = 4;
 const MARKETS_PER_TICK: usize = 20;
@@ -89,6 +93,7 @@ pub struct BrowserResearchFixture {
     pub evaluation_dataset_id: TrainingDatasetId,
     pub backtest_report_id: BacktestReportId,
     pub feedback_cycle_id: FeedbackCycleId,
+    pub governed_cancellation_cycle_id: Option<FeedbackCycleId>,
     pub model_version_id: ModelVersionId,
 }
 
@@ -104,6 +109,11 @@ struct FeedbackCycleSeed<'a> {
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
     observed_at: DateTime<Utc>,
+}
+
+struct PersistedFeedbackCycles {
+    governed_cancellation_cycle_id: Option<FeedbackCycleId>,
+    historical_cycle_id: FeedbackCycleId,
 }
 
 impl PersistedDataset {
@@ -179,18 +189,38 @@ struct DatasetSeed {
     label_schema_hash: ContentHash,
 }
 
-struct BrowserCandidateSeed<'a> {
+#[derive(Clone, Copy)]
+enum BrowserModelTarget {
+    Candidate,
+    Active(ModelVersionId),
+}
+
+struct BrowserModelSeed<'a> {
     db: &'a DatabaseConnection,
     store: &'a Arc<dyn ArtifactStore>,
     registry: &'a PgModelRegistryRepository,
     model_spec_id: ModelSpecId,
     model_spec_definition_hash: ContentHash,
     training: &'a PersistedDataset,
+    target: BrowserModelTarget,
 }
 
-impl BrowserCandidateSeed<'_> {
+struct FeedbackTriggerSourceSeed<'a> {
+    db: &'a DatabaseConnection,
+    store: &'a Arc<dyn ArtifactStore>,
+    model_spec_id: ModelSpecId,
+    model_spec_definition_hash: ContentHash,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    runtime_config_hash: ContentHash,
+    factor_serving_plane: &'a FactorServingPlane,
+}
+
+impl BrowserModelSeed<'_> {
     async fn persist(&self) -> QuantResult<ModelVersionId> {
-        let model_version_id = ModelVersionId::from_v7();
+        let model_version_id = match self.target {
+            BrowserModelTarget::Candidate => ModelVersionId::from_v7(),
+            BrowserModelTarget::Active(model_version_id) => model_version_id,
+        };
         let training_input_hash = CanonicalDigest::content_hash_json(&(
             "browser-research-training-input-v1",
             self.training.semantic_hash,
@@ -210,10 +240,56 @@ impl BrowserCandidateSeed<'_> {
             .registry
             .next_version_for_spec(&self.model_spec_id)
             .await?;
-        self.registry
-            .create_model_version(fixture.version(self.model_spec_id, version))
-            .await?;
+        let version = fixture.version(self.model_spec_id, version);
+        match self.target {
+            BrowserModelTarget::Candidate => {
+                self.registry.create_model_version(version).await?;
+            }
+            BrowserModelTarget::Active(_) => {
+                ModelVersionFixture::persist_published(self.db, version).await?;
+            }
+        }
         Ok(model_version_id)
+    }
+}
+
+impl FeedbackTriggerSourceSeed<'_> {
+    async fn persist(&self) -> QuantResult<()> {
+        let profile_ref = fixture_profile_ref();
+        let profile = profile_ref
+            .resolve_builtin_research_profile()
+            .map_err(|detail| ResearchError::DatasetBuild {
+                detail: format!("resolve governed-feedback profile: {detail}"),
+            })?;
+        let plan = FeedbackCycleFreezePlan::derive(
+            &profile,
+            self.model_spec_id,
+            self.model_spec_definition_hash,
+            self.decision_policy_snapshot_id,
+            self.runtime_config_hash,
+            self.db.statement_time().await,
+        )?;
+        let examples = model_examples(
+            "governed-feedback-trigger",
+            plan.source_start(),
+            self.factor_serving_plane,
+        )?;
+        let stored = persist_replayable_source_slice(
+            self.store,
+            &examples,
+            ReplayableSourceSliceFixture {
+                profile_ref,
+                evaluation_track: profile.spec.activation_eligibility,
+                research_program_hash: plan.research_program_hash(),
+                decision_policy_snapshot_id: self.decision_policy_snapshot_id,
+                runtime_config_hash: self.runtime_config_hash,
+                window_start: plan.source_start(),
+                window_end: plan.label_cutoff(),
+            },
+        )
+        .await?;
+        seed_source_manifest(self.db, &stored).await?;
+        Ok(())
     }
 }
 
@@ -222,6 +298,38 @@ pub async fn seed_browser_research(
     db: &DatabaseConnection,
     store: &Arc<dyn ArtifactStore>,
     infra: &SharedDemoInfra,
+) -> QuantResult<BrowserResearchFixture> {
+    Box::pin(seed_research(
+        db,
+        store,
+        infra,
+        BrowserModelTarget::Candidate,
+    ))
+    .await
+}
+
+/// Seed the browser research graph with the exact Published model already
+/// reserved by the governed-feedback policy fixture.
+pub async fn seed_governed_feedback_research(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    infra: &SharedDemoInfra,
+    active_model_version_id: ModelVersionId,
+) -> QuantResult<BrowserResearchFixture> {
+    Box::pin(seed_research(
+        db,
+        store,
+        infra,
+        BrowserModelTarget::Active(active_model_version_id),
+    ))
+    .await
+}
+
+async fn seed_research(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    infra: &SharedDemoInfra,
+    model_target: BrowserModelTarget,
 ) -> QuantResult<BrowserResearchFixture> {
     let registry = PgModelRegistryRepository::new(db.clone());
     let template = registry
@@ -285,17 +393,31 @@ pub async fn seed_browser_research(
     )
     .await?;
     let model_version_id = Box::pin(
-        BrowserCandidateSeed {
+        BrowserModelSeed {
             db,
             store,
             registry: &registry,
             model_spec_id: browser_model_spec_id,
             model_spec_definition_hash: browser_model_spec_definition_hash,
             training: &training,
+            target: model_target,
         }
         .persist(),
     )
     .await?;
+    if matches!(model_target, BrowserModelTarget::Active(_)) {
+        FeedbackTriggerSourceSeed {
+            db,
+            store,
+            model_spec_id: browser_model_spec_id,
+            model_spec_definition_hash: browser_model_spec_definition_hash,
+            decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
+            runtime_config_hash: policy_snapshot_hash,
+            factor_serving_plane: &factor_serving_plane,
+        }
+        .persist()
+        .await?;
+    }
     let evaluation = persist_dataset(
         db,
         store,
@@ -332,25 +454,93 @@ pub async fn seed_browser_research(
         .ok_or_else(|| ResearchError::DatasetBuild {
             detail: format!("browser candidate model {model_version_id} is missing"),
         })?;
-    let feedback_cycle_id = FeedbackCycleSeed {
+    let feedback_cycles = FeedbackCycleSeed {
         training: &training,
         evaluation: &evaluation,
         champion_model_version_id: candidate.model_version_id,
         champion_serving_contract_hash: candidate.serving_contract_hash,
         observed_at: now,
     }
-    .persist(db)
+    .persist(db, model_target)
     .await?;
     Ok(BrowserResearchFixture {
         evaluation_dataset_id: evaluation.id,
         backtest_report_id: report,
-        feedback_cycle_id,
+        feedback_cycle_id: feedback_cycles.historical_cycle_id,
+        governed_cancellation_cycle_id: feedback_cycles.governed_cancellation_cycle_id,
         model_version_id,
     })
 }
 
 impl FeedbackCycleSeed<'_> {
-    async fn persist(self, db: &DatabaseConnection) -> QuantResult<FeedbackCycleId> {
+    fn seal_cycle(
+        &self,
+        trigger_family: FeedbackTriggerFamily,
+        feedback_policy_hash: ContentHash,
+        candidate_family: FeedbackCandidateFamily,
+    ) -> QuantResult<NewFeedbackCycle> {
+        NewFeedbackCycle::try_seal(FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
+            trigger_family,
+            profile_ref: fixture_profile_ref(),
+            feedback_policy_hash,
+            label_cutoff: self.evaluation.feedback_request.source_lineage.pit_cutoff,
+            capability_registry_hashes: self
+                .evaluation
+                .feedback_request
+                .source_lineage
+                .capability_registry_hashes
+                .clone(),
+            champion_model_version_id: self.champion_model_version_id,
+            champion_serving_contract_hash: self.champion_serving_contract_hash,
+            candidate_family,
+        })?)
+        .map_err(Into::into)
+    }
+
+    async fn persist_trigger(
+        &self,
+        repository: &PgFeedbackCycleRepository,
+        cycle: NewFeedbackCycle,
+        actor: &str,
+        reason_code: &str,
+    ) -> QuantResult<FeedbackCycleInfo> {
+        let feedback_cycle_id = cycle.feedback_cycle_id();
+        let trigger = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+            feedback_cycle_id,
+            event_sequence: 1,
+            stage: FeedbackStage::Trigger,
+            event_kind: FeedbackStageEventKind::Triggered,
+            research_job_id: None,
+            actor: Some(actor.to_owned()),
+            reason_code: Some(reason_code.to_owned()),
+            evidence_uri: None,
+            evidence_hash: None,
+            occurred_at: self.observed_at,
+        })?;
+        let (cycle_outcome, stage_outcome) = repository.record_trigger(cycle, trigger).await?;
+        match (cycle_outcome, stage_outcome) {
+            (
+                FeedbackCycleWriteOutcome::Inserted(persisted),
+                FeedbackStageWriteOutcome::Inserted(_),
+            )
+            | (
+                FeedbackCycleWriteOutcome::AlreadyPresent(persisted),
+                FeedbackStageWriteOutcome::AlreadyPresent(_),
+            ) => Ok(persisted),
+            _ => Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "browser feedback trigger outcomes are inconsistent for {feedback_cycle_id}"
+                ),
+            }
+            .into()),
+        }
+    }
+
+    async fn persist(
+        self,
+        db: &DatabaseConnection,
+        model_target: BrowserModelTarget,
+    ) -> QuantResult<PersistedFeedbackCycles> {
         let profile_ref = fixture_profile_ref();
         let profile = profile_ref
             .resolve_builtin_research_profile()
@@ -382,53 +572,20 @@ impl FeedbackCycleSeed<'_> {
                 .map_err(|error| ResearchError::DatasetBuild {
                     detail: format!("hash browser feedback policy: {error}"),
                 })?;
-        let cycle =
-            NewFeedbackCycle::try_seal(FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
-                trigger_family: FeedbackTriggerFamily::Manual,
-                profile_ref,
-                feedback_policy_hash,
-                label_cutoff: self.evaluation.feedback_request.source_lineage.pit_cutoff,
-                capability_registry_hashes: self
-                    .evaluation
-                    .feedback_request
-                    .source_lineage
-                    .capability_registry_hashes
-                    .clone(),
-                champion_model_version_id: self.champion_model_version_id,
-                champion_serving_contract_hash: self.champion_serving_contract_hash,
-                candidate_family,
-            })?)?;
-        let feedback_cycle_id = cycle.feedback_cycle_id();
-        let trigger = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
-            feedback_cycle_id,
-            event_sequence: 1,
-            stage: FeedbackStage::Trigger,
-            event_kind: FeedbackStageEventKind::Triggered,
-            research_job_id: None,
-            actor: Some("browser_fixture".to_owned()),
-            reason_code: Some("browser_fixture".to_owned()),
-            evidence_uri: None,
-            evidence_hash: None,
-            occurred_at: self.observed_at,
-        })?;
         let repository = PgFeedbackCycleRepository::new(db.clone());
-        let (cycle_outcome, stage_outcome) = repository.record_trigger(cycle, trigger).await?;
-        let (
-            (
-                FeedbackCycleWriteOutcome::Inserted(persisted),
-                FeedbackStageWriteOutcome::Inserted(_),
+        let historical = self
+            .persist_trigger(
+                &repository,
+                self.seal_cycle(
+                    FeedbackTriggerFamily::Manual,
+                    feedback_policy_hash,
+                    candidate_family.clone(),
+                )?,
+                "browser_fixture",
+                "browser_fixture",
             )
-            | (
-                FeedbackCycleWriteOutcome::AlreadyPresent(persisted),
-                FeedbackStageWriteOutcome::AlreadyPresent(_),
-            ),
-        ) = ((cycle_outcome, stage_outcome),)
-        else {
-            return Err(ResearchError::DatasetBuild {
-                detail: "browser feedback trigger outcomes are inconsistent".to_owned(),
-            }
-            .into());
-        };
+            .await?;
+        let feedback_cycle_id = historical.feedback_cycle_id;
         let cancellation = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
             feedback_cycle_id,
             event_sequence: 2,
@@ -442,7 +599,7 @@ impl FeedbackCycleSeed<'_> {
             occurred_at: self.observed_at,
         })?;
         let (cycle_outcome, stage_outcome) = repository
-            .request_cancel(FeedbackCycleGeneration::from(&persisted), cancellation)
+            .request_cancel(FeedbackCycleGeneration::from(&historical), cancellation)
             .await?;
         if !matches!(
             (cycle_outcome, stage_outcome),
@@ -459,7 +616,28 @@ impl FeedbackCycleSeed<'_> {
             }
             .into());
         }
-        Ok(feedback_cycle_id)
+        let governed_cancellation_cycle_id = match model_target {
+            BrowserModelTarget::Candidate => None,
+            BrowserModelTarget::Active(_) => {
+                let scheduled = self
+                    .persist_trigger(
+                        &repository,
+                        self.seal_cycle(
+                            FeedbackTriggerFamily::Scheduled,
+                            feedback_policy_hash,
+                            candidate_family,
+                        )?,
+                        "browser_fixture_scheduler",
+                        "browser_fixture_scheduled",
+                    )
+                    .await?;
+                Some(scheduled.feedback_cycle_id)
+            }
+        };
+        Ok(PersistedFeedbackCycles {
+            governed_cancellation_cycle_id,
+            historical_cycle_id: feedback_cycle_id,
+        })
     }
 }
 

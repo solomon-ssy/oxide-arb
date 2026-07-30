@@ -678,9 +678,13 @@ fn observations(
 async fn persist_comparison(
     store: &Arc<dyn ArtifactStore>,
     params: &FeedbackComparisonJobParams,
+    candidate_return_bps: Decimal,
 ) -> ResearchJobArtifactRef {
     let champion = observations(params.evaluation_use.evaluation_window_start, Decimal::ZERO);
-    let candidate = observations(params.evaluation_use.evaluation_window_start, dec!(100));
+    let candidate = observations(
+        params.evaluation_use.evaluation_window_start,
+        candidate_return_bps,
+    );
     let outcome = RomanoWolfStepdown::evaluate(
         &params.comparison_contract,
         &champion,
@@ -693,7 +697,10 @@ async fn persist_comparison(
     let RomanoWolfOutcome::Compared { evidence } = &outcome else {
         panic!("F10 predecessor must meet the governed observation floor");
     };
-    assert!(evidence.candidates[0].is_eligible());
+    assert_eq!(
+        evidence.candidates[0].is_eligible(),
+        candidate_return_bps > Decimal::ZERO
+    );
     let artifact = FeedbackComparisonArtifact::try_seal(FeedbackComparisonArtifactInput {
         artifact_id: params.artifact_id,
         feedback_cycle_id: params.feedback_cycle_id,
@@ -747,6 +754,7 @@ pub async fn record_comparison(
     store: &Arc<dyn ArtifactStore>,
     claim: &FeedbackCycleClaim,
     params: FeedbackComparisonJobParams,
+    candidate_return_bps: Decimal,
     event_sequence: i64,
 ) {
     let identity = FeedbackStageJobIdentity::try_root(
@@ -790,7 +798,7 @@ pub async fn record_comparison(
     .await
     .expect("lease F09 job")
     .expect("queued F09 job");
-    let artifact = persist_comparison(store, &params).await;
+    let artifact = persist_comparison(store, &params, candidate_return_bps).await;
     let info = jobs
         .finalize(
             &identity.job_id(),
@@ -931,7 +939,7 @@ pub async fn terminal_restart_tamper() {
     let generations = activate_generation(&db, &store, &models).await;
     let (schema, claim) = record_cycle(&db, &models).await;
     let comparison = comparison_params(&db, &schema, &claim, &models).await;
-    record_comparison(&db, &store, &claim, comparison, 2).await;
+    record_comparison(&db, &store, &claim, comparison, dec!(100), 2).await;
 
     let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
     insert_observation(&db, cycles.as_ref(), &generations).await;

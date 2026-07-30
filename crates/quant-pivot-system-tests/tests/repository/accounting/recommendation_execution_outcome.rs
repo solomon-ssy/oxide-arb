@@ -4,8 +4,9 @@ use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::quant::{
-        ExecutionOutcomeReconciliationResult, NewExecutionOrder, NewPosition,
-        NewRecommendationExecutionOutcome, NewReconciliation, RecommendationExecutionOutcomeInfo,
+        ExecutionOutcomeDeferredReason, ExecutionOutcomeReconciliationResult, NewExecutionOrder,
+        NewPosition, NewRecommendationExecutionOutcome, NewReconciliation,
+        RecommendationExecutionOutcomeInfo,
     },
     entities::{
         quant_execution_order::Entity as QuantExecutionOrderEntity,
@@ -37,7 +38,7 @@ use quant_pivot_repository::{
     traits::RecommendationExecutionOutcomeRepository,
 };
 use quant_pivot_system_tests::{
-    postgres::setup_pg,
+    postgres::{PostgresClock, setup_pg},
     support::execution_pg_seed::{
         ExecutionTxnIds, entry_execution_order, prepared_order, seed_approved_intent,
         seed_report_fixture,
@@ -220,8 +221,9 @@ pub async fn reconcile_idempotent_worm_evident() {
     let db = pool.connection().clone();
     let source = seed_execution_source(&db, SourceShape::FullyFilled).await;
     let repository = PgRecommendationExecutionOutcomeRepository::new(db.clone());
+    let initial_cutoff = db.statement_time().await;
     let inserted = repository
-        .reconcile_intent(&source.order_intent_id)
+        .reconcile_intent(&source.order_intent_id, initial_cutoff)
         .await
         .expect("reconcile execution outcome");
     let inserted = match inserted {
@@ -237,7 +239,7 @@ pub async fn reconcile_idempotent_worm_evident() {
     assert!(inserted.available_at <= inserted.created_at);
 
     let duplicate = repository
-        .reconcile_intent(&source.order_intent_id)
+        .reconcile_intent(&source.order_intent_id, initial_cutoff)
         .await
         .expect("idempotent execution-outcome retry");
     let duplicate = match duplicate {
@@ -265,7 +267,7 @@ pub async fn reconcile_idempotent_worm_evident() {
         .expect("simulate late conflicting source correction");
     assert!(matches!(
         repository
-            .reconcile_intent(&source.order_intent_id)
+            .reconcile_intent(&source.order_intent_id, db.statement_time().await)
             .await
             .expect_err("same recommendation cannot acquire different immutable content"),
         StorageError::StateConflict { .. }
@@ -317,10 +319,11 @@ pub async fn reconciliation_candidates_require_source() {
     let terminal = seed_execution_source(&db, SourceShape::Unfilled).await;
     let pre_submission = seed_report_fixture(&db).await;
     let pre_submission_intent = seed_approved_intent(&db, &pre_submission).await;
-    let repository = PgRecommendationExecutionOutcomeRepository::new(db);
+    let repository = PgRecommendationExecutionOutcomeRepository::new(db.clone());
+    let cutoff = db.statement_time().await;
 
     let candidates = repository
-        .list_reconciliation_candidates(None, 10)
+        .list_reconciliation_candidates(cutoff, None, 10)
         .await
         .expect("execution reconciliation candidates");
     assert_eq!(candidates.len(), 1);
@@ -334,21 +337,55 @@ pub async fn reconciliation_candidates_require_source() {
     );
 
     let terminal_page = repository
-        .list_reconciliation_candidates(Some(terminal.order_intent_id), 10)
+        .list_reconciliation_candidates(cutoff, Some(terminal.order_intent_id), 10)
         .await
         .expect("terminal execution candidate keyset page");
     assert!(terminal_page.is_empty());
 
     repository
-        .reconcile_intent(&terminal.order_intent_id)
+        .reconcile_intent(&terminal.order_intent_id, cutoff)
         .await
         .expect("seal terminal execution outcome");
     assert!(
         repository
-            .list_reconciliation_candidates(None, 10)
+            .list_reconciliation_candidates(cutoff, None, 10)
             .await
             .expect("execution candidates after seal")
             .is_empty()
+    );
+}
+
+pub async fn late_source_defers() {
+    let (pool, _database) = setup_pg().await;
+    let db = pool.connection().clone();
+    let source = seed_execution_source(&db, SourceShape::Unfilled).await;
+    let repository = PgRecommendationExecutionOutcomeRepository::new(db);
+    let frozen_before_source = source.terminal_at;
+
+    assert!(
+        repository
+            .list_reconciliation_candidates(frozen_before_source, None, 10)
+            .await
+            .expect("scan candidates before database source visibility")
+            .is_empty(),
+        "an intent created after the cutoff cannot enter the frozen candidate universe"
+    );
+    assert_eq!(
+        repository
+            .reconcile_intent(&source.order_intent_id, frozen_before_source)
+            .await
+            .expect("late execution source returns a typed deferred result"),
+        ExecutionOutcomeReconciliationResult::Deferred(
+            ExecutionOutcomeDeferredReason::SourceAvailableAfterCutoff
+        )
+    );
+    assert!(
+        repository
+            .find_by_recommendation(&source.ids.recommendation)
+            .await
+            .expect("read outcome after late-source deferral")
+            .is_none(),
+        "late source must not create an execution outcome"
     );
 }
 
@@ -357,8 +394,9 @@ impl SourceShape {
         let (pool, _database) = setup_pg().await;
         let db = pool.connection().clone();
         let source = seed_execution_source(&db, self).await;
+        let cutoff = db.statement_time().await;
         let inserted = PgRecommendationExecutionOutcomeRepository::new(db)
-            .reconcile_intent(&source.order_intent_id)
+            .reconcile_intent(&source.order_intent_id, cutoff)
             .await
             .expect("reconcile execution outcome");
         match inserted {

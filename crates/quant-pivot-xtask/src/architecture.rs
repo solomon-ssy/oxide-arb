@@ -102,6 +102,7 @@ pub fn run() -> Result<()> {
     violations.extend(validate_factor_publication_removal(
         &metadata.workspace_root,
     )?);
+    violations.extend(validate_feedback_dead_semantics(&metadata.workspace_root)?);
     violations.extend(validate_serving_dead_semantics(&metadata.workspace_root)?);
     violations.extend(validate_model_serving_registry(&metadata.workspace_root)?);
     violations.extend(validate_model_category_routes(&metadata.workspace_root)?);
@@ -318,6 +319,50 @@ fn read_architecture_source(
     Ok((path, source))
 }
 
+fn validate_removed_contract(
+    workspace_root: &Path,
+    contract: &str,
+    removed_paths: &[&str],
+    removed_tokens: &[&str],
+    source_roots: &[&str],
+) -> Result<Vec<String>> {
+    let mut violations = Vec::new();
+    for relative in removed_paths {
+        let path = workspace_root.join(relative);
+        if path.exists() {
+            violations.push(format!(
+                "{} retains a removed {contract} source path",
+                path.display()
+            ));
+        }
+    }
+
+    let mut source_paths = Vec::new();
+    for relative in source_roots {
+        collect_contract_sources(&workspace_root.join(relative), &mut source_paths)?;
+    }
+    source_paths.sort();
+    let gate_source = workspace_root.join("crates/quant-pivot-xtask/src/architecture.rs");
+    let evidence_source = workspace_root
+        .join("crates/quant-pivot-system-tests/tests/infrastructure/removal_catalog.rs");
+    for path in source_paths {
+        if path == gate_source || path == evidence_source {
+            continue;
+        }
+        let source =
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        for token in removed_tokens {
+            if source.contains(token) {
+                violations.push(format!(
+                    "{} retains removed {contract} contract `{token}`",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(violations)
+}
+
 fn validate_attribution_removal(workspace_root: &Path) -> Result<Vec<String>> {
     const REMOVED_PATHS: &[&str] = &[
         "crates/quant-pivot-core/src/app/attribution_worker.rs",
@@ -364,44 +409,19 @@ fn validate_attribution_removal(workspace_root: &Path) -> Result<Vec<String>> {
         "RECOMMENDATION_STATUSES.attributed",
     ];
 
-    let mut violations = Vec::new();
-    for relative in REMOVED_PATHS {
-        let path = workspace_root.join(relative);
-        if path.exists() {
-            violations.push(format!(
-                "{} retains a removed Phase 11.9 attribution source path",
-                path.display()
-            ));
-        }
-    }
-
-    let mut source_paths = Vec::new();
-    for relative in [
-        "crates",
-        "schema",
-        "config",
-        "ui/apps/web-antdv-next/src",
-        "ui/packages/types/src",
-    ] {
-        collect_contract_sources(&workspace_root.join(relative), &mut source_paths)?;
-    }
-    source_paths.sort();
-    let gate_source = workspace_root.join("crates/quant-pivot-xtask/src/architecture.rs");
-    for path in source_paths {
-        if path == gate_source {
-            continue;
-        }
-        let source =
-            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        for token in REMOVED_TOKENS {
-            if source.contains(token) {
-                violations.push(format!(
-                    "{} retains removed Phase 11.9 attribution contract `{token}`",
-                    path.display()
-                ));
-            }
-        }
-    }
+    let mut violations = validate_removed_contract(
+        workspace_root,
+        "Phase 11.9 attribution",
+        REMOVED_PATHS,
+        REMOVED_TOKENS,
+        &[
+            "crates",
+            "schema",
+            "config",
+            "ui/apps/web-antdv-next/src",
+            "ui/packages/types/src",
+        ],
+    )?;
 
     let postgres_manifest = workspace_root.join("schema/postgres/manifest.json");
     let postgres_schema = fs::read_to_string(&postgres_manifest)
@@ -432,46 +452,19 @@ fn validate_phase_allocation_removal(workspace_root: &Path) -> Result<Vec<String
         "profile-allocation",
     ];
 
-    let mut violations = Vec::new();
-    for relative in REMOVED_PATHS {
-        let path = workspace_root.join(relative);
-        if path.exists() {
-            violations.push(format!(
-                "{} retains a removed Phase 11.9 profile-allocation source path",
-                path.display()
-            ));
-        }
-    }
-
-    let mut source_paths = Vec::new();
-    for relative in [
-        "crates",
-        "schema",
-        "config",
-        "ui/apps/web-antdv-next/src",
-        "ui/packages/types/src",
-    ] {
-        collect_contract_sources(&workspace_root.join(relative), &mut source_paths)?;
-    }
-    source_paths.sort();
-    let gate_source = workspace_root.join("crates/quant-pivot-xtask/src/architecture.rs");
-    for path in source_paths {
-        if path == gate_source {
-            continue;
-        }
-        let source =
-            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        for token in REMOVED_TOKENS {
-            if source.contains(token) {
-                violations.push(format!(
-                    "{} retains removed Phase 11.9 profile-allocation contract `{token}`",
-                    path.display()
-                ));
-            }
-        }
-    }
-
-    Ok(violations)
+    validate_removed_contract(
+        workspace_root,
+        "Phase 11.9 profile-allocation",
+        REMOVED_PATHS,
+        REMOVED_TOKENS,
+        &[
+            "crates",
+            "schema",
+            "config",
+            "ui/apps/web-antdv-next/src",
+            "ui/packages/types/src",
+        ],
+    )
 }
 
 fn validate_factor_publication_removal(workspace_root: &Path) -> Result<Vec<String>> {
@@ -515,46 +508,56 @@ fn validate_factor_publication_removal(workspace_root: &Path) -> Result<Vec<Stri
         "idx_quant_factor_definition_family_status",
     ];
 
-    let mut violations = Vec::new();
-    for relative in REMOVED_PATHS {
-        let path = workspace_root.join(relative);
-        if path.exists() {
-            violations.push(format!(
-                "{} retains a removed factor-publication source path",
-                path.display()
-            ));
-        }
-    }
+    validate_removed_contract(
+        workspace_root,
+        "factor-publication",
+        REMOVED_PATHS,
+        REMOVED_TOKENS,
+        &[
+            "crates",
+            "schema",
+            "config",
+            "ui/apps/web-antdv-next/src",
+            "ui/packages/types/src",
+        ],
+    )
+}
 
-    let mut source_paths = Vec::new();
-    for relative in [
-        "crates",
-        "schema",
-        "config",
-        "ui/apps/web-antdv-next/src",
-        "ui/packages/types/src",
-    ] {
-        collect_contract_sources(&workspace_root.join(relative), &mut source_paths)?;
-    }
-    source_paths.sort();
-    let gate_source = workspace_root.join("crates/quant-pivot-xtask/src/architecture.rs");
-    for path in source_paths {
-        if path == gate_source {
-            continue;
-        }
-        let source =
-            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        for token in REMOVED_TOKENS {
-            if source.contains(token) {
-                violations.push(format!(
-                    "{} retains removed factor-publication contract `{token}`",
-                    path.display()
-                ));
-            }
-        }
-    }
+fn validate_feedback_dead_semantics(workspace_root: &Path) -> Result<Vec<String>> {
+    const REMOVED_PATHS: &[&str] = &["crates/quant-pivot-research/src/model/calibration.rs"];
+    const REMOVED_TOKENS: &[&str] = &[
+        "ScoreMultiplierCalibration",
+        "score_multiplier_calibration",
+        "score_multiplier_calibration_report",
+        "source_backtest_report_id",
+        "idx_quant_model_version_source_backtest",
+        "fk-quant_model_version-source_backtest_report_id",
+        "pub calibrate: bool",
+        "calibrate_weighted_artifact",
+        "calibrate_score_multipliers",
+        "calibrate_liquidity_multipliers",
+        "calibrate_horizon_multipliers",
+        "calibrate_substitution_rules",
+        "RecommendationOutcome",
+        "qp_recommendation_outcome",
+        "SETTLEMENT_OUTCOME",
+        "LabelName::new(\"settlement_outcome\")",
+        "LabelName::from_static(\"settlement_outcome\")",
+    ];
 
-    Ok(violations)
+    validate_removed_contract(
+        workspace_root,
+        "feedback calibration/outcome",
+        REMOVED_PATHS,
+        REMOVED_TOKENS,
+        &[
+            "crates",
+            "schema",
+            "config",
+            "ui/apps/web-antdv-next/src",
+            "ui/packages/types/src",
+        ],
+    )
 }
 
 fn validate_serving_dead_semantics(workspace_root: &Path) -> Result<Vec<String>> {
@@ -575,36 +578,13 @@ fn validate_serving_dead_semantics(workspace_root: &Path) -> Result<Vec<String>>
         "pub fn replace(&self, config: DecisionPolicySnapshot)",
     ];
 
-    let mut violations = Vec::new();
-    for relative in REMOVED_PATHS {
-        let path = workspace_root.join(relative);
-        if path.exists() {
-            violations.push(format!(
-                "{} retains a removed serving abstraction path",
-                path.display()
-            ));
-        }
-    }
-
-    let mut source_paths = Vec::new();
-    collect_contract_sources(&workspace_root.join("crates"), &mut source_paths)?;
-    source_paths.sort();
-    let gate_source = workspace_root.join("crates/quant-pivot-xtask/src/architecture.rs");
-    for path in source_paths {
-        if path == gate_source {
-            continue;
-        }
-        let source =
-            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        for token in REMOVED_TOKENS {
-            if source.contains(token) {
-                violations.push(format!(
-                    "{} retains removed serving/dead contract `{token}`",
-                    path.display()
-                ));
-            }
-        }
-    }
+    let mut violations = validate_removed_contract(
+        workspace_root,
+        "serving/dead",
+        REMOVED_PATHS,
+        REMOVED_TOKENS,
+        &["crates"],
+    )?;
 
     let (artifact_path, artifact) = read_architecture_source(
         workspace_root,
@@ -3398,8 +3378,8 @@ mod tests {
 
     use super::{
         CargoDependency, CargoMetadata, CargoPackage, validate_config_secret_types,
-        validate_ledger_source, validate_persistence_documents, validate_public_exports,
-        validate_source_style,
+        validate_feedback_dead_semantics, validate_ledger_source, validate_persistence_documents,
+        validate_public_exports, validate_source_style,
     };
 
     fn dependency(name: &str, kind: Option<&str>, features: &[&str]) -> CargoDependency {
@@ -3462,6 +3442,17 @@ mod tests {
 ## 13. 决策账本
 "
         )
+    }
+
+    #[test]
+    fn feedback_dead_semantics_absent() {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonical workspace root");
+        let violations =
+            validate_feedback_dead_semantics(&workspace_root).expect("scan removed semantics");
+        assert!(violations.is_empty(), "{violations:#?}");
     }
 
     #[test]

@@ -98,6 +98,10 @@ use super::{
 
 const POLICY_CANDIDATE_ID: &str = "immediate";
 const POLICY_SAMPLE_COUNT: u64 = 500;
+/// Canonical disposable attestation key used by fixture evidence producers and
+/// every real-binary consumer launched against the same seeded database.
+pub const SYSTEM_EVIDENCE_SIGNING_KEY: &str =
+    "abababababababababababababababababababababababababababababababab";
 
 /// Published policy plus the exact immutable subjects needed to verify it.
 pub struct PublishedTradePolicyFixture {
@@ -129,7 +133,7 @@ impl PublishedTradePolicyFixture {
     /// consumer-side verification.
     pub fn evidence_attestor() -> QuantResult<EvidenceAttestor> {
         EvidenceAttestor::from_config(&EvidenceAttestationConfig {
-            signing_key: "ab".repeat(32).into(),
+            signing_key: SYSTEM_EVIDENCE_SIGNING_KEY.into(),
             previous_signing_keys: Vec::new(),
         })?
         .ok_or_else(|| {

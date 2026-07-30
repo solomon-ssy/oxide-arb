@@ -2,7 +2,8 @@
 
 use std::{
     env, fs,
-    fs::File,
+    fs::OpenOptions,
+    future::Future,
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -10,10 +11,12 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Error as AnyhowError, Result, bail, ensure};
 use chrono::Utc;
+use clap::ValueEnum;
 use quant_pivot_models::{
-    config::DeployConfig,
+    config::{ArtifactStoreDeployConfig, ArtifactStoreKind, DeployConfig},
+    domain::{api::ModelVersionListQuery, pagination::PageRequest},
     entities::{
         market::Entity as MarketEntity,
         quant_feature_parity_run::{Column, Entity},
@@ -22,19 +25,30 @@ use quant_pivot_models::{
     enums::{
         market::MarketStatus, quant::FeatureParityRunKind, settlement::SettlementEffectivePolicy,
     },
-    types::{ContentHash, MarketId, RecommendationReportId},
+    types::{ContentHash, FeedbackCycleId, MarketId, RecommendationReportId, WorkerId},
 };
-use quant_pivot_repository::postgres::{
-    PgExecutionSubmissionRepository, PgModelRegistryRepository, PgPolicyRepository,
-    policy_bootstrap::ensure_default_policy_bundle,
+use quant_pivot_repository::{
+    postgres::{
+        PgExecutionSubmissionRepository, PgFeedbackCycleRepository, PgModelRegistryRepository,
+        PgPolicyRepository, policy_bootstrap::ensure_default_policy_bundle,
+    },
+    traits::{FeedbackCycleRepository, ModelRegistryRepository},
 };
-use quant_pivot_research::artifact::{ArtifactStore, LocalArtifactStore};
+use quant_pivot_research::{
+    artifact::{ArtifactStore, LocalArtifactStore, S3ArtifactStore, S3StaticCredentials},
+    model::ModelArtifact,
+};
 use reqwest::Client;
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
     QueryFilter, QueryOrder,
 };
 use serde::Deserialize;
+use testcontainers::{
+    ContainerAsync, GenericImage, ImageExt,
+    core::{Mount, WaitFor, wait::HttpWaitStrategy},
+    runners::AsyncRunner,
+};
 use tokio::{
     net::TcpStream,
     process::{Child, Command as TokioCommand},
@@ -50,12 +64,13 @@ use wiremock::{
 
 use crate::{
     stack::SystemStack,
-    support::artifact_store::VersionedArtifactStoreFixture,
     support::execution_pg_seed::{
         ReportSeedConfig, enable_test_admission, fill_entry_lot, seed_approved_intent,
-        seed_demo_with_store, seed_pending_intent, seed_report_fixture, seed_report_on_infra,
+        seed_demo_with_store, seed_feedback_serving_infra, seed_pending_intent,
+        seed_report_on_infra,
     },
-    support::research_browser_seed::seed_browser_research,
+    support::research_browser_seed::{seed_browser_research, seed_governed_feedback_research},
+    support::trade_policy_fixtures::SYSTEM_EVIDENCE_SIGNING_KEY,
 };
 
 const PRIVATE_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -64,12 +79,19 @@ const API_KEY: &str = "00000000-0000-0000-0000-000000000000";
 const API_PASSPHRASE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const API_SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const JWT_SIGNING_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
-const EVIDENCE_SIGNING_KEY: &str =
-    "0808080808080808080808080808080808080808080808080808080808080808";
 const STARTUP_TIMEOUT: Duration = Duration::from_mins(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const SIGNAL_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(1);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const GOVERNED_CANCELLATION_LEASE_SECS: u64 = 3_600;
+const MINIO_ACCESS_KEY: &str = "quantpivot-system-test";
+const MINIO_SECRET_KEY: &str = "quantpivot-system-test-object-lock-secret";
+const MINIO_BUCKET: &str = "quant-pivot-production-stack";
+const MINIO_REGION: &str = "us-east-1";
+const MINIO_API_PORT: u16 = 9_000;
+const MINIO_SERVER_IMAGE_TAG: &str = "RELEASE.2025-06-13T11-33-47Z";
+const MINIO_CLIENT_IMAGE_TAG: &str = "RELEASE.2025-07-16T15-35-03Z";
+const MINIO_BOOTSTRAP_READY: &str = "quant-pivot-minio-bootstrap-ready";
 
 const DISABLED_DOMAIN_SOURCES: &[&str] = &[
     "binance",
@@ -100,13 +122,269 @@ struct Workspace {
     binary: PathBuf,
 }
 
+struct ProductionLaunch {
+    workspace_root: PathBuf,
+    binary: PathBuf,
+    run_dir: PathBuf,
+    base_url: String,
+    uses_fixture_s3: bool,
+}
+
+struct BrowserFixtureEvidence {
+    governed_cancellation_cycle_id: Option<FeedbackCycleId>,
+    sampled_parity_report_id: RecommendationReportId,
+}
+
+struct StartedProduction {
+    child: Child,
+    launch: ProductionLaunch,
+    browser_evidence: Option<BrowserFixtureEvidence>,
+}
+
+struct ProductionArtifactStack {
+    config: ArtifactStoreDeployConfig,
+    container: ContainerAsync<GenericImage>,
+}
+
+struct ProductionStartup {
+    artifact_infrastructure: Option<ProductionArtifactStack>,
+    infrastructure: Option<SystemStack>,
+}
+
+impl ProductionArtifactStack {
+    async fn start(run_dir: &Path) -> Result<Self> {
+        let identity = Uuid::now_v7();
+        let network = format!("quant-pivot-artifacts-{identity}");
+        let server_name = format!("quant-pivot-minio-{identity}");
+        let data_dir = run_dir.join("minio-data");
+        fs::create_dir_all(&data_dir)
+            .with_context(|| format!("create MinIO data root {}", data_dir.display()))?;
+        let data_root = data_dir
+            .to_str()
+            .context("MinIO data root is not valid UTF-8")?;
+
+        let container = GenericImage::new("minio/minio", MINIO_SERVER_IMAGE_TAG)
+            .with_exposed_port(MINIO_API_PORT.into())
+            .with_wait_for(WaitFor::http(
+                HttpWaitStrategy::new("/minio/health/ready")
+                    .with_port(MINIO_API_PORT.into())
+                    .with_expected_status_code(200u16),
+            ))
+            .with_cmd(["server", "/data", "--console-address", ":9001"])
+            .with_env_var("MINIO_ROOT_USER", MINIO_ACCESS_KEY)
+            .with_env_var("MINIO_ROOT_PASSWORD", MINIO_SECRET_KEY)
+            .with_network(network.clone())
+            .with_container_name(server_name.clone())
+            .with_mount(Mount::bind_mount(data_root, "/data"))
+            .with_startup_timeout(Duration::from_mins(2))
+            .start()
+            .await
+            .context("start production-stack MinIO")?;
+        let host_port = container
+            .get_host_port_ipv4(MINIO_API_PORT)
+            .await
+            .context("resolve production-stack MinIO port")?;
+
+        let bootstrap = r#"
+/usr/bin/mc alias set system "http://${QP_MINIO_SERVER}:9000" "${QP_MINIO_ACCESS_KEY}" "${QP_MINIO_SECRET_KEY}" &&
+/usr/bin/mc mb --with-lock "system/${QP_MINIO_BUCKET}" &&
+/usr/bin/mc retention set --default GOVERNANCE "30d" "system/${QP_MINIO_BUCKET}" &&
+echo "quant-pivot-minio-bootstrap-ready" &&
+while :; do sleep 3600; done
+"#;
+        let helper = GenericImage::new("minio/mc", MINIO_CLIENT_IMAGE_TAG)
+            .with_entrypoint("/bin/sh")
+            .with_wait_for(WaitFor::message_on_stdout(MINIO_BOOTSTRAP_READY))
+            .with_cmd(["-c", bootstrap])
+            .with_env_var("QP_MINIO_SERVER", server_name)
+            .with_env_var("QP_MINIO_ACCESS_KEY", MINIO_ACCESS_KEY)
+            .with_env_var("QP_MINIO_SECRET_KEY", MINIO_SECRET_KEY)
+            .with_env_var("QP_MINIO_BUCKET", MINIO_BUCKET)
+            .with_network(network)
+            .with_startup_timeout(Duration::from_mins(2))
+            .start()
+            .await;
+        let helper = match helper {
+            Ok(helper) => helper,
+            Err(error) => {
+                let cleanup = container
+                    .rm()
+                    .await
+                    .context("remove MinIO after bootstrap failure");
+                cleanup?;
+                return Err(error).context("configure versioned Object-Lock MinIO bucket");
+            }
+        };
+        if let Err(error) = helper.rm().await.context("remove MinIO bootstrap helper") {
+            let cleanup = container
+                .rm()
+                .await
+                .context("remove MinIO after helper cleanup failure");
+            cleanup?;
+            return Err(error);
+        }
+
+        Ok(Self {
+            config: ArtifactStoreDeployConfig {
+                kind: ArtifactStoreKind::S3,
+                bucket: MINIO_BUCKET.to_owned(),
+                prefix: "artifacts".to_owned(),
+                region: MINIO_REGION.to_owned(),
+                endpoint: Some(format!("http://127.0.0.1:{host_port}")),
+                path_style: true,
+                require_object_lock: true,
+                require_versioning: true,
+            },
+            container,
+        })
+    }
+
+    fn store(&self) -> Result<Arc<dyn ArtifactStore>> {
+        let credentials = S3StaticCredentials::new(MINIO_ACCESS_KEY, MINIO_SECRET_KEY)
+            .context("build production-stack MinIO credentials")?;
+        let store = S3ArtifactStore::new_with_credentials(&self.config, credentials)
+            .context("build production-stack S3 artifact store")?;
+        Ok(Arc::new(store))
+    }
+
+    async fn shutdown(self) -> Result<()> {
+        self.container
+            .rm()
+            .await
+            .context("remove production-stack MinIO")
+    }
+}
+
+impl ProductionStartup {
+    const fn new(infrastructure: SystemStack) -> Self {
+        Self {
+            artifact_infrastructure: None,
+            infrastructure: Some(infrastructure),
+        }
+    }
+
+    fn infrastructure(&self) -> Result<&SystemStack> {
+        self.infrastructure
+            .as_ref()
+            .context("production-stack infrastructure ownership is missing")
+    }
+
+    fn finish(mut self) -> Result<(Option<ProductionArtifactStack>, SystemStack)> {
+        let infrastructure = self
+            .infrastructure
+            .take()
+            .context("production-stack infrastructure ownership is missing")?;
+        Ok((self.artifact_infrastructure.take(), infrastructure))
+    }
+
+    async fn abort<T>(mut self, error: AnyhowError) -> Result<T> {
+        let artifact_result = match self.artifact_infrastructure.take() {
+            Some(infrastructure) => infrastructure.shutdown().await,
+            None => Ok(()),
+        };
+        let infrastructure_result = match self.infrastructure.take() {
+            Some(infrastructure) => Box::pin(infrastructure.shutdown())
+                .await
+                .context("remove production-stack infrastructure after startup failure"),
+            None => Ok(()),
+        };
+        let cleanup_detail = match (artifact_result, infrastructure_result) {
+            (Ok(()), Ok(())) => return Err(error),
+            (Err(artifact), Ok(())) => {
+                format!("artifact infrastructure cleanup also failed: {artifact:#}")
+            }
+            (Ok(()), Err(infrastructure)) => {
+                format!("base infrastructure cleanup also failed: {infrastructure:#}")
+            }
+            (Err(artifact), Err(infrastructure)) => format!(
+                "artifact infrastructure cleanup also failed: {artifact:#}; base infrastructure cleanup also failed: {infrastructure:#}"
+            ),
+        };
+        Err(error.context(cleanup_detail))
+    }
+}
+
+impl ProductionLaunch {
+    fn log_path(&self) -> PathBuf {
+        self.run_dir.join("backend.log")
+    }
+
+    async fn spawn(&self) -> Result<Child> {
+        let log_path = self.log_path();
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("open backend log {}", log_path.display()))?;
+        let stderr = stdout
+            .try_clone()
+            .with_context(|| format!("clone backend log handle {}", log_path.display()))?;
+        let mut command = TokioCommand::new(&self.binary);
+        command
+            .arg("--config-dir")
+            .arg(&self.run_dir)
+            .current_dir(&self.workspace_root)
+            .env("RUST_LOG", "info,polymarket_client_sdk_v2=error")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .kill_on_drop(true);
+        if self.uses_fixture_s3 {
+            command
+                .env("AWS_ACCESS_KEY_ID", MINIO_ACCESS_KEY)
+                .env("AWS_SECRET_ACCESS_KEY", MINIO_SECRET_KEY)
+                .env("AWS_REGION", MINIO_REGION)
+                .env("AWS_DEFAULT_REGION", MINIO_REGION)
+                .env("AWS_EC2_METADATA_DISABLED", "true")
+                .env_remove("AWS_PROFILE")
+                .env_remove("AWS_SESSION_TOKEN")
+                .env_remove("AWS_WEB_IDENTITY_TOKEN_FILE")
+                .env_remove("AWS_ROLE_ARN");
+        }
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("spawn production binary {}", self.binary.display()))?;
+        if let Err(error) = await_startup(&mut child, &self.base_url).await {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(error.context(format!(
+                "production binary did not become ready; logs={}",
+                log_path.display()
+            )));
+        }
+        Ok(child)
+    }
+}
+
 pub struct ProductionStack {
     child: Child,
-    base_url: String,
+    governed_cancellation_cycle_id: Option<FeedbackCycleId>,
+    launch: ProductionLaunch,
     listen_port: u16,
-    run_dir: PathBuf,
     _upstream: MockServer,
+    artifact_infrastructure: Option<ProductionArtifactStack>,
     infrastructure: SystemStack,
+}
+
+/// Coherent seed surface installed before the real production binary starts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ProductionStackFixture {
+    /// Canonical empty fresh deployment.
+    Empty,
+    /// Coherent research, report, intent, and settlement browser evidence.
+    Browser,
+    /// Browser evidence plus one exact active Weather serving route.
+    GovernedFeedback,
+}
+
+impl ProductionStackFixture {
+    const fn seeds_browser(self) -> bool {
+        matches!(self, Self::Browser | Self::GovernedFeedback)
+    }
+
+    const fn requires_default_policy(self) -> bool {
+        !matches!(self, Self::GovernedFeedback)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,17 +400,21 @@ enum SignalObservation {
     Unobserved,
 }
 
-pub async fn serve(listen_port: u16, browser_fixture: bool, retain_artifacts: bool) -> Result<()> {
+pub async fn serve(
+    listen_port: u16,
+    fixture: ProductionStackFixture,
+    retain_artifacts: bool,
+) -> Result<()> {
     if listen_port == 0 {
         bail!("production-stack serve requires a non-zero --listen-port");
     }
     ensure_port_available(listen_port)?;
-    let workspace = build_production_binary()?;
-    let mut running = start_at(&workspace, listen_port, browser_fixture).await?;
+    let workspace = Workspace::build()?;
+    let mut running = Box::pin(ProductionStack::start_at(&workspace, listen_port, fixture)).await?;
     println!(
         "production stack ready: base_url={} artifacts={} (terminate to stop)",
-        running.base_url,
-        running.run_dir.display(),
+        running.base_url(),
+        running.run_dir().display(),
     );
 
     tokio::select! {
@@ -141,7 +423,7 @@ pub async fn serve(listen_port: u16, browser_fixture: bool, retain_artifacts: bo
             let status = status.context("wait for production binary")?;
             bail!(
                 "production binary exited before the fixture was terminated: {status}; logs={}",
-                running.log_path().display(),
+                running.launch.log_path().display(),
             );
         }
     }
@@ -149,22 +431,20 @@ pub async fn serve(listen_port: u16, browser_fixture: bool, retain_artifacts: bo
     Box::pin(running.stop_after_signal(!retain_artifacts)).await
 }
 
-pub async fn start_production_stack() -> Result<ProductionStack> {
-    let workspace = build_production_binary()?;
-    let listen_port = reserve_port()?;
-    start_at(&workspace, listen_port, false).await
-}
-
 pub async fn verify(runs: u16) -> Result<()> {
     if runs == 0 {
         bail!("production-stack verify requires --runs greater than zero");
     }
-    let workspace = build_production_binary()?;
+    let workspace = Workspace::build()?;
     for run_number in 1..=runs {
         let listen_port = reserve_port()?;
-        let running = start_at(&workspace, listen_port, false)
-            .await
-            .with_context(|| format!("start production-stack verification run {run_number}"))?;
+        let running = Box::pin(ProductionStack::start_at(
+            &workspace,
+            listen_port,
+            ProductionStackFixture::Empty,
+        ))
+        .await
+        .with_context(|| format!("start production-stack verification run {run_number}"))?;
         Box::pin(running.stop(true))
             .await
             .with_context(|| format!("stop production-stack verification run {run_number}"))?;
@@ -174,23 +454,104 @@ pub async fn verify(runs: u16) -> Result<()> {
 }
 
 impl ProductionStack {
+    pub async fn start(fixture: ProductionStackFixture) -> Result<Self> {
+        let workspace = Workspace::build()?;
+        let listen_port = reserve_port()?;
+        Box::pin(Self::start_at(&workspace, listen_port, fixture)).await
+    }
+
     #[must_use]
     pub fn base_url(&self) -> &str {
-        &self.base_url
+        &self.launch.base_url
     }
 
     #[must_use]
     pub fn run_dir(&self) -> &Path {
-        &self.run_dir
+        &self.launch.run_dir
     }
 
-    fn log_path(&self) -> PathBuf {
-        self.run_dir.join("backend.log")
+    /// Cycle held by a distinct live worker for deterministic governed
+    /// cancellation evidence in the `GovernedFeedback` fixture.
+    #[must_use]
+    pub const fn governed_cancellation_cycle_id(&self) -> Option<FeedbackCycleId> {
+        self.governed_cancellation_cycle_id
+    }
+
+    /// Gracefully restart only the real binary while preserving every owned
+    /// persistence service, the rendered config, port, and artifact directory.
+    pub async fn restart(&mut self) -> Result<()> {
+        self.shutdown_binary(ShutdownOrigin::Harness).await?;
+        self.child = self.launch.spawn().await?;
+        Ok(())
+    }
+
+    /// Stop the owned Redis service while `verify_outage` exercises the real
+    /// binary, then restore the same fixed endpoint and wait for the original
+    /// shared pool to recover. Redis restoration is attempted even when the
+    /// outage assertion fails.
+    pub async fn with_redis_outage<F, Fut>(&self, verify_outage: F) -> Result<()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        self.infrastructure
+            .redis_container
+            .stop_with_timeout(Some(0))
+            .await
+            .context("stop production-stack Redis")?;
+        let outage_result = verify_outage().await;
+        let recovery_result = self.restore_redis().await;
+        match (outage_result, recovery_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(outage), Ok(())) => Err(outage.context("verify production Redis outage")),
+            (Ok(()), Err(recovery)) => Err(recovery),
+            (Err(outage), Err(recovery)) => bail!(
+                "production Redis outage assertion failed: {outage:#}; Redis recovery also failed: {recovery:#}"
+            ),
+        }
     }
 
     pub async fn stop(self, remove_artifacts: bool) -> Result<()> {
         self.shutdown(remove_artifacts, ShutdownOrigin::Harness)
             .await
+    }
+
+    async fn restore_redis(&self) -> Result<()> {
+        self.infrastructure
+            .redis_container
+            .start()
+            .await
+            .context("restart production-stack Redis")?;
+        let restarted_port = self
+            .infrastructure
+            .redis_container
+            .get_host_port_ipv4(6379)
+            .await
+            .context("resolve production-stack Redis port after restart")?;
+        ensure!(
+            restarted_port == self.infrastructure.redis_config.port,
+            "production-stack Redis endpoint changed across restart: expected {}, got {restarted_port}",
+            self.infrastructure.redis_config.port,
+        );
+        ensure!(
+            self.infrastructure
+                .redis_container
+                .is_running()
+                .await
+                .context("inspect production-stack Redis after restart")?,
+            "production-stack Redis exited immediately after restart"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match self.infrastructure.redis.health_check().await {
+                Ok(()) => return Ok(()),
+                Err(error) if Instant::now() >= deadline => {
+                    bail!("production-stack Redis pool did not recover: {error}")
+                }
+                Err(_) => sleep(POLL_INTERVAL).await,
+            }
+        }
     }
 
     async fn stop_after_signal(self, remove_artifacts: bool) -> Result<()> {
@@ -200,19 +561,28 @@ impl ProductionStack {
 
     async fn shutdown(mut self, remove_artifacts: bool, origin: ShutdownOrigin) -> Result<()> {
         let shutdown_result = self.shutdown_binary(origin).await;
-        let artifact_result = if remove_artifacts && shutdown_result.is_ok() {
-            fs::remove_dir_all(&self.run_dir)
-                .with_context(|| format!("remove successful run {}", self.run_dir.display()))
-        } else {
-            Ok(())
+        let artifact_infrastructure_result = match self.artifact_infrastructure {
+            Some(infrastructure) => infrastructure.shutdown().await,
+            None => Ok(()),
         };
         let infrastructure_result = Box::pin(self.infrastructure.shutdown())
             .await
             .context("remove disposable production-stack infrastructure");
+        let run_dir_result = if remove_artifacts
+            && shutdown_result.is_ok()
+            && artifact_infrastructure_result.is_ok()
+            && infrastructure_result.is_ok()
+        {
+            fs::remove_dir_all(&self.launch.run_dir)
+                .with_context(|| format!("remove successful run {}", self.launch.run_dir.display()))
+        } else {
+            Ok(())
+        };
 
         shutdown_result?;
-        artifact_result?;
-        infrastructure_result
+        artifact_infrastructure_result?;
+        infrastructure_result?;
+        run_dir_result
     }
 
     async fn shutdown_binary(&mut self, origin: ShutdownOrigin) -> Result<()> {
@@ -268,7 +638,7 @@ impl ProductionStack {
         if !terminate.success() {
             bail!(
                 "could not signal production binary {process_id}; logs={}",
-                self.log_path().display(),
+                self.launch.log_path().display(),
             );
         }
         Ok(())
@@ -285,7 +655,7 @@ impl ProductionStack {
             let _ = self.child.wait().await;
             bail!(
                 "production binary exceeded the {SHUTDOWN_TIMEOUT:?} shutdown budget; logs={}",
-                self.log_path().display(),
+                self.launch.log_path().display(),
             );
         }
     }
@@ -294,137 +664,233 @@ impl ProductionStack {
         if !status.success() {
             bail!(
                 "production binary shutdown failed with {status}; logs={}",
-                self.log_path().display(),
+                self.launch.log_path().display(),
             );
         }
         Ok(())
     }
 }
 
-async fn start_at(
-    workspace: &Workspace,
-    listen_port: u16,
-    browser_fixture: bool,
-) -> Result<ProductionStack> {
-    let upstream = deterministic_upstream().await;
-    let infrastructure = Box::pin(SystemStack::start())
-        .await
-        .context("start disposable production-stack infrastructure")?;
-    PgModelRegistryRepository::new(infrastructure.postgres.connection().clone())
-        .ensure_builtin_research_profiles()
-        .await
-        .context("bootstrap immutable fresh-deployment research profiles")?;
-    ensure_default_policy_bundle(
-        &PgPolicyRepository::new(infrastructure.postgres.connection().clone()),
-        "production-stack-fixture",
-        "canonical fresh-boot policy for the real-binary system fixture",
-    )
-    .await
-    .context("bootstrap canonical fresh-boot policy bundle")?;
-    let run_dir = workspace
-        .target_directory
-        .join("production-stack")
-        .join(Uuid::now_v7().to_string());
-    fs::create_dir_all(&run_dir)
-        .with_context(|| format!("create production-stack run {}", run_dir.display()))?;
-    let runtime_artifact_store: Arc<dyn ArtifactStore> =
-        Arc::new(LocalArtifactStore::new(run_dir.join("artifacts")));
-    let artifact_store: Arc<dyn ArtifactStore> = Arc::new(VersionedArtifactStoreFixture::new(
-        Arc::clone(&runtime_artifact_store),
-    ));
-    let browser_report_id = if browser_fixture {
-        Some(
-            Box::pin(seed_browser_fixture(
-                infrastructure.postgres.connection(),
-                &artifact_store,
-                &runtime_artifact_store,
-            ))
+impl ProductionStack {
+    async fn start_at(
+        workspace: &Workspace,
+        listen_port: u16,
+        fixture: ProductionStackFixture,
+    ) -> Result<Self> {
+        let upstream = deterministic_upstream().await;
+        let infrastructure = Box::pin(SystemStack::start())
             .await
+            .context("start disposable production-stack infrastructure")?;
+        let mut startup = ProductionStartup::new(infrastructure);
+        let started = async {
+            let infrastructure = startup.infrastructure()?;
+            PgModelRegistryRepository::new(infrastructure.postgres.connection().clone())
+                .ensure_builtin_research_profiles()
+                .await
+                .context("bootstrap immutable fresh-deployment research profiles")?;
+            if fixture.requires_default_policy() {
+                ensure_default_policy_bundle(
+                    &PgPolicyRepository::new(infrastructure.postgres.connection().clone()),
+                    "production-stack-fixture",
+                    "canonical fresh-boot policy for the real-binary system fixture",
+                )
+                .await
+                .context("bootstrap canonical fresh-boot policy bundle")?;
+            }
+
+            let run_dir = workspace
+                .target_directory
+                .join("production-stack")
+                .join(Uuid::now_v7().to_string());
+            fs::create_dir_all(&run_dir)
+                .with_context(|| format!("create production-stack run {}", run_dir.display()))?;
+            if fixture.seeds_browser() {
+                startup.artifact_infrastructure = Some(
+                    ProductionArtifactStack::start(&run_dir)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "start production artifact infrastructure; retained artifacts={}",
+                                run_dir.display()
+                            )
+                        })?,
+                );
+            }
+            let artifact_config = startup.artifact_infrastructure.as_ref().map_or_else(
+                || ArtifactStoreDeployConfig {
+                    prefix: run_dir.join("artifacts").to_string_lossy().into_owned(),
+                    ..ArtifactStoreDeployConfig::default()
+                },
+                |infrastructure| infrastructure.config.clone(),
+            );
+            let runtime_artifact_store: Arc<dyn ArtifactStore> =
+                match startup.artifact_infrastructure.as_ref() {
+                    Some(infrastructure) => infrastructure.store()?,
+                    None => Arc::new(LocalArtifactStore::new(&artifact_config.prefix)),
+                };
+            let infrastructure = startup.infrastructure()?;
+            let browser_evidence = if fixture.seeds_browser() {
+                Some(
+                    Box::pin(seed_browser_fixture(
+                        infrastructure.postgres.connection(),
+                        &runtime_artifact_store,
+                        fixture,
+                    ))
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "seed browser production fixture; retained artifacts={}",
+                            run_dir.display()
+                        )
+                    })?,
+                )
+            } else {
+                None
+            };
+
+            render_config(
+                &workspace.root,
+                &run_dir,
+                listen_port,
+                &upstream,
+                infrastructure,
+                &artifact_config,
+            )
             .with_context(|| {
                 format!(
-                    "seed browser production fixture; retained artifacts={}",
+                    "render production config; retained artifacts={}",
                     run_dir.display()
                 )
-            })?,
-        )
-    } else {
-        None
-    };
+            })?;
 
-    if let Err(error) = render_config(
-        &workspace.root,
-        &run_dir,
-        listen_port,
-        &upstream,
-        &infrastructure,
-    ) {
-        return Err(error.context(format!(
-            "render production config; retained artifacts={}",
-            run_dir.display()
-        )));
+            let launch = ProductionLaunch {
+                workspace_root: workspace.root.clone(),
+                binary: workspace.binary.clone(),
+                run_dir,
+                base_url: format!("http://127.0.0.1:{listen_port}"),
+                uses_fixture_s3: startup.artifact_infrastructure.is_some(),
+            };
+            let child = launch.spawn().await?;
+            Ok::<_, AnyhowError>(StartedProduction {
+                child,
+                launch,
+                browser_evidence,
+            })
+        }
+        .await;
+        let started = match started {
+            Ok(started) => started,
+            Err(error) => return startup.abort(error).await,
+        };
+        let (artifact_infrastructure, infrastructure) = startup.finish()?;
+        let governed_cancellation_cycle_id = started
+            .browser_evidence
+            .as_ref()
+            .and_then(|evidence| evidence.governed_cancellation_cycle_id);
+        let running = Self {
+            child: started.child,
+            governed_cancellation_cycle_id,
+            launch: started.launch,
+            listen_port,
+            _upstream: upstream,
+            artifact_infrastructure,
+            infrastructure,
+        };
+        let readiness = async {
+            if let Some(evidence) = started.browser_evidence.as_ref() {
+                // The real research worker consumes the report's mandatory
+                // sampled parity job. The deterministic browser profile has no
+                // serving facts, so wait for fail-closed containment before
+                // exposing the stable, auditable report/intent state.
+                await_sampled_parity_containment(
+                    running.infrastructure.postgres.connection(),
+                    &evidence.sampled_parity_report_id,
+                )
+                .await?;
+                await_browser_settlement_discovery(running.infrastructure.postgres.connection())
+                    .await?;
+            }
+            Ok::<_, AnyhowError>(())
+        }
+        .await;
+        if let Err(error) = readiness {
+            let cleanup = running
+                .shutdown(false, ShutdownOrigin::Harness)
+                .await
+                .context("clean production stack after readiness failure");
+            return match cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(error.context(format!(
+                    "production-stack readiness cleanup also failed: {cleanup:#}"
+                ))),
+            };
+        }
+        Ok(running)
     }
-
-    let log_path = run_dir.join("backend.log");
-    let stdout = File::create(&log_path)
-        .with_context(|| format!("create backend log {}", log_path.display()))?;
-    let stderr = stdout
-        .try_clone()
-        .with_context(|| format!("clone backend log handle {}", log_path.display()))?;
-    let mut command = TokioCommand::new(&workspace.binary);
-    command
-        .arg("--config-dir")
-        .arg(&run_dir)
-        .current_dir(&workspace.root)
-        .env("RUST_LOG", "info,polymarket_client_sdk_v2=error")
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .kill_on_drop(true);
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("spawn production binary {}", workspace.binary.display()))?;
-    let base_url = format!("http://127.0.0.1:{listen_port}");
-    if let Err(error) = await_startup(&mut child, &base_url).await {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-        return Err(error.context(format!(
-            "production binary did not become ready; logs={}",
-            log_path.display()
-        )));
-    }
-    if let Some(report_id) = browser_report_id.as_ref() {
-        // The real research worker consumes the report's mandatory sampled
-        // parity job. The deterministic browser profile deliberately has no
-        // serving facts, so wait for fail-closed containment before exposing
-        // the stable, auditable report/intent state to Playwright.
-        await_sampled_parity_containment(infrastructure.postgres.connection(), report_id).await?;
-        await_browser_settlement_discovery(infrastructure.postgres.connection()).await?;
-    }
-
-    Ok(ProductionStack {
-        child,
-        base_url,
-        listen_port,
-        run_dir,
-        _upstream: upstream,
-        infrastructure,
-    })
 }
 
 async fn seed_browser_fixture(
     db: &DatabaseConnection,
-    artifact_store: &Arc<dyn ArtifactStore>,
     runtime_artifact_store: &Arc<dyn ArtifactStore>,
-) -> Result<RecommendationReportId> {
-    let infra = Box::pin(seed_demo_with_store(db, artifact_store)).await;
-    let research = Box::pin(seed_browser_research(db, runtime_artifact_store, &infra)).await?;
+    fixture: ProductionStackFixture,
+) -> Result<BrowserFixtureEvidence> {
+    let (infra, research) = match fixture {
+        ProductionStackFixture::Browser => {
+            let infra = Box::pin(seed_demo_with_store(db, runtime_artifact_store)).await;
+            let research =
+                Box::pin(seed_browser_research(db, runtime_artifact_store, &infra)).await?;
+            (infra, research)
+        }
+        ProductionStackFixture::GovernedFeedback => {
+            let governed = Box::pin(seed_feedback_serving_infra(db, runtime_artifact_store)).await;
+            let research = Box::pin(seed_governed_feedback_research(
+                db,
+                runtime_artifact_store,
+                &governed.template,
+                governed.active_model_version_id,
+            ))
+            .await?;
+            (governed.template, research)
+        }
+        ProductionStackFixture::Empty => {
+            bail!("empty production fixture cannot seed browser evidence")
+        }
+    };
     println!(
-        "browser research fixture: model_version_id={} evaluation_dataset_id={} backtest_report_id={} feedback_cycle_id={}",
+        "browser research fixture: model_version_id={} evaluation_dataset_id={} backtest_report_id={} feedback_cycle_id={} governed_cancellation_cycle_id={:?}",
         research.model_version_id,
         research.evaluation_dataset_id,
         research.backtest_report_id,
         research.feedback_cycle_id,
+        research.governed_cancellation_cycle_id,
     );
+    let governed_cancellation_cycle_id =
+        if let Some(cycle_id) = research.governed_cancellation_cycle_id {
+            ensure!(
+                fixture == ProductionStackFixture::GovernedFeedback,
+                "only GovernedFeedback may seed a governed cancellation cycle"
+            );
+            // Model a cycle already owned by another healthy worker. Its live lease
+            // makes API cancellation deterministic without weakening the terminal
+            // state machine or depending on a request-vs-worker race.
+            let claim = PgFeedbackCycleRepository::new(db.clone())
+                .claim_cycle(WorkerId::from_v7(), GOVERNED_CANCELLATION_LEASE_SECS)
+                .await?
+                .context("claim governed cancellation fixture cycle")?;
+            ensure!(
+                claim.cycle.feedback_cycle_id == cycle_id,
+                "governed cancellation fixture claimed {}, expected {}",
+                claim.cycle.feedback_cycle_id,
+                cycle_id,
+            );
+            Some(cycle_id)
+        } else {
+            ensure!(
+                fixture != ProductionStackFixture::GovernedFeedback,
+                "GovernedFeedback fixture is missing its queued cancellation cycle"
+            );
+            None
+        };
     enable_test_admission(db, "browser-e2e-fixture").await;
     let settlement_report = seed_report_on_infra(
         db,
@@ -468,9 +934,58 @@ async fn seed_browser_fixture(
     // Publish the parity-containment fixture last so the settlement report
     // cannot supersede its still-pending intent before the real worker
     // atomically revokes it.
-    let report = Box::pin(seed_report_fixture(db)).await;
+    let parity_infra = Box::pin(seed_demo_with_store(db, runtime_artifact_store)).await;
+    let report = Box::pin(seed_report_on_infra(
+        db,
+        &parity_infra,
+        ReportSeedConfig {
+            event_id: "evt-1".to_owned(),
+            market_id: "0xmarket".to_owned(),
+            market_question: "Will it?".to_owned(),
+            market_slug: "will-it".to_owned(),
+            token_id: "token-1".to_owned(),
+            trigger_key: format!("scheduled:test:{}", RecommendationReportId::from_v7()),
+        },
+    ))
+    .await;
     seed_pending_intent(db, &report).await;
-    Ok(report.report)
+    verify_browser_artifacts(db, runtime_artifact_store).await?;
+    Ok(BrowserFixtureEvidence {
+        governed_cancellation_cycle_id,
+        sampled_parity_report_id: report.report,
+    })
+}
+
+async fn verify_browser_artifacts(
+    db: &DatabaseConnection,
+    artifact_store: &Arc<dyn ArtifactStore>,
+) -> Result<()> {
+    let versions = PgModelRegistryRepository::new(db.clone())
+        .page_versions(ModelVersionListQuery {
+            page: PageRequest::new(1, PageRequest::MAX_SIZE),
+            ..ModelVersionListQuery::default()
+        })
+        .await
+        .context("list browser fixture model versions")?;
+    ensure!(
+        !versions.has_next,
+        "browser fixture exceeds the bounded model-artifact verification window"
+    );
+    ensure!(
+        !versions.items.is_empty(),
+        "browser fixture must expose at least one model version"
+    );
+    for version in &versions.items {
+        ModelArtifact::load_verified(artifact_store.as_ref(), version)
+            .await
+            .with_context(|| {
+                format!(
+                    "verify browser fixture model artifact {}",
+                    version.model_version_id
+                )
+            })?;
+    }
+    Ok(())
 }
 
 async fn await_browser_settlement_discovery(db: &DatabaseConnection) -> Result<()> {
@@ -522,42 +1037,44 @@ async fn await_sampled_parity_containment(
     }
 }
 
-fn build_production_binary() -> Result<Workspace> {
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let metadata_output = Command::new(&cargo)
-        .args(["metadata", "--format-version", "1", "--no-deps"])
-        .output()
-        .context("resolve workspace and target directories")?;
-    if !metadata_output.status.success() {
-        bail!(
-            "cargo metadata failed: {}",
-            String::from_utf8_lossy(&metadata_output.stderr).trim()
-        );
+impl Workspace {
+    fn build() -> Result<Self> {
+        let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let metadata_output = Command::new(&cargo)
+            .args(["metadata", "--format-version", "1", "--no-deps"])
+            .output()
+            .context("resolve workspace and target directories")?;
+        if !metadata_output.status.success() {
+            bail!(
+                "cargo metadata failed: {}",
+                String::from_utf8_lossy(&metadata_output.stderr).trim()
+            );
+        }
+        let metadata: CargoMetadata =
+            serde_json::from_slice(&metadata_output.stdout).context("decode cargo metadata")?;
+        let status = Command::new(cargo)
+            .args(["build", "-p", "quant-pivot-bin", "-p", "quant-pivot-xtask"])
+            .current_dir(&metadata.workspace_root)
+            .status()
+            .context("build real quant-pivot production binary with the launcher feature set")?;
+        if !status.success() {
+            bail!("production binary and launcher build failed with {status}");
+        }
+        let binary_name = if cfg!(windows) {
+            "quant-pivot.exe"
+        } else {
+            "quant-pivot"
+        };
+        let binary = metadata.target_directory.join("debug").join(binary_name);
+        if !binary.is_file() {
+            bail!("built production binary is missing: {}", binary.display());
+        }
+        Ok(Self {
+            root: metadata.workspace_root,
+            target_directory: metadata.target_directory,
+            binary,
+        })
     }
-    let metadata: CargoMetadata =
-        serde_json::from_slice(&metadata_output.stdout).context("decode cargo metadata")?;
-    let status = Command::new(cargo)
-        .args(["build", "-p", "quant-pivot-bin", "-p", "quant-pivot-xtask"])
-        .current_dir(&metadata.workspace_root)
-        .status()
-        .context("build real quant-pivot production binary with the launcher feature set")?;
-    if !status.success() {
-        bail!("production binary and launcher build failed with {status}");
-    }
-    let binary_name = if cfg!(windows) {
-        "quant-pivot.exe"
-    } else {
-        "quant-pivot"
-    };
-    let binary = metadata.target_directory.join("debug").join(binary_name);
-    if !binary.is_file() {
-        bail!("built production binary is missing: {}", binary.display());
-    }
-    Ok(Workspace {
-        root: metadata.workspace_root,
-        target_directory: metadata.target_directory,
-        binary,
-    })
 }
 
 async fn deterministic_upstream() -> MockServer {
@@ -599,6 +1116,7 @@ fn render_config(
     listen_port: u16,
     upstream: &MockServer,
     stack: &SystemStack,
+    artifact_store: &ArtifactStoreDeployConfig,
 ) -> Result<()> {
     let source_path = workspace_root.join("config/quant-pivot.toml");
     let source = fs::read_to_string(&source_path)
@@ -606,7 +1124,7 @@ fn render_config(
     let mut config: Value = toml::from_str(&source)
         .with_context(|| format!("parse canonical deploy config {}", source_path.display()))?;
     configure_upstreams(&mut config, upstream)?;
-    configure_test_identity(&mut config, run_dir)?;
+    configure_test_identity(&mut config, artifact_store)?;
     configure_infrastructure(&mut config, stack)?;
     configure_web(&mut config, listen_port)?;
 
@@ -662,18 +1180,62 @@ fn configure_upstreams(config: &mut Value, upstream: &MockServer) -> Result<()> 
     Ok(())
 }
 
-fn configure_test_identity(config: &mut Value, run_dir: &Path) -> Result<()> {
+fn configure_test_identity(
+    config: &mut Value,
+    artifact_store: &ArtifactStoreDeployConfig,
+) -> Result<()> {
     set(config, &["keys", "private_key"], PRIVATE_KEY)?;
     set(config, &["quant", "account", "funder"], FUNDER)?;
     set(
         config,
-        &["research", "artifact_store", "prefix"],
-        run_dir.join("artifacts").to_string_lossy().into_owned(),
+        &["research", "artifact_store", "kind"],
+        match artifact_store.kind {
+            ArtifactStoreKind::Local => "local",
+            ArtifactStoreKind::S3 => "s3",
+        },
     )?;
     set(
         config,
+        &["research", "artifact_store", "bucket"],
+        artifact_store.bucket.clone(),
+    )?;
+    set(
+        config,
+        &["research", "artifact_store", "prefix"],
+        artifact_store.prefix.clone(),
+    )?;
+    set(
+        config,
+        &["research", "artifact_store", "region"],
+        artifact_store.region.clone(),
+    )?;
+    set(
+        config,
+        &["research", "artifact_store", "path_style"],
+        artifact_store.path_style,
+    )?;
+    set(
+        config,
+        &["research", "artifact_store", "require_object_lock"],
+        artifact_store.require_object_lock,
+    )?;
+    set(
+        config,
+        &["research", "artifact_store", "require_versioning"],
+        artifact_store.require_versioning,
+    )?;
+    match &artifact_store.endpoint {
+        Some(endpoint) => set(
+            config,
+            &["research", "artifact_store", "endpoint"],
+            endpoint.clone(),
+        )?,
+        None => remove(config, &["research", "artifact_store", "endpoint"])?,
+    }
+    set(
+        config,
         &["research", "evidence_attestation", "signing_key"],
-        EVIDENCE_SIGNING_KEY,
+        SYSTEM_EVIDENCE_SIGNING_KEY,
     )?;
     Ok(())
 }
@@ -792,6 +1354,23 @@ where
         .as_table_mut()
         .with_context(|| format!("configuration parent is not a table: {}", parents.join(".")))?;
     table.insert((*key).to_owned(), value.into());
+    Ok(())
+}
+
+fn remove(root: &mut Value, path: &[&str]) -> Result<()> {
+    let (key, parents) = path
+        .split_last()
+        .context("configuration mutation path cannot be empty")?;
+    let mut cursor = root;
+    for parent in parents {
+        cursor = cursor
+            .get_mut(*parent)
+            .with_context(|| format!("configuration section is missing: {parent}"))?;
+    }
+    let table = cursor
+        .as_table_mut()
+        .with_context(|| format!("configuration parent is not a table: {}", parents.join(".")))?;
+    table.remove(*key);
     Ok(())
 }
 

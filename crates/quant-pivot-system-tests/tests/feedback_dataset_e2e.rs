@@ -55,8 +55,9 @@ use quant_pivot_models::{
         feature::EvidenceSourceKind,
         market::MarketStatus,
         quant::{
-            CalibrationMethod, DataQualityStatus, DatasetPurpose, DownsideSource, FeedbackStage,
-            FeedbackStageEventKind, FeedbackTriggerFamily,
+            CalibrationMethod, CohortExclusionReason, DataQualityStatus, DatasetPurpose,
+            DownsideSource, FeedbackStage, FeedbackStageEventKind, FeedbackTriggerFamily,
+            QuantRuntimeMode,
         },
     },
     hashing::CanonicalDigest,
@@ -107,10 +108,10 @@ use quant_pivot_system_tests::{
     support::{
         artifact_store::VersionedArtifactStoreFixture,
         execution_pg_seed::{
-            ExecutionTxnIds, FEEDBACK_SCALE_REPORT_COUNT, FEEDBACK_SCALE_TOTAL, ReportBuildOptions,
-            ReportSeedConfig, SharedDemoInfra, build_custom_report_transaction,
-            fixture_no_token_id, fixture_profile_ref, prepare_report_on_infra,
-            seed_demo_with_store, seed_feedback_scale,
+            ExecutionTxnIds, FEEDBACK_SCALE_PER_REPORT, FEEDBACK_SCALE_REPORT_COUNT,
+            FEEDBACK_SCALE_TOTAL, ReportBuildOptions, ReportSeedConfig, SharedDemoInfra,
+            build_custom_report_transaction, fixture_no_token_id, fixture_profile_ref,
+            prepare_report_on_infra, seed_demo_with_store, seed_feedback_scale,
         },
         model_serving_runtime::ModelServingRegistryFixture,
         report_lifecycle_seed::persist_and_publish_report,
@@ -337,6 +338,21 @@ async fn assert_signal_coverage(
             && artifact.champion_rows.len() == 2
             && artifact.champion_examples.len() == 2,
         "coverage did not freeze the two real mature champion labels"
+    );
+    let execution_exclusions = artifact.cohorts.execution_learning.exclusion_counts();
+    let report_only_count = execution_exclusions
+        .iter()
+        .find(|entry| entry.reason == CohortExclusionReason::ReportOnlyNoExecutionAuthority)
+        .map_or(0, |entry| entry.count);
+    let not_attempted_count = execution_exclusions
+        .iter()
+        .find(|entry| entry.reason == CohortExclusionReason::ExecutionNotAttempted)
+        .map_or(0, |entry| entry.count);
+    ensure!(
+        artifact.cohorts.execution_learning.eligible_count() == 0
+            && report_only_count == FEEDBACK_SCALE_PER_REPORT as u64
+            && not_attempted_count == (FEEDBACK_SCALE_TOTAL - FEEDBACK_SCALE_PER_REPORT) as u64,
+        "ReportOnly recommendations entered ExecutionLearning or lost their exact exclusion reason"
     );
     let after = parity
         .current_state()
@@ -588,7 +604,10 @@ async fn seed_feedback_report(
         trigger_key: format!("feedback-dataset:{ordinal}"),
     };
     let ids = prepare_report_on_infra(db, infra, &config).await;
-    let options = ReportBuildOptions::published_single(&ids);
+    let mut options = ReportBuildOptions::published_single(&ids);
+    if ordinal == 0 {
+        options.runtime_mode = QuantRuntimeMode::ReportOnly;
+    }
     let recommendation = options
         .recommendations
         .first()

@@ -36,9 +36,14 @@
 > 连续 24 小时 ReportOnly shadow 阻断；
 > **11.8 已完成（含 2026-07-16 P0 收尾复核）**：ReportRun / Prepared→Published、
 > PG durable scheduler、scope current、supersession execution cascade、censored attribution 与
-> operator workflow 的唯一验收真相见 11.8；**11.9 的 Crypto/Weather Vertical Data Closure 已于
-> 2026-07-18 完成，canonical v4 evidence=`blake3:488a22188f2fae8c6663175e8f6ad0b6a1f77c2bd986fcdb95567fb386e715a3`；
-> Feedback/Published profile/UI/WS 等后续范围按用户指令 PAUSED，故 11.9 本身尚未完成**；
+> operator workflow 的唯一验收真相见 11.8；**11.9 Implementation Closure 已完成**：包含
+> Crypto/Weather source、PIT、outcome/cohort、FeedbackCycle、PromotionPermit、category route、
+> protected REST/WS/UI 与两套 fresh production-stack、两轮 protected Chromium、288/288 人工像素证据。
+> **11.9 Operational Activation 未完成且未被宣称完成**：当前目标 PostgreSQL bootstrap identity
+> 不匹配、ClickHouse database/schema 不可用；Crypto v2 profile 仍为 `ResearchOnly` 且 19/19
+> current gates blocked；Weather 八个 family 均为 `MatureLabelsUnavailable`，其中七个 parser gate
+> 在每族达到 500 个真实成熟标签后仍需重验；不存在真实资金、Published current route 或
+> 24h/多日 shadow 完成声明。唯一逐项进度与证据真相见 11.9 Implementation Ledger；
 > 11.0/11.2.1/11.3/11.7.2/11.10–11.11 其余工作仍在设计、实施或部分落地阶段。
 >
 > 父文档（概念真理）：
@@ -134,7 +139,7 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.7.1 | Composable Entry Conditions + Crypto/Weather Events | typed AST + PIT facts/events + Recommendation shadow + vertical gates — **实施中** | — | [11.7.1](11.7.1-composable-entry-event-triggers.md) |
 | 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility baseline + cash-budget + PIT fee + purged CPCV/uniqueness/DSR/PBO/ESS，交付至 ReportOnly shadow — **仓库契约已闭环：Weather/structural producers、56/21 CPCV、2× latency、Evidence v3、独立 Validate、分页 drilldown 与 fact outbox 已接通；物理迁移/真实数据验收与 24h shadow 待目标环境完成；真实 canary 已移交 11.11** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
 | 11.8 | Report Lifecycle, Durable Scheduling & Operator Workflow | **已完成（含 P0 收尾复核）**：CH decision-fact、delivery claim-loss 与 censor accounting 闭环；历史版本已被 boot 基线取代 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
-| 11.9 | Crypto / Weather Verticals, Attribution Feedback & Auto-Retraining | 双垂直真实数据与 serving、研究反馈闭环、model+factor 原子晋升、WS/UI 实时验收 — **Vertical Data Closure 已完成；其余 PAUSED；Phase 尚未完成；唯一进度真相见 11.9 Implementation Ledger** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
+| 11.9 | Crypto / Weather Verticals, Attribution Feedback & Auto-Retraining | 双垂直 source/PIT、研究反馈、model+factor 原子晋升、REST/WS/UI 与 production-stack 验收 — **Implementation Closure 已完成；Operational Activation 因 current PG/CH、eligible profile、成熟标签与 shadow 证据 blocked；唯一进度真相见 11.9 Implementation Ledger** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 11.10 | Counterfactual Factor Attribution | 反事实归因 + MAE 回填 | 20 | [11.10](11.10-counterfactual-factor-attribution.md) |
 | 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
 
@@ -209,8 +214,9 @@ flowchart TD
   的垂直闭环设计(确定性优先 linkage 取代 LLM 优先;`ResolutionOracle` + basis 取代"特征源=结算源=Binance")。
   11.2.1 **提前**落地 11.3 的 `FavoriteLongshotBiasTable`(favorite-longshot 因子所需),11.3 正式落地时统一收敛
   治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。11.2.1/11.2.2 的历史版本波次已被
-  boot baseline 取代，但两层向量等业务决策保留。11.9 已完成双垂直数据闭环，反馈/serving/UI
-  后续范围 PAUSED；完整字段、测试和逐项状态只见
+  boot baseline 取代，但两层向量等业务决策保留。11.9 的 source/PIT、反馈、serving、REST/WS/UI
+  与工程验收已完成 Implementation Closure；Crypto/Weather Operational Activation 仍由 current PG/CH
+  truth、activation-eligible profile、真实成熟标签及 24h/多日 shadow 阻断。完整字段、测试和逐项状态只见
   [11.9 Implementation Ledger](11.9-attribution-feedback-and-auto-retraining.md#11-implementation-ledger)。
   Tier 2 LLM linkage 若在首次部署前落地，直接修改 boot contract 并 fresh-install 验证；首次部署后必须正式
   bump 和 migration，任何状态都不得静默改写既有 persisted artifact。

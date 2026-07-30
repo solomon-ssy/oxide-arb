@@ -1,6 +1,7 @@
 //! F06/F09/F10-to-F11 contracts against real `PostgreSQL` and object storage.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     slice,
     sync::{
         Arc, Mutex,
@@ -43,11 +44,11 @@ use quant_pivot_models::{
         },
         quant::{
             CommitModelRoutePromotion, FeedbackCohortWindow, FeedbackCycleInfo,
-            FeedbackStageEventInput, FeedbackStageJobIdentity, IssuePromotionPermit,
-            NewFeedbackStageEvent, NewResearchJob, NoopProgressSink, PromoteModelRoute,
-            PromotionPermitActor, PromotionPermitInfo, PromotionPolicyProjection,
-            PromotionPreflight, ResearchJobArtifactRef, ResearchJobFinalization, ResearchJobInfo,
-            ResearchJobResultRef, RevokePromotionPermit,
+            FeedbackStageEventInfo, FeedbackStageEventInput, FeedbackStageJobIdentity,
+            IssuePromotionPermit, NewFeedbackStageEvent, NewResearchJob, NoopProgressSink,
+            PromoteModelRoute, PromotionPermitActor, PromotionPermitInfo, PromotionPermitStatus,
+            PromotionPolicyProjection, PromotionPreflight, ResearchJobArtifactRef,
+            ResearchJobFinalization, ResearchJobInfo, ResearchJobResultRef, RevokePromotionPermit,
         },
     },
     entities::{
@@ -60,10 +61,19 @@ use quant_pivot_models::{
         policy_activation_guard::Entity as ActivationGuardEntity,
         policy_approval::Entity as ApprovalEntity,
         policy_revision::Entity as RevisionEntity,
+        quant_capital_allocation::{
+            Column as CapitalAllocationColumn, Entity as CapitalAllocationEntity,
+        },
+        quant_feature_parity_run::Entity as ParityRunEntity,
+        quant_feature_parity_state::Entity as ParityStateEntity,
         quant_feedback_cycle::{Entity as CycleEntity, Model as CycleModel},
+        quant_feedback_event_outbox::Entity as FeedbackOutboxEntity,
         quant_feedback_promotion_permit::Entity as PermitEntity,
+        quant_feedback_stage_event::Entity as StageEventEntity,
         quant_model_governance_audit::Entity as ModelAuditEntity,
         quant_model_version::{Entity as ModelVersionEntity, Model as ModelVersionModel},
+        quant_research_job::Entity as ResearchJobEntity,
+        quant_shadow_comparison::Entity as ShadowComparisonEntity,
         user::{Column as UserColumn, Entity as UserEntity},
     },
     enums::{
@@ -75,14 +85,15 @@ use quant_pivot_models::{
         },
         runtime_config::PolicyActivationKind,
     },
+    hashing::CanonicalDigest,
     runtime_config::{
         ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, PolicyApplyDegradedCause,
         PolicyApplyReadiness, PolicyBundleIdentity,
     },
     types::{
         ArtifactUri, ContentHash, FeatureValue, FeedbackCoverageArtifactId, FeedbackCycleId,
-        FeedbackDriftArtifactId, ModelVersionId, PolicyIdempotencyKey, PromotionPermitId,
-        ResearchJobId, ResearchJobParams, RoleCode, TrainingDatasetId, WorkerId,
+        FeedbackDecisionArtifactId, FeedbackDriftArtifactId, ModelVersionId, PolicyIdempotencyKey,
+        PromotionPermitId, ResearchJobId, ResearchJobParams, RoleCode, TrainingDatasetId, WorkerId,
         stable_name::FeatureName,
     },
 };
@@ -117,14 +128,24 @@ use quant_pivot_system_tests::{
         artifact_store::ReadTamperArtifactStoreFixture, model_serving_fixtures::ModelVersionFixture,
     },
 };
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QuerySelect, TransactionTrait,
+    QueryOrder, QuerySelect, TransactionTrait,
 };
+use serde::Serialize;
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{
     feedback_boot_schema::content_hash,
+    feedback_decision_evidence::{
+        DecisionArtifactEvidence, DecisionPath, DecisionPathEvidence, DecisionPathEvidenceManifest,
+        DeploymentAuthorityBoundary, ExactDecisionIdentifiers, InvariantDiff, InvariantSnapshot,
+        PermitBindingEvidence, PermitEvidence, PermitLifecycleEvidence, ReplayEvidence,
+        RestartReadBackEvidence, RowCountSnapshot, TimelineEventEvidence,
+    },
     feedback_shadow_stage::{
         ActivatedServing, ArtifactRoot, ShadowModels, activate_crypto_generation,
         activate_generation, build_crypto_models, build_models, comparison_params,
@@ -134,6 +155,346 @@ use super::{
 };
 
 const JOB_LEASE_SECS: i64 = 90;
+
+const PROMOTION_REPOSITORY_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../quant-pivot-repository/src/postgres/quant/model_route_promotion.rs"
+));
+const PROMOTION_SERVICE_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../quant-pivot-core/src/service/model_route_promotion.rs"
+));
+
+fn wire_value<T: Serialize>(value: &T) -> Value {
+    serde_json::to_value(value).expect("serialize W4-E04 evidence value")
+}
+
+fn wire_name<T: Serialize>(value: &T) -> String {
+    wire_value(value)
+        .as_str()
+        .expect("W4-E04 enum serializes as a string")
+        .to_owned()
+}
+
+const fn route_name(route: BuyModelRoute) -> &'static str {
+    match route {
+        BuyModelRoute::Pooled => "pooled",
+        BuyModelRoute::Crypto => "crypto",
+        BuyModelRoute::Weather => "weather",
+    }
+}
+
+fn policy_identity_value(identity: PolicyBundleIdentity) -> Value {
+    json!({
+        "generation": identity.generation,
+        "decision_policy_snapshot_id": identity.decision_policy_snapshot_id,
+        "snapshot_hash": identity.snapshot_hash,
+    })
+}
+
+fn readiness_value(readiness: PolicyApplyReadiness) -> Value {
+    match readiness {
+        PolicyApplyReadiness::Ready { applied } => json!({
+            "status": "ready",
+            "applied": policy_identity_value(applied),
+        }),
+        PolicyApplyReadiness::Degraded {
+            desired,
+            applied,
+            cause,
+        } => json!({
+            "status": "degraded",
+            "desired": policy_identity_value(desired),
+            "applied": policy_identity_value(applied),
+            "cause": cause.to_string(),
+        }),
+    }
+}
+
+fn serving_route_value(identity: &PublishedShadowRouteIdentity) -> Value {
+    json!({
+        "route": route_name(identity.route),
+        "category_scope": identity.category_scope,
+        "research_profile_artifact_id": identity.research_profile_artifact_id,
+        "decision_policy_snapshot_id": identity.decision_policy_snapshot_id,
+        "decision_policy_snapshot_hash": identity.decision_policy_snapshot_hash,
+        "policy_bundle_generation": identity.policy_bundle_generation,
+        "active_model_version_id": identity.active_model_version_id,
+        "active_serving_contract_hash": identity.active_serving_contract_hash,
+        "shadow_model_version_id": identity.shadow_model_version_id,
+        "shadow_serving_contract_hash": identity.shadow_serving_contract_hash,
+        "minimum_topn_overlap": identity.minimum_topn_overlap,
+        "required_shadow_window_secs": identity.required_shadow_window_secs,
+    })
+}
+
+fn assert_authority_boundary() {
+    for forbidden in [
+        "DeployConfig",
+        "KeysConfig",
+        "private_key",
+        "funder",
+        "order_client",
+        "signer",
+        "capital_allocation",
+    ] {
+        assert!(
+            !PROMOTION_REPOSITORY_SOURCE.contains(forbidden),
+            "promotion repository unexpectedly reaches deployment authority token {forbidden}"
+        );
+        assert!(
+            !PROMOTION_SERVICE_SOURCE.contains(forbidden),
+            "promotion service unexpectedly reaches deployment authority token {forbidden}"
+        );
+    }
+}
+
+#[derive(Clone)]
+struct InvariantProbe {
+    db: DatabaseConnection,
+    cycle_id: FeedbackCycleId,
+    champion_model_version_id: ModelVersionId,
+    candidate_model_version_id: ModelVersionId,
+    route: BuyModelRoute,
+    serving_generations: Arc<ModelServingGenerationStore>,
+    policy_apply: Option<Arc<CommittedPolicyApplicator>>,
+}
+
+impl InvariantProbe {
+    async fn load(&self) -> InvariantSnapshot {
+        let cycles = PgFeedbackCycleRepository::new(self.db.clone());
+        let policies = PgPolicyRepository::new(self.db.clone());
+        let runtime = PgRuntimeControlRepository::new(self.db.clone());
+        let models = PgModelRegistryRepository::new(self.db.clone());
+        let parity = PgFeatureParityRepository::new(self.db.clone());
+        let cycle = cycles
+            .find_cycle(&self.cycle_id)
+            .await
+            .expect("load W4-E04 invariant cycle")
+            .expect("W4-E04 invariant cycle exists");
+        let policy_bundle = policies
+            .load_current_bundle()
+            .await
+            .expect("load W4-E04 invariant policy")
+            .expect("W4-E04 invariant policy exists");
+        let runtime_control = runtime.load().await.expect("load W4-E04 invariant runtime");
+        let champion_model = models
+            .find_model_version(&self.champion_model_version_id)
+            .await
+            .expect("load W4-E04 invariant champion")
+            .expect("W4-E04 invariant champion exists");
+        let candidate_model = models
+            .find_model_version(&self.candidate_model_version_id)
+            .await
+            .expect("load W4-E04 invariant candidate")
+            .expect("W4-E04 invariant candidate exists");
+        let parity_latch = parity
+            .current_state()
+            .await
+            .expect("load W4-E04 invariant parity latch");
+        let capital_allocations = CapitalAllocationEntity::find()
+            .order_by_asc(CapitalAllocationColumn::CapitalAllocationId)
+            .all(&self.db)
+            .await
+            .expect("load W4-E04 invariant capital allocations")
+            .into_iter()
+            .map(|allocation| {
+                json!({
+                    "capital_allocation_id": allocation.capital_allocation_id,
+                    "order_intent_id": allocation.order_intent_id,
+                    "recommendation_id": allocation.recommendation_id,
+                    "state": allocation.state,
+                    "planned_usd": allocation.planned_usd,
+                    "allocated_usd": allocation.allocated_usd,
+                    "locked_usd": allocation.locked_usd,
+                    "spent_usd": allocation.spent_usd,
+                    "released_usd": allocation.released_usd,
+                    "reason": allocation.reason,
+                    "created_at": allocation.created_at,
+                    "updated_at": allocation.updated_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        let route = self
+            .serving_generations
+            .current_route(self.route)
+            .expect("load W4-E04 in-memory serving route")
+            .published_shadow_identity()
+            .expect("W4-E04 in-memory route is complete");
+        let policy_apply_readiness = self
+            .policy_apply
+            .as_ref()
+            .map_or(Value::Null, |apply| readiness_value(apply.readiness()));
+        InvariantSnapshot {
+            cycle: wire_value(&cycle),
+            policy_bundle: wire_value(&policy_bundle),
+            runtime_control: wire_value(&runtime_control),
+            model_routes: wire_value(&policy_bundle.snapshot.model_routing),
+            capital_allocations: Value::Array(capital_allocations),
+            champion_model: wire_value(&champion_model),
+            candidate_model: wire_value(&candidate_model),
+            parity_latch: wire_value(&parity_latch),
+            in_memory_serving_route: serving_route_value(&route),
+            policy_apply_readiness,
+            deployment_authority: DeploymentAuthorityBoundary::default(),
+        }
+    }
+}
+
+async fn load_evidence_counts(db: &DatabaseConnection) -> RowCountSnapshot {
+    let rows = BTreeMap::from([
+        (
+            "decision_policy_snapshot".to_owned(),
+            SnapshotEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 policy snapshots"),
+        ),
+        (
+            "policy_activation".to_owned(),
+            ActivationEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 policy activations"),
+        ),
+        (
+            "policy_activation_audit".to_owned(),
+            ActivationAuditEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 policy activation audits"),
+        ),
+        (
+            "policy_activation_event_outbox".to_owned(),
+            ActivationOutboxEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 policy activation outbox"),
+        ),
+        (
+            "policy_approval".to_owned(),
+            ApprovalEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 policy approvals"),
+        ),
+        (
+            "policy_revision".to_owned(),
+            RevisionEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 policy revisions"),
+        ),
+        (
+            "quant_capital_allocation".to_owned(),
+            CapitalAllocationEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 capital allocations"),
+        ),
+        (
+            "quant_feature_parity_run".to_owned(),
+            ParityRunEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 parity runs"),
+        ),
+        (
+            "quant_feature_parity_state".to_owned(),
+            ParityStateEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 parity states"),
+        ),
+        (
+            "quant_feedback_cycle".to_owned(),
+            CycleEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 cycles"),
+        ),
+        (
+            "quant_feedback_event_outbox".to_owned(),
+            FeedbackOutboxEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 feedback outbox"),
+        ),
+        (
+            "quant_feedback_promotion_permit".to_owned(),
+            PermitEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 permits"),
+        ),
+        (
+            "quant_feedback_stage_event".to_owned(),
+            StageEventEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 stage events"),
+        ),
+        (
+            "quant_model_governance_audit".to_owned(),
+            ModelAuditEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 model audits"),
+        ),
+        (
+            "quant_model_version".to_owned(),
+            ModelVersionEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 model versions"),
+        ),
+        (
+            "quant_research_job".to_owned(),
+            ResearchJobEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 research jobs"),
+        ),
+        (
+            "quant_shadow_comparison".to_owned(),
+            ShadowComparisonEntity::find()
+                .count(db)
+                .await
+                .expect("count W4-E04 shadow comparisons"),
+        ),
+    ]);
+    RowCountSnapshot { rows }
+}
+
+fn timeline_evidence(events: Vec<FeedbackStageEventInfo>) -> Vec<TimelineEventEvidence> {
+    events
+        .into_iter()
+        .map(|event| TimelineEventEvidence {
+            sequence: event.event_sequence,
+            stage: wire_name(&event.stage),
+            event_kind: wire_name(&event.event_kind),
+            research_job_id: event.research_job_id.map(|id| id.to_string()),
+            actor: event.actor,
+            reason_code: event.reason_code,
+            evidence_uri: event.evidence_uri.map(|uri| uri.to_string()),
+            evidence_hash: event.evidence_hash.map(|hash| hash.to_string()),
+            event_hash: event.event_hash.to_string(),
+        })
+        .collect()
+}
+
+fn assert_protected_unchanged(
+    invariant_diff: &InvariantDiff,
+    path_name: &str,
+    protected_paths: &[&str],
+) {
+    for protected_path in protected_paths {
+        assert!(
+            !invariant_diff.any_below(protected_path),
+            "{path_name} path changed protected invariant {protected_path}"
+        );
+    }
+}
 
 struct AdvancingDriftSeed<'a> {
     cycle: &'a FeedbackCycleInfo,
@@ -436,7 +797,10 @@ async fn record_shadow(
 
 struct DecisionCompletion {
     identity: FeedbackStageJobIdentity,
+    artifact_id: FeedbackDecisionArtifactId,
     artifact: ResearchJobArtifactRef,
+    semantic_hash: ContentHash,
+    job_input_hash: ContentHash,
     info: ResearchJobInfo,
     success: FeedbackStageSuccess,
 }
@@ -467,6 +831,9 @@ async fn execute_decision(
         ResearchJobParams::FeedbackDecision(params) => params.as_ref().clone(),
         _ => panic!("F11 Decision stage emitted another kind"),
     };
+    let job_input_hash = decision_params
+        .input_hash()
+        .expect("hash exact F11 Decision input");
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     let cancelled_result = FeedbackDecisionExecutionService::new(FeedbackDecisionExecutionDeps {
@@ -545,7 +912,10 @@ async fn execute_decision(
     assert_eq!(terminal.reason_code(), expected_reason);
     DecisionCompletion {
         identity: decision_identity,
+        artifact_id: decision_artifact.artifact_id(),
         artifact: decision_result.artifact,
+        semantic_hash: decision_artifact.artifact_hash(),
+        job_input_hash,
         info: decision_info,
         success: first,
     }
@@ -619,70 +989,427 @@ async fn finalize_decision(
     assert_eq!(completed.decision, expected_decision);
 }
 
-pub async fn terminal_restart_tamper() {
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    let artifact_root = ArtifactRoot::create();
-    let store: Arc<dyn ArtifactStore> =
-        Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
-    let models = Box::pin(build_models(&db, &store)).await;
-    let generations = activate_generation(&db, &store, &models).await;
-    let route_before = generations
-        .current_route(BuyModelRoute::Pooled)
-        .expect("F11 route before")
-        .published_shadow_identity()
-        .expect("F11 published identity before");
-    let (schema, claim) = record_cycle(&db, &models).await;
-    let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
-    let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
-    record_drift(
-        cycles.as_ref(),
-        jobs.as_ref(),
-        &store,
-        &claim.cycle,
-        claim.lease,
-    )
-    .await;
-    let comparison = comparison_params(&db, &schema, &claim, &models).await;
-    record_comparison(&db, &store, &claim, comparison, 3).await;
-    insert_observation(&db, cycles.as_ref(), &generations).await;
-    Box::pin(record_shadow(
-        &db,
-        &store,
-        &generations,
-        &cycles,
-        &jobs,
-        &claim,
-    ))
-    .await;
-    let completion = Box::pin(execute_decision(
-        &store,
-        &cycles,
-        &jobs,
-        &claim,
-        FeedbackDecision::NoAction,
-        "feedback_shadow_insufficient_observations",
-    ))
-    .await;
-    assert_tamper(&store, &cycles, &jobs, &claim.cycle, &completion).await;
-    finalize_decision(cycles.as_ref(), &claim, &completion).await;
-    assert_eq!(
-        generations
-            .current_route(BuyModelRoute::Pooled)
-            .expect("F11 route after")
-            .published_shadow_identity()
-            .expect("F11 published identity after"),
-        route_before
-    );
-    assert_eq!(
-        PgModelRegistryRepository::new(db)
-            .find_model_version(&models.candidate.model_version_id)
+fn decision_artifact_evidence(
+    completion: &DecisionCompletion,
+    models: &ShadowModels,
+    decision_job_input_hash: Option<ContentHash>,
+) -> DecisionArtifactEvidence {
+    DecisionArtifactEvidence {
+        artifact_id: completion.artifact_id.to_string(),
+        uri: completion.artifact.uri.to_string(),
+        bytes_hash: completion.artifact.content_hash.to_string(),
+        semantic_hash: completion.semantic_hash.to_string(),
+        decision_job_input_hash: decision_job_input_hash.map(|hash| hash.to_string()),
+        champion_serving_contract_hash: models.champion.serving_contract_hash.to_string(),
+        candidate_serving_contract_hash: models.candidate.serving_contract_hash.to_string(),
+    }
+}
+
+struct ExactIdInput<'a> {
+    cycle: &'a FeedbackCycleInfo,
+    models: &'a ShadowModels,
+    policy_before: &'a ActivePolicyBundle,
+    policy_after: &'a ActivePolicyBundle,
+    permit: Option<&'a PromotionPermitInfo>,
+    policy_activation_id: Option<String>,
+    promotion_transaction_hash: Option<ContentHash>,
+    route: BuyModelRoute,
+}
+
+fn exact_identifiers(input: ExactIdInput<'_>) -> ExactDecisionIdentifiers {
+    let before_model = &input.policy_before.snapshot.model_routing.model;
+    let after_model = &input.policy_after.snapshot.model_routing.model;
+    ExactDecisionIdentifiers {
+        feedback_cycle_id: input.cycle.feedback_cycle_id.to_string(),
+        research_profile_artifact_id: input.cycle.research_profile_artifact_id.to_string(),
+        profile_hash: input.cycle.profile_hash.to_string(),
+        champion_model_version_id: input.models.champion.model_version_id.to_string(),
+        champion_model_spec_id: input.models.champion.model_spec_id.to_string(),
+        champion_training_dataset_id: input
+            .models
+            .champion
+            .training_dataset_id
+            .map(|id| id.to_string()),
+        candidate_model_version_id: input.models.candidate.model_version_id.to_string(),
+        candidate_model_spec_id: input.models.candidate.model_spec_id.to_string(),
+        candidate_training_dataset_id: input
+            .models
+            .candidate
+            .training_dataset_id
+            .map(|id| id.to_string()),
+        policy_generation_before: input.policy_before.generation.to_string(),
+        policy_generation_after: input.policy_after.generation.to_string(),
+        policy_snapshot_id_before: input.policy_before.decision_policy_snapshot_id.to_string(),
+        policy_snapshot_id_after: input.policy_after.decision_policy_snapshot_id.to_string(),
+        model_routing_revision_before: input
+            .policy_before
+            .revision_vector
+            .model_routing
+            .map(|id| id.to_string()),
+        model_routing_revision_after: input
+            .policy_after
+            .revision_vector
+            .model_routing
+            .map(|id| id.to_string()),
+        promotion_permit_id: input
+            .permit
+            .map(|permit| permit.promotion_permit_id.to_string()),
+        policy_activation_id: input.policy_activation_id,
+        promotion_transaction_hash: input
+            .promotion_transaction_hash
+            .map(|hash| hash.to_string()),
+        target_category: input.route.category().map(|category| wire_name(&category)),
+        route_pointer_before: before_model
+            .active_pointer(input.route)
+            .ok()
+            .map(|pointer| pointer.id().to_string()),
+        route_pointer_after: after_model
+            .active_pointer(input.route)
+            .ok()
+            .map(|pointer| pointer.id().to_string()),
+        global_shadow_before: before_model
+            .shadow_model_version_id
+            .as_ref()
+            .map(|pointer| pointer.id().to_string()),
+        global_shadow_after: after_model
+            .shadow_model_version_id
+            .as_ref()
+            .map(|pointer| pointer.id().to_string()),
+    }
+}
+
+struct RestartProbe<'a> {
+    invariant: InvariantProbe,
+    artifacts: Arc<dyn ArtifactStore>,
+    completion: &'a DecisionCompletion,
+    expected_after: &'a InvariantSnapshot,
+    expected_timeline: &'a [TimelineEventEvidence],
+    expected_permit: Option<&'a PromotionPermitInfo>,
+    expected_transaction_hash: Option<ContentHash>,
+}
+
+impl RestartProbe<'_> {
+    async fn verify(self) -> RestartReadBackEvidence {
+        let cycles = Arc::new(PgFeedbackCycleRepository::new(self.invariant.db.clone()));
+        let jobs = Arc::new(PgResearchJobRepository::new(self.invariant.db.clone()));
+        let cycle = cycles
+            .find_cycle(&self.invariant.cycle_id)
             .await
-            .expect("read F11 candidate")
-            .expect("F11 candidate exists")
-            .publication_status,
-        PublicationStatus::Candidate
-    );
+            .expect("restart read W4-E04 cycle")
+            .expect("restart W4-E04 cycle exists");
+        let job = jobs
+            .find_by_id(&self.completion.identity.job_id())
+            .await
+            .expect("restart read W4-E04 Decision job")
+            .expect("restart W4-E04 Decision job exists");
+        let stage = FeedbackDecisionStageAdapter::try_new(FeedbackDecisionStageDeps {
+            cycles: Arc::clone(&cycles) as Arc<dyn FeedbackCycleRepository>,
+            jobs: Arc::clone(&jobs) as Arc<dyn ResearchJobRepository>,
+            artifacts: Arc::clone(&self.artifacts),
+            max_recovery_attempts: 3,
+        })
+        .expect("build fresh W4-E04 Decision stage adapter");
+        let success = stage
+            .succeeded_decision(&cycle, &job)
+            .await
+            .expect("restart verify W4-E04 Decision artifact");
+        assert_eq!(success, self.completion.success);
+
+        let timeline = timeline_evidence(
+            cycles
+                .list_stage_events(&self.invariant.cycle_id)
+                .await
+                .expect("restart read W4-E04 WORM timeline"),
+        );
+        let after = self.invariant.load().await;
+        let permit = if let Some(expected) = self.expected_permit {
+            let loaded = PgPromotionPermitRepository::new(self.invariant.db.clone())
+                .load(&expected.promotion_permit_id)
+                .await
+                .expect("restart read W4-E04 permit");
+            assert_eq!(&loaded, expected);
+            Some(loaded)
+        } else {
+            None
+        };
+        let committed = if let Some(expected_permit) = self.expected_permit {
+            PgModelRoutePromotionRepository::new(self.invariant.db.clone())
+                .find_committed(
+                    &expected_permit.promotion_permit_id,
+                    &self.invariant.cycle_id,
+                )
+                .await
+                .expect("restart read W4-E04 promotion")
+        } else {
+            None
+        };
+        let committed_hash = committed.as_ref().map(|commit| commit.transaction_hash);
+        assert_eq!(committed_hash, self.expected_transaction_hash);
+
+        let after_value = wire_value(&after);
+        let expected_after_value = wire_value(self.expected_after);
+        let exact_match = after_value == expected_after_value
+            && timeline == self.expected_timeline
+            && wire_value(&job) == wire_value(&self.completion.info);
+        assert!(
+            exact_match,
+            "fresh W4-E04 owners read a different durable graph"
+        );
+        let read_back = json!({
+            "invariant": after_value,
+            "timeline": timeline,
+            "decision_job": job,
+            "permit": permit,
+            "promotion_transaction_hash": committed_hash,
+        });
+        let canonical_read_back_hash = CanonicalDigest::content_hash_typed(
+            "quant-pivot:w4-e04:restart-read-back",
+            1,
+            &read_back,
+        )
+        .expect("hash W4-E04 restart read-back");
+        RestartReadBackEvidence {
+            fresh_repository_owners: true,
+            fresh_stage_adapter: true,
+            exact_match,
+            canonical_read_back_hash: canonical_read_back_hash.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TerminalDecisionCase {
+    InsufficientShadow,
+    RejectedComparison,
+}
+
+struct TerminalEvidenceInput<'a> {
+    claim: &'a FeedbackCycleClaim,
+    models: &'a ShadowModels,
+    policy_before: &'a ActivePolicyBundle,
+    policy_after: &'a ActivePolicyBundle,
+    completion: &'a DecisionCompletion,
+    timeline: Vec<TimelineEventEvidence>,
+    before: InvariantSnapshot,
+    after: InvariantSnapshot,
+    counts_before: RowCountSnapshot,
+    counts_after_first: RowCountSnapshot,
+    counts_after_exact_replay: RowCountSnapshot,
+    restart_read_back: RestartReadBackEvidence,
+}
+
+impl TerminalDecisionCase {
+    const fn contract(self) -> (FeedbackDecision, &'static str, DecisionPath) {
+        match self {
+            Self::InsufficientShadow => (
+                FeedbackDecision::NoAction,
+                "feedback_shadow_insufficient_observations",
+                DecisionPath::NoAction,
+            ),
+            Self::RejectedComparison => (
+                FeedbackDecision::ChallengerRejected,
+                "feedback_all_candidates_rejected",
+                DecisionPath::ChallengerRejected,
+            ),
+        }
+    }
+
+    fn evidence(self, input: TerminalEvidenceInput<'_>) -> DecisionPathEvidence {
+        let (expected_decision, expected_reason, path) = self.contract();
+        let invariant_diff = InvariantDiff::between(&input.before, &input.after);
+        assert_protected_unchanged(
+            &invariant_diff,
+            "terminal",
+            &[
+                "$.policy_bundle",
+                "$.runtime_control",
+                "$.model_routes",
+                "$.capital_allocations",
+                "$.champion_model",
+                "$.candidate_model",
+                "$.parity_latch",
+                "$.in_memory_serving_route",
+                "$.policy_apply_readiness",
+                "$.deployment_authority",
+            ],
+        );
+        assert!(invariant_diff.any_below("$.cycle"));
+        let evidence = DecisionPathEvidence {
+            path,
+            decision: wire_name(&expected_decision),
+            decision_reason: expected_reason.to_owned(),
+            exact_ids: exact_identifiers(ExactIdInput {
+                cycle: &input.claim.cycle,
+                models: input.models,
+                policy_before: input.policy_before,
+                policy_after: input.policy_after,
+                permit: None,
+                policy_activation_id: None,
+                promotion_transaction_hash: None,
+                route: BuyModelRoute::Pooled,
+            }),
+            decision_artifact: decision_artifact_evidence(
+                input.completion,
+                input.models,
+                Some(input.completion.job_input_hash),
+            ),
+            permit: None,
+            worm_timeline: input.timeline,
+            before: input.before,
+            after: input.after,
+            invariant_diff,
+            replay: ReplayEvidence::new(
+                format!("committed:{}", wire_name(&expected_decision)),
+                "exact_artifact_read_replay",
+                input.counts_before,
+                input.counts_after_first,
+                input.counts_after_exact_replay,
+            ),
+            restart_read_back: input.restart_read_back,
+            fault_injection_rollback_verified: false,
+        };
+        evidence.validate();
+        evidence
+    }
+
+    async fn run(self) -> DecisionPathEvidence {
+        assert_authority_boundary();
+        let (pool, _container) = setup_pg().await;
+        let db = pool.connection().clone();
+        let artifact_root = ArtifactRoot::create();
+        let store: Arc<dyn ArtifactStore> =
+            Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+        let models = Box::pin(build_models(&db, &store)).await;
+        let generations = activate_generation(&db, &store, &models).await;
+        let route_before = generations
+            .current_route(BuyModelRoute::Pooled)
+            .expect("F11 route before")
+            .published_shadow_identity()
+            .expect("F11 published identity before");
+        let (schema, claim) = record_cycle(&db, &models).await;
+        let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
+        let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
+        record_drift(
+            cycles.as_ref(),
+            jobs.as_ref(),
+            &store,
+            &claim.cycle,
+            claim.lease,
+        )
+        .await;
+        let comparison = comparison_params(&db, &schema, &claim, &models).await;
+        let candidate_return_bps = match self {
+            Self::InsufficientShadow => dec!(100),
+            Self::RejectedComparison => Decimal::ZERO,
+        };
+        record_comparison(&db, &store, &claim, comparison, candidate_return_bps, 3).await;
+        if matches!(self, Self::InsufficientShadow) {
+            insert_observation(&db, cycles.as_ref(), &generations).await;
+        }
+        Box::pin(record_shadow(
+            &db,
+            &store,
+            &generations,
+            &cycles,
+            &jobs,
+            &claim,
+        ))
+        .await;
+        let policy_repository = PgPolicyRepository::new(db.clone());
+        let policy_before = policy_repository
+            .load_current_bundle()
+            .await
+            .expect("load W4-E04 terminal policy before")
+            .expect("W4-E04 terminal policy exists");
+        let probe = InvariantProbe {
+            db: db.clone(),
+            cycle_id: claim.cycle.feedback_cycle_id,
+            champion_model_version_id: models.champion.model_version_id,
+            candidate_model_version_id: models.candidate.model_version_id,
+            route: BuyModelRoute::Pooled,
+            serving_generations: Arc::clone(&generations),
+            policy_apply: None,
+        };
+        let before = probe.load().await;
+        let counts_before = load_evidence_counts(&db).await;
+        let (expected_decision, expected_reason, _) = self.contract();
+        let completion = Box::pin(execute_decision(
+            &store,
+            &cycles,
+            &jobs,
+            &claim,
+            expected_decision,
+            expected_reason,
+        ))
+        .await;
+        assert_tamper(&store, &cycles, &jobs, &claim.cycle, &completion).await;
+        finalize_decision(cycles.as_ref(), &claim, &completion).await;
+        let policy_after = policy_repository
+            .load_current_bundle()
+            .await
+            .expect("load W4-E04 terminal policy after")
+            .expect("W4-E04 terminal policy remains");
+        let after = probe.load().await;
+        let timeline = timeline_evidence(
+            cycles
+                .list_stage_events(&claim.cycle.feedback_cycle_id)
+                .await
+                .expect("load W4-E04 terminal WORM timeline"),
+        );
+        let counts_after_first = load_evidence_counts(&db).await;
+        assert_eq!(
+            generations
+                .current_route(BuyModelRoute::Pooled)
+                .expect("F11 route after")
+                .published_shadow_identity()
+                .expect("F11 published identity after"),
+            route_before
+        );
+        assert_eq!(
+            PgModelRegistryRepository::new(db.clone())
+                .find_model_version(&models.candidate.model_version_id)
+                .await
+                .expect("read F11 candidate")
+                .expect("F11 candidate exists")
+                .publication_status,
+            PublicationStatus::Candidate
+        );
+        let restart_read_back = Box::pin(
+            RestartProbe {
+                invariant: probe,
+                artifacts: Arc::clone(&store),
+                completion: &completion,
+                expected_after: &after,
+                expected_timeline: &timeline,
+                expected_permit: None,
+                expected_transaction_hash: None,
+            }
+            .verify(),
+        )
+        .await;
+        let counts_after_exact_replay = load_evidence_counts(&db).await;
+        self.evidence(TerminalEvidenceInput {
+            claim: &claim,
+            models: &models,
+            policy_before: &policy_before,
+            policy_after: &policy_after,
+            completion: &completion,
+            timeline,
+            before,
+            after,
+            counts_before,
+            counts_after_first,
+            counts_after_exact_replay,
+            restart_read_back,
+        })
+    }
+}
+
+pub async fn terminal_decision_contracts() {
+    let no_action = Box::pin(TerminalDecisionCase::InsufficientShadow.run()).await;
+    let rejected = Box::pin(TerminalDecisionCase::RejectedComparison.run()).await;
+    no_action.validate();
+    rejected.validate();
 }
 
 struct PromotionPreflightCase {
@@ -696,6 +1423,8 @@ struct PromotionPreflightCase {
     cycles: Arc<PgFeedbackCycleRepository>,
     jobs: Arc<PgResearchJobRepository>,
     completion: DecisionCompletion,
+    decision_before: InvariantSnapshot,
+    decision_counts_before: RowCountSnapshot,
 }
 
 impl PromotionPreflightCase {
@@ -732,7 +1461,7 @@ impl PromotionPreflightCase {
         )
         .await;
         let comparison = comparison_params(&db, &schema, &claim, &models).await;
-        record_comparison(&db, &store, &claim, comparison, 3).await;
+        record_comparison(&db, &store, &claim, comparison, dec!(100), 3).await;
         insert_stable_observations(&db, &serving.generations, claim.cycle.created_at).await;
         Box::pin(record_shadow(
             &db,
@@ -743,6 +1472,17 @@ impl PromotionPreflightCase {
             &claim,
         ))
         .await;
+        let decision_probe = InvariantProbe {
+            db: db.clone(),
+            cycle_id: claim.cycle.feedback_cycle_id,
+            champion_model_version_id: models.champion.model_version_id,
+            candidate_model_version_id: models.candidate.model_version_id,
+            route: BuyModelRoute::Crypto,
+            serving_generations: Arc::clone(&serving.generations),
+            policy_apply: None,
+        };
+        let decision_before = decision_probe.load().await;
+        let decision_counts_before = load_evidence_counts(&db).await;
         let completion = Box::pin(execute_decision(
             &store,
             &cycles,
@@ -764,6 +1504,8 @@ impl PromotionPreflightCase {
             cycles,
             jobs,
             completion,
+            decision_before,
+            decision_counts_before,
         }
     }
 
@@ -810,152 +1552,418 @@ impl PromotionPreflightCase {
         .expect_err("promotion evidence must reject tampered F11 bytes");
         decision_stage
     }
+
+    fn invariant_probe(
+        &self,
+        policy_apply: Option<Arc<CommittedPolicyApplicator>>,
+    ) -> InvariantProbe {
+        InvariantProbe {
+            db: self.db.clone(),
+            cycle_id: self.claim.cycle.feedback_cycle_id,
+            champion_model_version_id: self.models.champion.model_version_id,
+            candidate_model_version_id: self.models.candidate.model_version_id,
+            route: BuyModelRoute::Crypto,
+            serving_generations: Arc::clone(&self.serving.generations),
+            policy_apply,
+        }
+    }
+}
+
+struct PermitEvidenceProbe<'a> {
+    cycles: &'a PgFeedbackCycleRepository,
+    runtime_repository: &'a PgRuntimeControlRepository,
+    runtime_controls: &'a RuntimeControlsHandle,
+    permit: &'a PromotionPermitInfo,
+    preflight: &'a PromotionPreflight,
+}
+
+impl PermitEvidenceProbe<'_> {
+    async fn load(&self) -> PermitEvidence {
+        let runtime = self
+            .runtime_repository
+            .load()
+            .await
+            .expect("read promotion evidence runtime");
+        assert_eq!(
+            self.runtime_controls.quant_runtime_mode(),
+            runtime.quant_runtime_mode
+        );
+        let action_time = self
+            .cycles
+            .database_time()
+            .await
+            .expect("read promotion evidence permit clock");
+        let permit_status = self
+            .permit
+            .status_at(action_time)
+            .expect("derive promotion evidence permit status");
+        assert_eq!(permit_status, PromotionPermitStatus::Active);
+        let permit_scope = self
+            .permit
+            .scope()
+            .expect("rebuild promotion evidence permit scope");
+        PermitEvidence {
+            persisted_permit: wire_value(self.permit),
+            status_at_action: wire_name(&permit_status),
+            lifecycle: PermitLifecycleEvidence {
+                active: permit_status == PromotionPermitStatus::Active,
+                not_expired: action_time < self.permit.expires_at,
+                not_revoked: self.permit.revoked_at.is_none(),
+            },
+            bindings: PermitBindingEvidence {
+                scope_exact: permit_scope == *self.preflight.scope(),
+                preflight_hash_exact: self.permit.preflight_hash == self.preflight.preflight_hash(),
+                runtime_mode_exact: runtime.quant_runtime_mode
+                    == self.preflight.current_runtime_mode()
+                    && self
+                        .permit
+                        .allowed_runtime_modes
+                        .contains(&runtime.quant_runtime_mode),
+            },
+        }
+    }
+}
+
+struct PromotionPermitFixtureSpec {
+    idempotency_key: &'static str,
+    reason: &'static str,
+}
+
+struct PromotionPermitFixture {
+    policies: Arc<PgPolicyRepository>,
+    runtime_repository: Arc<PgRuntimeControlRepository>,
+    runtime_controls: RuntimeControlsHandle,
+    preflight: Arc<PromotionPreflightService>,
+    permit_service: Arc<PromotionPermitService>,
+    actor: PromotionPermitActor,
+    permit: PromotionPermitInfo,
+    initial_preflight: PromotionPreflight,
+    initial_projection: PromotionPolicyProjection,
+    policy_before: ActivePolicyBundle,
+}
+
+impl PromotionPermitFixture {
+    async fn issue(
+        case: &PromotionPreflightCase,
+        decisions: Arc<FeedbackDecisionStageAdapter>,
+        spec: PromotionPermitFixtureSpec,
+    ) -> Self {
+        let policies = Arc::new(PgPolicyRepository::new(case.db.clone()));
+        let policy_before = policies
+            .load_current_bundle()
+            .await
+            .expect("load promotion fixture policy")
+            .expect("promotion fixture policy exists");
+        let runtime_repository = Arc::new(PgRuntimeControlRepository::new(case.db.clone()));
+        let runtime = runtime_repository
+            .load()
+            .await
+            .expect("load promotion fixture runtime");
+        let runtime_controls =
+            RuntimeControlsHandle::new(RuntimeControlSnapshot::from(runtime.clone()));
+        let permits = Arc::new(PgPromotionPermitRepository::new(case.db.clone()));
+        let preflight = Arc::new(PromotionPreflightService::new(
+            PromotionPreflightServiceDeps {
+                permits: Arc::clone(&permits) as Arc<dyn PromotionPermitRepository>,
+                cycles: Arc::clone(&case.cycles) as Arc<dyn FeedbackCycleRepository>,
+                decisions,
+                policies: Arc::clone(&policies) as Arc<dyn PolicyRepository>,
+                durable_runtime: Arc::clone(&runtime_repository)
+                    as Arc<dyn RuntimeControlRepository>,
+                runtime_controls: runtime_controls.clone(),
+                policy_store: Arc::new(DecisionPolicyStore::new_active(policy_before.clone())),
+                models: Arc::clone(&case.model_repository) as Arc<dyn ModelRegistryRepository>,
+                feature_parity: Arc::new(PgFeatureParityRepository::new(case.db.clone()))
+                    as Arc<dyn FeatureParityRepository>,
+                runtime_registry: Arc::clone(&case.serving.runtime_registry),
+                serving_generations: Arc::clone(&case.serving.generations),
+            },
+        ));
+        let database_now = case
+            .cycles
+            .database_time()
+            .await
+            .expect("read promotion fixture database clock");
+        let plan = preflight
+            .prepare_issue(PromotionPreflightDraft {
+                feedback_cycle_id: case.claim.cycle.feedback_cycle_id,
+                allowed_runtime_modes: vec![QuantRuntimeMode::ReportOnly],
+                expires_at: database_now + Duration::minutes(10),
+            })
+            .await
+            .expect("derive server-owned promotion preflight");
+        assert_eq!(plan.preflight().scope().category(), MarketCategory::Crypto);
+        assert_eq!(
+            plan.projection().champion_model_version_id(),
+            case.models.champion.model_version_id
+        );
+        assert_eq!(
+            plan.projection().candidate_model_version_id(),
+            case.models.candidate.model_version_id
+        );
+        plan.projection()
+            .validate_candidate(plan.projection().prospective_snapshot())
+            .expect("promotion projection changes only its exact route and global shadow");
+        let actor = UserEntity::find()
+            .filter(UserColumn::Username.eq("admin"))
+            .one(&case.db)
+            .await
+            .expect("load promotion fixture admin actor")
+            .expect("promotion fixture admin actor exists");
+        let permit_service = Arc::new(PromotionPermitService::new(
+            Arc::clone(&permits) as Arc<dyn PromotionPermitRepository>
+        ));
+        let permit_actor = PromotionPermitActor {
+            user_id: actor.id,
+            acting_role: RoleCode::new("super_admin"),
+        };
+        let permit = match permit_service
+            .issue(IssuePromotionPermit {
+                actor: permit_actor.clone(),
+                idempotency_key: spec
+                    .idempotency_key
+                    .parse::<PolicyIdempotencyKey>()
+                    .expect("valid promotion fixture idempotency key"),
+                scope: plan.preflight().scope().clone(),
+                preflight_hash: plan.preflight().preflight_hash(),
+                reason: spec.reason.to_owned(),
+            })
+            .await
+            .expect("issue promotion fixture permit")
+        {
+            PromotionPermitIssueOutcome::Issued(permit) => permit,
+            PromotionPermitIssueOutcome::ExactReplay(_) => {
+                panic!("first promotion fixture permit issue cannot be a replay")
+            }
+        };
+        let verified = preflight
+            .verify_permit(
+                &permit.promotion_permit_id,
+                case.claim.cycle.feedback_cycle_id,
+            )
+            .await
+            .expect("verify exact promotion fixture permit");
+        Self {
+            policies,
+            runtime_repository,
+            runtime_controls,
+            preflight,
+            permit_service,
+            actor: permit_actor,
+            permit,
+            initial_preflight: verified.preflight().clone(),
+            initial_projection: verified.projection().clone(),
+            policy_before,
+        }
+    }
+
+    async fn assert_exact_replay(&self, cycle_id: FeedbackCycleId) {
+        let replay = self
+            .permit_service
+            .issue(IssuePromotionPermit {
+                actor: self.actor.clone(),
+                idempotency_key: self.permit.idempotency_key.clone(),
+                scope: self
+                    .permit
+                    .scope()
+                    .expect("rebuild exact promotion fixture permit scope"),
+                preflight_hash: self.permit.preflight_hash,
+                reason: self.permit.issuance_reason.clone(),
+            })
+            .await
+            .expect("replay exact promotion fixture permit");
+        let PromotionPermitIssueOutcome::ExactReplay(replayed) = replay else {
+            panic!("second promotion fixture permit issue must be an exact replay");
+        };
+        assert_eq!(replayed, self.permit);
+        let verified = self
+            .preflight
+            .verify_permit(&self.permit.promotion_permit_id, cycle_id)
+            .await
+            .expect("verify exact replayed promotion fixture permit");
+        assert_eq!(verified.permit(), &self.permit);
+        assert_eq!(
+            verified.preflight().preflight_hash(),
+            self.initial_preflight.preflight_hash()
+        );
+        assert_eq!(
+            verified.projection().non_route_policy_hash(),
+            self.initial_projection.non_route_policy_hash()
+        );
+        assert_eq!(
+            verified.projection().prospective_snapshot(),
+            self.initial_projection.prospective_snapshot()
+        );
+    }
+}
+
+struct CandidateReadyState {
+    policy_after: ActivePolicyBundle,
+    after: InvariantSnapshot,
+    invariant_diff: InvariantDiff,
+}
+
+impl PromotionPreflightCase {
+    async fn candidate_ready_state(
+        &self,
+        permit_fixture: &PromotionPermitFixture,
+    ) -> CandidateReadyState {
+        let policy_after = permit_fixture
+            .policies
+            .load_current_bundle()
+            .await
+            .expect("load CandidateReady policy after preflight")
+            .expect("CandidateReady policy still exists");
+        let route_after = self
+            .serving
+            .generations
+            .current_route(BuyModelRoute::Crypto)
+            .expect("CandidateReady Crypto route after preflight")
+            .published_shadow_identity()
+            .expect("CandidateReady published shadow remains complete");
+        assert_eq!(policy_after, permit_fixture.policy_before);
+        assert_eq!(route_after, self.route_before);
+        assert_eq!(
+            self.model_repository
+                .find_model_version(&self.models.champion.model_version_id)
+                .await
+                .expect("read CandidateReady champion")
+                .expect("CandidateReady champion exists")
+                .publication_status,
+            PublicationStatus::Published
+        );
+        assert_eq!(
+            self.model_repository
+                .find_model_version(&self.models.candidate.model_version_id)
+                .await
+                .expect("read CandidateReady candidate")
+                .expect("CandidateReady candidate exists")
+                .publication_status,
+            PublicationStatus::Shadow
+        );
+        let after = self.invariant_probe(None).load().await;
+        let invariant_diff = InvariantDiff::between(&self.decision_before, &after);
+        assert_protected_unchanged(
+            &invariant_diff,
+            "CandidateReady",
+            &[
+                "$.policy_bundle",
+                "$.runtime_control",
+                "$.model_routes",
+                "$.capital_allocations",
+                "$.champion_model",
+                "$.candidate_model",
+                "$.parity_latch",
+                "$.in_memory_serving_route",
+                "$.policy_apply_readiness",
+                "$.deployment_authority",
+            ],
+        );
+        assert!(invariant_diff.any_below("$.cycle"));
+        CandidateReadyState {
+            policy_after,
+            after,
+            invariant_diff,
+        }
+    }
+}
+
+impl DecisionPathEvidence {
+    async fn candidate_ready() -> Self {
+        assert_authority_boundary();
+        let (pool, _container) = setup_pg().await;
+        let db = pool.connection().clone();
+        let artifact_root = ArtifactRoot::create();
+        let store: Arc<dyn ArtifactStore> =
+            Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+        let case = Box::pin(PromotionPreflightCase::prepare(db, store)).await;
+        let decisions = case.verify_decision_evidence().await;
+        let permit_fixture = Box::pin(PromotionPermitFixture::issue(
+            &case,
+            decisions,
+            PromotionPermitFixtureSpec {
+                idempotency_key: "p03-preflight-issue-0001",
+                reason: "authorize exact CandidateReady Crypto preflight",
+            },
+        ))
+        .await;
+        let counts_after_first = load_evidence_counts(&case.db).await;
+        Box::pin(permit_fixture.assert_exact_replay(case.claim.cycle.feedback_cycle_id)).await;
+        let counts_after_exact_replay = load_evidence_counts(&case.db).await;
+        let state = Box::pin(case.candidate_ready_state(&permit_fixture)).await;
+        let timeline = timeline_evidence(
+            case.cycles
+                .list_stage_events(&case.claim.cycle.feedback_cycle_id)
+                .await
+                .expect("load W4-E04 CandidateReady timeline"),
+        );
+        let permit_evidence = Box::pin(
+            PermitEvidenceProbe {
+                cycles: &case.cycles,
+                runtime_repository: &permit_fixture.runtime_repository,
+                runtime_controls: &permit_fixture.runtime_controls,
+                permit: &permit_fixture.permit,
+                preflight: &permit_fixture.initial_preflight,
+            }
+            .load(),
+        )
+        .await;
+        let restart_read_back = Box::pin(
+            RestartProbe {
+                invariant: case.invariant_probe(None),
+                artifacts: Arc::clone(&case.store),
+                completion: &case.completion,
+                expected_after: &state.after,
+                expected_timeline: &timeline,
+                expected_permit: Some(&permit_fixture.permit),
+                expected_transaction_hash: None,
+            }
+            .verify(),
+        )
+        .await;
+        let evidence = Self {
+            path: DecisionPath::CandidateReady,
+            decision: wire_name(&FeedbackDecision::CandidateReady),
+            decision_reason: "feedback_candidate_ready_governance_required".to_owned(),
+            exact_ids: exact_identifiers(ExactIdInput {
+                cycle: &case.claim.cycle,
+                models: &case.models,
+                policy_before: &permit_fixture.policy_before,
+                policy_after: &state.policy_after,
+                permit: Some(&permit_fixture.permit),
+                policy_activation_id: None,
+                promotion_transaction_hash: None,
+                route: BuyModelRoute::Crypto,
+            }),
+            decision_artifact: decision_artifact_evidence(
+                &case.completion,
+                &case.models,
+                Some(permit_fixture.initial_preflight.decision_job_input_hash()),
+            ),
+            permit: Some(permit_evidence),
+            worm_timeline: timeline,
+            before: case.decision_before.clone(),
+            after: state.after,
+            invariant_diff: state.invariant_diff,
+            replay: ReplayEvidence::new(
+                "committed:candidate_ready_and_permit_issued",
+                "exact_permit_and_artifact_replay",
+                case.decision_counts_before.clone(),
+                counts_after_first,
+                counts_after_exact_replay,
+            ),
+            restart_read_back,
+            fault_injection_rollback_verified: false,
+        };
+        evidence.validate();
+        evidence
+    }
 }
 
 pub async fn promotion_preflight_contracts() {
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    let artifact_root = ArtifactRoot::create();
-    let store: Arc<dyn ArtifactStore> =
-        Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
-    let case = Box::pin(PromotionPreflightCase::prepare(db, store)).await;
-    let decision_stage = case.verify_decision_evidence().await;
-    let PromotionPreflightCase {
-        db,
-        models,
-        model_repository,
-        serving,
-        route_before,
-        claim,
-        cycles,
-        ..
-    } = case;
-
-    let policy_repository = Arc::new(PgPolicyRepository::new(db.clone()));
-    let policy_before = policy_repository
-        .load_current_bundle()
+    Box::pin(DecisionPathEvidence::candidate_ready())
         .await
-        .expect("load P03 policy before preflight")
-        .expect("P03 policy exists");
-    let runtime_repository = Arc::new(PgRuntimeControlRepository::new(db.clone()));
-    let runtime = runtime_repository
-        .load()
-        .await
-        .expect("load P03 durable runtime control");
-    let runtime_controls = RuntimeControlsHandle::new(RuntimeControlSnapshot::from(runtime));
-    let permit_repository = Arc::new(PgPromotionPermitRepository::new(db.clone()));
-    let preflight = PromotionPreflightService::new(PromotionPreflightServiceDeps {
-        permits: Arc::clone(&permit_repository) as Arc<dyn PromotionPermitRepository>,
-        cycles: Arc::clone(&cycles) as Arc<dyn FeedbackCycleRepository>,
-        decisions: decision_stage,
-        policies: Arc::clone(&policy_repository) as Arc<dyn PolicyRepository>,
-        durable_runtime: Arc::clone(&runtime_repository) as Arc<dyn RuntimeControlRepository>,
-        runtime_controls,
-        policy_store: Arc::new(DecisionPolicyStore::new_active(policy_before.clone())),
-        models: Arc::clone(&model_repository) as Arc<dyn ModelRegistryRepository>,
-        feature_parity: Arc::new(PgFeatureParityRepository::new(db.clone()))
-            as Arc<dyn FeatureParityRepository>,
-        runtime_registry: Arc::clone(&serving.runtime_registry),
-        serving_generations: Arc::clone(&serving.generations),
-    });
-    let database_now = cycles.database_time().await.expect("P03 database clock");
-    let plan = preflight
-        .prepare_issue(PromotionPreflightDraft {
-            feedback_cycle_id: claim.cycle.feedback_cycle_id,
-            allowed_runtime_modes: vec![QuantRuntimeMode::ReportOnly],
-            expires_at: database_now + Duration::minutes(10),
-        })
-        .await
-        .expect("derive P03 server-side preflight");
-    assert_eq!(plan.preflight().scope().category(), MarketCategory::Crypto);
-    assert_eq!(
-        plan.projection().champion_model_version_id(),
-        models.champion.model_version_id
-    );
-    assert_eq!(
-        plan.projection().candidate_model_version_id(),
-        models.candidate.model_version_id
-    );
-    plan.projection()
-        .validate_candidate(plan.projection().prospective_snapshot())
-        .expect("P03 projection changes only the exact route and consumed shadow");
-
-    let actor_row = UserEntity::find()
-        .filter(UserColumn::Username.eq("admin"))
-        .one(&db)
-        .await
-        .expect("load P03 admin actor")
-        .expect("P03 admin actor exists");
-    let permit_service = PromotionPermitService::new(
-        Arc::clone(&permit_repository) as Arc<dyn PromotionPermitRepository>
-    );
-    let issue = IssuePromotionPermit {
-        actor: PromotionPermitActor {
-            user_id: actor_row.id,
-            acting_role: RoleCode::new("super_admin"),
-        },
-        idempotency_key: "p03-preflight-issue-0001"
-            .parse::<PolicyIdempotencyKey>()
-            .expect("valid P03 permit idempotency key"),
-        scope: plan.preflight().scope().clone(),
-        preflight_hash: plan.preflight().preflight_hash(),
-        reason: "authorize exact CandidateReady Crypto preflight".to_owned(),
-    };
-    let permit = match permit_service.issue(issue).await.expect("issue P03 permit") {
-        PromotionPermitIssueOutcome::Issued(permit) => permit,
-        PromotionPermitIssueOutcome::ExactReplay(_) => {
-            panic!("first P03 permit issue cannot be a replay")
-        }
-    };
-    let verified = preflight
-        .verify_permit(&permit.promotion_permit_id, claim.cycle.feedback_cycle_id)
-        .await
-        .expect("verify exact persisted P03 permit");
-    assert_eq!(verified.permit(), &permit);
-    assert_eq!(
-        verified.preflight().preflight_hash(),
-        plan.preflight().preflight_hash()
-    );
-    assert_eq!(
-        verified.projection().non_route_policy_hash(),
-        plan.projection().non_route_policy_hash()
-    );
-    assert_eq!(
-        verified.projection().prospective_snapshot(),
-        plan.projection().prospective_snapshot()
-    );
-
-    let policy_after = policy_repository
-        .load_current_bundle()
-        .await
-        .expect("load P03 policy after preflight")
-        .expect("P03 policy still exists");
-    let route_after = serving
-        .generations
-        .current_route(BuyModelRoute::Crypto)
-        .expect("P03 Crypto route after preflight")
-        .published_shadow_identity()
-        .expect("P03 exact published shadow after preflight");
-    assert_eq!(policy_after, policy_before);
-    assert_eq!(route_after, route_before);
-    assert_eq!(
-        model_repository
-            .find_model_version(&models.champion.model_version_id)
-            .await
-            .expect("read P03 champion")
-            .expect("P03 champion exists")
-            .publication_status,
-        PublicationStatus::Published
-    );
-    assert_eq!(
-        model_repository
-            .find_model_version(&models.candidate.model_version_id)
-            .await
-            .expect("read P03 candidate")
-            .expect("P03 candidate exists")
-            .publication_status,
-        PublicationStatus::Shadow
-    );
+        .validate();
 }
 
 struct PromotionPolicyPort {
@@ -1031,103 +2039,43 @@ struct PromotionHarness {
 
 impl PromotionHarness {
     async fn wire(case: &PromotionPreflightCase) -> Self {
-        let policies = Arc::new(PgPolicyRepository::new(case.db.clone()));
-        let policy_before = policies
-            .load_current_bundle()
-            .await
-            .expect("load P04 policy before promotion")
-            .expect("P04 policy exists");
-        let runtime_repository = Arc::new(PgRuntimeControlRepository::new(case.db.clone()));
-        let runtime = runtime_repository
-            .load()
-            .await
-            .expect("load P04 durable runtime control");
-        let runtime_controls = RuntimeControlsHandle::new(RuntimeControlSnapshot::from(runtime));
-        let permits = Arc::new(PgPromotionPermitRepository::new(case.db.clone()));
-        let preflight = Arc::new(PromotionPreflightService::new(
-            PromotionPreflightServiceDeps {
-                permits: Arc::clone(&permits) as Arc<dyn PromotionPermitRepository>,
-                cycles: Arc::clone(&case.cycles) as Arc<dyn FeedbackCycleRepository>,
-                decisions: case.decision_stage(),
-                policies: Arc::clone(&policies) as Arc<dyn PolicyRepository>,
-                durable_runtime: Arc::clone(&runtime_repository)
-                    as Arc<dyn RuntimeControlRepository>,
-                runtime_controls: runtime_controls.clone(),
-                policy_store: Arc::new(DecisionPolicyStore::new_active(policy_before.clone())),
-                models: Arc::clone(&case.model_repository) as Arc<dyn ModelRegistryRepository>,
-                feature_parity: Arc::new(PgFeatureParityRepository::new(case.db.clone()))
-                    as Arc<dyn FeatureParityRepository>,
-                runtime_registry: Arc::clone(&case.serving.runtime_registry),
-                serving_generations: Arc::clone(&case.serving.generations),
+        let permit_fixture = Box::pin(PromotionPermitFixture::issue(
+            case,
+            case.decision_stage(),
+            PromotionPermitFixtureSpec {
+                idempotency_key: "p04-atomic-promotion-0001",
+                reason: "authorize exact atomic Crypto route promotion",
             },
-        ));
-        let database_now = case
-            .cycles
-            .database_time()
-            .await
-            .expect("P04 database clock");
-        let plan = preflight
-            .prepare_issue(PromotionPreflightDraft {
-                feedback_cycle_id: case.claim.cycle.feedback_cycle_id,
-                allowed_runtime_modes: vec![QuantRuntimeMode::ReportOnly],
-                expires_at: database_now + Duration::minutes(10),
-            })
-            .await
-            .expect("derive P04 server-side preflight");
-        let actor = UserEntity::find()
-            .filter(UserColumn::Username.eq("admin"))
-            .one(&case.db)
-            .await
-            .expect("load P04 admin actor")
-            .expect("P04 admin actor exists");
-        let permit_service = Arc::new(PromotionPermitService::new(
-            Arc::clone(&permits) as Arc<dyn PromotionPermitRepository>
-        ));
-        let permit_actor = PromotionPermitActor {
-            user_id: actor.id,
-            acting_role: RoleCode::new("super_admin"),
-        };
-        let permit = match permit_service
-            .issue(IssuePromotionPermit {
-                actor: permit_actor.clone(),
-                idempotency_key: "p04-atomic-promotion-0001"
-                    .parse::<PolicyIdempotencyKey>()
-                    .expect("valid P04 permit idempotency key"),
-                scope: plan.preflight().scope().clone(),
-                preflight_hash: plan.preflight().preflight_hash(),
-                reason: "authorize exact atomic Crypto route promotion".to_owned(),
-            })
-            .await
-            .expect("issue P04 permit")
-        {
-            PromotionPermitIssueOutcome::Issued(permit) => permit,
-            PromotionPermitIssueOutcome::ExactReplay(_) => {
-                panic!("first P04 permit issue cannot be a replay")
-            }
-        };
-        let verified = preflight
-            .verify_permit(
-                &permit.promotion_permit_id,
-                case.claim.cycle.feedback_cycle_id,
-            )
-            .await
-            .expect("verify exact P04 permit");
+        ))
+        .await;
         let promotions = Arc::new(PgModelRoutePromotionRepository::new(case.db.clone()));
         let raw_apply = Arc::new(PromotionPolicyPort::new(PolicyBundleIdentity::from(
-            &policy_before,
+            &permit_fixture.policy_before,
         )));
         let policy_apply = Arc::new(CommittedPolicyApplicator::new(
             Arc::clone(&raw_apply) as Arc<dyn PolicySnapshotPort>,
-            PolicyBundleIdentity::from(&policy_before),
+            PolicyBundleIdentity::from(&permit_fixture.policy_before),
         ));
         let service = Arc::new(ModelRoutePromotionService::new(
             ModelRoutePromotionServiceDeps {
-                preflight: Arc::clone(&preflight),
+                preflight: Arc::clone(&permit_fixture.preflight),
                 repository: Arc::clone(&promotions) as Arc<dyn ModelRoutePromotionRepository>,
-                policies: Arc::clone(&policies) as Arc<dyn PolicyRepository>,
+                policies: Arc::clone(&permit_fixture.policies) as Arc<dyn PolicyRepository>,
                 policy_apply: Arc::clone(&policy_apply) as Arc<dyn CommittedPolicyApplyPort>,
             },
         ));
+        let PromotionPermitFixture {
+            policies,
+            runtime_repository,
+            runtime_controls,
+            preflight,
+            permit_service,
+            actor,
+            permit,
+            initial_preflight,
+            initial_projection: _,
+            policy_before,
+        } = permit_fixture;
         Self {
             policies,
             promotions,
@@ -1138,9 +2086,9 @@ impl PromotionHarness {
             service,
             raw_apply,
             policy_apply,
-            actor: permit_actor,
+            actor,
             permit,
-            initial_preflight: verified.preflight().clone(),
+            initial_preflight,
             policy_before,
         }
     }
@@ -1323,6 +2271,15 @@ struct AtomicPromotionCase {
     champion_before: ModelVersionModel,
     candidate_before: ModelVersionModel,
     cycle_before: CycleModel,
+    invariant_before: InvariantSnapshot,
+    evidence_counts_before: RowCountSnapshot,
+}
+
+struct PromotedState {
+    policy_after: ActivePolicyBundle,
+    after: InvariantSnapshot,
+    invariant_diff: InvariantDiff,
+    timeline: Vec<TimelineEventEvidence>,
 }
 
 impl AtomicPromotionCase {
@@ -1350,6 +2307,11 @@ impl AtomicPromotionCase {
             .await
             .expect("read P04 cycle before")
             .expect("P04 cycle exists before");
+        let invariant_before = case
+            .invariant_probe(Some(Arc::clone(&harness.policy_apply)))
+            .load()
+            .await;
+        let evidence_counts_before = load_evidence_counts(&db).await;
         Self {
             db,
             case,
@@ -1359,6 +2321,149 @@ impl AtomicPromotionCase {
             champion_before,
             candidate_before,
             cycle_before,
+            invariant_before,
+            evidence_counts_before,
+        }
+    }
+
+    fn invariant_probe(&self) -> InvariantProbe {
+        self.case
+            .invariant_probe(Some(Arc::clone(&self.harness.policy_apply)))
+    }
+
+    fn assert_promoted_delta(
+        &self,
+        policy_after: &ActivePolicyBundle,
+        invariant_diff: &InvariantDiff,
+    ) {
+        assert_protected_unchanged(
+            invariant_diff,
+            "Promoted",
+            &[
+                "$.runtime_control",
+                "$.capital_allocations",
+                "$.champion_model",
+                "$.parity_latch",
+                "$.in_memory_serving_route",
+                "$.deployment_authority",
+            ],
+        );
+        for changed in [
+            "$.policy_bundle",
+            "$.model_routes",
+            "$.candidate_model",
+            "$.cycle",
+            "$.policy_apply_readiness",
+        ] {
+            assert!(
+                invariant_diff.any_below(changed),
+                "Promoted path failed to change required invariant {changed}"
+            );
+        }
+        let candidate_changes = invariant_diff
+            .changes
+            .iter()
+            .filter(|change| change.path.starts_with("$.candidate_model."))
+            .map(|change| change.path.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            candidate_changes,
+            BTreeSet::from([
+                "$.candidate_model.publication_status",
+                "$.candidate_model.published_at",
+            ]),
+            "candidate promotion changed fields beyond Shadow-to-Published"
+        );
+        let policy_before = &self.harness.policy_before;
+        assert_eq!(
+            policy_after.snapshot.recommendation,
+            policy_before.snapshot.recommendation
+        );
+        assert_eq!(
+            policy_after.snapshot.execution_risk,
+            policy_before.snapshot.execution_risk
+        );
+        assert_eq!(
+            policy_after.snapshot.report_schedule,
+            policy_before.snapshot.report_schedule
+        );
+        assert_eq!(
+            policy_after.snapshot.operational_control,
+            policy_before.snapshot.operational_control
+        );
+        assert_eq!(
+            policy_after.snapshot.execution_authorization,
+            policy_before.snapshot.execution_authorization
+        );
+        assert_eq!(
+            policy_after.snapshot.profile_artifacts,
+            policy_before.snapshot.profile_artifacts
+        );
+        let before_routes = &policy_before.snapshot.model_routing.model;
+        let after_routes = &policy_after.snapshot.model_routing.model;
+        assert_eq!(
+            after_routes.active_model_version_id,
+            before_routes.active_model_version_id
+        );
+        assert_eq!(
+            after_routes.active_exit_model_version_id,
+            before_routes.active_exit_model_version_id
+        );
+        assert_eq!(
+            after_routes
+                .category_model_pointers
+                .get(&MarketCategory::Weather),
+            before_routes
+                .category_model_pointers
+                .get(&MarketCategory::Weather)
+        );
+        assert_eq!(
+            after_routes
+                .category_model_pointers
+                .get(&MarketCategory::Crypto)
+                .map(|pointer| *pointer.id()),
+            Some(self.case.models.candidate.model_version_id)
+        );
+        assert_eq!(
+            before_routes
+                .category_model_pointers
+                .get(&MarketCategory::Crypto)
+                .map(|pointer| *pointer.id()),
+            Some(self.case.models.champion.model_version_id)
+        );
+        assert_eq!(
+            before_routes
+                .shadow_model_version_id
+                .as_ref()
+                .map(|pointer| *pointer.id()),
+            Some(self.case.models.candidate.model_version_id)
+        );
+        assert!(after_routes.shadow_model_version_id.is_none());
+    }
+
+    async fn promoted_state(&self) -> PromotedState {
+        let policy_after = self
+            .harness
+            .policies
+            .load_current_bundle()
+            .await
+            .expect("load W4-E04 promoted policy")
+            .expect("W4-E04 promoted policy exists");
+        let after = self.invariant_probe().load().await;
+        let timeline = timeline_evidence(
+            self.case
+                .cycles
+                .list_stage_events(&self.case.claim.cycle.feedback_cycle_id)
+                .await
+                .expect("load W4-E04 Promoted timeline"),
+        );
+        let invariant_diff = InvariantDiff::between(&self.invariant_before, &after);
+        self.assert_promoted_delta(&policy_after, &invariant_diff);
+        PromotedState {
+            policy_after,
+            after,
+            invariant_diff,
+            timeline,
         }
     }
 
@@ -1422,6 +2527,16 @@ impl AtomicPromotionCase {
             .expect_err("injected activation failure must roll back the whole promotion");
         remove_rollback_fault(&self.db).await;
         Box::pin(self.assert_unchanged()).await;
+        assert_eq!(
+            load_evidence_counts(&self.db).await,
+            self.evidence_counts_before,
+            "injected promotion rollback changed the complete W4-E04 row-count witness"
+        );
+        assert_eq!(
+            wire_value(&self.invariant_probe().load().await),
+            wire_value(&self.invariant_before),
+            "injected promotion rollback changed a protected W4-E04 invariant"
+        );
     }
 
     async fn wait_for_expiry(&self, expires_at: DateTime<Utc>) {
@@ -2113,20 +3228,102 @@ impl AtomicPromotionCase {
     }
 }
 
+impl DecisionPathEvidence {
+    async fn promoted() -> Self {
+        assert_authority_boundary();
+        let (pool, _container) = setup_pg().await;
+        let artifact_root = ArtifactRoot::create();
+        let store: Arc<dyn ArtifactStore> =
+            Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+        let case = Box::pin(AtomicPromotionCase::prepare(
+            pool.connection().clone(),
+            store,
+        ))
+        .await;
+        Box::pin(case.assert_rollback()).await;
+        let committed = Box::pin(case.commit_race()).await;
+        Box::pin(case.assert_commit(&committed)).await;
+        let counts_after_first = load_evidence_counts(&case.db).await;
+        Box::pin(case.assert_replay(&committed)).await;
+        let counts_after_exact_replay = load_evidence_counts(&case.db).await;
+        let state = Box::pin(case.promoted_state()).await;
+        let permit_evidence = Box::pin(
+            PermitEvidenceProbe {
+                cycles: &case.case.cycles,
+                runtime_repository: &case.harness.runtime_repository,
+                runtime_controls: &case.harness.runtime_controls,
+                permit: &case.harness.permit,
+                preflight: &case.harness.initial_preflight,
+            }
+            .load(),
+        )
+        .await;
+        let restart_read_back = Box::pin(
+            RestartProbe {
+                invariant: case.invariant_probe(),
+                artifacts: Arc::clone(&case.case.store),
+                completion: &case.case.completion,
+                expected_after: &state.after,
+                expected_timeline: &state.timeline,
+                expected_permit: Some(&case.harness.permit),
+                expected_transaction_hash: Some(committed.transaction_hash),
+            }
+            .verify(),
+        )
+        .await;
+        let evidence = Self {
+            path: DecisionPath::Promoted,
+            decision: wire_name(&FeedbackDecision::Promoted),
+            decision_reason: committed.audit.reason.clone(),
+            exact_ids: exact_identifiers(ExactIdInput {
+                cycle: &case.case.claim.cycle,
+                models: &case.case.models,
+                policy_before: &case.harness.policy_before,
+                policy_after: &state.policy_after,
+                permit: Some(&case.harness.permit),
+                policy_activation_id: Some(committed.activation.policy_activation_id.to_string()),
+                promotion_transaction_hash: Some(committed.transaction_hash),
+                route: BuyModelRoute::Crypto,
+            }),
+            decision_artifact: decision_artifact_evidence(
+                &case.case.completion,
+                &case.case.models,
+                Some(case.harness.initial_preflight.decision_job_input_hash()),
+            ),
+            permit: Some(permit_evidence),
+            worm_timeline: state.timeline,
+            before: case.invariant_before.clone(),
+            after: state.after,
+            invariant_diff: state.invariant_diff,
+            replay: ReplayEvidence::new(
+                "committed:promoted",
+                "exact_concurrent_and_explicit_promotion_replay",
+                case.evidence_counts_before.clone(),
+                counts_after_first,
+                counts_after_exact_replay,
+            ),
+            restart_read_back,
+            fault_injection_rollback_verified: true,
+        };
+        evidence.validate();
+        evidence
+    }
+}
+
 pub async fn model_route_promotion_contracts() {
-    let (pool, _container) = setup_pg().await;
-    let artifact_root = ArtifactRoot::create();
-    let store: Arc<dyn ArtifactStore> =
-        Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
-    let case = Box::pin(AtomicPromotionCase::prepare(
-        pool.connection().clone(),
-        store,
-    ))
-    .await;
-    Box::pin(case.assert_rollback()).await;
-    let committed = Box::pin(case.commit_race()).await;
-    Box::pin(case.assert_commit(&committed)).await;
-    Box::pin(case.assert_replay(&committed)).await;
+    Box::pin(DecisionPathEvidence::promoted()).await.validate();
+}
+
+pub async fn decision_path_evidence_contracts() {
+    let paths = vec![
+        Box::pin(TerminalDecisionCase::InsufficientShadow.run()).await,
+        Box::pin(TerminalDecisionCase::RejectedComparison.run()).await,
+        Box::pin(DecisionPathEvidence::candidate_ready()).await,
+        Box::pin(DecisionPathEvidence::promoted()).await,
+    ];
+    let artifact = DecisionPathEvidenceManifest::new(paths).write();
+    assert!(artifact.path.is_file());
+    ContentHash::parse(&artifact.content_hash).expect("evidence hash uses canonical BLAKE3 text");
 }
 
 pub async fn promotion_runtime_apply_contracts() {

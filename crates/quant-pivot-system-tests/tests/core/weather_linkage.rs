@@ -28,7 +28,7 @@ fn hash<T: Serialize>(value: &T) -> ContentHash {
     CanonicalDigest::content_hash_json(value).expect("fixture hash")
 }
 
-fn station_profiles() -> HashMap<String, WeatherStationProfileConfig> {
+pub fn station_profiles() -> HashMap<String, WeatherStationProfileConfig> {
     HashMap::from([(
         "KLGA".to_owned(),
         WeatherStationProfileConfig {

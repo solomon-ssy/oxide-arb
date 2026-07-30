@@ -1,6 +1,9 @@
 //! Disposable `PostgreSQL`, Redis, and `ClickHouse` stack for system suites.
 
-use std::time::Duration;
+use std::{
+    net::{Ipv4Addr, TcpListener},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use quant_pivot_migration::apply as apply_postgres_migrations;
@@ -44,7 +47,7 @@ pub struct SystemStack {
     pub clickhouse: ClickHousePool,
     pub clickhouse_schema: ClickHouseSchemaStatus,
     _postgres_container: ContainerAsync<Postgres>,
-    _redis_container: ContainerAsync<Redis>,
+    pub(crate) redis_container: ContainerAsync<Redis>,
     _clickhouse_container: ContainerAsync<GenericImage>,
 }
 
@@ -69,7 +72,7 @@ impl SystemStack {
             clickhouse: clickhouse.1,
             clickhouse_schema: clickhouse.2,
             _postgres_container: postgres.3,
-            _redis_container: redis.2,
+            redis_container: redis.2,
             _clickhouse_container: clickhouse.3,
         })
     }
@@ -86,7 +89,7 @@ impl SystemStack {
             redis,
             clickhouse,
             _postgres_container: postgres_container,
-            _redis_container: redis_container,
+            redis_container,
             _clickhouse_container: clickhouse_container,
             ..
         } = self;
@@ -167,8 +170,19 @@ async fn start_postgres() -> Result<(
 }
 
 async fn start_redis() -> Result<(RedisConfig, RedisBackend, ContainerAsync<Redis>)> {
+    let host_port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .context("reserve Redis system-test host port")?
+        .local_addr()
+        .context("resolve Redis system-test host port")?
+        .port();
     let container = Redis::default()
         .with_tag(REDIS_IMAGE_TAG)
+        .with_mapped_port(host_port, 6379.into())
+        // SystemStack owns volatile cache/session state. Disabling both Redis
+        // persistence mechanisms makes a process restart deterministically
+        // model complete state loss instead of depending on the default RDB
+        // save cadence and the test's wall-clock duration.
+        .with_cmd(["redis-server", "--save", "", "--appendonly", "no"])
         .start()
         .await
         .context("start Redis system-test container")?;

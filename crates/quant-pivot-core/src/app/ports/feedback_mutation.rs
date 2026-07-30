@@ -76,19 +76,30 @@ pub struct CoreFeedbackMutationPort {
     deps: CoreFeedbackMutationDeps,
 }
 
+/// Immutable server plan shared by feedback identity freezing and durable
+/// Source Slice lookup.
 #[derive(Debug, Clone)]
-struct FeedbackWindows {
+pub struct FeedbackCycleFreezePlan {
+    label_cutoff: DateTime<Utc>,
     training: FeedbackCohortWindow,
     calibration: FeedbackCohortWindow,
     evaluation: FeedbackCohortWindow,
     source_start: DateTime<Utc>,
+    research_program_hash: ContentHash,
 }
 
-impl FeedbackWindows {
-    fn derive(
+impl FeedbackCycleFreezePlan {
+    /// Derive the cadence bucket, purged cohorts, source window, and canonical
+    /// research-program commitment from one exact serving preimage.
+    pub fn derive(
         profile: &ResearchProfileArtifact,
-        label_cutoff: DateTime<Utc>,
-    ) -> Result<Self, FeedbackError> {
+        model_spec_id: ModelSpecId,
+        model_spec_definition_hash: ContentHash,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        runtime_config_hash: ContentHash,
+        database_now: DateTime<Utc>,
+    ) -> QuantResult<Self> {
+        let label_cutoff = Self::cadence_cutoff(database_now, profile)?;
         let evaluation_days = i64::from(profile.spec.feedback_policy.evaluation_window_days);
         let fit_days = i64::from(profile.spec.fit_span_days);
         let target_horizon = Self::seconds(
@@ -125,32 +136,108 @@ impl FeedbackWindows {
         )?;
         let source_start =
             Self::subtract(training_start, lookback, "source window start underflowed")?;
+        let training = FeedbackCohortWindow::try_new(
+            profile.profile_ref.clone(),
+            training_start,
+            training_end,
+        )
+        .map_err(|error| FeedbackError::InvalidCycleIdentity {
+            detail: error.to_string(),
+        })?;
+        let calibration = FeedbackCohortWindow::try_new(
+            profile.profile_ref.clone(),
+            calibration_start,
+            calibration_end,
+        )
+        .map_err(|error| FeedbackError::InvalidCycleIdentity {
+            detail: error.to_string(),
+        })?;
+        let evaluation = FeedbackCohortWindow::try_new(
+            profile.profile_ref.clone(),
+            evaluation_start,
+            evaluation_end,
+        )
+        .map_err(|error| FeedbackError::InvalidCycleIdentity {
+            detail: error.to_string(),
+        })?;
+        let research_program_hash = CanonicalDigest::content_hash_typed(
+            FEEDBACK_SOURCE_PROGRAM_DOMAIN,
+            FEEDBACK_SOURCE_PROGRAM_VERSION,
+            &(
+                FEEDBACK_SOURCE_PROGRAM_VERSION,
+                &profile.profile_ref,
+                model_spec_id,
+                model_spec_definition_hash,
+                decision_policy_snapshot_id,
+                runtime_config_hash,
+                label_cutoff,
+                training.window_start(),
+                training.cutoff(),
+                calibration.window_start(),
+                calibration.cutoff(),
+                evaluation.window_start(),
+                evaluation.cutoff(),
+                DATASET_ARTIFACT_FORMAT_VERSION,
+            ),
+        )?;
         Ok(Self {
-            training: FeedbackCohortWindow::try_new(
-                profile.profile_ref.clone(),
-                training_start,
-                training_end,
-            )
-            .map_err(|error| FeedbackError::InvalidCycleIdentity {
-                detail: error.to_string(),
-            })?,
-            calibration: FeedbackCohortWindow::try_new(
-                profile.profile_ref.clone(),
-                calibration_start,
-                calibration_end,
-            )
-            .map_err(|error| FeedbackError::InvalidCycleIdentity {
-                detail: error.to_string(),
-            })?,
-            evaluation: FeedbackCohortWindow::try_new(
-                profile.profile_ref.clone(),
-                evaluation_start,
-                evaluation_end,
-            )
-            .map_err(|error| FeedbackError::InvalidCycleIdentity {
-                detail: error.to_string(),
-            })?,
+            label_cutoff,
+            training,
+            calibration,
+            evaluation,
             source_start,
+            research_program_hash,
+        })
+    }
+
+    #[must_use]
+    pub const fn label_cutoff(&self) -> DateTime<Utc> {
+        self.label_cutoff
+    }
+
+    #[must_use]
+    pub const fn training(&self) -> &FeedbackCohortWindow {
+        &self.training
+    }
+
+    #[must_use]
+    pub const fn calibration(&self) -> &FeedbackCohortWindow {
+        &self.calibration
+    }
+
+    #[must_use]
+    pub const fn evaluation(&self) -> &FeedbackCohortWindow {
+        &self.evaluation
+    }
+
+    #[must_use]
+    pub const fn source_start(&self) -> DateTime<Utc> {
+        self.source_start
+    }
+
+    #[must_use]
+    pub const fn research_program_hash(&self) -> ContentHash {
+        self.research_program_hash
+    }
+
+    fn cadence_cutoff(
+        database_now: DateTime<Utc>,
+        profile: &ResearchProfileArtifact,
+    ) -> Result<DateTime<Utc>, FeedbackError> {
+        let cadence =
+            i64::try_from(profile.spec.feedback_policy.feedback_cadence_secs).map_err(|error| {
+                FeedbackError::InvalidCycleIdentity {
+                    detail: format!("feedback cadence exceeds i64 seconds: {error}"),
+                }
+            })?;
+        if cadence <= 0 {
+            return Err(FeedbackError::InvalidCycleIdentity {
+                detail: "feedback cadence must be positive".to_owned(),
+            });
+        }
+        let bucket = database_now.timestamp().div_euclid(cadence) * cadence;
+        DateTime::from_timestamp(bucket, 0).ok_or_else(|| FeedbackError::InvalidCycleIdentity {
+            detail: "feedback cadence bucket exceeds chrono bounds".to_owned(),
         })
     }
 
@@ -208,54 +295,6 @@ impl CoreFeedbackMutationPort {
         Ok((profile, route))
     }
 
-    fn label_cutoff(
-        database_now: DateTime<Utc>,
-        profile: &ResearchProfileArtifact,
-    ) -> QuantResult<DateTime<Utc>> {
-        let cadence =
-            i64::try_from(profile.spec.feedback_policy.feedback_cadence_secs).map_err(|error| {
-                Self::invalid(format!("feedback cadence exceeds i64 seconds: {error}"))
-            })?;
-        if cadence <= 0 {
-            return Err(Self::invalid("feedback cadence must be positive"));
-        }
-        let bucket = database_now.timestamp().div_euclid(cadence) * cadence;
-        DateTime::from_timestamp(bucket, 0)
-            .ok_or_else(|| Self::invalid("feedback cadence bucket exceeds chrono bounds"))
-    }
-
-    fn research_program_hash(
-        profile: &ResearchProfileArtifact,
-        model_spec_id: ModelSpecId,
-        model_spec_definition_hash: ContentHash,
-        decision_policy_snapshot_id: DecisionPolicySnapshotId,
-        runtime_config_hash: ContentHash,
-        label_cutoff: DateTime<Utc>,
-        windows: &FeedbackWindows,
-    ) -> QuantResult<ContentHash> {
-        CanonicalDigest::content_hash_typed(
-            FEEDBACK_SOURCE_PROGRAM_DOMAIN,
-            FEEDBACK_SOURCE_PROGRAM_VERSION,
-            &(
-                FEEDBACK_SOURCE_PROGRAM_VERSION,
-                &profile.profile_ref,
-                model_spec_id,
-                model_spec_definition_hash,
-                decision_policy_snapshot_id,
-                runtime_config_hash,
-                label_cutoff,
-                windows.training.window_start(),
-                windows.training.cutoff(),
-                windows.calibration.window_start(),
-                windows.calibration.cutoff(),
-                windows.evaluation.window_start(),
-                windows.evaluation.cutoff(),
-                DATASET_ARTIFACT_FORMAT_VERSION,
-            ),
-        )
-        .map_err(Into::into)
-    }
-
     fn dataset_request(
         purpose: DatasetPurpose,
         window: FeedbackCohortWindow,
@@ -294,9 +333,18 @@ impl CoreFeedbackMutationPort {
         &self,
         profile: &ResearchProfileArtifact,
         route: BuyModelRoute,
-        label_cutoff: DateTime<Utc>,
+        database_now: DateTime<Utc>,
     ) -> QuantResult<NewFeedbackCycle> {
-        let serving = self.deps.serving_generations.current_route(route)?;
+        let serving = self
+            .deps
+            .serving_generations
+            .current_route(route)
+            .ok_or_else(|| FeedbackError::InvalidCycleState {
+                detail: format!(
+                    "feedback profile {} has no active serving route {route:?}",
+                    profile.profile_ref.id
+                ),
+            })?;
         let champion = serving.active_version();
         let preimage = self.deps.serving_preimages.load(champion).await?;
         if preimage.profile() != profile
@@ -309,17 +357,15 @@ impl CoreFeedbackMutationPort {
                 "current route, champion, profile, or committed policy preimage differs",
             ));
         }
-        let windows = FeedbackWindows::derive(profile, label_cutoff)?;
         let model_spec = preimage.model_spec();
         let policy = preimage.policy_snapshot();
-        let research_program_hash = Self::research_program_hash(
+        let plan = FeedbackCycleFreezePlan::derive(
             profile,
             model_spec.model_spec_id,
             model_spec.definition_hash,
             policy.decision_policy_snapshot_id,
             policy.snapshot_hash,
-            label_cutoff,
-            &windows,
+            database_now,
         )?;
         let source_lineage = self
             .deps
@@ -330,31 +376,31 @@ impl CoreFeedbackMutationPort {
                     runtime: &policy.snapshot,
                     decision_policy_snapshot_id: policy.decision_policy_snapshot_id,
                     runtime_config_hash: policy.snapshot_hash,
-                    research_program_hash,
-                    window_start: windows.source_start,
-                    window_end: label_cutoff,
-                    pit_cutoff: label_cutoff,
+                    research_program_hash: plan.research_program_hash(),
+                    window_start: plan.source_start(),
+                    window_end: plan.label_cutoff(),
+                    pit_cutoff: plan.label_cutoff(),
                 },
                 &self.deps.shutdown,
             )
             .await?;
         let training = Self::dataset_request(
             DatasetPurpose::Training,
-            windows.training,
+            plan.training().clone(),
             model_spec.model_spec_id,
             model_spec.definition_hash,
             &source_lineage,
         )?;
         let calibration = Self::dataset_request(
             DatasetPurpose::Calibration,
-            windows.calibration,
+            plan.calibration().clone(),
             model_spec.model_spec_id,
             model_spec.definition_hash,
             &source_lineage,
         )?;
         let evaluation = Self::dataset_request(
             DatasetPurpose::Evaluation,
-            windows.evaluation,
+            plan.evaluation().clone(),
             model_spec.model_spec_id,
             model_spec.definition_hash,
             &source_lineage,
@@ -385,7 +431,7 @@ impl CoreFeedbackMutationPort {
             trigger_family: FeedbackTriggerFamily::Manual,
             profile_ref: profile.profile_ref.clone(),
             feedback_policy_hash,
-            label_cutoff,
+            label_cutoff: plan.label_cutoff(),
             capability_registry_hashes: source_lineage.capability_registry_hashes,
             champion_model_version_id: champion.model_version_id,
             champion_serving_contract_hash: champion.serving_contract_hash,
@@ -439,8 +485,7 @@ impl FeedbackMutationPort for CoreFeedbackMutationPort {
     ) -> QuantResult<FeedbackCycleMutationView> {
         let (profile, route) = Self::resolve_profile_route(&request.profile_id)?;
         let database_now = self.deps.cycles.database_time().await?;
-        let label_cutoff = Self::label_cutoff(database_now, &profile)?;
-        let cycle = Box::pin(self.freeze_feedback_cycle(&profile, route, label_cutoff)).await?;
+        let cycle = Box::pin(self.freeze_feedback_cycle(&profile, route, database_now)).await?;
         let result = self
             .deps
             .cycles
@@ -574,9 +619,12 @@ impl FeedbackMutationPort for CoreFeedbackMutationPort {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
-    use quant_pivot_models::types::{CRYPTO_PRICE_15M_PROFILE_ID, builtin_research_profiles};
+    use quant_pivot_models::types::{
+        CRYPTO_PRICE_15M_PROFILE_ID, ContentHash, DecisionPolicySnapshotId, ModelSpecId,
+        builtin_research_profiles,
+    };
 
-    use super::{CoreFeedbackMutationPort, FeedbackWindows};
+    use super::FeedbackCycleFreezePlan;
 
     #[test]
     fn cadence_cutoff_is_stable() {
@@ -589,7 +637,7 @@ mod tests {
             .with_ymd_and_hms(2026, 7, 28, 13, 47, 29)
             .single()
             .expect("valid test timestamp");
-        let cutoff = CoreFeedbackMutationPort::label_cutoff(database_now, &profile)
+        let cutoff = FeedbackCycleFreezePlan::cadence_cutoff(database_now, &profile)
             .expect("derive cadence cutoff");
         let cadence = i64::try_from(profile.spec.feedback_policy.feedback_cadence_secs)
             .expect("cadence fits signed seconds");
@@ -597,7 +645,7 @@ mod tests {
         assert!(cutoff <= database_now);
         assert_eq!(cutoff.timestamp().rem_euclid(cadence), 0);
         assert_eq!(
-            CoreFeedbackMutationPort::label_cutoff(
+            FeedbackCycleFreezePlan::cadence_cutoff(
                 cutoff + Duration::seconds(cadence - 1),
                 &profile,
             )
@@ -617,8 +665,16 @@ mod tests {
             .with_ymd_and_hms(2026, 7, 28, 12, 0, 0)
             .single()
             .expect("valid test timestamp");
-        let windows =
-            FeedbackWindows::derive(&profile, label_cutoff).expect("derive feedback cohorts");
+        let policy_hash = ContentHash::from_bytes([0x31; 32]);
+        let plan = FeedbackCycleFreezePlan::derive(
+            &profile,
+            ModelSpecId::from_v7(),
+            ContentHash::from_bytes([0x32; 32]),
+            DecisionPolicySnapshotId::from_content_hash(&policy_hash),
+            policy_hash,
+            label_cutoff,
+        )
+        .expect("derive feedback cohorts");
         let embargo = Duration::seconds(
             i64::try_from(profile.spec.purge_embargo_secs).expect("embargo fits signed seconds"),
         );
@@ -631,17 +687,17 @@ mod tests {
         );
 
         assert_eq!(
-            windows.training.cutoff() + embargo,
-            windows.calibration.window_start()
+            plan.training().cutoff() + embargo,
+            plan.calibration().window_start()
         );
         assert_eq!(
-            windows.calibration.cutoff() + embargo,
-            windows.evaluation.window_start()
+            plan.calibration().cutoff() + embargo,
+            plan.evaluation().window_start()
         );
-        assert_eq!(windows.evaluation.cutoff() + horizon, label_cutoff);
+        assert_eq!(plan.evaluation().cutoff() + horizon, label_cutoff);
         assert_eq!(
-            windows.source_start + lookback,
-            windows.training.window_start()
+            plan.source_start() + lookback,
+            plan.training().window_start()
         );
     }
 }

@@ -680,10 +680,21 @@ impl JwtService {
         self.blacklist.revoke(&claims.jti, ttl).await
     }
 
-    /// Whether the given `jti` has been revoked. Backend outages surface as
-    /// [`AuthError::BlacklistUnavailable`] (fail-closed).
-    pub async fn is_revoked(&self, jti: &str) -> Result<bool, AuthError> {
-        self.blacklist.is_revoked(jti).await
+    /// Whether both Redis-backed access-token revocation and refresh-family
+    /// authority still permit this login session.
+    ///
+    /// Requiring both facts makes complete Redis state loss fail closed: a
+    /// missing blacklist entry alone cannot resurrect a token because the
+    /// corresponding active family is also required.
+    pub async fn session_active(
+        &self,
+        access_jti: &str,
+        family_id: &str,
+    ) -> Result<bool, AuthError> {
+        if self.blacklist.is_revoked(access_jti).await? {
+            return Ok(false);
+        }
+        self.blacklist.refresh_family_active(family_id).await
     }
 
     pub async fn create_refresh_family(
@@ -722,10 +733,6 @@ impl JwtService {
 
     pub async fn revoke_subject_sessions(&self, subject: &str) -> Result<(), AuthError> {
         self.blacklist.revoke_subject_sessions(subject).await
-    }
-
-    pub async fn family_active(&self, family_id: &str) -> Result<bool, AuthError> {
-        self.blacklist.refresh_family_active(family_id).await
     }
 }
 

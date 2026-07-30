@@ -1,5 +1,6 @@
 //! Audited `PostgreSQL` migration and schema-verification system contracts.
 
+use crate::infrastructure_removal_catalog::POSTGRES_REMOVED_OBJECTS_QUERY;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_migration::{
     apply as apply_postgres_migrations, migrations::Migrator as PostgresMigrator,
@@ -130,6 +131,40 @@ pub async fn immutable_baseline_idempotent_rejected() {
     .await
     .expect("inject schema drift");
     assert_manifest_drift(&db, "tables").await;
+}
+
+pub async fn removed_schema_absent() {
+    let (db, _container, config) = setup_empty_pg().await;
+    apply_postgres_migrations(&config, &db)
+        .await
+        .expect("apply baseline");
+    finalize_schema_deployment(&db)
+        .await
+        .expect("finalize baseline");
+
+    let residues = db
+        .query_all_raw(Statement::from_string(
+            DbBackend::Postgres,
+            POSTGRES_REMOVED_OBJECTS_QUERY,
+        ))
+        .await
+        .expect("inspect removed PostgreSQL objects");
+    let residues = residues
+        .iter()
+        .map(|row| {
+            let kind = row
+                .try_get::<String>("", "object_kind")
+                .expect("removed object kind");
+            let name = row
+                .try_get::<String>("", "object_name")
+                .expect("removed object name");
+            format!("{kind}:{name}")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        residues.is_empty(),
+        "fresh PostgreSQL catalog retained removed objects: {residues:?}"
+    );
 }
 
 pub async fn boot_rejects_unknown_schema() {

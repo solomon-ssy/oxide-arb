@@ -28,7 +28,7 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_system_tests::{
-    postgres::{self, setup_pg},
+    postgres::{self, PostgresClock, setup_pg},
     support::execution_pg_seed::{
         ExecutionTxnIds, close_position_full, fill_entry_lot, seed_approved_intent,
         seed_report_fixture,
@@ -99,9 +99,10 @@ async fn closed_execution_source_reconciled() {
     assert_multiple_exit_aggregated(&graph);
     assert_order_mismatch_rejects(&graph);
 
-    let repository = PgRecommendationExecutionOutcomeRepository::new(db);
+    let repository = PgRecommendationExecutionOutcomeRepository::new(db.clone());
+    let cutoff = db.statement_time().await;
     let first = repository
-        .reconcile_intent(&intent_id)
+        .reconcile_intent(&intent_id, cutoff)
         .await
         .expect("reconcile complete execution source graph");
     let inserted = match first {
@@ -109,7 +110,7 @@ async fn closed_execution_source_reconciled() {
         other => panic!("expected inserted execution outcome, got {other:?}"),
     };
     let second = repository
-        .reconcile_intent(&intent_id)
+        .reconcile_intent(&intent_id, cutoff)
         .await
         .expect("retry execution source graph");
     let existing = match second {

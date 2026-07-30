@@ -2,6 +2,8 @@
 
 #[path = "core/catalog_bootstrap.rs"]
 mod catalog_bootstrap;
+#[path = "core/domain_source_supervisor.rs"]
+mod domain_source_supervisor;
 #[path = "core/equity_snapshot.rs"]
 mod equity_snapshot;
 #[path = "core/factor_pipeline.rs"]
@@ -18,6 +20,8 @@ mod model_governance;
 mod model_runtime;
 #[path = "core/model_training_backtest.rs"]
 mod model_training_backtest;
+#[path = "core/outcome_backfill_evidence.rs"]
+mod outcome_backfill_evidence;
 #[path = "core/outcome_reconciliation.rs"]
 mod outcome_reconciliation;
 #[path = "core/outcome_reconciliation_producer.rs"]
@@ -105,6 +109,15 @@ async fn report_route_stays_pinned() {
     ))
     .await
     .expect("start pinned report-route PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn domain_source_credential_readiness() {
+    Box::pin(postgres::with_postgres_suite(
+        domain_source_supervisor::credential_blocked_recovers(),
+    ))
+    .await
+    .expect("start credential-gated domain-source PostgreSQL suite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

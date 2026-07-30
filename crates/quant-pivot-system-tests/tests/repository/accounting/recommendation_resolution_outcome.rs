@@ -23,7 +23,7 @@ use quant_pivot_repository::{
     traits::{MarketRepository, RecommendationResolutionOutcomeRepository},
 };
 use quant_pivot_system_tests::{
-    postgres::setup_pg,
+    postgres::{PostgresClock, setup_pg},
     support::execution_pg_seed::{
         ExecutionTxnIds, ReportSeedConfig, seed_report_on_infra, seed_settlement_report_fixture,
         seed_shared_demo_infra,
@@ -362,10 +362,33 @@ pub async fn reconciliation_candidates_terminal_aware() {
             .await
             .expect("mark resolution candidate terminal");
     }
-    let repository = PgRecommendationResolutionOutcomeRepository::new(db);
+    let repository = PgRecommendationResolutionOutcomeRepository::new(db.clone());
+    let cutoff = db.statement_time().await;
+    let old_cutoff = cutoff - Duration::days(1);
+    assert_eq!(
+        repository
+            .source_history_start(old_cutoff)
+            .await
+            .expect("read empty source history before recommendation visibility"),
+        None
+    );
+    assert!(
+        repository
+            .source_history_start(cutoff)
+            .await
+            .expect("read earliest source history boundary")
+            .is_some()
+    );
+    assert!(
+        repository
+            .list_reconciliation_candidates(old_cutoff, None, 10)
+            .await
+            .expect("scan resolution candidates before recommendation visibility")
+            .is_empty()
+    );
 
     let first_page = repository
-        .list_reconciliation_candidates(None, 1)
+        .list_reconciliation_candidates(cutoff, None, 1)
         .await
         .expect("first resolution reconciliation candidate");
     assert_eq!(first_page.len(), 1);
@@ -373,7 +396,7 @@ pub async fn reconciliation_candidates_terminal_aware() {
     assert_eq!(first_page[0].market_id, MarketId::new(&ids[0].market));
 
     let second_page = repository
-        .list_reconciliation_candidates(Some(ids[0].recommendation), 1)
+        .list_reconciliation_candidates(cutoff, Some(ids[0].recommendation), 1)
         .await
         .expect("second resolution reconciliation candidate");
     assert_eq!(second_page.len(), 1);
@@ -391,7 +414,7 @@ pub async fn reconciliation_candidates_terminal_aware() {
         .await
         .expect("seal first resolution outcome");
     let remaining = repository
-        .list_reconciliation_candidates(None, 10)
+        .list_reconciliation_candidates(cutoff, None, 10)
         .await
         .expect("remaining resolution reconciliation candidates");
     assert_eq!(remaining.len(), 1);

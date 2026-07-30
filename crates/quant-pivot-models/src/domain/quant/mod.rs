@@ -150,7 +150,8 @@ pub use outcome_reconciliation::{
     ExecutionOutcomeDeferredReason, ExecutionOutcomeDerivation,
     ExecutionOutcomeReconciliationError, ExecutionOutcomeReconciliationResult,
     ExecutionOutcomeSourceGraph, RecommendationExecutionReconciliationCandidate,
-    RecommendationResolutionReconciliationCandidate,
+    RecommendationResolutionReconciliationCandidate, ResolutionOutcomeDeferredReason,
+    ResolutionOutcomeReconciliationResult,
 };
 pub use portfolio::{NewPortfolioPlan, PortfolioPlanInfo};
 pub use position::{NewPosition, PositionExit, PositionFill, PositionInfo};

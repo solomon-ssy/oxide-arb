@@ -14,8 +14,12 @@ mod infrastructure_postgres_schema_migration;
 mod infrastructure_postgres_schema_mutation;
 #[path = "infrastructure/redis/backend.rs"]
 mod infrastructure_redis_backend;
+#[path = "infrastructure/redis/restart.rs"]
+mod infrastructure_redis_restart;
 #[path = "infrastructure/redis/tiered_cache.rs"]
 mod infrastructure_redis_tiered_cache;
+#[path = "infrastructure/removal_catalog.rs"]
+mod infrastructure_removal_catalog;
 
 type Scenario = Pin<Box<dyn Future<Output = ()>>>;
 
@@ -41,6 +45,7 @@ async fn infrastructure_contracts_share_stack() {
             infrastructure_redis_tiered_cache::tiered_set_populates_levels,
             infrastructure_postgres_schema_migration::migration_plan_empty_database,
             infrastructure_postgres_schema_migration::immutable_baseline_idempotent_rejected,
+            infrastructure_postgres_schema_migration::removed_schema_absent,
             infrastructure_postgres_schema_migration::boot_rejects_unknown_schema,
             infrastructure_postgres_schema_migration::immutable_migrations_empty_database,
             infrastructure_postgres_schema_migration::legacy_sqlx_ledger_forbidden,
@@ -74,6 +79,7 @@ async fn infrastructure_contracts_share_stack() {
             infrastructure_clickhouse_storage::preproduction_rejects_without_dropping,
             infrastructure_clickhouse_storage::clickhouse_health_check,
             infrastructure_clickhouse_storage::clickhouse_schema_idempotent,
+            infrastructure_clickhouse_storage::removed_tables_absent,
             infrastructure_clickhouse_storage::native_query_limits_rejects,
             infrastructure_clickhouse_storage::canonical_evidence_no_ttl,
             infrastructure_clickhouse_storage::runtime_schema_rejects_ttl,
@@ -91,4 +97,5 @@ async fn infrastructure_contracts_share_stack() {
     })
     .await
     .expect("start disposable infrastructure stack");
+    infrastructure_redis_restart::cache_restart_recovers().await;
 }

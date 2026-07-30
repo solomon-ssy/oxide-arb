@@ -726,7 +726,7 @@ impl TradePolicyEvidenceBundleManifest {
                         .to_owned(),
                 );
             }
-            if !uris.insert(object.uri.as_str()) || !object.uri.as_str().ends_with(".parquet") {
+            if !uris.insert(object.uri.as_str()) || !object.uri.has_path_extension("parquet") {
                 return Err(
                     "policy evidence objects must use unique immutable Parquet URIs".to_owned(),
                 );

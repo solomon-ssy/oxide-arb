@@ -133,8 +133,10 @@ fn ticket_protocol(req: &HttpRequest) -> Option<String> {
 async fn validate_ticket(state: &AppState, ticket: &WsTicketClaims) -> Result<UserId, WebError> {
     if !state.casbin.is_healthy()
         || ticket.session_exp <= Utc::now().timestamp()
-        || state.jwt.is_revoked(&ticket.access_jti).await?
-        || !state.jwt.family_active(&ticket.family_id).await?
+        || !state
+            .jwt
+            .session_active(&ticket.access_jti, &ticket.family_id)
+            .await?
     {
         return Err(WebError::from(AuthError::Blacklisted));
     }
