@@ -7,11 +7,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use super::model::ModelVersionInfo;
 use crate::{
-    enums::{
-        common::MarketCategory,
-        model::ModelFamily,
-        quant::{PublicationStatus, QuantRuntimeMode},
-    },
+    enums::{common::MarketCategory, model::ModelFamily, quant::QuantRuntimeMode},
     hashing::CanonicalDigest,
     runtime_config::{
         ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, DecisionPolicySnapshotDocument,
@@ -19,27 +15,29 @@ use crate::{
     },
     types::{
         ContentHash, DecisionPolicySnapshotId, FeatureParityRunId, FeatureParityStateId,
-        FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackShadowReplayArtifactId, ModelSpecId,
-        ModelVersionId, PolicyActivationId, PolicyApprovalId, PolicyBundleGeneration,
-        PolicyIdempotencyKey, PolicyRevisionId, PromotionPermitId, ResearchProfileArtifactId,
-        ResearchProfileRef, RoleCode, TrainingDatasetId, UserId,
+        FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackShadowArtifactId,
+        ModelCandidateManifestId, ModelSpecId, ModelVersionId, PolicyActivationId,
+        PolicyApprovalId, PolicyBundleGeneration, PolicyIdempotencyKey, PolicyRevisionId,
+        PromotionPermitId, ResearchProfileArtifactId, ResearchProfileRef, RoleCode,
+        TrainingDatasetId, UserId,
     },
 };
 
-const PROMOTION_PERMIT_SCOPE_VERSION: u32 = 1;
+const PROMOTION_PERMIT_SCOPE_VERSION: u32 = 5;
 const PROMOTION_PERMIT_SCOPE_DOMAIN: &str = "quant-pivot/promotion-permit-scope";
 const PROMOTION_PERMIT_ISSUANCE_VERSION: u32 = 1;
 const PROMOTION_PERMIT_ISSUANCE_DOMAIN: &str = "quant-pivot/promotion-permit-issuance";
 const PROMOTION_NON_ROUTE_VERSION: u32 = 1;
 const PROMOTION_NON_ROUTE_DOMAIN: &str = "quant-pivot/promotion-non-route-policy";
-const PROMOTION_SERVING_VERSION: u32 = 2;
+const PROMOTION_SERVING_VERSION: u32 = 4;
 const PROMOTION_SERVING_DOMAIN: &str = "quant-pivot/promotion-serving-constraints";
 const PROMOTION_PREFLIGHT_VERSION: u32 = 1;
 const PROMOTION_PREFLIGHT_DOMAIN: &str = "quant-pivot/promotion-preflight";
-const PROMOTION_TRANSACTION_VERSION: u32 = 1;
+const PROMOTION_TRANSACTION_VERSION: u32 = 2;
 const PROMOTION_TRANSACTION_DOMAIN: &str = "quant-pivot/model-route-promotion";
 const MAX_ACTOR_BYTES: usize = 256;
 const MAX_REASON_BYTES: usize = 2_048;
+const MAX_REASON_CODE_BYTES: usize = 128;
 const MAX_ROLE_BYTES: usize = 64;
 
 /// Canonically ordered, non-empty runtime-mode authority persisted as a
@@ -75,13 +73,19 @@ impl IntoActiveValue<Vec<QuantRuntimeMode>> for PromotionRuntimeModes {
 #[serde(deny_unknown_fields, try_from = "PromotionPermitScopeDocument")]
 pub struct PromotionPermitScope {
     format_version: u32,
+    feedback_cycle_id: FeedbackCycleId,
     profile_ref: ResearchProfileRef,
     category: MarketCategory,
     expected_policy_generation: PolicyBundleGeneration,
+    expected_runtime_control_revision: i64,
     expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     expected_snapshot_hash: ContentHash,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
+    candidate_model_version_id: ModelVersionId,
+    candidate_manifest_id: ModelCandidateManifestId,
+    candidate_manifest_hash: ContentHash,
+    promotion_gate_hash: ContentHash,
     allowed_runtime_modes: PromotionRuntimeModes,
     non_route_policy_hash: ContentHash,
     serving_constraints_hash: ContentHash,
@@ -92,13 +96,19 @@ pub struct PromotionPermitScope {
 #[serde(deny_unknown_fields)]
 struct PromotionPermitScopeDocument {
     format_version: u32,
+    feedback_cycle_id: FeedbackCycleId,
     profile_ref: ResearchProfileRef,
     category: MarketCategory,
     expected_policy_generation: PolicyBundleGeneration,
+    expected_runtime_control_revision: i64,
     expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     expected_snapshot_hash: ContentHash,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
+    candidate_model_version_id: ModelVersionId,
+    candidate_manifest_id: ModelCandidateManifestId,
+    candidate_manifest_hash: ContentHash,
+    promotion_gate_hash: ContentHash,
     allowed_runtime_modes: Vec<QuantRuntimeMode>,
     non_route_policy_hash: ContentHash,
     serving_constraints_hash: ContentHash,
@@ -108,13 +118,19 @@ struct PromotionPermitScopeDocument {
 /// Server-frozen inputs for one exact permit scope.
 #[derive(Debug, Clone)]
 pub struct PromotionPermitScopeInput {
+    pub feedback_cycle_id: FeedbackCycleId,
     pub profile_ref: ResearchProfileRef,
     pub category: MarketCategory,
     pub expected_policy_generation: PolicyBundleGeneration,
+    pub expected_runtime_control_revision: i64,
     pub expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub expected_snapshot_hash: ContentHash,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
+    pub candidate_model_version_id: ModelVersionId,
+    pub candidate_manifest_id: ModelCandidateManifestId,
+    pub candidate_manifest_hash: ContentHash,
+    pub promotion_gate_hash: ContentHash,
     pub allowed_runtime_modes: Vec<QuantRuntimeMode>,
     pub non_route_policy_hash: ContentHash,
     pub serving_constraints_hash: ContentHash,
@@ -126,13 +142,19 @@ impl PromotionPermitScope {
     pub fn try_new(input: PromotionPermitScopeInput) -> Result<Self, FeedbackError> {
         let scope = Self {
             format_version: PROMOTION_PERMIT_SCOPE_VERSION,
+            feedback_cycle_id: input.feedback_cycle_id,
             profile_ref: input.profile_ref,
             category: input.category,
             expected_policy_generation: input.expected_policy_generation,
+            expected_runtime_control_revision: input.expected_runtime_control_revision,
             expected_decision_policy_snapshot_id: input.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: input.expected_snapshot_hash,
             champion_model_version_id: input.champion_model_version_id,
             champion_serving_contract_hash: input.champion_serving_contract_hash,
+            candidate_model_version_id: input.candidate_model_version_id,
+            candidate_manifest_id: input.candidate_manifest_id,
+            candidate_manifest_hash: input.candidate_manifest_hash,
+            promotion_gate_hash: input.promotion_gate_hash,
             allowed_runtime_modes: PromotionRuntimeModes::try_new(input.allowed_runtime_modes)?,
             non_route_policy_hash: input.non_route_policy_hash,
             serving_constraints_hash: input.serving_constraints_hash,
@@ -170,11 +192,28 @@ impl PromotionPermitScope {
                 self.profile_ref.id, self.category
             )));
         }
+        if self.expected_runtime_control_revision < 0 {
+            return Err(invalid_permit(
+                "expected runtime-control revision cannot be negative",
+            ));
+        }
         if self.expected_decision_policy_snapshot_id
             != DecisionPolicySnapshotId::from_content_hash(&self.expected_snapshot_hash)
         {
             return Err(invalid_permit(
                 "expected policy snapshot ID does not match its content hash",
+            ));
+        }
+        if self.champion_model_version_id == self.candidate_model_version_id {
+            return Err(invalid_permit(
+                "permit candidate must differ from the current route champion",
+            ));
+        }
+        if self.candidate_manifest_id
+            != ModelCandidateManifestId::from_content_hash(&self.candidate_manifest_hash)
+        {
+            return Err(invalid_permit(
+                "candidate manifest ID does not match its content hash",
             ));
         }
         validate_modes(&self.allowed_runtime_modes.0)
@@ -197,6 +236,11 @@ impl PromotionPermitScope {
     }
 
     #[must_use]
+    pub const fn feedback_cycle_id(&self) -> FeedbackCycleId {
+        self.feedback_cycle_id
+    }
+
+    #[must_use]
     pub const fn category(&self) -> MarketCategory {
         self.category
     }
@@ -204,6 +248,11 @@ impl PromotionPermitScope {
     #[must_use]
     pub const fn expected_policy_generation(&self) -> PolicyBundleGeneration {
         self.expected_policy_generation
+    }
+
+    #[must_use]
+    pub const fn expected_runtime_control_revision(&self) -> i64 {
+        self.expected_runtime_control_revision
     }
 
     #[must_use]
@@ -224,6 +273,26 @@ impl PromotionPermitScope {
     #[must_use]
     pub const fn champion_serving_contract_hash(&self) -> ContentHash {
         self.champion_serving_contract_hash
+    }
+
+    #[must_use]
+    pub const fn candidate_model_version_id(&self) -> ModelVersionId {
+        self.candidate_model_version_id
+    }
+
+    #[must_use]
+    pub const fn candidate_manifest_id(&self) -> ModelCandidateManifestId {
+        self.candidate_manifest_id
+    }
+
+    #[must_use]
+    pub const fn candidate_manifest_hash(&self) -> ContentHash {
+        self.candidate_manifest_hash
+    }
+
+    #[must_use]
+    pub const fn promotion_gate_hash(&self) -> ContentHash {
+        self.promotion_gate_hash
     }
 
     #[must_use]
@@ -262,7 +331,11 @@ impl PromotionPermitScope {
         self.allowed_runtime_modes.0.contains(&mode)
     }
 
-    /// Revalidate the exact published champion projection bound by this scope.
+    /// Revalidate the exact champion artifact projection bound by this scope.
+    ///
+    /// Champion authority is derived exclusively from the active route
+    /// generation; a mutable model-global publication status is deliberately
+    /// outside this contract.
     pub fn validate_champion(&self, model: &ModelVersionInfo) -> Result<(), FeedbackError> {
         self.validate()?;
         model
@@ -272,7 +345,6 @@ impl PromotionPermitScope {
             || model.serving_contract_hash != self.champion_serving_contract_hash
             || model.profile_ref != self.profile_ref
             || model.category_scope != Some(self.category)
-            || model.publication_status != PublicationStatus::Published
         {
             return Err(invalid_preflight(
                 "champion model differs from the permit serving projection",
@@ -288,13 +360,19 @@ impl TryFrom<PromotionPermitScopeDocument> for PromotionPermitScope {
     fn try_from(document: PromotionPermitScopeDocument) -> Result<Self, Self::Error> {
         let scope = Self {
             format_version: document.format_version,
+            feedback_cycle_id: document.feedback_cycle_id,
             profile_ref: document.profile_ref,
             category: document.category,
             expected_policy_generation: document.expected_policy_generation,
+            expected_runtime_control_revision: document.expected_runtime_control_revision,
             expected_decision_policy_snapshot_id: document.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: document.expected_snapshot_hash,
             champion_model_version_id: document.champion_model_version_id,
             champion_serving_contract_hash: document.champion_serving_contract_hash,
+            candidate_model_version_id: document.candidate_model_version_id,
+            candidate_manifest_id: document.candidate_manifest_id,
+            candidate_manifest_hash: document.candidate_manifest_hash,
+            promotion_gate_hash: document.promotion_gate_hash,
             allowed_runtime_modes: PromotionRuntimeModes::try_new(document.allowed_runtime_modes)?,
             non_route_policy_hash: document.non_route_policy_hash,
             serving_constraints_hash: document.serving_constraints_hash,
@@ -511,6 +589,9 @@ impl PromotionPolicyProjection {
 pub struct PromotionServingConstraints {
     format_version: u32,
     candidate_model_version_id: ModelVersionId,
+    candidate_manifest_id: ModelCandidateManifestId,
+    candidate_manifest_hash: ContentHash,
+    promotion_gate_hash: ContentHash,
     candidate_model_spec_id: ModelSpecId,
     candidate_model_family: ModelFamily,
     candidate_artifact_hash: ContentHash,
@@ -522,7 +603,6 @@ pub struct PromotionServingConstraints {
     feature_parity_evidence_hash: ContentHash,
     profile_ref: ResearchProfileRef,
     category: MarketCategory,
-    expected_publication_status: PublicationStatus,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -530,6 +610,9 @@ pub struct PromotionServingConstraints {
 struct PromotionServingConstraintsDocument {
     format_version: u32,
     candidate_model_version_id: ModelVersionId,
+    candidate_manifest_id: ModelCandidateManifestId,
+    candidate_manifest_hash: ContentHash,
+    promotion_gate_hash: ContentHash,
     candidate_model_spec_id: ModelSpecId,
     candidate_model_family: ModelFamily,
     candidate_artifact_hash: ContentHash,
@@ -541,12 +624,14 @@ struct PromotionServingConstraintsDocument {
     feature_parity_evidence_hash: ContentHash,
     profile_ref: ResearchProfileRef,
     category: MarketCategory,
-    expected_publication_status: PublicationStatus,
 }
 
 /// Server-resolved inputs for one immutable candidate serving plane.
 pub struct PromotionServingConstraintsInput {
     pub candidate_model_version_id: ModelVersionId,
+    pub candidate_manifest_id: ModelCandidateManifestId,
+    pub candidate_manifest_hash: ContentHash,
+    pub promotion_gate_hash: ContentHash,
     pub candidate_model_spec_id: ModelSpecId,
     pub candidate_model_family: ModelFamily,
     pub candidate_artifact_hash: ContentHash,
@@ -558,7 +643,6 @@ pub struct PromotionServingConstraintsInput {
     pub feature_parity_evidence_hash: ContentHash,
     pub profile_ref: ResearchProfileRef,
     pub category: MarketCategory,
-    pub expected_publication_status: PublicationStatus,
 }
 
 impl PromotionServingConstraints {
@@ -566,6 +650,9 @@ impl PromotionServingConstraints {
         let constraints = Self {
             format_version: PROMOTION_SERVING_VERSION,
             candidate_model_version_id: input.candidate_model_version_id,
+            candidate_manifest_id: input.candidate_manifest_id,
+            candidate_manifest_hash: input.candidate_manifest_hash,
+            promotion_gate_hash: input.promotion_gate_hash,
             candidate_model_spec_id: input.candidate_model_spec_id,
             candidate_model_family: input.candidate_model_family,
             candidate_artifact_hash: input.candidate_artifact_hash,
@@ -577,7 +664,6 @@ impl PromotionServingConstraints {
             feature_parity_evidence_hash: input.feature_parity_evidence_hash,
             profile_ref: input.profile_ref,
             category: input.category,
-            expected_publication_status: input.expected_publication_status,
         };
         constraints.validate()?;
         Ok(constraints)
@@ -592,8 +678,12 @@ impl PromotionServingConstraints {
             .resolve_builtin_research_profile()
             .map_err(invalid_preflight)?;
         if self.format_version != PROMOTION_SERVING_VERSION
-            || self.candidate_model_family != ModelFamily::WeightedFactor
-            || self.expected_publication_status != PublicationStatus::Shadow
+            || !matches!(
+                self.candidate_model_family,
+                ModelFamily::WeightedFactor | ModelFamily::ClassicalGradientBoostedTrees
+            )
+            || self.candidate_manifest_id
+                != ModelCandidateManifestId::from_content_hash(&self.candidate_manifest_hash)
             || profile.spec.category != Some(self.category)
             || !matches!(
                 self.category,
@@ -601,7 +691,7 @@ impl PromotionServingConstraints {
             )
         {
             return Err(invalid_preflight(
-                "candidate serving family, status, profile, or category is not promotable",
+                "candidate serving family, profile, or category is not promotable",
             ));
         }
         Ok(())
@@ -620,6 +710,21 @@ impl PromotionServingConstraints {
     #[must_use]
     pub const fn candidate_model_version_id(&self) -> ModelVersionId {
         self.candidate_model_version_id
+    }
+
+    #[must_use]
+    pub const fn candidate_manifest_id(&self) -> ModelCandidateManifestId {
+        self.candidate_manifest_id
+    }
+
+    #[must_use]
+    pub const fn candidate_manifest_hash(&self) -> ContentHash {
+        self.candidate_manifest_hash
+    }
+
+    #[must_use]
+    pub const fn promotion_gate_hash(&self) -> ContentHash {
+        self.promotion_gate_hash
     }
 
     #[must_use]
@@ -688,7 +793,6 @@ impl PromotionServingConstraints {
             || model.training_dataset_id != Some(self.candidate_training_dataset_id)
             || model.profile_ref != self.profile_ref
             || model.category_scope != Some(self.category)
-            || model.publication_status != self.expected_publication_status
         {
             return Err(invalid_preflight(
                 "candidate model differs from the frozen serving constraints",
@@ -705,6 +809,9 @@ impl TryFrom<PromotionServingConstraintsDocument> for PromotionServingConstraint
         let constraints = Self {
             format_version: document.format_version,
             candidate_model_version_id: document.candidate_model_version_id,
+            candidate_manifest_id: document.candidate_manifest_id,
+            candidate_manifest_hash: document.candidate_manifest_hash,
+            promotion_gate_hash: document.promotion_gate_hash,
             candidate_model_spec_id: document.candidate_model_spec_id,
             candidate_model_family: document.candidate_model_family,
             candidate_artifact_hash: document.candidate_artifact_hash,
@@ -716,7 +823,6 @@ impl TryFrom<PromotionServingConstraintsDocument> for PromotionServingConstraint
             feature_parity_evidence_hash: document.feature_parity_evidence_hash,
             profile_ref: document.profile_ref,
             category: document.category,
-            expected_publication_status: document.expected_publication_status,
         };
         constraints.validate()?;
         Ok(constraints)
@@ -737,7 +843,7 @@ pub struct PromotionPreflight {
     decision_artifact_hash: ContentHash,
     decision_object_hash: ContentHash,
     decision_job_input_hash: ContentHash,
-    shadow_artifact_id: FeedbackShadowReplayArtifactId,
+    shadow_artifact_id: FeedbackShadowArtifactId,
     shadow_artifact_hash: ContentHash,
     shadow_object_hash: ContentHash,
     shadow_contract_hash: ContentHash,
@@ -760,7 +866,7 @@ struct PromotionPreflightDocument {
     decision_artifact_hash: ContentHash,
     decision_object_hash: ContentHash,
     decision_job_input_hash: ContentHash,
-    shadow_artifact_id: FeedbackShadowReplayArtifactId,
+    shadow_artifact_id: FeedbackShadowArtifactId,
     shadow_artifact_hash: ContentHash,
     shadow_object_hash: ContentHash,
     shadow_contract_hash: ContentHash,
@@ -781,7 +887,7 @@ struct PromotionPreflightPreimage<'a> {
     decision_artifact_hash: ContentHash,
     decision_object_hash: ContentHash,
     decision_job_input_hash: ContentHash,
-    shadow_artifact_id: FeedbackShadowReplayArtifactId,
+    shadow_artifact_id: FeedbackShadowArtifactId,
     shadow_artifact_hash: ContentHash,
     shadow_object_hash: ContentHash,
     shadow_contract_hash: ContentHash,
@@ -800,7 +906,7 @@ pub struct PromotionPreflightInput {
     pub decision_artifact_hash: ContentHash,
     pub decision_object_hash: ContentHash,
     pub decision_job_input_hash: ContentHash,
-    pub shadow_artifact_id: FeedbackShadowReplayArtifactId,
+    pub shadow_artifact_id: FeedbackShadowArtifactId,
     pub shadow_artifact_hash: ContentHash,
     pub shadow_object_hash: ContentHash,
     pub shadow_contract_hash: ContentHash,
@@ -866,16 +972,23 @@ impl PromotionPreflight {
             || self.scope.serving_constraints_hash() != serving_hash
             || self.scope.profile_ref() != self.serving_constraints.profile_ref()
             || self.scope.category() != self.serving_constraints.category()
-            || self.scope.champion_model_version_id()
-                == self.serving_constraints.candidate_model_version_id()
+            || self.scope.candidate_model_version_id()
+                != self.serving_constraints.candidate_model_version_id()
+            || self.scope.candidate_manifest_id()
+                != self.serving_constraints.candidate_manifest_id()
+            || self.scope.candidate_manifest_hash()
+                != self.serving_constraints.candidate_manifest_hash()
+            || self.scope.promotion_gate_hash() != self.serving_constraints.promotion_gate_hash()
             || !self.scope.allows_mode(self.current_runtime_mode)
             || self.runtime_control_revision < 0
+            || self.scope.expected_runtime_control_revision() != self.runtime_control_revision
             || FeedbackCycleId::from_idempotency_hash(&self.cycle_idempotency_hash)
                 != self.feedback_cycle_id
+            || self.scope.feedback_cycle_id() != self.feedback_cycle_id
             || self.decision_artifact_id
                 != FeedbackDecisionArtifactId::from_cycle_id(self.feedback_cycle_id)
             || self.shadow_artifact_id
-                != FeedbackShadowReplayArtifactId::from_cycle_id(self.feedback_cycle_id)
+                != FeedbackShadowArtifactId::from_cycle_id(self.feedback_cycle_id)
             || self.preflight_hash != Self::derive_hash(&self.preimage())?
         {
             return Err(invalid_preflight(
@@ -959,7 +1072,7 @@ impl PromotionPreflight {
     }
 
     #[must_use]
-    pub const fn shadow_artifact_id(&self) -> FeedbackShadowReplayArtifactId {
+    pub const fn shadow_artifact_id(&self) -> FeedbackShadowArtifactId {
         self.shadow_artifact_id
     }
 
@@ -1068,7 +1181,9 @@ struct ModelRoutePromotionPreimage<'a> {
     actor_user_id: UserId,
     actor_username: &'a str,
     actor_role: &'a RoleCode,
-    reason: &'a str,
+    idempotency_key: &'a PolicyIdempotencyKey,
+    reason_code: &'a str,
+    note: &'a str,
     route: &'a ModelRoutePromotionRoute,
     policy: &'a ModelRoutePromotionPolicy,
 }
@@ -1082,7 +1197,9 @@ pub struct ModelRoutePromotionRecordInput {
     pub actor_user_id: UserId,
     pub actor_username: String,
     pub actor_role: RoleCode,
-    pub reason: String,
+    pub idempotency_key: PolicyIdempotencyKey,
+    pub reason_code: String,
+    pub note: String,
     pub route: ModelRoutePromotionRoute,
     pub policy: ModelRoutePromotionPolicy,
 }
@@ -1100,7 +1217,9 @@ pub struct ModelRoutePromotionRecord {
     actor_user_id: UserId,
     actor_username: String,
     actor_role: RoleCode,
-    reason: String,
+    idempotency_key: PolicyIdempotencyKey,
+    reason_code: String,
+    note: String,
     route: ModelRoutePromotionRoute,
     policy: ModelRoutePromotionPolicy,
 }
@@ -1116,7 +1235,9 @@ impl ModelRoutePromotionRecord {
             actor_user_id: input.actor_user_id,
             actor_username: &input.actor_username,
             actor_role: &input.actor_role,
-            reason: &input.reason,
+            idempotency_key: &input.idempotency_key,
+            reason_code: &input.reason_code,
+            note: &input.note,
             route: &input.route,
             policy: &input.policy,
         })?;
@@ -1130,7 +1251,9 @@ impl ModelRoutePromotionRecord {
             actor_user_id: input.actor_user_id,
             actor_username: input.actor_username,
             actor_role: input.actor_role,
-            reason: input.reason,
+            idempotency_key: input.idempotency_key,
+            reason_code: input.reason_code,
+            note: input.note,
             route: input.route,
             policy: input.policy,
         };
@@ -1140,7 +1263,8 @@ impl ModelRoutePromotionRecord {
 
     pub fn validate(&self) -> Result<(), FeedbackError> {
         self.preflight.validate()?;
-        validate_actor(&self.actor_username, &self.actor_role, &self.reason)?;
+        validate_actor(&self.actor_username, &self.actor_role, &self.note)?;
+        validate_reason_code(&self.reason_code)?;
         let scope = self.preflight.scope();
         let candidate = self.preflight.serving_constraints();
         let next_revision = self
@@ -1189,7 +1313,9 @@ impl ModelRoutePromotionRecord {
             actor_user_id: self.actor_user_id,
             actor_username: &self.actor_username,
             actor_role: &self.actor_role,
-            reason: &self.reason,
+            idempotency_key: &self.idempotency_key,
+            reason_code: &self.reason_code,
+            note: &self.note,
             route: &self.route,
             policy: &self.policy,
         }
@@ -1237,8 +1363,23 @@ impl ModelRoutePromotionRecord {
     }
 
     #[must_use]
-    pub fn reason(&self) -> &str {
-        &self.reason
+    pub const fn idempotency_key(&self) -> &PolicyIdempotencyKey {
+        &self.idempotency_key
+    }
+
+    #[must_use]
+    pub fn reason_code(&self) -> &str {
+        &self.reason_code
+    }
+
+    #[must_use]
+    pub fn note(&self) -> &str {
+        &self.note
+    }
+
+    #[must_use]
+    pub fn audit_reason(&self) -> String {
+        format!("{}: {}", self.reason_code, self.note)
     }
 
     #[must_use]
@@ -1257,17 +1398,34 @@ impl ModelRoutePromotionRecord {
 pub struct CommitModelRoutePromotion {
     promotion_permit_id: PromotionPermitId,
     preflight: PromotionPreflight,
+    actor: PromotionPermitActor,
+    idempotency_key: PolicyIdempotencyKey,
+    reason_code: String,
+    note: String,
 }
 
 impl CommitModelRoutePromotion {
     pub fn try_new(
-        promotion_permit_id: PromotionPermitId,
+        request: PromoteModelRoute,
         preflight: PromotionPreflight,
     ) -> Result<Self, FeedbackError> {
+        request.validate()?;
         preflight.validate()?;
+        if request.feedback_cycle_id != preflight.feedback_cycle_id()
+            || request.expected_policy_generation != preflight.scope().expected_policy_generation()
+            || request.expected_runtime_control_revision != preflight.runtime_control_revision()
+        {
+            return Err(invalid_preflight(
+                "activation request cycle, policy generation, or runtime revision differs from preflight",
+            ));
+        }
         Ok(Self {
-            promotion_permit_id,
+            promotion_permit_id: request.promotion_permit_id,
             preflight,
+            actor: request.actor,
+            idempotency_key: request.idempotency_key,
+            reason_code: request.reason_code,
+            note: request.note,
         })
     }
 
@@ -1280,13 +1438,52 @@ impl CommitModelRoutePromotion {
     pub const fn preflight(&self) -> &PromotionPreflight {
         &self.preflight
     }
+
+    #[must_use]
+    pub const fn actor(&self) -> &PromotionPermitActor {
+        &self.actor
+    }
+
+    #[must_use]
+    pub const fn idempotency_key(&self) -> &PolicyIdempotencyKey {
+        &self.idempotency_key
+    }
+
+    #[must_use]
+    pub fn reason_code(&self) -> &str {
+        &self.reason_code
+    }
+
+    #[must_use]
+    pub fn note(&self) -> &str {
+        &self.note
+    }
 }
 
-/// Stable idempotent request surface; all authority is server-loaded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Stable authenticated activation intent; all serving authority is
+/// server-loaded and checked against the permit-bound preflight.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromoteModelRoute {
     pub promotion_permit_id: PromotionPermitId,
     pub feedback_cycle_id: FeedbackCycleId,
+    pub expected_policy_generation: PolicyBundleGeneration,
+    pub expected_runtime_control_revision: i64,
+    pub idempotency_key: PolicyIdempotencyKey,
+    pub actor: PromotionPermitActor,
+    pub reason_code: String,
+    pub note: String,
+}
+
+impl PromoteModelRoute {
+    pub fn validate(&self) -> Result<(), FeedbackError> {
+        if self.expected_runtime_control_revision < 0 {
+            return Err(invalid_preflight(
+                "expected runtime-control revision cannot be negative",
+            ));
+        }
+        validate_role_reason(&self.actor.acting_role, &self.note)?;
+        validate_reason_code(&self.reason_code)
+    }
 }
 
 /// Authenticated principal and explicit role used for a governed permit action.
@@ -1371,6 +1568,7 @@ pub struct NewPromotionPermit {
     idempotency_key: PolicyIdempotencyKey,
     scope_hash: ContentHash,
     issuance_hash: ContentHash,
+    feedback_cycle_id: FeedbackCycleId,
     #[sea_orm(column_type = "JsonBinary")]
     profile_ref: ResearchProfileRef,
     research_profile_artifact_id: ResearchProfileArtifactId,
@@ -1378,10 +1576,15 @@ pub struct NewPromotionPermit {
     #[sea_orm(column_type = r#"custom("qp_market_category")"#)]
     category: MarketCategory,
     expected_policy_generation: PolicyBundleGeneration,
+    expected_runtime_control_revision: i64,
     expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     expected_snapshot_hash: ContentHash,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
+    candidate_model_version_id: ModelVersionId,
+    candidate_manifest_id: ModelCandidateManifestId,
+    candidate_manifest_hash: ContentHash,
+    promotion_gate_hash: ContentHash,
     #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode[]")"#)]
     allowed_runtime_modes: PromotionRuntimeModes,
     non_route_policy_hash: ContentHash,
@@ -1423,15 +1626,21 @@ impl NewPromotionPermit {
             idempotency_key: input.idempotency_key,
             scope_hash,
             issuance_hash,
+            feedback_cycle_id: input.scope.feedback_cycle_id,
             research_profile_artifact_id: profile_ref.artifact_id(),
             profile_hash: profile_ref.content_hash,
             profile_ref,
             category: input.scope.category,
             expected_policy_generation: input.scope.expected_policy_generation,
+            expected_runtime_control_revision: input.scope.expected_runtime_control_revision,
             expected_decision_policy_snapshot_id: input.scope.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: input.scope.expected_snapshot_hash,
             champion_model_version_id: input.scope.champion_model_version_id,
             champion_serving_contract_hash: input.scope.champion_serving_contract_hash,
+            candidate_model_version_id: input.scope.candidate_model_version_id,
+            candidate_manifest_id: input.scope.candidate_manifest_id,
+            candidate_manifest_hash: input.scope.candidate_manifest_hash,
+            promotion_gate_hash: input.scope.promotion_gate_hash,
             allowed_runtime_modes: input.scope.allowed_runtime_modes,
             non_route_policy_hash: input.scope.non_route_policy_hash,
             serving_constraints_hash: input.scope.serving_constraints_hash,
@@ -1458,13 +1667,19 @@ impl NewPromotionPermit {
     pub fn scope(&self) -> PromotionPermitScope {
         PromotionPermitScope {
             format_version: PROMOTION_PERMIT_SCOPE_VERSION,
+            feedback_cycle_id: self.feedback_cycle_id,
             profile_ref: self.profile_ref.clone(),
             category: self.category,
             expected_policy_generation: self.expected_policy_generation,
+            expected_runtime_control_revision: self.expected_runtime_control_revision,
             expected_decision_policy_snapshot_id: self.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: self.expected_snapshot_hash,
             champion_model_version_id: self.champion_model_version_id,
             champion_serving_contract_hash: self.champion_serving_contract_hash,
+            candidate_model_version_id: self.candidate_model_version_id,
+            candidate_manifest_id: self.candidate_manifest_id,
+            candidate_manifest_hash: self.candidate_manifest_hash,
+            promotion_gate_hash: self.promotion_gate_hash,
             allowed_runtime_modes: self.allowed_runtime_modes.clone(),
             non_route_policy_hash: self.non_route_policy_hash,
             serving_constraints_hash: self.serving_constraints_hash,
@@ -1542,15 +1757,21 @@ pub struct PromotionPermitInfo {
     pub idempotency_key: PolicyIdempotencyKey,
     pub scope_hash: ContentHash,
     pub issuance_hash: ContentHash,
+    pub feedback_cycle_id: FeedbackCycleId,
     pub profile_ref: ResearchProfileRef,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub profile_hash: ContentHash,
     pub category: MarketCategory,
     pub expected_policy_generation: PolicyBundleGeneration,
+    pub expected_runtime_control_revision: i64,
     pub expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub expected_snapshot_hash: ContentHash,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
+    pub candidate_model_version_id: ModelVersionId,
+    pub candidate_manifest_id: ModelCandidateManifestId,
+    pub candidate_manifest_hash: ContentHash,
+    pub promotion_gate_hash: ContentHash,
     pub allowed_runtime_modes: Vec<QuantRuntimeMode>,
     pub non_route_policy_hash: ContentHash,
     pub serving_constraints_hash: ContentHash,
@@ -1615,13 +1836,19 @@ impl PromotionPermitInfo {
 
     pub fn scope(&self) -> Result<PromotionPermitScope, FeedbackError> {
         PromotionPermitScope::try_new(PromotionPermitScopeInput {
+            feedback_cycle_id: self.feedback_cycle_id,
             profile_ref: self.profile_ref.clone(),
             category: self.category,
             expected_policy_generation: self.expected_policy_generation,
+            expected_runtime_control_revision: self.expected_runtime_control_revision,
             expected_decision_policy_snapshot_id: self.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: self.expected_snapshot_hash,
             champion_model_version_id: self.champion_model_version_id,
             champion_serving_contract_hash: self.champion_serving_contract_hash,
+            candidate_model_version_id: self.candidate_model_version_id,
+            candidate_manifest_id: self.candidate_manifest_id,
+            candidate_manifest_hash: self.candidate_manifest_hash,
+            promotion_gate_hash: self.promotion_gate_hash,
             allowed_runtime_modes: self.allowed_runtime_modes.clone(),
             non_route_policy_hash: self.non_route_policy_hash,
             serving_constraints_hash: self.serving_constraints_hash,
@@ -1638,16 +1865,22 @@ impl PromotionPermitInfo {
             && self.idempotency_key == expected.idempotency_key
             && self.scope_hash == expected.scope_hash
             && self.issuance_hash == expected.issuance_hash
+            && self.feedback_cycle_id == expected.feedback_cycle_id
             && self.profile_ref == expected.profile_ref
             && self.research_profile_artifact_id == expected.research_profile_artifact_id
             && self.profile_hash == expected.profile_hash
             && self.category == expected.category
             && self.expected_policy_generation == expected.expected_policy_generation
+            && self.expected_runtime_control_revision == expected.expected_runtime_control_revision
             && self.expected_decision_policy_snapshot_id
                 == expected.expected_decision_policy_snapshot_id
             && self.expected_snapshot_hash == expected.expected_snapshot_hash
             && self.champion_model_version_id == expected.champion_model_version_id
             && self.champion_serving_contract_hash == expected.champion_serving_contract_hash
+            && self.candidate_model_version_id == expected.candidate_model_version_id
+            && self.candidate_manifest_id == expected.candidate_manifest_id
+            && self.candidate_manifest_hash == expected.candidate_manifest_hash
+            && self.promotion_gate_hash == expected.promotion_gate_hash
             && self.allowed_runtime_modes == expected.allowed_runtime_modes.0
             && self.non_route_policy_hash == expected.non_route_policy_hash
             && self.serving_constraints_hash == expected.serving_constraints_hash
@@ -1798,6 +2031,20 @@ fn validate_role_reason(role: &RoleCode, reason: &str) -> Result<(), FeedbackErr
     Ok(())
 }
 
+fn validate_reason_code(reason_code: &str) -> Result<(), FeedbackError> {
+    if reason_code.is_empty()
+        || reason_code.len() > MAX_REASON_CODE_BYTES
+        || !reason_code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(invalid_preflight(
+            "activation reason code must be lowercase snake_case",
+        ));
+    }
+    Ok(())
+}
+
 fn invalid_permit(detail: impl Into<String>) -> FeedbackError {
     FeedbackError::InvalidPromotionPermit {
         detail: detail.into(),
@@ -1816,17 +2063,14 @@ mod tests {
     use sea_orm::{ActiveValue, IntoActiveModel};
 
     use crate::{
-        enums::{
-            common::MarketCategory,
-            model::ModelFamily,
-            quant::{PublicationStatus, QuantRuntimeMode},
-        },
+        enums::{common::MarketCategory, model::ModelFamily, quant::QuantRuntimeMode},
         runtime_config::{ActivePolicyBundle, DecisionPolicySnapshot, ModelVersionRef},
         types::{
             ContentHash, DecisionPolicySnapshotId, FeatureParityRunId, FeatureParityStateId,
-            FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackShadowReplayArtifactId,
-            ModelSpecId, ModelVersionId, PolicyBundleGeneration, PolicyIdempotencyKey,
-            PolicyRevisionId, ResearchProfileRef, RoleCode, TrainingDatasetId, UserId,
+            FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackShadowArtifactId,
+            ModelCandidateManifestId, ModelSpecId, ModelVersionId, PolicyBundleGeneration,
+            PolicyIdempotencyKey, PolicyRevisionId, ResearchProfileRef, RoleCode,
+            TrainingDatasetId, UserId,
             research_profile::{CRYPTO_PRICE_15M_PROFILE_ID, builtin_research_profiles},
         },
     };
@@ -1840,6 +2084,7 @@ mod tests {
     };
 
     struct PermitFixture {
+        feedback_cycle_id: FeedbackCycleId,
         profile_ref: ResearchProfileRef,
         issued_by_user_id: UserId,
     }
@@ -1853,6 +2098,7 @@ mod tests {
                 .expect("crypto profile")
                 .profile_ref;
             Self {
+                feedback_cycle_id: FeedbackCycleId::from_v7(),
                 profile_ref,
                 issued_by_user_id: UserId::from_v7(),
             }
@@ -1860,16 +2106,25 @@ mod tests {
 
         fn scope(&self) -> PromotionPermitScope {
             let snapshot_hash = hash(1);
+            let candidate_manifest_hash = hash(30);
             PromotionPermitScope::try_new(PromotionPermitScopeInput {
+                feedback_cycle_id: self.feedback_cycle_id,
                 profile_ref: self.profile_ref.clone(),
                 category: MarketCategory::Crypto,
                 expected_policy_generation: PolicyBundleGeneration::FIRST,
+                expected_runtime_control_revision: 0,
                 expected_decision_policy_snapshot_id: DecisionPolicySnapshotId::from_content_hash(
                     &snapshot_hash,
                 ),
                 expected_snapshot_hash: snapshot_hash,
                 champion_model_version_id: ModelVersionId::from_v7(),
                 champion_serving_contract_hash: hash(2),
+                candidate_model_version_id: ModelVersionId::from_v7(),
+                candidate_manifest_id: ModelCandidateManifestId::from_content_hash(
+                    &candidate_manifest_hash,
+                ),
+                candidate_manifest_hash,
+                promotion_gate_hash: hash(31),
                 allowed_runtime_modes: vec![
                     QuantRuntimeMode::ReportOnly,
                     QuantRuntimeMode::SemiAuto,
@@ -1911,15 +2166,21 @@ mod tests {
                 idempotency_key: new.idempotency_key().clone(),
                 scope_hash: new.scope_hash(),
                 issuance_hash: new.issuance_hash(),
+                feedback_cycle_id: scope.feedback_cycle_id(),
                 profile_ref: scope.profile_ref().clone(),
                 research_profile_artifact_id: scope.profile_ref().artifact_id(),
                 profile_hash: scope.profile_ref().content_hash,
                 category: scope.category(),
                 expected_policy_generation: scope.expected_policy_generation(),
+                expected_runtime_control_revision: scope.expected_runtime_control_revision(),
                 expected_decision_policy_snapshot_id: scope.expected_snapshot_id(),
                 expected_snapshot_hash: scope.expected_snapshot_hash(),
                 champion_model_version_id: scope.champion_model_version_id(),
                 champion_serving_contract_hash: scope.champion_serving_contract_hash(),
+                candidate_model_version_id: scope.candidate_model_version_id(),
+                candidate_manifest_id: scope.candidate_manifest_id(),
+                candidate_manifest_hash: scope.candidate_manifest_hash(),
+                promotion_gate_hash: scope.promotion_gate_hash(),
                 allowed_runtime_modes: scope.allowed_runtime_modes().to_vec(),
                 non_route_policy_hash: scope.non_route_policy_hash(),
                 serving_constraints_hash: scope.serving_constraints_hash(),
@@ -1964,8 +2225,14 @@ mod tests {
         }
 
         fn constraints(&self, candidate: ModelVersionId) -> PromotionServingConstraints {
+            let candidate_manifest_hash = hash(30);
             PromotionServingConstraints::try_new(PromotionServingConstraintsInput {
                 candidate_model_version_id: candidate,
+                candidate_manifest_id: ModelCandidateManifestId::from_content_hash(
+                    &candidate_manifest_hash,
+                ),
+                candidate_manifest_hash,
+                promotion_gate_hash: hash(31),
                 candidate_model_spec_id: ModelSpecId::from_v7(),
                 candidate_model_family: ModelFamily::WeightedFactor,
                 candidate_artifact_hash: hash(31),
@@ -1977,7 +2244,6 @@ mod tests {
                 feature_parity_evidence_hash: hash(35),
                 profile_ref: self.profile_ref.clone(),
                 category: MarketCategory::Crypto,
-                expected_publication_status: PublicationStatus::Shadow,
             })
             .expect("promotion serving constraints")
         }
@@ -1990,14 +2256,22 @@ mod tests {
                 PromotionPolicyProjection::try_new(&bundle, MarketCategory::Crypto, candidate)
                     .expect("promotion policy projection");
             let constraints = self.constraints(candidate);
+            let cycle_hash = hash(35);
+            let feedback_cycle_id = FeedbackCycleId::from_idempotency_hash(&cycle_hash);
             let scope = PromotionPermitScope::try_new(PromotionPermitScopeInput {
+                feedback_cycle_id,
                 profile_ref: self.profile_ref.clone(),
                 category: MarketCategory::Crypto,
                 expected_policy_generation: bundle.generation,
+                expected_runtime_control_revision: 7,
                 expected_decision_policy_snapshot_id: bundle.decision_policy_snapshot_id,
                 expected_snapshot_hash: bundle.snapshot_hash,
                 champion_model_version_id: champion,
                 champion_serving_contract_hash: hash(34),
+                candidate_model_version_id: constraints.candidate_model_version_id(),
+                candidate_manifest_id: constraints.candidate_manifest_id(),
+                candidate_manifest_hash: constraints.candidate_manifest_hash(),
+                promotion_gate_hash: constraints.promotion_gate_hash(),
                 allowed_runtime_modes: vec![
                     QuantRuntimeMode::ReportOnly,
                     QuantRuntimeMode::SemiAuto,
@@ -2012,8 +2286,6 @@ mod tests {
                     .expect("preflight expiry"),
             })
             .expect("preflight scope");
-            let cycle_hash = hash(35);
-            let feedback_cycle_id = FeedbackCycleId::from_idempotency_hash(&cycle_hash);
             PromotionPreflight::try_seal(PromotionPreflightInput {
                 scope,
                 feedback_cycle_id,
@@ -2022,9 +2294,7 @@ mod tests {
                 decision_artifact_hash: hash(36),
                 decision_object_hash: hash(37),
                 decision_job_input_hash: hash(38),
-                shadow_artifact_id: FeedbackShadowReplayArtifactId::from_cycle_id(
-                    feedback_cycle_id,
-                ),
+                shadow_artifact_id: FeedbackShadowArtifactId::from_cycle_id(feedback_cycle_id),
                 shadow_artifact_hash: hash(39),
                 shadow_object_hash: hash(40),
                 shadow_contract_hash: hash(41),

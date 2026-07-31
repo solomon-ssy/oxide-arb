@@ -1,16 +1,22 @@
-//! `PostgreSQL` WORM recommendation-resolution outcome repository.
+//! `PostgreSQL` WORM recommendation-resolution outcome and durable queue.
 
-use chrono::{DateTime, TimeZone, Utc};
+use std::{collections::HashMap, fmt::Display};
+
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use quant_pivot_error::storage::{
     StorageError,
-    entity::{QUANT_RECOMMENDATION, QUANT_RECOMMENDATION_RESOLUTION_OUTCOME},
+    entity::{
+        QUANT_RECOMMENDATION, QUANT_RECOMMENDATION_RESOLUTION_OUTCOME,
+        QUANT_RESOLUTION_OUTCOME_RECONCILIATION_TASK,
+    },
 };
 use quant_pivot_models::{
     clickhouse::MarketResolutionRow,
     domain::quant::{
-        InsertResolutionOutcomeResult, NewRecommendationResolutionOutcome,
+        InsertResolutionOutcomeResult, NewRecommendationResolutionOutcome, OutcomeTaskSettlement,
         RecommendationResolutionOutcomeInfo, RecommendationResolutionOutcomePage,
         RecommendationResolutionOutcomePageQuery, RecommendationResolutionReconciliationCandidate,
+        ResolutionOutcomeTaskClaim,
     },
     entities::{
         market::Column as MarketColumn,
@@ -22,19 +28,28 @@ use quant_pivot_models::{
             Column, Entity as QuantRecommendationResolutionOutcomeEntity,
             Model as QuantRecommendationResolutionOutcomeModel,
         },
+        quant_resolution_outcome_reconciliation_task::{
+            ActiveModel as TaskActiveModel, Column as TaskColumn, Entity as TaskEntity,
+        },
     },
-    enums::market::MarketStatus,
-    types::{MarketId, RecommendationId, SchemaVersion},
+    enums::{market::MarketStatus, quant::OutcomeReconciliationTaskStatus},
+    types::{MarketId, RecommendationId, SchemaVersion, WorkerId},
 };
 use sea_orm::{
-    ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction, DbErr,
-    EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
-    TransactionTrait, sea_query::OnConflict,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction,
+    DbErr, EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, TransactionTrait,
+    sea_query::{LockBehavior, LockType, OnConflict},
 };
 
 use crate::{
     postgres::primitives::statement_timestamp, traits::RecommendationResolutionOutcomeRepository,
 };
+
+const MAX_ERROR_CHARS: usize = 4_096;
+const MAX_LEASE_SECS: u64 = 3_600;
+const MAX_QUEUE_BATCH: u64 = 4_096;
+const MAX_RETRY_SECS: u64 = 86_400;
 
 /// PostgreSQL-backed immutable recommendation-resolution outcome repository.
 pub struct PgRecommendationResolutionOutcomeRepository {
@@ -100,48 +115,139 @@ impl RecommendationResolutionOutcomeRepository for PgRecommendationResolutionOut
             .map(Option::flatten)
     }
 
-    async fn list_reconciliation_candidates(
+    async fn claim_reconciliation(
         &self,
         available_through: DateTime<Utc>,
-        after: Option<RecommendationId>,
+        worker_id: WorkerId,
+        lease_secs: u64,
         limit: u64,
-    ) -> Result<Vec<RecommendationResolutionReconciliationCandidate>, StorageError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let rows = QuantRecommendationEntity::find()
+    ) -> Result<Vec<ResolutionOutcomeTaskClaim>, StorageError> {
+        let lease = validate_claim(lease_secs, limit)?;
+        let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        Self::materialize_tasks(&transaction, available_through, limit).await?;
+        let now = statement_timestamp(&transaction).await?;
+        let due = Condition::any()
+            .add(TaskColumn::Status.eq(OutcomeReconciliationTaskStatus::Pending))
+            .add(
+                Condition::all()
+                    .add(TaskColumn::Status.eq(OutcomeReconciliationTaskStatus::Retrying))
+                    .add(TaskColumn::NextAttemptAt.lte(now)),
+            )
+            .add(
+                Condition::all()
+                    .add(TaskColumn::Status.eq(OutcomeReconciliationTaskStatus::Delivering))
+                    .add(TaskColumn::LeaseExpiresAt.lte(now)),
+            );
+        let rows = TaskEntity::find()
+            .filter(TaskColumn::ReadyAt.lte(available_through))
+            .filter(due)
+            .order_by_asc(TaskColumn::ReadyAt)
+            .order_by_asc(TaskColumn::RecommendationId)
+            .limit(limit)
+            .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
+            .all(&transaction)
+            .await
+            .map_err(StorageError::from)?;
+        let recommendation_ids = rows
+            .iter()
+            .map(|row| row.recommendation_id)
+            .collect::<Vec<_>>();
+        let markets = QuantRecommendationEntity::find()
             .select_only()
             .column(QuantRecommendationColumn::RecommendationId)
             .column(QuantRecommendationColumn::MarketId)
-            .join(
-                JoinType::InnerJoin,
-                QuantRecommendationRelation::Market.def(),
-            )
-            .join(
-                JoinType::LeftJoin,
-                QuantRecommendationRelation::ResolutionOutcome.def(),
-            )
-            .filter(MarketColumn::Status.eq(MarketStatus::Settled))
-            .filter(Column::RecommendationId.is_null())
-            .filter(QuantRecommendationColumn::CreatedAt.lte(available_through))
-            .filter(after.map_or_else(Condition::all, |cursor| {
-                Condition::all().add(QuantRecommendationColumn::RecommendationId.gt(cursor))
-            }))
-            .order_by_asc(QuantRecommendationColumn::RecommendationId)
-            .limit(limit)
+            .filter(QuantRecommendationColumn::RecommendationId.is_in(recommendation_ids))
             .into_tuple::<(RecommendationId, MarketId)>()
-            .all(&self.db)
+            .all(&transaction)
             .await
-            .map_err(StorageError::from)?;
-        Ok(rows
+            .map_err(StorageError::from)?
             .into_iter()
-            .map(
-                |(recommendation_id, market_id)| RecommendationResolutionReconciliationCandidate {
-                    recommendation_id,
+            .collect::<HashMap<_, _>>();
+        let mut claims = Vec::with_capacity(rows.len());
+        for row in rows {
+            let attempt_count = row
+                .attempt_count
+                .checked_add(1)
+                .ok_or_else(|| queue_invariant("resolution reconciliation count overflow"))?;
+            let mut active = row.clone().into_active_model();
+            active.status = ActiveValue::Set(OutcomeReconciliationTaskStatus::Delivering);
+            active.attempt_count = ActiveValue::Set(attempt_count);
+            active.claim_owner = ActiveValue::Set(Some(worker_id));
+            active.lease_expires_at = ActiveValue::Set(Some(now + lease));
+            active.next_attempt_at = ActiveValue::Set(None);
+            active.updated_at = ActiveValue::Set(now);
+            active
+                .update(&transaction)
+                .await
+                .map_err(StorageError::from)?;
+            let market_id = markets
+                .get(&row.recommendation_id)
+                .cloned()
+                .ok_or_else(|| queue_invariant("resolution task lost its recommendation"))?;
+            claims.push(ResolutionOutcomeTaskClaim {
+                candidate: RecommendationResolutionReconciliationCandidate {
+                    recommendation_id: row.recommendation_id,
                     market_id,
                 },
-            )
-            .collect())
+                attempt_count,
+            });
+        }
+        transaction.commit().await.map_err(StorageError::from)?;
+        Ok(claims)
+    }
+
+    async fn settle_reconciliation(
+        &self,
+        recommendation_id: RecommendationId,
+        worker_id: WorkerId,
+        settlement: OutcomeTaskSettlement,
+    ) -> Result<(), StorageError> {
+        let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        let row = TaskEntity::find_by_id(recommendation_id)
+            .lock_exclusive()
+            .one(&transaction)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::not_found(
+                    QUANT_RESOLUTION_OUTCOME_RECONCILIATION_TASK,
+                    recommendation_id,
+                )
+            })?;
+        if row.status != OutcomeReconciliationTaskStatus::Delivering
+            || row.claim_owner != Some(worker_id)
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_RESOLUTION_OUTCOME_RECONCILIATION_TASK,
+                Some(recommendation_id),
+                "resolution task is not leased by the settling worker",
+            ));
+        }
+        let now = statement_timestamp(&transaction).await?;
+        let mut active = row.into_active_model();
+        active.claim_owner = ActiveValue::Set(None);
+        active.lease_expires_at = ActiveValue::Set(None);
+        active.updated_at = ActiveValue::Set(now);
+        match settlement {
+            OutcomeTaskSettlement::Completed => {
+                active.status = ActiveValue::Set(OutcomeReconciliationTaskStatus::Completed);
+                active.next_attempt_at = ActiveValue::Set(None);
+                active.last_error = ActiveValue::Set(None);
+                active.completed_at = ActiveValue::Set(Some(now));
+            }
+            OutcomeTaskSettlement::RetryAfter { delay_secs, error } => {
+                let delay = validate_retry(delay_secs, &error)?;
+                active.status = ActiveValue::Set(OutcomeReconciliationTaskStatus::Retrying);
+                active.next_attempt_at = ActiveValue::Set(Some(now + delay));
+                active.last_error = ActiveValue::Set(Some(error));
+                active.completed_at = ActiveValue::Set(None);
+            }
+        }
+        active
+            .update(&transaction)
+            .await
+            .map_err(StorageError::from)?;
+        transaction.commit().await.map_err(StorageError::from)
     }
 
     async fn list_available_page(
@@ -177,6 +283,102 @@ impl RecommendationResolutionOutcomeRepository for PgRecommendationResolutionOut
             .collect::<Result<Vec<_>, _>>()?;
         Ok(RecommendationResolutionOutcomePage::new(outcomes))
     }
+}
+
+impl PgRecommendationResolutionOutcomeRepository {
+    async fn materialize_tasks(
+        transaction: &DatabaseTransaction,
+        available_through: DateTime<Utc>,
+        limit: u64,
+    ) -> Result<u64, StorageError> {
+        let recommendation_ids = QuantRecommendationEntity::find()
+            .select_only()
+            .column(QuantRecommendationColumn::RecommendationId)
+            .join(
+                JoinType::InnerJoin,
+                QuantRecommendationRelation::Market.def(),
+            )
+            .join(
+                JoinType::LeftJoin,
+                QuantRecommendationRelation::ResolutionOutcome.def(),
+            )
+            .join(
+                JoinType::LeftJoin,
+                QuantRecommendationRelation::ResolutionOutcomeReconciliationTask.def(),
+            )
+            .filter(MarketColumn::Status.eq(MarketStatus::Settled))
+            .filter(Column::RecommendationId.is_null())
+            .filter(TaskColumn::RecommendationId.is_null())
+            .filter(QuantRecommendationColumn::CreatedAt.lte(available_through))
+            .order_by_asc(QuantRecommendationColumn::RecommendationId)
+            .limit(limit)
+            .into_tuple::<RecommendationId>()
+            .all(transaction)
+            .await
+            .map_err(StorageError::from)?;
+        let inserted = u64::try_from(recommendation_ids.len())
+            .map_err(|error| queue_invariant(format!("task batch size overflow: {error}")))?;
+        let now = statement_timestamp(transaction).await?;
+        for recommendation_id in recommendation_ids {
+            TaskEntity::insert(TaskActiveModel {
+                recommendation_id: ActiveValue::Set(recommendation_id),
+                ready_at: ActiveValue::Set(available_through),
+                status: ActiveValue::Set(OutcomeReconciliationTaskStatus::Pending),
+                attempt_count: ActiveValue::Set(0),
+                claim_owner: ActiveValue::Set(None),
+                lease_expires_at: ActiveValue::Set(None),
+                next_attempt_at: ActiveValue::Set(None),
+                last_error: ActiveValue::Set(None),
+                completed_at: ActiveValue::Set(None),
+                created_at: ActiveValue::Set(now),
+                updated_at: ActiveValue::Set(now),
+            })
+            .on_conflict(
+                OnConflict::column(TaskColumn::RecommendationId)
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .exec_without_returning(transaction)
+            .await
+            .map_err(StorageError::from)?;
+        }
+        Ok(inserted)
+    }
+}
+
+fn validate_claim(lease_secs: u64, limit: u64) -> Result<Duration, StorageError> {
+    if lease_secs == 0 || lease_secs > MAX_LEASE_SECS {
+        return Err(queue_invariant(format!(
+            "lease_secs must be within 1..={MAX_LEASE_SECS}"
+        )));
+    }
+    if limit == 0 || limit > MAX_QUEUE_BATCH {
+        return Err(queue_invariant(format!(
+            "claim limit must be within 1..={MAX_QUEUE_BATCH}"
+        )));
+    }
+    let seconds = i64::try_from(lease_secs)
+        .map_err(|error| queue_invariant(format!("lease seconds overflow: {error}")))?;
+    Ok(Duration::seconds(seconds))
+}
+
+fn validate_retry(delay_secs: u64, error: &str) -> Result<Duration, StorageError> {
+    if delay_secs == 0
+        || delay_secs > MAX_RETRY_SECS
+        || error.trim().is_empty()
+        || error.chars().count() > MAX_ERROR_CHARS
+    {
+        return Err(queue_invariant(format!(
+            "retry delay must be within 1..={MAX_RETRY_SECS} and error within 1..={MAX_ERROR_CHARS} characters"
+        )));
+    }
+    let seconds = i64::try_from(delay_secs)
+        .map_err(|error| queue_invariant(format!("retry delay overflow: {error}")))?;
+    Ok(Duration::seconds(seconds))
+}
+
+fn queue_invariant(detail: impl Display) -> StorageError {
+    StorageError::invariant_violation(Some(QUANT_RESOLUTION_OUTCOME_RECONCILIATION_TASK), detail)
 }
 
 fn derive_outcome(

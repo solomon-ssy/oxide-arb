@@ -32,7 +32,7 @@ use crate::{
     training::{TOKEN_PAYOUT_RATIO, TrainingExample},
 };
 
-pub const FEEDBACK_COVERAGE_ARTIFACT_FORMAT_VERSION: u32 = 1;
+pub const FEEDBACK_COVERAGE_ARTIFACT_FORMAT_VERSION: u32 = 2;
 pub const FEEDBACK_DRIFT_ARTIFACT_FORMAT_VERSION: u32 = 1;
 
 const POPULATION_BIN_COUNT: usize = 10;
@@ -214,6 +214,7 @@ impl ChampionBaselineRef {
 pub struct FeedbackMatureLabel {
     pub recommendation_id: RecommendationId,
     pub model_version_id: ModelVersionId,
+    pub decision_at: DateTime<Utc>,
     pub candidate_available_at: DateTime<Utc>,
     pub label_available_at: DateTime<Utc>,
     pub outcome_hash: ContentHash,
@@ -311,7 +312,8 @@ impl FeedbackCoverageArtifact {
             && self.champion_model_version_id == self.cycle_key.champion_model_version_id()
             && self.champion_serving_contract_hash
                 == self.cycle_key.champion_serving_contract_hash()
-            && self.evaluation_window.cutoff() == self.cycle_key.label_cutoff();
+            && self.champion_baseline.pit_cutoff <= self.cycle_key.label_cutoff()
+            && self.evaluation_window.cutoff() <= self.cycle_key.label_cutoff();
         if !valid {
             return Err(methodology(
                 "feedback coverage artifact identity differs from its frozen cycle",
@@ -340,9 +342,11 @@ impl FeedbackCoverageArtifact {
                     )
             })
             || self.mature_labels.iter().any(|label| {
-                label.candidate_available_at < self.evaluation_window.window_start()
+                label.decision_at < self.evaluation_window.window_start()
+                    || label.decision_at > self.evaluation_window.cutoff()
+                    || label.decision_at > label.candidate_available_at
                     || label.candidate_available_at > label.label_available_at
-                    || label.label_available_at > self.evaluation_window.cutoff()
+                    || label.label_available_at > self.cycle_key.label_cutoff()
             })
         {
             return Err(methodology(
@@ -413,15 +417,17 @@ impl FeedbackCoverageArtifact {
                 && row.market_id == example.market_id
                 && model_token_matches
                 && row.model_version_id == self.champion_model_version_id
-                && row.candidate_available_at >= self.evaluation_window.window_start()
-                && row.candidate_available_at <= self.evaluation_window.cutoff()
-                && row.resolution.available_at <= self.evaluation_window.cutoff()
+                && row.decision_at >= self.evaluation_window.window_start()
+                && row.decision_at <= self.evaluation_window.cutoff()
+                && row.candidate_available_at <= self.cycle_key.label_cutoff()
+                && row.resolution.available_at <= self.cycle_key.label_cutoff()
                 && labels.len() == 1
                 && label.is_resolved
                 && label.value == row.model_token_payout_ratio.inner()
                 && label.matured_at == row.resolution.resolved_at
                 && mature.is_some_and(|mature| {
                     mature.model_version_id == row.model_version_id
+                        && mature.decision_at == row.decision_at
                         && mature.candidate_available_at == row.candidate_available_at
                         && mature.label_available_at == row.resolution.available_at
                         && mature.outcome_hash == row.resolution.outcome_hash

@@ -3,13 +3,13 @@
 use chrono::Duration;
 use quant_pivot_models::{
     domain::quant::{
-        ExecutionOutcomeDeferredReason, ExecutionOutcomeDerivation,
-        ExecutionOutcomeReconciliationError, ExecutionOutcomeReconciliationResult,
-        ExecutionOutcomeSourceGraph, NewRecommendationExecutionOutcome,
+        ExecutionAttemptDeferredReason, ExecutionAttemptDerivation,
+        ExecutionAttemptReconciliationError, ExecutionAttemptReconciliationResult,
+        ExecutionAttemptSourceGraph, NewExecutionAttemptOutcome,
     },
     enums::{
         execution::{ExecutionOrderPhase, PositionLedgerState, ReconciliationResult},
-        quant::{ExecutionOrderState, RecommendationExecutionTerminalState},
+        quant::{ExecutionAttemptTerminalState, ExecutionOrderState},
     },
     types::{
         ExecutionOrderId, MarketId, OrderId, OrderIntentId, Price, ReconciliationId, Shares,
@@ -18,13 +18,13 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgExecutionOrderRepository, PgExecutionSubmissionRepository, PgOrderIntentRepository,
-        PgPositionRepository, PgRecommendationExecutionOutcomeRepository,
+        PgExecutionAttemptOutcomeRepository, PgExecutionOrderRepository,
+        PgExecutionSubmissionRepository, PgOrderIntentRepository, PgPositionRepository,
         PgReconciliationRepository,
     },
     traits::{
-        ExecutionOrderRepository, OrderIntentRepository, PositionRepository,
-        RecommendationExecutionOutcomeRepository, ReconciliationRepository,
+        ExecutionAttemptOutcomeRepository, ExecutionOrderRepository, OrderIntentRepository,
+        PositionRepository, ReconciliationRepository,
     },
 };
 use quant_pivot_system_tests::{
@@ -99,14 +99,14 @@ async fn closed_execution_source_reconciled() {
     assert_multiple_exit_aggregated(&graph);
     assert_order_mismatch_rejects(&graph);
 
-    let repository = PgRecommendationExecutionOutcomeRepository::new(db.clone());
+    let repository = PgExecutionAttemptOutcomeRepository::new(db.clone());
     let cutoff = db.statement_time().await;
     let first = repository
         .reconcile_intent(&intent_id, cutoff)
         .await
         .expect("reconcile complete execution source graph");
     let inserted = match first {
-        ExecutionOutcomeReconciliationResult::Inserted(outcome) => outcome,
+        ExecutionAttemptReconciliationResult::Inserted(outcome) => outcome,
         other => panic!("expected inserted execution outcome, got {other:?}"),
     };
     let second = repository
@@ -114,13 +114,13 @@ async fn closed_execution_source_reconciled() {
         .await
         .expect("retry execution source graph");
     let existing = match second {
-        ExecutionOutcomeReconciliationResult::AlreadyPresent(outcome) => outcome,
+        ExecutionAttemptReconciliationResult::AlreadyPresent(outcome) => outcome,
         other => panic!("expected idempotent existing outcome, got {other:?}"),
     };
 
     assert_eq!(
         inserted.terminal_state,
-        RecommendationExecutionTerminalState::FullyFilled
+        ExecutionAttemptTerminalState::FullyFilled
     );
     assert_eq!(inserted.requested_shares, Shares::new(dec!(40)));
     assert_eq!(inserted.filled_shares, Shares::new(dec!(40)));
@@ -139,7 +139,7 @@ async fn load_source_graph(
     db: &DatabaseConnection,
     ids: &ExecutionTxnIds,
     intent_id: &OrderIntentId,
-) -> ExecutionOutcomeSourceGraph {
+) -> ExecutionAttemptSourceGraph {
     let intent = PgOrderIntentRepository::new(db.clone())
         .find_by_id(intent_id)
         .await
@@ -164,7 +164,7 @@ async fn load_source_graph(
         .find_by_intent(intent_id)
         .await
         .expect("load source position");
-    ExecutionOutcomeSourceGraph {
+    ExecutionAttemptSourceGraph {
         recommendation_id: ids.recommendation,
         market_id: MarketId::new(&ids.market),
         token_id: TokenId::new(&ids.token),
@@ -176,7 +176,7 @@ async fn load_source_graph(
     }
 }
 
-fn assert_deferred_source_reasons(graph: &ExecutionOutcomeSourceGraph) {
+fn assert_deferred_source_reasons(graph: &ExecutionAttemptSourceGraph) {
     let entry_order_id = graph
         .orders
         .iter()
@@ -199,7 +199,7 @@ fn assert_deferred_source_reasons(graph: &ExecutionOutcomeSourceGraph) {
         .retain(|row| row.execution_order_id != entry_order_id);
     assert_deferred(
         missing_entry,
-        ExecutionOutcomeDeferredReason::EntryOrderMissing,
+        ExecutionAttemptDeferredReason::EntryOrderMissing,
     );
 
     let mut missing_entry_reconciliation = graph.clone();
@@ -208,21 +208,21 @@ fn assert_deferred_source_reasons(graph: &ExecutionOutcomeSourceGraph) {
         .retain(|row| row.execution_order_id != entry_order_id);
     assert_deferred(
         missing_entry_reconciliation,
-        ExecutionOutcomeDeferredReason::EntryReconciliationMissing,
+        ExecutionAttemptDeferredReason::EntryReconciliationMissing,
     );
 
     let mut missing_position = graph.clone();
     missing_position.position = None;
     assert_deferred(
         missing_position,
-        ExecutionOutcomeDeferredReason::FilledPositionMissing,
+        ExecutionAttemptDeferredReason::FilledPositionMissing,
     );
 
     let mut open_position = graph.clone();
     open_position.position.as_mut().expect("position").state = PositionLedgerState::Open;
     assert_deferred(
         open_position,
-        ExecutionOutcomeDeferredReason::PositionNotTerminal,
+        ExecutionAttemptDeferredReason::PositionNotTerminal,
     );
 
     let mut missing_exit_reconciliation = graph.clone();
@@ -231,7 +231,7 @@ fn assert_deferred_source_reasons(graph: &ExecutionOutcomeSourceGraph) {
         .retain(|row| row.execution_order_id != exit_order_id);
     assert_deferred(
         missing_exit_reconciliation,
-        ExecutionOutcomeDeferredReason::ExitReconciliationMissing,
+        ExecutionAttemptDeferredReason::ExitReconciliationMissing,
     );
 
     let mut pending_exit_reconciliation = graph.clone();
@@ -244,7 +244,7 @@ fn assert_deferred_source_reasons(graph: &ExecutionOutcomeSourceGraph) {
     pending.resolved_at = None;
     assert_deferred(
         pending_exit_reconciliation,
-        ExecutionOutcomeDeferredReason::ExitReconciliationPending,
+        ExecutionAttemptDeferredReason::ExitReconciliationPending,
     );
 
     let mut missing_settlement_lot = graph.clone();
@@ -255,11 +255,11 @@ fn assert_deferred_source_reasons(graph: &ExecutionOutcomeSourceGraph) {
         .state = PositionLedgerState::Settled;
     assert_deferred(
         missing_settlement_lot,
-        ExecutionOutcomeDeferredReason::SettlementLotMissing,
+        ExecutionAttemptDeferredReason::SettlementLotMissing,
     );
 }
 
-fn assert_input_order_stable(graph: &ExecutionOutcomeSourceGraph) {
+fn assert_input_order_stable(graph: &ExecutionAttemptSourceGraph) {
     let expected = expect_ready(graph.clone());
     let mut reordered = graph.clone();
     reordered.orders.reverse();
@@ -268,7 +268,7 @@ fn assert_input_order_stable(graph: &ExecutionOutcomeSourceGraph) {
     assert_eq!(actual, expected);
 }
 
-fn assert_multiple_exit_aggregated(graph: &ExecutionOutcomeSourceGraph) {
+fn assert_multiple_exit_aggregated(graph: &ExecutionAttemptSourceGraph) {
     let mut split = graph.clone();
     let exit_order_index = split
         .orders
@@ -336,7 +336,7 @@ fn assert_multiple_exit_aggregated(graph: &ExecutionOutcomeSourceGraph) {
     assert_eq!(outcome.exit_avg_price, Some(Price::new(dec!(0.55))));
 }
 
-fn assert_partial_not_full(graph: &ExecutionOutcomeSourceGraph) {
+fn assert_partial_not_full(graph: &ExecutionAttemptSourceGraph) {
     let mut partial = graph.clone();
     let entry_order_id = partial
         .orders
@@ -397,7 +397,7 @@ fn assert_partial_not_full(graph: &ExecutionOutcomeSourceGraph) {
     let outcome = expect_ready(partial);
     assert_eq!(
         outcome.terminal_state,
-        RecommendationExecutionTerminalState::PartiallyFilled
+        ExecutionAttemptTerminalState::PartiallyFilled
     );
     assert_eq!(outcome.requested_shares, Shares::new(dec!(40)));
     assert_eq!(outcome.filled_shares, Shares::new(dec!(20)));
@@ -406,7 +406,7 @@ fn assert_partial_not_full(graph: &ExecutionOutcomeSourceGraph) {
     assert_eq!(outcome.realized_pnl_usd, Some(Usd::new(dec!(-1.5))));
 }
 
-fn assert_order_mismatch_rejects(graph: &ExecutionOutcomeSourceGraph) {
+fn assert_order_mismatch_rejects(graph: &ExecutionAttemptSourceGraph) {
     let mut mismatched = graph.clone();
     mismatched
         .orders
@@ -416,21 +416,21 @@ fn assert_order_mismatch_rejects(graph: &ExecutionOutcomeSourceGraph) {
         .token_id = TokenId::new("wrong-token");
     assert!(matches!(
         mismatched.derive(),
-        Err(ExecutionOutcomeReconciliationError::IdentityMismatch { .. })
+        Err(ExecutionAttemptReconciliationError::IdentityMismatch { .. })
     ));
 }
 
-fn assert_deferred(graph: ExecutionOutcomeSourceGraph, expected: ExecutionOutcomeDeferredReason) {
+fn assert_deferred(graph: ExecutionAttemptSourceGraph, expected: ExecutionAttemptDeferredReason) {
     assert_eq!(
         graph.derive().expect("valid incomplete source graph"),
-        ExecutionOutcomeDerivation::Deferred(expected)
+        ExecutionAttemptDerivation::Deferred(expected)
     );
 }
 
-fn expect_ready(graph: ExecutionOutcomeSourceGraph) -> NewRecommendationExecutionOutcome {
+fn expect_ready(graph: ExecutionAttemptSourceGraph) -> NewExecutionAttemptOutcome {
     match graph.derive().expect("valid complete source graph") {
-        ExecutionOutcomeDerivation::Ready(outcome) => *outcome,
-        other @ ExecutionOutcomeDerivation::Deferred(_) => {
+        ExecutionAttemptDerivation::Ready(outcome) => *outcome,
+        other @ ExecutionAttemptDerivation::Deferred(_) => {
             panic!("expected ready source graph, got {other:?}")
         }
     }

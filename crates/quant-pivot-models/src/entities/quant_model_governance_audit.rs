@@ -6,7 +6,7 @@ use sea_orm::entity::prelude::*;
 use super::{quant_feedback_promotion_permit, quant_model_version, quant_training_dataset};
 use crate::{
     domain::quant::ModelGovernanceAuditDetail,
-    enums::quant::{ModelGovernanceAction, PublicationStatus},
+    enums::quant::ModelGovernanceAction,
     types::{
         AuditEventId, ContentHash, ModelGovernanceAuditId, ModelVersionId, PromotionPermitId,
         RoleCode, TrainingDatasetId, UserId,
@@ -26,8 +26,6 @@ pub struct Model {
     pub actor_username: String,
     pub actor_role: Option<RoleCode>,
     pub reason: String,
-    pub before_status: PublicationStatus,
-    pub after_status: PublicationStatus,
     #[sea_orm(column_type = "JsonBinary")]
     pub detail: ModelGovernanceAuditDetail,
     pub audit_event_id: AuditEventId,

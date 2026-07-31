@@ -23,7 +23,7 @@ use quant_pivot_models::{
     },
     enums::{
         factor::FactorValueState,
-        quant::{DataQualityStatus, OutcomeSide, PublicationStatus},
+        quant::{DataQualityStatus, OutcomeSide},
     },
     runtime_config::{
         DataQualityConfig, DecisionPolicySnapshot, DomainConfig, FactorsConfig, FeaturesConfig,
@@ -51,7 +51,7 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 
 use crate::{
-    governance::quality_gate_load::quality_gate_passed_ok,
+    governance::quality_gate_load::model_contract_ok,
     prefetch::feature_window::FeatureWindowProvider,
     projection::inference_batch::build_runtime_input,
     service::{
@@ -485,10 +485,7 @@ async fn resolve_frozen_config(
 /// Load-time policy for a model version on the exit path (shared by
 /// thesis-invalidation re-inference and the opportunistic Sell scorer).
 pub(crate) fn exit_model_load_ok(version: &ModelVersionInfo) -> Result<(), String> {
-    match version.publication_status {
-        PublicationStatus::Published | PublicationStatus::Retired => Ok(()),
-        PublicationStatus::Candidate | PublicationStatus::Shadow => quality_gate_passed_ok(version),
-    }
+    model_contract_ok(version)
 }
 
 /// Project a position lot into a [`SelectedMarket`] for feature / model scoring.

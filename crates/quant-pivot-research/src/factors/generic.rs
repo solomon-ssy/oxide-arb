@@ -632,8 +632,8 @@ mod tests {
                     UNDERLYING_MOMENTUM, UNDERLYING_REALIZED_VOL,
                 },
                 domain_weather::{
-                    ENSEMBLE_BIN_PROBABILITY, ENSEMBLE_SPREAD, NOAA_RESOLUTION_BASIS_RISK,
-                    OBSERVED_EXTREME_HEADROOM,
+                    BOUNDARY_DISTANCE, CONTRACT_PROBABILITY, FORECAST_DISPERSION,
+                    SOURCE_BASIS_RISK, TRUTH_MATURITY_RISK,
                 },
                 market::{CATEGORY, EVENT_AGE_SECS, IS_ACTIVE, NEG_RISK, TIME_TO_RESOLUTION_SECS},
                 structural::{
@@ -785,10 +785,11 @@ mod tests {
             family: DomainFamily::Weather,
             schema_version: SchemaVersion::FIRST,
             values: [
-                ENSEMBLE_BIN_PROBABILITY,
-                ENSEMBLE_SPREAD,
-                OBSERVED_EXTREME_HEADROOM,
-                NOAA_RESOLUTION_BASIS_RISK,
+                CONTRACT_PROBABILITY,
+                FORECAST_DISPERSION,
+                BOUNDARY_DISTANCE,
+                SOURCE_BASIS_RISK,
+                TRUTH_MATURITY_RISK,
             ]
             .into_iter()
             .map(|name| {

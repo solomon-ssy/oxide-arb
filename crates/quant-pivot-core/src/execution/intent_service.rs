@@ -1521,25 +1521,17 @@ mod tests {
                 api::{ModelPickerSide, ModelSpecListQuery, ModelVersionListQuery},
                 pagination::{PageRequest, Paginated},
                 quant::{
-                    ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion,
-                    PublishedModelCatalogInfo,
+                    ModelCatalogInfo, ModelSpecInfo, ModelVersionInfo, NewModelSpec,
+                    NewModelVersion,
                 },
             },
-            enums::{
-                common::MarketCategory,
-                quant::{DownsideSource, PublicationStatus},
-            },
+            enums::{common::MarketCategory, quant::DownsideSource},
             types::{
-                BacktestPathSetId, CalibrationArtifactId, FactorDefinitionId, ModelRunId,
-                ModelSpecId, ModelVersionId,
+                CalibrationArtifactId, FactorDefinitionId, ModelRunId, ModelSpecId, ModelVersionId,
                 calibration::{MonotoneMapping, ReliabilityReport},
-                model_quality::QualityGateReport,
             },
         };
-        use quant_pivot_repository::traits::{
-            BindPublishPathSetCommit, ModelRegistryRepository, PublishModelVersionCommit,
-            PublishModelVersionResult,
-        };
+        use quant_pivot_repository::traits::ModelRegistryRepository;
         use quant_pivot_research::{
             artifact::{ArtifactStore, LocalArtifactStore},
             model::{
@@ -1620,55 +1612,11 @@ mod tests {
             ) -> Result<Paginated<ModelVersionInfo>, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
-            async fn list_published_catalog(
+            async fn list_model_catalog(
                 &self,
                 _side: ModelPickerSide,
                 _category: Option<MarketCategory>,
-            ) -> Result<Vec<PublishedModelCatalogInfo>, StorageError> {
-                unimplemented!("not exercised by the calibration recheck tests")
-            }
-            async fn list_published_for_spec(
-                &self,
-                _model_spec_id: &ModelSpecId,
-            ) -> Result<Vec<ModelVersionInfo>, StorageError> {
-                unimplemented!("not exercised by the calibration recheck tests")
-            }
-            async fn retire_model_version(
-                &self,
-                _model_version_id: &ModelVersionId,
-            ) -> Result<ModelVersionInfo, StorageError> {
-                unimplemented!("not exercised by the calibration recheck tests")
-            }
-            async fn publish_model_version(
-                &self,
-                _commit: PublishModelVersionCommit<'_>,
-            ) -> Result<PublishModelVersionResult, StorageError> {
-                unimplemented!("not exercised by the calibration recheck tests")
-            }
-            async fn promote_model_to_shadow(
-                &self,
-                _model_version_id: &ModelVersionId,
-            ) -> Result<ModelVersionInfo, StorageError> {
-                unimplemented!("not exercised by the calibration recheck tests")
-            }
-            async fn set_quality_gate_report(
-                &self,
-                _model_version_id: &ModelVersionId,
-                _quality_gate_report: QualityGateReport,
-            ) -> Result<ModelVersionInfo, StorageError> {
-                unimplemented!("not exercised by the calibration recheck tests")
-            }
-            async fn set_publish_path(
-                &self,
-                _model_version_id: &ModelVersionId,
-                _publish_path_set_id: Option<BacktestPathSetId>,
-            ) -> Result<ModelVersionInfo, StorageError> {
-                unimplemented!("not exercised by the calibration recheck tests")
-            }
-            async fn commit_publish_path_binding(
-                &self,
-                _commit: BindPublishPathSetCommit,
-            ) -> Result<ModelVersionInfo, StorageError> {
+            ) -> Result<Vec<ModelCatalogInfo>, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
         }
@@ -1731,7 +1679,7 @@ mod tests {
                 .put(key, &artifact.to_bytes().expect("bytes"))
                 .await
                 .expect("put");
-            let version = model_version(&artifact, PublicationStatus::Published, None);
+            let version = model_version(&artifact);
             (store, version)
         }
 

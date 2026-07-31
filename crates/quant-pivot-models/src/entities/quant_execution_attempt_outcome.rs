@@ -1,32 +1,32 @@
-//! `quant_recommendation_execution_outcome` table entity.
+//! `quant_execution_attempt_outcome` table entity.
 
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
     quant_execution_order, quant_order_intent, quant_position, quant_recommendation,
-    quant_reconciliation,
+    quant_recommendation_execution_rollup_attempt, quant_reconciliation,
 };
 use crate::{
     enums::{
         execution::{ExitReason, PositionLedgerState},
         quant::{
-            ExecutionOrderState, QuantRuntimeMode, RecommendationExecutionNoFillReason,
-            RecommendationExecutionTerminalState,
+            ExecutionAttemptNoFillReason, ExecutionAttemptTerminalState, ExecutionOrderState,
+            QuantRuntimeMode,
         },
     },
     types::{
-        Bps, ContentHash, ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId,
-        PositionId, Price, RecommendationId, ReconciliationId, SchemaVersion, Shares, TokenId, Usd,
+        ContentHash, ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId, PositionId,
+        Price, RecommendationId, ReconciliationId, SchemaVersion, Shares, TokenId, Usd,
     },
 };
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "quant_recommendation_execution_outcome")]
+#[sea_orm(table_name = "quant_execution_attempt_outcome")]
 pub struct Model {
-    #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_id: RecommendationId,
+    #[sea_orm(primary_key, auto_increment = false)]
     pub order_intent_id: OrderIntentId,
     pub entry_execution_order_id: ExecutionOrderId,
     pub entry_reconciliation_id: ReconciliationId,
@@ -36,8 +36,8 @@ pub struct Model {
     pub token_id: TokenId,
     #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
     pub runtime_mode: QuantRuntimeMode,
-    pub terminal_state: RecommendationExecutionTerminalState,
-    pub no_fill_reason: Option<RecommendationExecutionNoFillReason>,
+    pub terminal_state: ExecutionAttemptTerminalState,
+    pub no_fill_reason: Option<ExecutionAttemptNoFillReason>,
     pub entry_order_state: ExecutionOrderState,
     pub requested_shares: Shares,
     pub filled_shares: Shares,
@@ -52,8 +52,6 @@ pub struct Model {
     pub exit_at: Option<DateTime<Utc>>,
     pub settlement_payout_usd: Option<Usd>,
     pub realized_pnl_usd: Option<Usd>,
-    pub max_adverse_excursion_bps: Option<Bps>,
-    pub max_favorable_excursion_bps: Option<Bps>,
     pub terminal_at: DateTime<Utc>,
     pub source_observed_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
@@ -98,6 +96,8 @@ pub struct Model {
         to = "position_id"
     )]
     pub position: BelongsTo<Option<quant_position::Entity>>,
+    #[sea_orm(has_one, relation_enum = "RollupAttempt")]
+    pub rollup_attempt: HasOne<quant_recommendation_execution_rollup_attempt::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -3,7 +3,7 @@
 use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
     domain::quant::{ModelVersionInfo, RecommendationInfo},
-    enums::quant::{PublicationStatus, TradePolicyStatus},
+    enums::quant::TradePolicyStatus,
     types::{RecommendationTradePlan, ResearchProfileRef, TradePolicyArtifactId},
 };
 use quant_pivot_repository::traits::TradePolicyRepository;
@@ -19,9 +19,6 @@ pub async fn require_frozen_trade_policy(
     let RecommendationTradePlan::Frozen { policy, sizing, .. } = &recommendation.trade_plan else {
         return Err(denied("recommendation trade plan is unavailable").into());
     };
-    if model_version.publication_status != PublicationStatus::Published {
-        return Err(denied("model version is no longer Published").into());
-    }
     if model_version.profile_ref != recommendation.profile_ref {
         return Err(denied(
             "recommendation research profile does not match the frozen model version",

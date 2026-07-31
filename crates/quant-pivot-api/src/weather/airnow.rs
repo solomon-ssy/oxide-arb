@@ -290,11 +290,16 @@ fn parse_pm25_reporting_area(
             } else {
                 (None, None)
             };
+            let report_kind = if key.data_type == AirNowDataType::Yesterday {
+                WeatherObservationReportKind::AirNowPm25OfficialDaily
+            } else {
+                WeatherObservationReportKind::AirNowPm25AreaObservation
+            };
             observations.push(WeatherObservationReport {
                 source_id: DomainSourceId::airnow(),
                 instrument_key: DomainInstrumentKey::airnow_pm25_observation(&area_key),
                 subject_key: area_key.clone(),
-                report_kind: WeatherObservationReportKind::AirNowPm25AreaObservation,
+                report_kind,
                 variable: WeatherVariable::Aqi,
                 value: aqi,
                 unit: DomainMeasurementUnit::Aqi,
@@ -913,6 +918,18 @@ mod tests {
             report.valid_to,
             Some(Utc.with_ymd_and_hms(2026, 7, 18, 11, 0, 0).unwrap())
         );
+    }
+
+    #[test]
+    fn aqi_preserves_beyond_range() {
+        assert!(
+            parse_optional_aqi(Some("-999"), "fixture")
+                .expect("sentinel")
+                .is_none()
+        );
+        assert!(parse_optional_aqi(Some("500"), "fixture").is_ok());
+        assert!(parse_optional_aqi(Some("501"), "fixture").is_ok());
+        assert!(parse_optional_aqi(Some("-1"), "fixture").is_err());
     }
 
     #[tokio::test]

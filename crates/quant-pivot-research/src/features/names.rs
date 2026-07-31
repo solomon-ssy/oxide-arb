@@ -167,17 +167,19 @@ pub mod domain_crypto {
         FeatureName::from_static("domain.crypto.basis_vs_resolution_source");
 }
 
-/// Airport daily-temperature Weather features. Values are emitted only from typed
-/// AviationWeather/GHCNh/GEFS facts bound by the market linkage.
+/// Cross-family Weather contract features. Values are emitted only from typed,
+/// source-bound facts selected by the shared PIT contract projector.
 pub mod domain_weather {
     use super::FeatureName;
 
-    pub const ENSEMBLE_BIN_PROBABILITY: FeatureName =
-        FeatureName::from_static("domain.weather.ensemble_bin_probability");
-    pub const ENSEMBLE_SPREAD: FeatureName =
-        FeatureName::from_static("domain.weather.ensemble_spread");
-    pub const OBSERVED_EXTREME_HEADROOM: FeatureName =
-        FeatureName::from_static("domain.weather.observed_extreme_headroom");
-    pub const NOAA_RESOLUTION_BASIS_RISK: FeatureName =
-        FeatureName::from_static("domain.weather.noaa_resolution_basis_risk");
+    pub const CONTRACT_PROBABILITY: FeatureName =
+        FeatureName::from_static("domain.weather.contract_probability");
+    pub const FORECAST_DISPERSION: FeatureName =
+        FeatureName::from_static("domain.weather.forecast_dispersion");
+    pub const BOUNDARY_DISTANCE: FeatureName =
+        FeatureName::from_static("domain.weather.boundary_distance");
+    pub const SOURCE_BASIS_RISK: FeatureName =
+        FeatureName::from_static("domain.weather.source_basis_risk");
+    pub const TRUTH_MATURITY_RISK: FeatureName =
+        FeatureName::from_static("domain.weather.truth_maturity_risk");
 }

@@ -590,8 +590,8 @@ impl CryptoReadinessEvidenceManifest {
                 sequence: 7,
                 access: RecoveryAccess::ReadOnly,
                 authorization: RecoveryAuthorization::AuthenticatedReadRequired,
-                command: "curl --fail-with-body --get --header \"Authorization: Bearer ${ACCESS_TOKEN:?set ACCESS_TOKEN}\" --data-urlencode \"intent=publish\" \"http://127.0.0.1:8088/api/research/models/${MODEL_VERSION_ID:?set MODEL_VERSION_ID}/quality-gate\"",
-                success_condition: "the exact current model passes the server-owned publication scorecard, serving contract, and immutable artifact checks",
+                command: "curl --fail-with-body --get --header \"Authorization: Bearer ${ACCESS_TOKEN:?set ACCESS_TOKEN}\" --data-urlencode \"intent=route_activation\" \"http://127.0.0.1:8088/api/research/models/${MODEL_VERSION_ID:?set MODEL_VERSION_ID}/quality-gate\"",
+                success_condition: "the exact current model passes the server-owned route-activation scorecard, serving contract, and immutable artifact checks",
             },
         ]
     }
@@ -810,9 +810,6 @@ enum CurrentWeatherGate {
 #[serde(tag = "status", rename_all = "snake_case")]
 enum ParserGate {
     Implemented,
-    RequiredAfterMatureLabels {
-        failure_if_missing: DomainMarketClassificationOutcome,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1188,46 +1185,62 @@ impl CurrentOfficialFacts {
         }
     }
 
+    const fn temperature_selectors() -> &'static [FactSelector] {
+        &[
+            FactSelector {
+                plane: FactPlane::Observation,
+                source_id: "aviation_weather",
+                variable: "temperature",
+                required: true,
+            },
+            FactSelector {
+                plane: FactPlane::Observation,
+                source_id: "ghcnh",
+                variable: "temperature",
+                required: true,
+            },
+            FactSelector {
+                plane: FactPlane::Observation,
+                source_id: "ghcnd",
+                variable: "temperature_maximum",
+                required: true,
+            },
+            FactSelector {
+                plane: FactPlane::Observation,
+                source_id: "ghcnd",
+                variable: "temperature_minimum",
+                required: true,
+            },
+            FactSelector {
+                plane: FactPlane::Observation,
+                source_id: "hko_open_data",
+                variable: "temperature_maximum",
+                required: true,
+            },
+            FactSelector {
+                plane: FactPlane::Observation,
+                source_id: "hko_open_data",
+                variable: "temperature_minimum",
+                required: true,
+            },
+            FactSelector {
+                plane: FactPlane::Forecast,
+                source_id: "gefs",
+                variable: "temperature_maximum",
+                required: true,
+            },
+            FactSelector {
+                plane: FactPlane::Forecast,
+                source_id: "gefs",
+                variable: "temperature_minimum",
+                required: true,
+            },
+        ]
+    }
+
     const fn selectors(family: DomainContractFamily) -> &'static [FactSelector] {
         match family {
-            DomainContractFamily::WeatherDailyTemperature => &[
-                FactSelector {
-                    plane: FactPlane::Observation,
-                    source_id: "aviation_weather",
-                    variable: "temperature",
-                    required: true,
-                },
-                FactSelector {
-                    plane: FactPlane::Observation,
-                    source_id: "ghcnh",
-                    variable: "temperature",
-                    required: true,
-                },
-                FactSelector {
-                    plane: FactPlane::Observation,
-                    source_id: "hko_open_data",
-                    variable: "temperature_maximum",
-                    required: true,
-                },
-                FactSelector {
-                    plane: FactPlane::Observation,
-                    source_id: "hko_open_data",
-                    variable: "temperature_minimum",
-                    required: true,
-                },
-                FactSelector {
-                    plane: FactPlane::Forecast,
-                    source_id: "gefs",
-                    variable: "temperature_maximum",
-                    required: true,
-                },
-                FactSelector {
-                    plane: FactPlane::Forecast,
-                    source_id: "gefs",
-                    variable: "temperature_minimum",
-                    required: true,
-                },
-            ],
+            DomainContractFamily::WeatherDailyTemperature => Self::temperature_selectors(),
             DomainContractFamily::WeatherPrecipitation => &[
                 FactSelector {
                     plane: FactPlane::Observation,
@@ -1266,6 +1279,12 @@ impl CurrentOfficialFacts {
                 FactSelector {
                     plane: FactPlane::Observation,
                     source_id: "ncei_storm_events",
+                    variable: "tornado_count",
+                    required: true,
+                },
+                FactSelector {
+                    plane: FactPlane::Observation,
+                    source_id: "ncei_tornado_time_series",
                     variable: "tornado_count",
                     required: true,
                 },
@@ -1485,7 +1504,7 @@ impl WeatherReadinessEvidenceManifest {
                             reason_code: DomainCapabilityReasonCode::MatureLabelsUnavailable,
                         },
                     },
-                    parser_gate: ParserGate::for_family(family),
+                    parser_gate: ParserGate::Implemented,
                     profile_gate: CurrentWeatherGate::Blocked {
                         blocker: WeatherGateBlocker::CurrentProfileTruthUnavailable,
                     },
@@ -1707,6 +1726,10 @@ impl WeatherReadinessEvidenceManifest {
                 url: "https://www.ncei.noaa.gov/products/global-historical-climatology-network-hourly",
             },
             OfficialSourceReference {
+                source_id: "ghcnd",
+                url: "https://www.ncei.noaa.gov/products/land-based-station/global-historical-climatology-network-daily",
+            },
+            OfficialSourceReference {
                 source_id: "hko_open_data",
                 url: "https://www.hko.gov.hk/en/abouthko/opendata_intro.htm",
             },
@@ -1717,6 +1740,10 @@ impl WeatherReadinessEvidenceManifest {
             OfficialSourceReference {
                 source_id: "ncei_storm_events",
                 url: "https://www.ncei.noaa.gov/stormevents/",
+            },
+            OfficialSourceReference {
+                source_id: "ncei_tornado_time_series",
+                url: "https://www.ncei.noaa.gov/access/monitoring/tornadoes/time-series",
             },
             OfficialSourceReference {
                 source_id: "nhc_advisory",
@@ -1779,21 +1806,6 @@ fn validate_selectors(family: DomainContractFamily, contracts: &[DomainContractC
         selector_sources, capability_sources,
         "official fact selectors must cover exactly the capability sources"
     );
-}
-
-impl ParserGate {
-    const fn for_family(family: DomainContractFamily) -> Self {
-        if matches!(family, DomainContractFamily::WeatherDailyTemperature) {
-            Self::Implemented
-        } else {
-            Self::RequiredAfterMatureLabels {
-                failure_if_missing: DomainMarketClassificationOutcome::UnsupportedTemplate {
-                    reason_code:
-                        DomainCapabilityReasonCode::RecognizedWeatherFamilyParserUnavailable,
-                },
-            }
-        }
-    }
 }
 
 fn historical_fixture(

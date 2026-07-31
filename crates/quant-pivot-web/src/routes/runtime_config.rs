@@ -272,6 +272,7 @@ pub async fn create_draft(
     body: ValidatedJson<CreatePolicyDraftRequest>,
 ) -> Result<WebResponse<PolicyRevisionView>, WebError> {
     let kind = kind.into_inner();
+    ensure_standard_mutation(kind)?;
     let body = body.into_inner();
     ensure_document_contract(kind, &body.document)?;
     let revision_hash = policy_document_hash(&body.document)?;
@@ -846,6 +847,21 @@ struct PolicyTransitionContext<'a> {
     activation_kind: PolicyActivationKind,
 }
 
+fn validate_transition_kind(
+    kind: ConfigResourceKind,
+    activation_kind: PolicyActivationKind,
+) -> Result<(), WebError> {
+    if kind == ConfigResourceKind::ModelRouting && activation_kind != PolicyActivationKind::Rollback
+    {
+        Err(WebError::BadRequest(
+            "model routing can only change through governed route activation or rollback"
+                .to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 async fn transition_revision(
     state: &AppState,
     (kind, revision_id): (ConfigResourceKind, PolicyRevisionId),
@@ -859,6 +875,7 @@ async fn transition_revision(
         op_ctx,
         activation_kind,
     } = context;
+    validate_transition_kind(kind, activation_kind)?;
     let revision = load_exact_revision(state, kind, &revision_id).await?;
     if revision.status != PolicyRevisionStatus::Validated {
         return Err(WebError::BadRequest(
@@ -895,9 +912,10 @@ async fn transition_revision(
             PolicyActivationKind::Initial | PolicyActivationKind::Promote => {
                 DecisionPolicySnapshotSource::Activation
             }
-            PolicyActivationKind::ModelPromotion => {
+            PolicyActivationKind::ModelBootstrap | PolicyActivationKind::ModelPromotion => {
                 return Err(WebError::BadRequest(
-                    "model promotion is not accepted by generic policy activation".to_owned(),
+                    "model route governance is not accepted by generic policy activation"
+                        .to_owned(),
                 ));
             }
         },
@@ -1188,6 +1206,16 @@ fn ensure_document_contract(
     Ok(())
 }
 
+fn ensure_standard_mutation(kind: ConfigResourceKind) -> Result<(), WebError> {
+    if kind == ConfigResourceKind::ModelRouting {
+        Err(WebError::BadRequest(
+            "model routing drafts are disabled; use feedback route governance".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn ensure_runtime_valid(candidate: &DecisionPolicySnapshot) -> Result<(), WebError> {
     let report = candidate.validate_runtime_config();
     if report.has_errors() {
@@ -1252,4 +1280,17 @@ fn preflight_token_hash(token: &PolicyPreflightToken) -> ContentHash {
 
 fn bounded_limit(limit: Option<u64>) -> u64 {
     limit.unwrap_or(DEFAULT_LIST_LIMIT).min(MAX_LIST_LIMIT)
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_models::enums::runtime_config::ConfigResourceKind;
+
+    use super::ensure_standard_mutation;
+
+    #[test]
+    fn model_routing_drafts_reject() {
+        assert!(ensure_standard_mutation(ConfigResourceKind::ModelRouting).is_err());
+        assert!(ensure_standard_mutation(ConfigResourceKind::ReportSchedule).is_ok());
+    }
 }

@@ -11,6 +11,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Duration as StdDuration,
 };
 
 use async_trait::async_trait;
@@ -34,7 +35,7 @@ use quant_pivot_error::{
     execution::ExecutionError,
     storage::{
         StorageError,
-        entity::{MARKET_RESOLUTION_EVENT, QUANT_RECOMMENDATION_EXECUTION_OUTCOME},
+        entity::{MARKET_RESOLUTION_EVENT, QUANT_EXECUTION_ATTEMPT_OUTCOME},
     },
 };
 use quant_pivot_models::{
@@ -48,8 +49,9 @@ use quant_pivot_models::{
             UpsertDomainSourceCursor,
         },
         quant::{
-            ExecutionOutcomeReconciliationResult, InsertResolutionOutcomeResult,
-            RecommendationExecutionOutcomeInfo, RecommendationExecutionReconciliationCandidate,
+            ExecutionAttemptBarrier, ExecutionAttemptOutcomeInfo,
+            ExecutionAttemptReconciliationResult, ExecutionAttemptTaskClaim,
+            InsertResolutionOutcomeResult, OutcomeTaskSettlement,
             RecommendationResolutionOutcomeInfo,
         },
     },
@@ -57,17 +59,19 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         ContentHash, DomainInstrumentKey, DomainSourceId, EvmAddress, EvmBlockHash,
-        EvmTransactionHash, MarketId, OrderIntentId, Price, RecommendationId, TokenId,
+        EvmTransactionHash, MarketId, OrderIntentId, Price, RecommendationId, TokenId, WorkerId,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgDomainSourceCursorRepository, PgExecutionSubmissionRepository, PgMarketRepository,
-        PgRecommendationExecutionOutcomeRepository, PgRecommendationResolutionOutcomeRepository,
+        PgDomainSourceCursorRepository, PgExecutionAttemptOutcomeRepository,
+        PgExecutionSubmissionRepository, PgMarketRepository,
+        PgRecommendationExecutionRollupRepository, PgRecommendationResolutionOutcomeRepository,
+        PgResolutionObservationRepository,
     },
     traits::{
-        DomainSourceCursorRepository, FactWriter, MarketRepository, QuantFactReadRepository,
-        RecommendationExecutionOutcomeRepository, RecommendationResolutionOutcomeRepository,
+        DomainSourceCursorRepository, ExecutionAttemptOutcomeRepository, FactWriter,
+        MarketRepository, QuantFactReadRepository, RecommendationResolutionOutcomeRepository,
     },
 };
 use quant_pivot_system_tests::{
@@ -79,7 +83,7 @@ use quant_pivot_system_tests::{
     },
 };
 use rust_decimal_macros::dec;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn outcome_reconciliation_producer_contracts() {
@@ -363,35 +367,60 @@ impl QuantFactReadRepository for MemoryResolutionFacts {
 struct FailingExecutionOutcomes;
 
 #[async_trait]
-impl RecommendationExecutionOutcomeRepository for FailingExecutionOutcomes {
+impl ExecutionAttemptOutcomeRepository for FailingExecutionOutcomes {
     async fn reconcile_intent(
         &self,
         _order_intent_id: &OrderIntentId,
         _available_through: DateTime<Utc>,
-    ) -> Result<ExecutionOutcomeReconciliationResult, StorageError> {
+    ) -> Result<ExecutionAttemptReconciliationResult, StorageError> {
         Err(failing_execution_repository())
     }
 
-    async fn find_by_recommendation(
+    async fn find_by_intent(
         &self,
-        _recommendation_id: &RecommendationId,
-    ) -> Result<Option<RecommendationExecutionOutcomeInfo>, StorageError> {
+        _order_intent_id: &OrderIntentId,
+    ) -> Result<Option<ExecutionAttemptOutcomeInfo>, StorageError> {
         Ok(None)
     }
 
-    async fn list_reconciliation_candidates(
+    async fn list_by_recommendations(
+        &self,
+        _recommendation_ids: &[RecommendationId],
+        _cutoff: DateTime<Utc>,
+    ) -> Result<Vec<ExecutionAttemptOutcomeInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn claim_reconciliation(
         &self,
         _available_through: DateTime<Utc>,
-        _after: Option<OrderIntentId>,
+        _worker_id: WorkerId,
+        _lease_secs: u64,
         _limit: u64,
-    ) -> Result<Vec<RecommendationExecutionReconciliationCandidate>, StorageError> {
+    ) -> Result<Vec<ExecutionAttemptTaskClaim>, StorageError> {
+        Err(failing_execution_repository())
+    }
+
+    async fn settle_reconciliation(
+        &self,
+        _order_intent_id: OrderIntentId,
+        _worker_id: WorkerId,
+        _settlement: OutcomeTaskSettlement,
+    ) -> Result<(), StorageError> {
+        Err(failing_execution_repository())
+    }
+
+    async fn barrier(
+        &self,
+        _cutoff: DateTime<Utc>,
+    ) -> Result<ExecutionAttemptBarrier, StorageError> {
         Err(failing_execution_repository())
     }
 }
 
 fn failing_execution_repository() -> StorageError {
     StorageError::invariant_violation(
-        Some(QUANT_RECOMMENDATION_EXECUTION_OUTCOME),
+        Some(QUANT_EXECUTION_ATTEMPT_OUTCOME),
         "simulated execution outcome repository failure",
     )
 }
@@ -530,7 +559,7 @@ async fn payout_vector_boundaries() {
     }
     seed_cursor(&db, 100, block_time).await;
     let facts = Arc::new(MemoryResolutionFacts::default());
-    let reconciliation = service(
+    let reconciliation_service = service(
         &db,
         Arc::new(ScriptedResolutionSource {
             head: block(103, block_time + Duration::seconds(3), '3'),
@@ -543,14 +572,24 @@ async fn payout_vector_boundaries() {
             }),
         }),
         Arc::clone(&facts),
-    )
-    .run_resolution_pass(pass_config(db.statement_time().await))
-    .await
-    .expect("reconcile exact payout boundary vectors");
-    assert_eq!(reconciliation.source_observations, 3);
-    assert_eq!(reconciliation.resolution_inserted, 3);
+    );
+    let first_pass = reconciliation_service
+        .run_resolution_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("project exact payout boundary vectors");
+    assert_eq!(first_pass.source_observations, 3);
+    assert_eq!(first_pass.resolution_inserted, 0);
+    assert_eq!(first_pass.resolution_deferred, 3);
     assert_eq!(facts.row_count(), 3);
     assert_eq!(cursor_block(&db).await, 103);
+
+    release_resolution_retries(&db).await;
+    let reconciliation = reconciliation_service
+        .run_resolution_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("reconcile projected payout boundary vectors");
+    assert_eq!(reconciliation.resolution_inserted, 3);
+    assert_eq!(reconciliation.resolution_deferred, 0);
 
     let outcomes = PgRecommendationResolutionOutcomeRepository::new(db);
     for (ids, (_, _, expected, _)) in reports.iter().zip(cases) {
@@ -561,6 +600,30 @@ async fn payout_vector_boundaries() {
             .expect("payout boundary outcome exists");
         assert_eq!(outcome.token_payout_ratio.inner(), expected);
     }
+}
+
+async fn release_resolution_retries(db: &DatabaseConnection) {
+    db.execute_raw(Statement::from_string(
+        DbBackend::Postgres,
+        "UPDATE quant_resolution_outcome_reconciliation_task \
+         SET next_attempt_at = statement_timestamp() + INTERVAL '1 millisecond' \
+         WHERE status = 'retrying'",
+    ))
+    .await
+    .expect("advance resolution retry schedule");
+    tokio::time::sleep(StdDuration::from_millis(5)).await;
+}
+
+async fn release_projection_retries(db: &DatabaseConnection) {
+    db.execute_raw(Statement::from_string(
+        DbBackend::Postgres,
+        "UPDATE quant_resolution_observation_projection \
+         SET next_attempt_at = statement_timestamp() + INTERVAL '1 millisecond' \
+         WHERE status = 'retrying'",
+    ))
+    .await
+    .expect("advance projection retry schedule");
+    tokio::time::sleep(StdDuration::from_millis(5)).await;
 }
 
 async fn crash_after_recovers_fact() {
@@ -590,18 +653,15 @@ async fn crash_after_recovers_fact() {
     let facts = Arc::new(MemoryResolutionFacts::default());
     facts.fail_after_next_persist();
     let reconciliation_service = service(&db, source, Arc::clone(&facts));
-    let config = pass_config(db.statement_time().await);
-
-    assert!(matches!(
-        reconciliation_service
-            .run_resolution_pass(config)
-            .await
-            .expect_err("lost fact acknowledgement must fail the pass"),
-        QuantError::Storage(StorageError::StateConflict { .. })
-    ));
+    let first_pass = reconciliation_service
+        .run_resolution_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("lost fact acknowledgement must enter durable retry");
+    assert_eq!(first_pass.source_projection_retries, 1);
+    assert_eq!(first_pass.resolution_deferred, 1);
     assert_eq!(facts.row_count(), 1);
     assert_eq!(facts.write_attempts(), 1);
-    assert_eq!(cursor_block(&db).await, 100);
+    assert_eq!(cursor_block(&db).await, 101);
     assert!(
         PgRecommendationResolutionOutcomeRepository::new(db.clone())
             .find_by_recommendation(&ids.recommendation)
@@ -610,13 +670,15 @@ async fn crash_after_recovers_fact() {
             .is_none()
     );
 
+    release_projection_retries(&db).await;
+    release_resolution_retries(&db).await;
     let recovered = reconciliation_service
-        .run_resolution_pass(config)
+        .run_resolution_pass(pass_config(db.statement_time().await))
         .await
         .expect("recover durable resolution fact");
     assert_eq!(recovered.source_facts_recovered, 1);
     assert_eq!(recovered.resolution_inserted, 1);
-    assert!(recovered.cursor_advanced);
+    assert!(!recovered.cursor_advanced);
     assert_eq!(facts.row_count(), 1);
     assert_eq!(facts.write_attempts(), 1);
     assert_eq!(cursor_block(&db).await, 101);
@@ -654,7 +716,7 @@ async fn crash_after_recovers_fact() {
             .expect_err("one market cannot acquire a second resolution checkpoint"),
         QuantError::Execution(ExecutionError::OutcomeReconciliationInvariant { .. })
     ));
-    assert_eq!(cursor_block(&db).await, 101);
+    assert_eq!(cursor_block(&db).await, 102);
     assert_eq!(facts.row_count(), 1);
     assert_eq!(facts.write_attempts(), 1);
 
@@ -801,8 +863,19 @@ async fn deferred_runtime_rotates_fairly() {
             source_block_span: 1,
         })
         .await
-        .expect("retry deferred runtime candidate after wrap");
-    assert_eq!(wrapped.resolution_deferred, 1);
+        .expect("deferred runtime candidate remains outside its due time");
+    assert_eq!(wrapped.resolution_candidates, 0);
+
+    release_resolution_retries(&db).await;
+    let due = reconciliation
+        .run_resolution_pass(OutcomeReconciliationPassConfig {
+            pass_started_at: db.statement_time().await,
+            candidate_batch_size: 1,
+            source_block_span: 1,
+        })
+        .await
+        .expect("retry deferred runtime candidate after durable due time");
+    assert_eq!(due.resolution_deferred, 1);
 }
 
 async fn disorder_never_advances_cursor() {
@@ -883,8 +956,8 @@ async fn execution_backlog_reconciled_owner() {
     assert_eq!(summary.execution_candidates, 1);
     assert_eq!(summary.execution_inserted, 1);
     assert!(
-        PgRecommendationExecutionOutcomeRepository::new(db)
-            .find_by_recommendation(&ids.recommendation)
+        PgExecutionAttemptOutcomeRepository::new(db)
+            .find_by_intent(&intent_id)
             .await
             .expect("read execution outcome")
             .is_some()
@@ -892,6 +965,7 @@ async fn execution_backlog_reconciled_owner() {
 }
 
 struct ResolutionBackfillProof {
+    source: ResolutionOutcomeBackfillSummary,
     summary: ResolutionOutcomeBackfillSummary,
     replay: ResolutionOutcomeBackfillSummary,
     cutoff: DateTime<Utc>,
@@ -902,7 +976,7 @@ struct ExecutionBackfillProof {
     summary: ExecutionOutcomeBackfillSummary,
     replay: ExecutionOutcomeBackfillSummary,
     cutoff: DateTime<Utc>,
-    outcomes: Vec<RecommendationExecutionOutcomeInfo>,
+    outcomes: Vec<ExecutionAttemptOutcomeInfo>,
 }
 
 async fn complete_backfill_replays_exactly() {
@@ -1004,6 +1078,26 @@ async fn verify_resolution_backfill(
     facts: &MemoryResolutionFacts,
     ids_by_market: &[ExecutionTxnIds],
 ) -> ResolutionBackfillProof {
+    let source_config = OutcomeReconciliationPassConfig {
+        pass_started_at: db.statement_time().await,
+        candidate_batch_size: 1,
+        source_block_span: 2,
+    };
+    let source = reconciliation
+        .run_resolution_backfill(source_config)
+        .await
+        .expect("drain frozen resolution source backfill");
+    assert_eq!(source.source_start_block, 100);
+    assert_eq!(source.source_target_block, 104);
+    assert_eq!(source.source_pages, 2);
+    assert_eq!(source.outcome_pages, 4);
+    assert_eq!(source.totals.source_observations, 3);
+    assert_eq!(source.totals.resolution_inserted, 0);
+    assert_eq!(source.totals.resolution_deferred, 4);
+    assert_eq!(facts.row_count(), 3);
+    assert_eq!(cursor_block(db).await, 104);
+
+    release_resolution_retries(db).await;
     let cutoff = db.statement_time().await;
     let config = OutcomeReconciliationPassConfig {
         pass_started_at: cutoff,
@@ -1013,16 +1107,13 @@ async fn verify_resolution_backfill(
     let summary = reconciliation
         .run_resolution_backfill(config)
         .await
-        .expect("drain complete frozen resolution backfill");
-    assert_eq!(summary.source_start_block, 100);
+        .expect("seal outcomes in the next frozen resolution window");
+    assert_eq!(summary.source_start_block, 104);
     assert_eq!(summary.source_target_block, 104);
-    assert_eq!(summary.source_pages, 2);
+    assert_eq!(summary.source_pages, 0);
     assert_eq!(summary.outcome_pages, 4);
-    assert_eq!(summary.totals.source_observations, 3);
     assert_eq!(summary.totals.resolution_inserted, 3);
     assert_eq!(summary.totals.resolution_deferred, 1);
-    assert_eq!(facts.row_count(), 3);
-    assert_eq!(cursor_block(db).await, 104);
 
     let repository = PgRecommendationResolutionOutcomeRepository::new(db.clone());
     let mut outcomes = Vec::new();
@@ -1047,6 +1138,7 @@ async fn verify_resolution_backfill(
         assert_eq!(replayed, stored);
         outcomes.push(stored);
     }
+    release_resolution_retries(db).await;
     let replay = reconciliation
         .run_resolution_backfill(config)
         .await
@@ -1075,6 +1167,7 @@ async fn verify_resolution_backfill(
         );
     }
     ResolutionBackfillProof {
+        source,
         summary,
         replay,
         cutoff,
@@ -1136,11 +1229,11 @@ async fn verify_execution_backfill(
     assert_eq!(summary.totals.execution_inserted, 3);
     assert_eq!(summary.totals.execution_deferred, 0);
 
-    let repository = PgRecommendationExecutionOutcomeRepository::new(db.clone());
+    let repository = PgExecutionAttemptOutcomeRepository::new(db.clone());
     let mut outcomes = Vec::new();
-    for (ids, intent_id) in ids_by_intent {
+    for (_ids, intent_id) in ids_by_intent {
         let stored = repository
-            .find_by_recommendation(&ids.recommendation)
+            .find_by_intent(intent_id)
             .await
             .expect("read backfilled execution outcome")
             .expect("backfilled execution outcome exists");
@@ -1148,7 +1241,7 @@ async fn verify_execution_backfill(
             .reconcile_intent(intent_id, cutoff)
             .await
             .expect("exact execution replay");
-        let ExecutionOutcomeReconciliationResult::AlreadyPresent(replayed) = replay else {
+        let ExecutionAttemptReconciliationResult::AlreadyPresent(replayed) = replay else {
             panic!("exact execution replay must return AlreadyPresent");
         };
         assert_eq!(replayed, stored);
@@ -1160,10 +1253,10 @@ async fn verify_execution_backfill(
         .expect("repeat complete execution backfill");
     assert_eq!(replay.outcome_pages, 0);
     assert_eq!(replay.totals.execution_inserted, 0);
-    for ((ids, _), expected) in ids_by_intent.iter().zip(&outcomes) {
+    for ((_ids, intent_id), expected) in ids_by_intent.iter().zip(&outcomes) {
         assert_eq!(
             repository
-                .find_by_recommendation(&ids.recommendation)
+                .find_by_intent(intent_id)
                 .await
                 .expect("read exact replay execution outcome")
                 .as_ref(),
@@ -1236,15 +1329,15 @@ fn backfill_evidence_input(
         generated_at: Utc::now(),
         source_frontier: SourceFrontierEvidence {
             source_id: "polymarket_ctf_resolution",
-            start_block: resolution.summary.source_start_block,
-            target_block: resolution.summary.source_target_block,
-            target_block_hash: resolution.summary.source_target_hash.to_string(),
-            target_block_time: resolution.summary.source_target_time,
-            source_pages: resolution.summary.source_pages,
-            scanned_blocks: resolution.summary.source_target_block
-                - resolution.summary.source_start_block,
-            observations: resolution.summary.totals.source_observations,
-            unknown_markets: resolution.summary.totals.source_unknown_markets,
+            start_block: resolution.source.source_start_block,
+            target_block: resolution.source.source_target_block,
+            target_block_hash: resolution.source.source_target_hash.to_string(),
+            target_block_time: resolution.source.source_target_time,
+            source_pages: resolution.source.source_pages,
+            scanned_blocks: resolution.source.source_target_block
+                - resolution.source.source_start_block,
+            observations: resolution.source.totals.source_observations,
+            unknown_markets: resolution.source.totals.source_unknown_markets,
             conflicts: 0,
             physical_facts: fact_rows,
             logical_facts: fact_rows,
@@ -1516,8 +1609,8 @@ async fn resolution_late_allows_execution() {
         .run_once(config)
         .await
         .expect("late resolution remains deferred while execution truth is sealed");
-    let execution_outcome = PgRecommendationExecutionOutcomeRepository::new(db.clone())
-        .find_by_recommendation(&execution_ids.recommendation)
+    let execution_outcome = PgExecutionAttemptOutcomeRepository::new(db.clone())
+        .find_by_intent(&intent_id)
         .await
         .expect("execution lane remains independently available");
     assert!(execution_outcome.is_some());
@@ -1554,12 +1647,13 @@ async fn execution_never_blocks_resolution() {
             )],
         }),
     });
-    let worker = OutcomeReconciliationWorker::new(Arc::new(service_with_execution_outcomes(
+    let reconciliation = Arc::new(service_with_execution_outcomes(
         &db,
         source,
         Arc::clone(&facts),
         Arc::new(FailingExecutionOutcomes),
-    )));
+    ));
+    let worker = OutcomeReconciliationWorker::new(Arc::clone(&reconciliation));
 
     assert!(matches!(
         worker
@@ -1571,10 +1665,24 @@ async fn execution_never_blocks_resolution() {
     assert_eq!(facts.row_count(), 1);
     assert_eq!(cursor_block(&db).await, 101);
     assert!(
-        PgRecommendationResolutionOutcomeRepository::new(db)
+        PgRecommendationResolutionOutcomeRepository::new(db.clone())
             .find_by_recommendation(&ids.recommendation)
             .await
             .expect("read resolution outcome after execution lane failure")
+            .is_none()
+    );
+
+    release_resolution_retries(&db).await;
+    let recovered = reconciliation
+        .run_resolution_pass(pass_config(db.statement_time().await))
+        .await
+        .expect("resolution lane recovers independently of execution");
+    assert_eq!(recovered.resolution_inserted, 1);
+    assert!(
+        PgRecommendationResolutionOutcomeRepository::new(db)
+            .find_by_recommendation(&ids.recommendation)
+            .await
+            .expect("read resolution outcome after independent recovery")
             .is_some()
     );
 }
@@ -1588,7 +1696,7 @@ fn service(
         db,
         source,
         facts,
-        Arc::new(PgRecommendationExecutionOutcomeRepository::new(db.clone())),
+        Arc::new(PgExecutionAttemptOutcomeRepository::new(db.clone())),
     )
 }
 
@@ -1596,7 +1704,7 @@ fn service_with_execution_outcomes(
     db: &DatabaseConnection,
     source: Arc<dyn ResolutionSourceReader>,
     facts: Arc<MemoryResolutionFacts>,
-    execution_outcomes: Arc<dyn RecommendationExecutionOutcomeRepository>,
+    execution_outcomes: Arc<dyn ExecutionAttemptOutcomeRepository>,
 ) -> OutcomeReconciliationService {
     let resolution_fact_writer = Arc::clone(&facts) as Arc<dyn FactWriter<MarketResolutionRow>>;
     let resolution_facts: Arc<dyn QuantFactReadRepository> = facts;
@@ -1605,9 +1713,11 @@ fn service_with_execution_outcomes(
         resolution_fact_writer,
         resolution_facts,
         cursors: Arc::new(PgDomainSourceCursorRepository::new(db.clone())),
+        resolution_observations: Arc::new(PgResolutionObservationRepository::new(db.clone())),
         markets: Arc::new(PgMarketRepository::new(db.clone())),
         resolution_outcomes: Arc::new(PgRecommendationResolutionOutcomeRepository::new(db.clone())),
         execution_outcomes,
+        execution_rollups: Arc::new(PgRecommendationExecutionRollupRepository::new(db.clone())),
     })
 }
 

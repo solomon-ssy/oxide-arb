@@ -2719,7 +2719,7 @@ async fn seed_model_version(
     )
     .await
     .expect("prepare exact model version");
-    ModelVersionFixture::persist_published(db, version)
+    ModelVersionFixture::persist_route_candidate(db, version)
         .await
         .expect("publish model version through exact parity proof");
     let model_run_id = ModelRunId::from_v7();

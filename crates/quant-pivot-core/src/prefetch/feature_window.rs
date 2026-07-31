@@ -20,7 +20,7 @@ use quant_pivot_models::{
         CryptoPriceReport, DecisionBoundary, DecisionSource, DomainObservation, TradeTapePrint,
         WeatherForecastPoint, WeatherObservationFact,
     },
-    types::{Bps, DomainInstrumentKey, IcaoStation, MarketId, Price, TokenId, Usd},
+    types::{Bps, DomainInstrumentKey, MarketId, Price, TokenId, Usd},
 };
 use quant_pivot_repository::traits::QuantFactReadRepository;
 use quant_pivot_research::{
@@ -243,24 +243,30 @@ impl FeatureWindowProvider {
         Ok(grouped)
     }
 
-    /// Load `AviationWeather` and `GHCNh` facts for the requested stations. The
-    /// source-time lookback supports real station calibration; publication and
-    /// system availability remain bounded by the Weather decision cutoff.
+    /// Load typed `Weather` facts for exact source-native subject keys.
+    ///
+    /// Airport stations, `AirNow` areas, regions, storms, and hemispheres share
+    /// the same fact ledger but remain distinct keys. Publication and system
+    /// availability are bounded by the frozen Weather decision cutoff.
     pub async fn load_weather_observations(
         &self,
-        stations: Vec<IcaoStation>,
+        subject_keys: Vec<String>,
         boundary: &DecisionBoundary,
-        lookback: Duration,
-    ) -> QuantResult<HashMap<IcaoStation, Vec<WeatherObservationFact>>> {
-        if stations.is_empty() {
+        from: DateTime<Utc>,
+    ) -> QuantResult<HashMap<String, Vec<WeatherObservationFact>>> {
+        if subject_keys.is_empty() {
             return Ok(HashMap::new());
         }
         let cutoff = boundary.cutoff_for(DecisionSource::DomainWeather);
-        let from = window_start(cutoff, lookback, "Weather calibration lookback")?;
+        if from > cutoff {
+            return Err(QuantError::config(
+                "Weather observation window starts after its PIT cutoff",
+            ));
+        }
         let rows = self
             .fact_read
             .weather_observation_facts_between(
-                stations.iter().map(ToString::to_string).collect(),
+                subject_keys,
                 from.timestamp_millis(),
                 cutoff.timestamp_millis().checked_add(1).ok_or_else(|| {
                     QuantError::config("Weather observation cutoff overflowed i64")
@@ -269,7 +275,7 @@ impl FeatureWindowProvider {
                 boundary.decision_at().timestamp_millis(),
             )
             .await?;
-        let mut grouped = HashMap::<IcaoStation, Vec<WeatherObservationFact>>::new();
+        let mut grouped = HashMap::<String, Vec<WeatherObservationFact>>::new();
         for row in rows {
             let fact = WeatherObservationFact::from_clickhouse_row(row).ok_or_else(|| {
                 ResearchError::PitResolution {
@@ -285,13 +291,10 @@ impl FeatureWindowProvider {
                 }
                 .into());
             }
-            let station = fact.station().ok_or_else(|| ResearchError::PitResolution {
-                detail: format!(
-                    "Weather observation subject `{}` is not an ICAO station",
-                    fact.subject_key
-                ),
-            })?;
-            grouped.entry(station).or_default().push(fact);
+            grouped
+                .entry(fact.subject_key.clone())
+                .or_default()
+                .push(fact);
         }
         for facts in grouped.values_mut() {
             facts.sort_by(|left, right| {
@@ -305,17 +308,18 @@ impl FeatureWindowProvider {
         Ok(grouped)
     }
 
-    /// Load raw GEFS points for calibration history plus the latest linked
-    /// target local day. Future `valid_time` is allowed; reference and
-    /// availability clocks are strictly PIT-bounded.
+    /// Load Weather forecast points for exact source-native subject keys.
+    ///
+    /// Future `valid_time` is allowed; reference and availability clocks are
+    /// strictly PIT-bounded.
     pub async fn load_weather_forecasts(
         &self,
-        stations: Vec<IcaoStation>,
+        subject_keys: Vec<String>,
         boundary: &DecisionBoundary,
         lookback: Duration,
         valid_to: DateTime<Utc>,
-    ) -> QuantResult<HashMap<IcaoStation, Vec<WeatherForecastPoint>>> {
-        if stations.is_empty() {
+    ) -> QuantResult<HashMap<String, Vec<WeatherForecastPoint>>> {
+        if subject_keys.is_empty() {
             return Ok(HashMap::new());
         }
         let cutoff = boundary.cutoff_for(DecisionSource::DomainWeather);
@@ -323,7 +327,7 @@ impl FeatureWindowProvider {
         let rows =
             self.fact_read
                 .weather_forecast_facts_between(
-                    stations.iter().map(ToString::to_string).collect(),
+                    subject_keys,
                     from.timestamp_millis(),
                     valid_to.timestamp_millis().checked_add(1).ok_or_else(|| {
                         QuantError::config("GEFS valid-time cutoff overflowed i64")
@@ -332,7 +336,7 @@ impl FeatureWindowProvider {
                     boundary.decision_at().timestamp_millis(),
                 )
                 .await?;
-        let mut grouped = HashMap::<IcaoStation, Vec<WeatherForecastPoint>>::new();
+        let mut grouped = HashMap::<String, Vec<WeatherForecastPoint>>::new();
         for row in rows {
             let fact = WeatherForecastPoint::from_clickhouse_row(row).ok_or_else(|| {
                 ResearchError::PitResolution {
@@ -348,13 +352,10 @@ impl FeatureWindowProvider {
                 }
                 .into());
             }
-            let station = fact.station().ok_or_else(|| ResearchError::PitResolution {
-                detail: format!(
-                    "Weather forecast subject `{}` is not an ICAO station",
-                    fact.subject_key
-                ),
-            })?;
-            grouped.entry(station).or_default().push(fact);
+            grouped
+                .entry(fact.subject_key.clone())
+                .or_default()
+                .push(fact);
         }
         for facts in grouped.values_mut() {
             facts.sort_by(|left, right| {

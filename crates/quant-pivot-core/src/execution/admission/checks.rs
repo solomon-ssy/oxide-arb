@@ -176,19 +176,22 @@ impl AdmissionCheck for SettlementRecoveryCheck {
 }
 
 // 6 ──────────────────────────────────────────────────────────────────────────
-/// The intent's model version is still `Published`.
-pub(super) struct ModelPublicationCheck;
+/// The current activated route still authorizes the intent model.
+pub(super) struct ModelRouteBindingCheck;
 
-impl AdmissionCheck for ModelPublicationCheck {
+impl AdmissionCheck for ModelRouteBindingCheck {
     fn id(&self) -> AdmissionCheckId {
-        AdmissionCheckId::ModelPublication
+        AdmissionCheckId::ModelRouteBinding
     }
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
-        if input.model_state.published {
-            AdmissionCheckTrace::pass(self.id(), "model version published")
+        if input.model_state.route_bound {
+            AdmissionCheckTrace::pass(self.id(), "model is authorized by the active route")
         } else {
-            AdmissionCheckTrace::deny(self.id(), "intent model version is no longer published")
+            AdmissionCheckTrace::deny(
+                self.id(),
+                "intent model is no longer authorized by the active route",
+            )
         }
     }
 }

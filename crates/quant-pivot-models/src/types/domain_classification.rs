@@ -218,8 +218,8 @@ mod tests {
             market_id: MarketId::new(id),
             family: DomainFamily::Weather,
             contract_family: Some(DomainContractFamily::WeatherPrecipitation),
-            outcome: DomainMarketClassificationOutcome::UnsupportedTemplate {
-                reason_code: DomainCapabilityReasonCode::RecognizedWeatherFamilyParserUnavailable,
+            outcome: DomainMarketClassificationOutcome::InsufficientEvidence {
+                reason_code: DomainCapabilityReasonCode::WeatherTemplateEvidenceIncomplete,
             },
             metadata_hash: hash(metadata),
         }
@@ -240,7 +240,7 @@ mod tests {
         )
         .expect("artifact");
         assert_eq!(left, right);
-        assert_eq!(left.unsupported_template_count(), 2);
+        assert_eq!(left.unsupported_template_count(), 0);
         assert!(left.validate().is_ok());
 
         let mut tampered = left;

@@ -105,7 +105,7 @@ fn decode_optional_millis(value: Option<i64>) -> Result<Option<DateTime<Utc>>, I
 
 /// Source-native aviation observation classification. A correction is explicit
 /// because the same observation timestamp may legitimately have multiple facts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WeatherObservationReportKind {
     Metar,
@@ -114,26 +114,39 @@ pub enum WeatherObservationReportKind {
     /// Historical `GHCNh` calibration fact. It is never projected as live
     /// `AviationWeather` state.
     HistoricalGhcnh,
-    /// HKO rolling rainfall window from the public current-weather feed.
-    HkoRainfall,
+    /// Archive-quality `GHCNd` local-day maximum/minimum temperature.
+    GhcndDailyTemperature,
+    /// HKO completed local-day total from the official climate CSV.
+    HkoDailyRainfall,
     /// HKO finalized daily maximum/minimum temperature from the climate API.
     HkoDailyTemperature,
     /// Preliminary `AirNow` reporting-area PM2.5 observation or prior-day maximum.
     AirNowPm25AreaObservation,
     /// Preliminary `AirNow` exact monitoring-site PM2.5 AQI observation.
     AirNowPm25SiteObservation,
+    /// Official completed reporting-area Daily AQI for PM2.5.
+    ///
+    /// This is deliberately distinct from hourly/current observations: only
+    /// this report kind may supply an `OfficialDailyAqi` final label.
+    AirNowPm25OfficialDaily,
     /// Preliminary, realtime SPC local storm-report count.
     SpcPreliminaryTornado,
     /// Post-storm NCEI Storm Events tornado count.
     NceiFinalTornado,
+    /// First published NCEI U.S. Tornadoes time-series aggregate.
+    NceiTornadoTimeSeries,
     /// NHC realtime tropical-cyclone advisory intensity.
     NhcAdvisory,
     /// NHC post-analysis HURDAT2 best-track intensity.
     NhcBestTrack,
     /// NASA GISTEMP v4 monthly global land-ocean anomaly.
     NasaGistemp,
+    /// NASA GISTEMP v4 annual unsmoothed global land-ocean anomaly.
+    NasaGistempAnnual,
     /// NOAA/NSIDC Sea Ice Index v4 daily hemisphere extent.
-    NsidcSeaIce,
+    NsidcDailySeaIce,
+    /// NOAA/NSIDC Sea Ice Index v4 completed calendar-month mean extent.
+    NsidcMonthlySeaIce,
     /// NOAA/NWS API quality-controlled station wind observation.
     NwsStation,
 }
@@ -203,16 +216,21 @@ impl WeatherObservationReportKind {
             Self::Speci => "speci",
             Self::Correction => "correction",
             Self::HistoricalGhcnh => "historical_ghcnh",
-            Self::HkoRainfall => "hko_rainfall",
+            Self::GhcndDailyTemperature => "ghcnd_daily_temperature",
+            Self::HkoDailyRainfall => "hko_daily_rainfall",
             Self::HkoDailyTemperature => "hko_daily_temperature",
             Self::AirNowPm25AreaObservation => "airnow_pm25_area_observation",
             Self::AirNowPm25SiteObservation => "airnow_pm25_site_observation",
+            Self::AirNowPm25OfficialDaily => "airnow_pm25_official_daily",
             Self::SpcPreliminaryTornado => "spc_preliminary_tornado",
             Self::NceiFinalTornado => "ncei_final_tornado",
+            Self::NceiTornadoTimeSeries => "ncei_tornado_time_series",
             Self::NhcAdvisory => "nhc_advisory",
             Self::NhcBestTrack => "nhc_best_track",
             Self::NasaGistemp => "nasa_gistemp",
-            Self::NsidcSeaIce => "nsidc_sea_ice",
+            Self::NasaGistempAnnual => "nasa_gistemp_annual",
+            Self::NsidcDailySeaIce => "nsidc_daily_sea_ice",
+            Self::NsidcMonthlySeaIce => "nsidc_monthly_sea_ice",
             Self::NwsStation => "nws_station",
         }
     }
@@ -224,16 +242,21 @@ impl WeatherObservationReportKind {
             "speci" => Some(Self::Speci),
             "correction" => Some(Self::Correction),
             "historical_ghcnh" => Some(Self::HistoricalGhcnh),
-            "hko_rainfall" => Some(Self::HkoRainfall),
+            "ghcnd_daily_temperature" => Some(Self::GhcndDailyTemperature),
+            "hko_daily_rainfall" => Some(Self::HkoDailyRainfall),
             "hko_daily_temperature" => Some(Self::HkoDailyTemperature),
             "airnow_pm25_area_observation" => Some(Self::AirNowPm25AreaObservation),
             "airnow_pm25_site_observation" => Some(Self::AirNowPm25SiteObservation),
+            "airnow_pm25_official_daily" => Some(Self::AirNowPm25OfficialDaily),
             "spc_preliminary_tornado" => Some(Self::SpcPreliminaryTornado),
             "ncei_final_tornado" => Some(Self::NceiFinalTornado),
+            "ncei_tornado_time_series" => Some(Self::NceiTornadoTimeSeries),
             "nhc_advisory" => Some(Self::NhcAdvisory),
             "nhc_best_track" => Some(Self::NhcBestTrack),
             "nasa_gistemp" => Some(Self::NasaGistemp),
-            "nsidc_sea_ice" => Some(Self::NsidcSeaIce),
+            "nasa_gistemp_annual" => Some(Self::NasaGistempAnnual),
+            "nsidc_daily_sea_ice" => Some(Self::NsidcDailySeaIce),
+            "nsidc_monthly_sea_ice" => Some(Self::NsidcMonthlySeaIce),
             "nws_station" => Some(Self::NwsStation),
             _ => None,
         }

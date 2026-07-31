@@ -294,8 +294,12 @@ impl From<FeedbackError> for WebError {
             | FeedbackError::EvaluationReuse { .. }
             | FeedbackError::SameWindowMismatch { .. }
             | FeedbackError::PromotionPermitConflict { .. }
+            | FeedbackError::InvalidModelRouteEvidence { .. }
             | FeedbackError::InvalidPromotionPreflight { .. }
-            | FeedbackError::PromotionTransactionConflict { .. } => Self::Conflict(message),
+            | FeedbackError::PromotionTransactionConflict { .. }
+            | FeedbackError::InvalidBootstrapPreflight { .. }
+            | FeedbackError::BootstrapTransactionConflict { .. }
+            | FeedbackError::ModelRouteConvergenceConflict { .. } => Self::Conflict(message),
             _ => Self::Internal(message),
         }
     }

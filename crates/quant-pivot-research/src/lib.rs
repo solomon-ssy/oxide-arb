@@ -39,6 +39,7 @@ pub mod stats;
 pub mod structural_volatility;
 
 pub mod artifact;
+pub mod attribution;
 pub mod backtest;
 pub mod domain;
 pub mod execution_semantics;
@@ -47,6 +48,7 @@ pub mod features;
 pub mod feedback;
 pub mod feedback_comparison;
 pub mod feedback_decision;
+pub mod feedback_governance;
 pub mod feedback_learning;
 pub mod feedback_shadow;
 pub mod gates;

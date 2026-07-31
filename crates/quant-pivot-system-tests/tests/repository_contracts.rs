@@ -46,6 +46,8 @@ mod domain_source_expectation;
 mod entry_condition_evaluation;
 #[path = "repository/accounting/equity_snapshot.rs"]
 mod equity_snapshot;
+#[path = "repository/accounting/execution_attempt_outcome.rs"]
+mod execution_attempt_outcome;
 #[path = "repository/execution/execution_submission.rs"]
 mod execution_submission;
 #[path = "repository/research/factor_revision.rs"]
@@ -66,6 +68,8 @@ mod feedback_decision_evidence;
 mod feedback_decision_stage;
 #[path = "repository/research/feedback_learning_stage.rs"]
 mod feedback_learning_stage;
+#[path = "repository/research/feedback_scheduler.rs"]
+mod feedback_scheduler;
 #[path = "repository/research/feedback_shadow_stage.rs"]
 mod feedback_shadow_stage;
 #[path = "repository/research/feedback_signal_stage.rs"]
@@ -80,14 +84,14 @@ mod market_selection;
 mod model_governance;
 #[path = "repository/research/model_registry.rs"]
 mod model_registry;
+#[path = "repository/research/model_route_bootstrap.rs"]
+mod model_route_bootstrap;
 #[path = "repository/governance/policy_governance.rs"]
 mod policy_governance;
 #[path = "repository/accounting/portfolio_optimizer.rs"]
 mod portfolio_optimizer;
 #[path = "repository/governance/promotion_permit.rs"]
 mod promotion_permit;
-#[path = "repository/accounting/recommendation_execution_outcome.rs"]
-mod recommendation_execution_outcome;
 #[path = "repository/accounting/recommendation_resolution_outcome.rs"]
 mod recommendation_resolution_outcome;
 #[path = "repository/execution/report_scheduler.rs"]
@@ -288,8 +292,8 @@ async fn run_research_scenarios() -> Result<(), String> {
         model_registry::create_model_version_lock,
         model_registry::find_page_versions_spec,
         model_registry::model_version_rejects_boundary,
-        model_registry::published_artifacts_coexist_explicit,
-        model_registry::published_picker_catalog_filters,
+        model_registry::immutable_artifacts_coexist,
+        model_registry::route_candidate_catalog_filters,
         research_readiness::readiness_evidence_scoped_only,
         research_readiness::readiness_evidence_rejects_tampering,
         research_readiness::shadow_missing_without_fallbacks,
@@ -362,14 +366,14 @@ async fn recommendation_resolution_outcome_contracts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn recommendation_execution_outcome_contracts() {
+async fn execution_attempt_outcome_contracts() {
     Box::pin(with_postgres_suite(async {
         run_scenarios!(
-            recommendation_execution_outcome::terminal_preserve_zero_semantics,
-            recommendation_execution_outcome::invalid_state_report_rejects,
-            recommendation_execution_outcome::reconcile_idempotent_worm_evident,
-            recommendation_execution_outcome::reconciliation_candidates_require_source,
-            recommendation_execution_outcome::late_source_defers,
+            execution_attempt_outcome::terminal_preserve_zero_semantics,
+            execution_attempt_outcome::invalid_state_report_rejects,
+            execution_attempt_outcome::reconcile_idempotent_worm_evident,
+            execution_attempt_outcome::reconciliation_candidates_require_source,
+            execution_attempt_outcome::late_source_defers,
         );
     }))
     .await
@@ -445,6 +449,15 @@ async fn feedback_cycle_repository_contracts() {
     }))
     .await
     .expect("start feedback-cycle repository PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feedback_scheduler_contracts() {
+    Box::pin(with_postgres_suite(
+        feedback_scheduler::scheduler_lease_contracts(),
+    ))
+    .await
+    .expect("start feedback-scheduler PostgreSQL suite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -565,12 +578,21 @@ async fn model_serving_persistence_contracts() {
     Box::pin(with_postgres_suite(async {
         run_scenarios!(
             model_registry::model_version_rejects_boundary,
-            model_registry::published_artifacts_coexist_explicit,
-            model_registry::published_picker_catalog_filters,
+            model_registry::immutable_artifacts_coexist,
+            model_registry::route_candidate_catalog_filters,
         );
     }))
     .await
     .expect("start exact model-serving persistence PostgreSQL suite");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn model_route_bootstrap_contracts() {
+    Box::pin(with_postgres_suite(
+        model_route_bootstrap::model_route_bootstrap_contracts(),
+    ))
+    .await
+    .expect("start first-champion model-route bootstrap PostgreSQL suite");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

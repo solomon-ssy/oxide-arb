@@ -1,4 +1,4 @@
-//! Immutable recommendation-execution outcome persistence contracts.
+//! Immutable execution-attempt outcome persistence contracts.
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::hashing::CanonicalDigestError;
@@ -8,18 +8,18 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    entities::quant_recommendation_execution_outcome,
+    entities::quant_execution_attempt_outcome,
     enums::{
         execution::{ExitReason, PositionLedgerState},
         quant::{
-            ExecutionOrderState, QuantRuntimeMode, RecommendationExecutionNoFillReason,
-            RecommendationExecutionTerminalState,
+            ExecutionAttemptNoFillReason, ExecutionAttemptTerminalState, ExecutionOrderState,
+            QuantRuntimeMode,
         },
     },
     hashing::CanonicalDigest,
     types::{
-        Bps, ContentHash, ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId,
-        PositionId, Price, RecommendationId, ReconciliationId, SchemaVersion, Shares, TokenId, Usd,
+        ContentHash, ExecutionAccountId, ExecutionOrderId, MarketId, OrderIntentId, PositionId,
+        Price, RecommendationId, ReconciliationId, SchemaVersion, Shares, TokenId, Usd,
     },
 };
 
@@ -29,8 +29,8 @@ use crate::{
 /// The producer supplies only terminal economic facts and their frozen source
 /// lineage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::quant_recommendation_execution_outcome::ActiveModel")]
-pub struct NewRecommendationExecutionOutcome {
+#[sea_orm(active_model = "crate::entities::quant_execution_attempt_outcome::ActiveModel")]
+pub struct NewExecutionAttemptOutcome {
     pub recommendation_id: RecommendationId,
     pub order_intent_id: OrderIntentId,
     pub entry_execution_order_id: ExecutionOrderId,
@@ -40,8 +40,8 @@ pub struct NewRecommendationExecutionOutcome {
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub runtime_mode: QuantRuntimeMode,
-    pub terminal_state: RecommendationExecutionTerminalState,
-    pub no_fill_reason: Option<RecommendationExecutionNoFillReason>,
+    pub terminal_state: ExecutionAttemptTerminalState,
+    pub no_fill_reason: Option<ExecutionAttemptNoFillReason>,
     pub entry_order_state: ExecutionOrderState,
     pub requested_shares: Shares,
     pub filled_shares: Shares,
@@ -56,8 +56,6 @@ pub struct NewRecommendationExecutionOutcome {
     pub exit_at: Option<DateTime<Utc>>,
     pub settlement_payout_usd: Option<Usd>,
     pub realized_pnl_usd: Option<Usd>,
-    pub max_adverse_excursion_bps: Option<Bps>,
-    pub max_favorable_excursion_bps: Option<Bps>,
     /// Time the execution lifecycle became terminal.
     pub terminal_at: DateTime<Utc>,
     /// Frozen source frontier selected by the reconciliation producer.
@@ -67,9 +65,9 @@ pub struct NewRecommendationExecutionOutcome {
     pub execution_fact_schema_version: SchemaVersion,
 }
 
-impl NewRecommendationExecutionOutcome {
+impl NewExecutionAttemptOutcome {
     /// Validate immutable execution semantics before any database work.
-    pub fn validate(&self) -> Result<(), RecommendationExecutionOutcomeContractError> {
+    pub fn validate(&self) -> Result<(), ExecutionAttemptOutcomeContractError> {
         validate_fields(
             &ExecutionOutcomeHashInput::from_new(self, self.terminal_at, self.terminal_at),
             None,
@@ -81,14 +79,14 @@ impl NewRecommendationExecutionOutcome {
         &self,
         source_observed_at: DateTime<Utc>,
         available_at: DateTime<Utc>,
-    ) -> Result<ContentHash, RecommendationExecutionOutcomeContractError> {
+    ) -> Result<ContentHash, ExecutionAttemptOutcomeContractError> {
         let input = ExecutionOutcomeHashInput::from_new(self, source_observed_at, available_at);
         validate_fields(&input, None)?;
         Ok(ContentHash::try_from(&input)?)
     }
 
     /// Exact fill ratio derived from canonical share facts.
-    pub fn fill_ratio(&self) -> Result<Decimal, RecommendationExecutionOutcomeContractError> {
+    pub fn fill_ratio(&self) -> Result<Decimal, ExecutionAttemptOutcomeContractError> {
         Decimal::try_from(ExecutionFill {
             requested: self.requested_shares,
             filled: self.filled_shares,
@@ -98,8 +96,8 @@ impl NewRecommendationExecutionOutcome {
 
 /// Immutable recommendation-execution outcome row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel)]
-#[sea_orm(entity = "crate::entities::quant_recommendation_execution_outcome::Entity")]
-pub struct RecommendationExecutionOutcomeInfo {
+#[sea_orm(entity = "crate::entities::quant_execution_attempt_outcome::Entity")]
+pub struct ExecutionAttemptOutcomeInfo {
     pub recommendation_id: RecommendationId,
     pub order_intent_id: OrderIntentId,
     pub entry_execution_order_id: ExecutionOrderId,
@@ -109,8 +107,8 @@ pub struct RecommendationExecutionOutcomeInfo {
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub runtime_mode: QuantRuntimeMode,
-    pub terminal_state: RecommendationExecutionTerminalState,
-    pub no_fill_reason: Option<RecommendationExecutionNoFillReason>,
+    pub terminal_state: ExecutionAttemptTerminalState,
+    pub no_fill_reason: Option<ExecutionAttemptNoFillReason>,
     pub entry_order_state: ExecutionOrderState,
     pub requested_shares: Shares,
     pub filled_shares: Shares,
@@ -125,8 +123,6 @@ pub struct RecommendationExecutionOutcomeInfo {
     pub exit_at: Option<DateTime<Utc>>,
     pub settlement_payout_usd: Option<Usd>,
     pub realized_pnl_usd: Option<Usd>,
-    pub max_adverse_excursion_bps: Option<Bps>,
-    pub max_favorable_excursion_bps: Option<Bps>,
     pub terminal_at: DateTime<Utc>,
     pub source_observed_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
@@ -137,33 +133,31 @@ pub struct RecommendationExecutionOutcomeInfo {
     pub created_at: DateTime<Utc>,
 }
 
-impl RecommendationExecutionOutcomeInfo {
+impl ExecutionAttemptOutcomeInfo {
     /// Recompute the canonical immutable digest.
     pub fn expected_outcome_hash(
         &self,
-    ) -> Result<ContentHash, RecommendationExecutionOutcomeContractError> {
+    ) -> Result<ContentHash, ExecutionAttemptOutcomeContractError> {
         let input = ExecutionOutcomeHashInput::from_info(self);
         validate_fields(&input, Some(self.created_at))?;
         Ok(ContentHash::try_from(&input)?)
     }
 
     /// Validate the stored row and its tamper-evident digest.
-    pub fn validate(&self) -> Result<(), RecommendationExecutionOutcomeContractError> {
+    pub fn validate(&self) -> Result<(), ExecutionAttemptOutcomeContractError> {
         let expected = self.expected_outcome_hash()?;
         if expected != self.outcome_hash {
-            return Err(
-                RecommendationExecutionOutcomeContractError::OutcomeHashMismatch {
-                    expected,
-                    actual: self.outcome_hash,
-                },
-            );
+            return Err(ExecutionAttemptOutcomeContractError::OutcomeHashMismatch {
+                expected,
+                actual: self.outcome_hash,
+            });
         }
         Ok(())
     }
 
     /// Whether an idempotent retry carries the exact stored source derivation.
     #[must_use]
-    pub fn has_same_derivation(&self, candidate: &NewRecommendationExecutionOutcome) -> bool {
+    pub fn has_same_derivation(&self, candidate: &NewExecutionAttemptOutcome) -> bool {
         self.recommendation_id == candidate.recommendation_id
             && self.order_intent_id == candidate.order_intent_id
             && self.entry_execution_order_id == candidate.entry_execution_order_id
@@ -189,8 +183,6 @@ impl RecommendationExecutionOutcomeInfo {
             && self.exit_at == candidate.exit_at
             && self.settlement_payout_usd == candidate.settlement_payout_usd
             && self.realized_pnl_usd == candidate.realized_pnl_usd
-            && self.max_adverse_excursion_bps == candidate.max_adverse_excursion_bps
-            && self.max_favorable_excursion_bps == candidate.max_favorable_excursion_bps
             && self.terminal_at == candidate.terminal_at
             && self.source_checkpoint_hash == candidate.source_checkpoint_hash
             && self.execution_fact_hash == candidate.execution_fact_hash
@@ -198,7 +190,7 @@ impl RecommendationExecutionOutcomeInfo {
     }
 
     /// Exact fill ratio derived from canonical share facts.
-    pub fn fill_ratio(&self) -> Result<Decimal, RecommendationExecutionOutcomeContractError> {
+    pub fn fill_ratio(&self) -> Result<Decimal, ExecutionAttemptOutcomeContractError> {
         Decimal::try_from(ExecutionFill {
             requested: self.requested_shares,
             filled: self.filled_shares,
@@ -207,8 +199,8 @@ impl RecommendationExecutionOutcomeInfo {
 }
 
 info_from_model!(
-    RecommendationExecutionOutcomeInfo,
-    quant_recommendation_execution_outcome::Model,
+    ExecutionAttemptOutcomeInfo,
+    quant_execution_attempt_outcome::Model,
     {
         recommendation_id,
         order_intent_id,
@@ -235,8 +227,6 @@ info_from_model!(
         exit_at,
         settlement_payout_usd,
         realized_pnl_usd,
-        max_adverse_excursion_bps,
-        max_favorable_excursion_bps,
         terminal_at,
         source_observed_at,
         available_at,
@@ -250,7 +240,7 @@ info_from_model!(
 
 /// Invalid immutable execution-outcome content.
 #[derive(Debug, Error)]
-pub enum RecommendationExecutionOutcomeContractError {
+pub enum ExecutionAttemptOutcomeContractError {
     #[error("market_id and token_id must both be non-empty")]
     EmptyIdentity,
     #[error("ReportOnly and other non-submitting modes cannot produce an execution outcome")]
@@ -263,7 +253,7 @@ pub enum RecommendationExecutionOutcomeContractError {
     InvalidFilledShares { requested: Shares, actual: Shares },
     #[error("terminal state {terminal_state:?} is inconsistent with fill and entry-order facts")]
     TerminalStateMismatch {
-        terminal_state: RecommendationExecutionTerminalState,
+        terminal_state: ExecutionAttemptTerminalState,
     },
     #[error("unfilled execution outcome contains a filled-position economic value")]
     UnfilledEconomicsPresent,
@@ -282,10 +272,6 @@ pub enum RecommendationExecutionOutcomeContractError {
         field: &'static str,
         actual: Decimal,
     },
-    #[error("maximum adverse excursion must be non-positive, got {actual}")]
-    PositiveAdverseExcursion { actual: Bps },
-    #[error("maximum favorable excursion must be non-negative, got {actual}")]
-    NegativeFavorableExcursion { actual: Bps },
     #[error("execution outcome hash mismatch: expected {expected}, got {actual}")]
     OutcomeHashMismatch {
         expected: ContentHash,
@@ -307,8 +293,8 @@ struct ExecutionOutcomeHashInput<'a> {
     market_id: &'a MarketId,
     token_id: &'a TokenId,
     runtime_mode: QuantRuntimeMode,
-    terminal_state: RecommendationExecutionTerminalState,
-    no_fill_reason: Option<RecommendationExecutionNoFillReason>,
+    terminal_state: ExecutionAttemptTerminalState,
+    no_fill_reason: Option<ExecutionAttemptNoFillReason>,
     entry_order_state: ExecutionOrderState,
     requested_shares: Shares,
     filled_shares: Shares,
@@ -323,8 +309,6 @@ struct ExecutionOutcomeHashInput<'a> {
     exit_at: Option<DateTime<Utc>>,
     settlement_payout_usd: Option<Usd>,
     realized_pnl_usd: Option<Usd>,
-    max_adverse_excursion_bps: Option<Bps>,
-    max_favorable_excursion_bps: Option<Bps>,
     terminal_at: DateTime<Utc>,
     source_observed_at: DateTime<Utc>,
     available_at: DateTime<Utc>,
@@ -335,12 +319,12 @@ struct ExecutionOutcomeHashInput<'a> {
 
 impl<'a> ExecutionOutcomeHashInput<'a> {
     fn from_new(
-        outcome: &'a NewRecommendationExecutionOutcome,
+        outcome: &'a NewExecutionAttemptOutcome,
         source_observed_at: DateTime<Utc>,
         available_at: DateTime<Utc>,
     ) -> Self {
         Self {
-            contract: "recommendation_execution_outcome_v1",
+            contract: "execution_attempt_outcome_v1",
             recommendation_id: outcome.recommendation_id,
             order_intent_id: outcome.order_intent_id,
             entry_execution_order_id: outcome.entry_execution_order_id,
@@ -366,8 +350,6 @@ impl<'a> ExecutionOutcomeHashInput<'a> {
             exit_at: outcome.exit_at,
             settlement_payout_usd: outcome.settlement_payout_usd.map(Usd::normalized),
             realized_pnl_usd: outcome.realized_pnl_usd.map(Usd::normalized),
-            max_adverse_excursion_bps: outcome.max_adverse_excursion_bps.map(Bps::normalized),
-            max_favorable_excursion_bps: outcome.max_favorable_excursion_bps.map(Bps::normalized),
             terminal_at: outcome.terminal_at,
             source_observed_at,
             available_at,
@@ -377,9 +359,9 @@ impl<'a> ExecutionOutcomeHashInput<'a> {
         }
     }
 
-    fn from_info(outcome: &'a RecommendationExecutionOutcomeInfo) -> Self {
+    fn from_info(outcome: &'a ExecutionAttemptOutcomeInfo) -> Self {
         Self {
-            contract: "recommendation_execution_outcome_v1",
+            contract: "execution_attempt_outcome_v1",
             recommendation_id: outcome.recommendation_id,
             order_intent_id: outcome.order_intent_id,
             entry_execution_order_id: outcome.entry_execution_order_id,
@@ -405,8 +387,6 @@ impl<'a> ExecutionOutcomeHashInput<'a> {
             exit_at: outcome.exit_at,
             settlement_payout_usd: outcome.settlement_payout_usd.map(Usd::normalized),
             realized_pnl_usd: outcome.realized_pnl_usd.map(Usd::normalized),
-            max_adverse_excursion_bps: outcome.max_adverse_excursion_bps.map(Bps::normalized),
-            max_favorable_excursion_bps: outcome.max_favorable_excursion_bps.map(Bps::normalized),
             terminal_at: outcome.terminal_at,
             source_observed_at: outcome.source_observed_at,
             available_at: outcome.available_at,
@@ -420,34 +400,32 @@ impl<'a> ExecutionOutcomeHashInput<'a> {
 fn validate_fields(
     outcome: &ExecutionOutcomeHashInput<'_>,
     created_at: Option<DateTime<Utc>>,
-) -> Result<(), RecommendationExecutionOutcomeContractError> {
+) -> Result<(), ExecutionAttemptOutcomeContractError> {
     if outcome.market_id.as_str().trim().is_empty() || outcome.token_id.as_str().trim().is_empty() {
-        return Err(RecommendationExecutionOutcomeContractError::EmptyIdentity);
+        return Err(ExecutionAttemptOutcomeContractError::EmptyIdentity);
     }
     if !outcome.runtime_mode.allows_order_submission() {
-        return Err(RecommendationExecutionOutcomeContractError::ExecutionNotAuthorized);
+        return Err(ExecutionAttemptOutcomeContractError::ExecutionNotAuthorized);
     }
     SchemaVersion::try_new(outcome.execution_fact_schema_version.get())?;
     if outcome.terminal_at > outcome.source_observed_at
         || outcome.source_observed_at > outcome.available_at
         || created_at.is_some_and(|created_at| outcome.available_at > created_at)
     {
-        return Err(RecommendationExecutionOutcomeContractError::InvalidTimeline);
+        return Err(ExecutionAttemptOutcomeContractError::InvalidTimeline);
     }
     if !outcome.requested_shares.is_positive() {
         return Err(
-            RecommendationExecutionOutcomeContractError::InvalidRequestedShares {
+            ExecutionAttemptOutcomeContractError::InvalidRequestedShares {
                 actual: outcome.requested_shares,
             },
         );
     }
     if outcome.filled_shares.is_negative() || outcome.filled_shares > outcome.requested_shares {
-        return Err(
-            RecommendationExecutionOutcomeContractError::InvalidFilledShares {
-                requested: outcome.requested_shares,
-                actual: outcome.filled_shares,
-            },
-        );
+        return Err(ExecutionAttemptOutcomeContractError::InvalidFilledShares {
+            requested: outcome.requested_shares,
+            actual: outcome.filled_shares,
+        });
     }
     validate_optional_price("entry_avg_price", outcome.entry_avg_price)?;
     validate_optional_price("exit_avg_price", outcome.exit_avg_price)?;
@@ -457,42 +435,27 @@ fn validate_fields(
         "settlement_payout_usd",
         outcome.settlement_payout_usd.map(Usd::inner),
     )?;
-    if let Some(actual) = outcome.max_adverse_excursion_bps
-        && actual.is_positive()
-    {
-        return Err(
-            RecommendationExecutionOutcomeContractError::PositiveAdverseExcursion { actual },
-        );
-    }
-    if let Some(actual) = outcome.max_favorable_excursion_bps
-        && actual.is_negative()
-    {
-        return Err(
-            RecommendationExecutionOutcomeContractError::NegativeFavorableExcursion { actual },
-        );
-    }
-
     match outcome.terminal_state {
-        RecommendationExecutionTerminalState::Unfilled => validate_unfilled(outcome),
-        RecommendationExecutionTerminalState::PartiallyFilled => {
+        ExecutionAttemptTerminalState::Unfilled => validate_unfilled(outcome),
+        ExecutionAttemptTerminalState::PartiallyFilled => {
             if !outcome.filled_shares.is_positive()
                 || outcome.filled_shares >= outcome.requested_shares
                 || outcome.entry_order_state != ExecutionOrderState::PartiallyFilled
             {
                 return Err(
-                    RecommendationExecutionOutcomeContractError::TerminalStateMismatch {
+                    ExecutionAttemptOutcomeContractError::TerminalStateMismatch {
                         terminal_state: outcome.terminal_state,
                     },
                 );
             }
             validate_filled(outcome)
         }
-        RecommendationExecutionTerminalState::FullyFilled => {
+        ExecutionAttemptTerminalState::FullyFilled => {
             if outcome.filled_shares != outcome.requested_shares
                 || outcome.entry_order_state != ExecutionOrderState::Filled
             {
                 return Err(
-                    RecommendationExecutionOutcomeContractError::TerminalStateMismatch {
+                    ExecutionAttemptOutcomeContractError::TerminalStateMismatch {
                         terminal_state: outcome.terminal_state,
                     },
                 );
@@ -504,7 +467,7 @@ fn validate_fields(
 
 const fn validate_unfilled(
     outcome: &ExecutionOutcomeHashInput<'_>,
-) -> Result<(), RecommendationExecutionOutcomeContractError> {
+) -> Result<(), ExecutionAttemptOutcomeContractError> {
     if !outcome.filled_shares.is_zero()
         || outcome.no_fill_reason.is_none()
         || !matches!(
@@ -513,7 +476,7 @@ const fn validate_unfilled(
         )
     {
         return Err(
-            RecommendationExecutionOutcomeContractError::TerminalStateMismatch {
+            ExecutionAttemptOutcomeContractError::TerminalStateMismatch {
                 terminal_state: outcome.terminal_state,
             },
         );
@@ -529,17 +492,15 @@ const fn validate_unfilled(
         || outcome.exit_at.is_some()
         || outcome.settlement_payout_usd.is_some()
         || outcome.realized_pnl_usd.is_some()
-        || outcome.max_adverse_excursion_bps.is_some()
-        || outcome.max_favorable_excursion_bps.is_some()
     {
-        return Err(RecommendationExecutionOutcomeContractError::UnfilledEconomicsPresent);
+        return Err(ExecutionAttemptOutcomeContractError::UnfilledEconomicsPresent);
     }
     Ok(())
 }
 
 fn validate_filled(
     outcome: &ExecutionOutcomeHashInput<'_>,
-) -> Result<(), RecommendationExecutionOutcomeContractError> {
+) -> Result<(), ExecutionAttemptOutcomeContractError> {
     if outcome.no_fill_reason.is_some()
         || outcome.position_id.is_none()
         || outcome.entry_avg_price.is_none()
@@ -550,20 +511,20 @@ fn validate_filled(
             .entry_filled_at
             .is_some_and(|filled_at| filled_at > outcome.terminal_at)
     {
-        return Err(RecommendationExecutionOutcomeContractError::FilledEconomicsMissing);
+        return Err(ExecutionAttemptOutcomeContractError::FilledEconomicsMissing);
     }
     match outcome.position_terminal_state {
         Some(PositionLedgerState::Closed) => validate_closed(outcome),
         Some(PositionLedgerState::Settled) => validate_settled(outcome),
         Some(PositionLedgerState::Open | PositionLedgerState::Closing) | None => {
-            Err(RecommendationExecutionOutcomeContractError::FilledEconomicsMissing)
+            Err(ExecutionAttemptOutcomeContractError::FilledEconomicsMissing)
         }
     }
 }
 
 fn validate_closed(
     outcome: &ExecutionOutcomeHashInput<'_>,
-) -> Result<(), RecommendationExecutionOutcomeContractError> {
+) -> Result<(), ExecutionAttemptOutcomeContractError> {
     if outcome.exit_reason.is_none()
         || outcome.exit_reason == Some(ExitReason::ResolutionRedeem)
         || outcome.exit_filled_shares != Some(outcome.filled_shares)
@@ -571,18 +532,18 @@ fn validate_closed(
         || outcome.exit_at != Some(outcome.terminal_at)
         || outcome.settlement_payout_usd.is_some()
     {
-        return Err(RecommendationExecutionOutcomeContractError::InvalidClosedPosition);
+        return Err(ExecutionAttemptOutcomeContractError::InvalidClosedPosition);
     }
     Ok(())
 }
 
 fn validate_settled(
     outcome: &ExecutionOutcomeHashInput<'_>,
-) -> Result<(), RecommendationExecutionOutcomeContractError> {
+) -> Result<(), ExecutionAttemptOutcomeContractError> {
     if outcome.exit_reason != Some(ExitReason::ResolutionRedeem)
         || outcome.settlement_payout_usd.is_none()
     {
-        return Err(RecommendationExecutionOutcomeContractError::InvalidSettledPosition);
+        return Err(ExecutionAttemptOutcomeContractError::InvalidSettledPosition);
     }
     match outcome.exit_filled_shares {
         None if outcome.exit_avg_price.is_none()
@@ -601,18 +562,18 @@ fn validate_settled(
         {
             Ok(())
         }
-        None | Some(_) => Err(RecommendationExecutionOutcomeContractError::InvalidSettledPosition),
+        None | Some(_) => Err(ExecutionAttemptOutcomeContractError::InvalidSettledPosition),
     }
 }
 
 fn validate_optional_price(
     field: &'static str,
     value: Option<Price>,
-) -> Result<(), RecommendationExecutionOutcomeContractError> {
+) -> Result<(), ExecutionAttemptOutcomeContractError> {
     if let Some(actual) = value
         && (actual.is_negative() || actual > Price::ONE)
     {
-        return Err(RecommendationExecutionOutcomeContractError::InvalidPrice { field, actual });
+        return Err(ExecutionAttemptOutcomeContractError::InvalidPrice { field, actual });
     }
     Ok(())
 }
@@ -620,11 +581,11 @@ fn validate_optional_price(
 const fn validate_non_negative(
     field: &'static str,
     value: Option<Decimal>,
-) -> Result<(), RecommendationExecutionOutcomeContractError> {
+) -> Result<(), ExecutionAttemptOutcomeContractError> {
     if let Some(actual) = value
         && actual.is_sign_negative()
     {
-        return Err(RecommendationExecutionOutcomeContractError::NegativeAmount { field, actual });
+        return Err(ExecutionAttemptOutcomeContractError::NegativeAmount { field, actual });
     }
     Ok(())
 }
@@ -636,23 +597,21 @@ struct ExecutionFill {
 }
 
 impl TryFrom<ExecutionFill> for Decimal {
-    type Error = RecommendationExecutionOutcomeContractError;
+    type Error = ExecutionAttemptOutcomeContractError;
 
     fn try_from(fill: ExecutionFill) -> Result<Self, Self::Error> {
         if !fill.requested.is_positive() {
             return Err(
-                RecommendationExecutionOutcomeContractError::InvalidRequestedShares {
+                ExecutionAttemptOutcomeContractError::InvalidRequestedShares {
                     actual: fill.requested,
                 },
             );
         }
         if fill.filled.is_negative() || fill.filled > fill.requested {
-            return Err(
-                RecommendationExecutionOutcomeContractError::InvalidFilledShares {
-                    requested: fill.requested,
-                    actual: fill.filled,
-                },
-            );
+            return Err(ExecutionAttemptOutcomeContractError::InvalidFilledShares {
+                requested: fill.requested,
+                actual: fill.filled,
+            });
         }
         Ok(fill.filled.inner() / fill.requested.inner())
     }

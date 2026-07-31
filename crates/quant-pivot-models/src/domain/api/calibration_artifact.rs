@@ -2,10 +2,8 @@
 //!
 //! Read surface for the content-addressed `CalibrationArtifact` catalog
 //! (all `kind`s) plus the governed mutations: fitting a new `market_price_bias`
-//! table, fitting a new `model_score` calibrator, activating a bias table
-//! into `factors.structural.favorite_longshot.bias_table_ref`, and binding a
-//! `model_score` calibrator to a model version's return model (routed with
-//! model governance — see `BindCalibrationRequest`).
+//! table, fitting a new `model_score` calibrator, and activating a bias table
+//! into `factors.structural.favorite_longshot.bias_table_ref`.
 
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
@@ -17,7 +15,7 @@ use crate::{
         pagination::PageRequest,
         quant::{CalibrationArtifactInfo, CalibrationArtifactPayload},
     },
-    enums::quant::{CalibrationKind, CalibrationMethod, DownsideSource},
+    enums::quant::{CalibrationKind, CalibrationMethod},
     half_open_window_request,
     types::{CalibrationArtifactId, ContentHash, ModelVersionId, TrainingDatasetId},
 };
@@ -68,22 +66,6 @@ pub struct FitModelCalibratorRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct ActivateCalibrationArtifactRequest {
     /// Operator reason recorded on the operation log and config activation.
-    #[validate(length(min = 1, max = 512))]
-    pub reason: String,
-}
-
-/// Inbound body for `POST /research/models/{model_version_id}/bind-calibration`
-/// (`model_score` artifacts only — routed with model governance).
-///
-/// Creates a new candidate model version whose `return_model` is
-/// `Calibrated { calibrator_ref, downside_source }`.
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct BindCalibrationRequest {
-    /// The `model_score` calibration artifact to bind.
-    pub calibrator_ref: CalibrationArtifactId,
-    /// Downside (bps) source for the derived return estimate.
-    pub downside_source: DownsideSource,
-    /// Operator reason recorded on the operation log.
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
 }

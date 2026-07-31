@@ -369,7 +369,6 @@ fn validate_attribution_removal(workspace_root: &Path) -> Result<Vec<String>> {
         "crates/quant-pivot-core/src/execution/attribution.rs",
         "crates/quant-pivot-core/src/observability/attribution_fact_writer.rs",
         "crates/quant-pivot-migration/src/snapshots/v1/quant_recommendation_attribution.rs",
-        "crates/quant-pivot-models/src/domain/quant/attribution.rs",
         "crates/quant-pivot-models/src/entities/quant_recommendation_attribution.rs",
         "crates/quant-pivot-models/src/types/attribution_payload.rs",
         "crates/quant-pivot-repository/src/postgres/quant/attribution.rs",
@@ -1472,14 +1471,14 @@ fn validate_category_readiness(
 fn validate_category_repository(repository_path: &Path, repository: &str) -> Vec<String> {
     let mut violations = Vec::new();
     let catalog = repository
-        .split_once("    async fn list_published_catalog(")
+        .split_once("    async fn list_model_catalog(")
         .and_then(|(_, tail)| {
-            tail.split_once("    async fn list_published_for_spec(")
+            tail.split_once("\n}\n\nfn next_model_version")
                 .map(|(catalog, _)| catalog)
         });
     let Some(catalog) = catalog else {
         violations.push(format!(
-            "{} is missing the canonical published-model catalog query",
+            "{} is missing the canonical model route-candidate catalog query",
             repository_path.display()
         ));
         return violations;
@@ -1499,7 +1498,7 @@ fn validate_category_repository(repository_path: &Path, repository: &str) -> Vec
             catalog,
             token,
             0,
-            "published vertical catalogs must not include pooled fallback artifacts",
+            "route-candidate vertical catalogs must not include pooled fallback artifacts",
         );
     }
     violations

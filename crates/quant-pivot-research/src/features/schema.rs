@@ -30,8 +30,8 @@ use crate::features::{
             UNDERLYING_MOMENTUM, UNDERLYING_REALIZED_VOL,
         },
         domain_weather::{
-            ENSEMBLE_BIN_PROBABILITY, ENSEMBLE_SPREAD, NOAA_RESOLUTION_BASIS_RISK,
-            OBSERVED_EXTREME_HEADROOM,
+            BOUNDARY_DISTANCE, CONTRACT_PROBABILITY, FORECAST_DISPERSION, SOURCE_BASIS_RISK,
+            TRUTH_MATURITY_RISK,
         },
         market::{CATEGORY, EVENT_AGE_SECS, IS_ACTIVE, NEG_RISK, TIME_TO_RESOLUTION_SECS},
         micro::{
@@ -1045,7 +1045,7 @@ fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
 fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
         FeatureSpecBuilder::new(
-            ENSEMBLE_BIN_PROBABILITY,
+            CONTRACT_PROBABILITY,
             FeatureFamily::Domain,
             FeatureValueKind::Probability,
             SourceRequirement::DomainWeatherObservationWindow,
@@ -1059,7 +1059,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         FeatureSpecBuilder::new(
-            ENSEMBLE_SPREAD,
+            FORECAST_DISPERSION,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
             SourceRequirement::DomainWeatherObservationWindow,
@@ -1072,7 +1072,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         FeatureSpecBuilder::new(
-            OBSERVED_EXTREME_HEADROOM,
+            BOUNDARY_DISTANCE,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
             SourceRequirement::DomainWeatherObservationWindow,
@@ -1084,7 +1084,7 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
     );
     out.push(
         FeatureSpecBuilder::new(
-            NOAA_RESOLUTION_BASIS_RISK,
+            SOURCE_BASIS_RISK,
             FeatureFamily::Domain,
             FeatureValueKind::Decimal,
             SourceRequirement::DomainWeatherObservationWindow,
@@ -1092,6 +1092,19 @@ fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
             StalenessRule::MaxDomainObservationAge,
         )
         .range(Decimal::ZERO, Decimal::from(100))
+        .null_policy(NullPolicy::Optional)
+        .build(),
+    );
+    out.push(
+        FeatureSpecBuilder::new(
+            TRUTH_MATURITY_RISK,
+            FeatureFamily::Domain,
+            FeatureValueKind::Decimal,
+            SourceRequirement::DomainWeatherObservationWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxDomainObservationAge,
+        )
+        .range(Decimal::ZERO, Decimal::ONE)
         .null_policy(NullPolicy::Optional)
         .build(),
     );

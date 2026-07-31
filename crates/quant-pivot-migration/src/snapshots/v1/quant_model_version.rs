@@ -2,9 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{
-    QpMarketCategory, QpModelVersionDerivationKind, QpPublicationStatus,
-};
+use super::sea_orm_active_enums::{QpMarketCategory, QpModelVersionDerivationKind};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -27,7 +25,6 @@ pub struct Model {
     pub trade_policy_artifact_id: Option<Uuid>,
     #[sea_orm(column_type = "Text", nullable)]
     pub trade_policy_hash: Option<String>,
-    pub publish_path_set_id: Option<Uuid>,
     pub derivation_kind: QpModelVersionDerivationKind,
     pub parent_model_version_id: Option<Uuid>,
     pub calibration_artifact_id: Option<Uuid>,
@@ -37,11 +34,6 @@ pub struct Model {
     pub metrics: Json,
     #[sea_orm(column_type = "JsonBinary")]
     pub training_objective: Json,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub quality_gate_report: Option<Json>,
-    pub publication_status: QpPublicationStatus,
-    pub published_at: Option<DateTimeWithTimeZone>,
-    pub retired_at: Option<DateTimeWithTimeZone>,
     pub created_at: DateTimeWithTimeZone,
     #[sea_orm(
         belongs_to,

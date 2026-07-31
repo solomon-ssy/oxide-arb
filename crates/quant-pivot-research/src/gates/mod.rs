@@ -17,9 +17,10 @@ use quant_pivot_models::types::model_quality::{QualityGateFailure, QualityGateRe
 
 /// The outcome of a quality-gate evaluation.
 ///
-/// Both arms carry the full [`QualityGateReport`] (which serializes into
-/// `quant_model_version.quality_gate_report`); `Fail` additionally surfaces the
-/// hard failures directly so callers reject the advance without re-scanning.
+/// Both arms carry the full [`QualityGateReport`], which is sealed into the
+/// candidate manifest and promotion-gate evidence. `Fail` additionally
+/// surfaces the hard failures directly so callers reject the advance without
+/// re-scanning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QualityGateDecision {
     /// Cleared every hard gate (soft warnings may still be present in the report).

@@ -161,6 +161,7 @@ pub struct RecommendationInfo {
     pub valid_from: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
     pub status: RecommendationStatus,
+    pub status_changed_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -193,6 +194,7 @@ impl From<RecommendationModel> for RecommendationInfo {
             valid_from: model.valid_from,
             valid_until: model.valid_until,
             status: model.status,
+            status_changed_at: model.status_changed_at,
             created_at: model.created_at,
         }
     }

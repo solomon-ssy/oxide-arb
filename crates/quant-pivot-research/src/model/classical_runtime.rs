@@ -77,6 +77,63 @@ struct ClassicalCandidateScores {
     suggested_horizon_secs: u64,
 }
 
+/// Exact business projection applied after a classical estimator prediction.
+///
+/// Feedback counterfactual replay uses this same constructor as online serving,
+/// preventing a second implementation of token selection, score multipliers,
+/// confidence, or horizon semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassicalDecisionProjection {
+    pub outcome_side: OutcomeSide,
+    pub token_id: TokenId,
+    pub entry_price_ref: Price,
+    pub expected_return_bps: Decimal,
+    pub raw_prediction: Decimal,
+    pub composite_score: Probability,
+    pub confidence: Probability,
+    pub liquidity_score: Probability,
+    pub data_quality_score: Probability,
+    pub suggested_horizon_secs: u64,
+}
+
+impl ClassicalDecisionProjection {
+    pub fn try_project(
+        payload: &ClassicalModelPayload,
+        prediction_horizon_secs: u64,
+        raw_prediction: Decimal,
+        row: &InferenceMatrixRow,
+    ) -> QuantResult<Option<Self>> {
+        let economic = match payload.output_semantics {
+            ClassicalOutputSemantics::ForwardReturnBps => {
+                project_forward_return(raw_prediction, row)?
+            }
+            ClassicalOutputSemantics::FullPayoutProbability => {
+                project_full_payout_probability(raw_prediction, row)?
+            }
+        };
+        let Some(economic) = economic else {
+            return Ok(None);
+        };
+        let Some(scores) =
+            candidate_scores(payload, prediction_horizon_secs, &economic, &row.context)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            outcome_side: economic.outcome_side,
+            token_id: economic.token_id,
+            entry_price_ref: economic.entry_price_ref,
+            expected_return_bps: economic.expected_return_bps,
+            raw_prediction: economic.raw_prediction,
+            composite_score: scores.composite_score,
+            confidence: scores.confidence,
+            liquidity_score: scores.liquidity_score,
+            data_quality_score: scores.data_quality_score,
+            suggested_horizon_secs: scores.suggested_horizon_secs,
+        }))
+    }
+}
+
 impl ClassicalRuntime {
     /// Load a classical runtime from its artifact + serialized estimator bytes,
     /// verifying the crate version and serialization format.
@@ -290,13 +347,16 @@ impl ClassicalRuntime {
         decision_at: DateTime<Utc>,
     ) -> QuantResult<Option<SignalCandidate>> {
         let raw_prediction = f64_to_decimal(prediction)?;
-        let Some(projection) = self.project_economics(raw_prediction, row)? else {
+        let Some(projection) = ClassicalDecisionProjection::try_project(
+            &self.payload,
+            self.header.prediction_horizon_secs(),
+            raw_prediction,
+            row,
+        )?
+        else {
             return Ok(None);
         };
         let context = &row.context;
-        let Some(scores) = self.candidate_scores(&projection, context)? else {
-            return Ok(None);
-        };
         let semantics = match self.payload.output_semantics {
             ClassicalOutputSemantics::ForwardReturnBps => "forward_return_bps",
             ClassicalOutputSemantics::FullPayoutProbability => "full_payout_probability",
@@ -308,15 +368,15 @@ impl ClassicalRuntime {
             market_id: row.market_id.clone(),
             token_id: projection.token_id,
             outcome_side: projection.outcome_side,
-            composite_score: scores.composite_score,
-            confidence: scores.confidence,
+            composite_score: projection.composite_score,
+            confidence: projection.confidence,
             expected_return_bps: projection.expected_return_bps,
             downside_bps: Decimal::from(MAX_LONG_DOWNSIDE_BPS),
             // Classical is explicitly ShadowOnly until it binds an independently
             // validated probability/return/downside calibration.
             win_probability: None,
             entry_price_ref: projection.entry_price_ref,
-            suggested_horizon_secs: scores.suggested_horizon_secs,
+            suggested_horizon_secs: projection.suggested_horizon_secs,
             factor_breakdown: Vec::new(),
             model_explanation: ModelExplanation {
                 headline: format!(
@@ -330,91 +390,78 @@ impl ClassicalRuntime {
             },
             rejection_warnings: (context).candidate_warnings(),
             rank_before_portfolio: 0,
-            liquidity_score: scores.liquidity_score,
-            data_quality_score: scores.data_quality_score,
+            liquidity_score: projection.liquidity_score,
+            data_quality_score: projection.data_quality_score,
             model_score_percentile: Probability::ZERO,
             decision_at,
         }))
     }
+}
 
-    fn candidate_scores(
-        &self,
-        projection: &ClassicalEconomicProjection,
-        context: &MarketInferenceContext,
-    ) -> QuantResult<Option<ClassicalCandidateScores>> {
-        let data_quality_score = clamp_unit(
-            self.payload
-                .multipliers
-                .data_quality
-                .multiplier_for(context.data_quality),
-        );
-        let liquidity_score = clamp_unit(
-            self.payload
-                .multipliers
-                .liquidity
-                .multiplier_for(context.liquidity_usd.map(Usd::inner)),
-        );
-        let horizon_multiplier = self.payload.multipliers.horizon.multiplier_for(
-            context.time_to_resolution_secs,
-            self.header.prediction_horizon_secs(),
-        );
-        let edge_strength = bounded_edge_strength(projection.expected_return_bps)?;
-        let composite_score = clamp_unit(checked_product(
-            "classical composite score",
-            &[
-                edge_strength,
-                data_quality_score.inner(),
-                liquidity_score.inner(),
-                horizon_multiplier,
-            ],
-        )?);
-        let substitution_penalty =
-            context
-                .substitution_reasons
-                .iter()
-                .try_fold(Decimal::ONE, |acc, reason| {
-                    checked_mul(
-                        "classical substitution confidence",
-                        acc,
-                        self.payload
-                            .substitution_confidence_rules
-                            .multiplier_for(*reason),
-                    )
-                })?;
-        let confidence = clamp_unit(checked_mul(
-            "classical confidence",
+fn candidate_scores(
+    payload: &ClassicalModelPayload,
+    prediction_horizon_secs: u64,
+    projection: &ClassicalEconomicProjection,
+    context: &MarketInferenceContext,
+) -> QuantResult<Option<ClassicalCandidateScores>> {
+    let data_quality_score = clamp_unit(
+        payload
+            .multipliers
+            .data_quality
+            .multiplier_for(context.data_quality),
+    );
+    let liquidity_score = clamp_unit(
+        payload
+            .multipliers
+            .liquidity
+            .multiplier_for(context.liquidity_usd.map(Usd::inner)),
+    );
+    let horizon_multiplier = payload
+        .multipliers
+        .horizon
+        .multiplier_for(context.time_to_resolution_secs, prediction_horizon_secs);
+    let edge_strength = bounded_edge_strength(projection.expected_return_bps)?;
+    let composite_score = clamp_unit(checked_product(
+        "classical composite score",
+        &[
+            edge_strength,
             data_quality_score.inner(),
-            substitution_penalty,
-        )?);
-        let suggested_horizon_secs = context.time_to_resolution_secs.map_or_else(
-            || self.header.prediction_horizon_secs(),
-            |remaining| remaining.min(self.header.prediction_horizon_secs()),
-        );
-        Ok(
-            (suggested_horizon_secs > 0).then_some(ClassicalCandidateScores {
-                composite_score,
-                confidence,
-                liquidity_score,
-                data_quality_score,
-                suggested_horizon_secs,
-            }),
-        )
-    }
-
-    fn project_economics(
-        &self,
-        raw_prediction: Decimal,
-        row: &InferenceMatrixRow,
-    ) -> QuantResult<Option<ClassicalEconomicProjection>> {
-        match self.payload.output_semantics {
-            ClassicalOutputSemantics::ForwardReturnBps => {
-                project_forward_return(raw_prediction, row)
-            }
-            ClassicalOutputSemantics::FullPayoutProbability => {
-                project_full_payout_probability(raw_prediction, row)
-            }
-        }
-    }
+            liquidity_score.inner(),
+            horizon_multiplier,
+        ],
+    )?);
+    let substitution_penalty =
+        context
+            .substitution_reasons
+            .iter()
+            .try_fold(Decimal::ONE, |acc, reason| {
+                checked_mul(
+                    "classical substitution confidence",
+                    acc,
+                    payload
+                        .substitution_confidence_rules
+                        .multiplier_for(*reason),
+                )
+            })?;
+    let confidence = clamp_unit(checked_mul(
+        "classical confidence",
+        data_quality_score.inner(),
+        substitution_penalty,
+    )?);
+    let suggested_horizon_secs = context
+        .time_to_resolution_secs
+        .map_or(prediction_horizon_secs, |remaining| {
+            remaining.min(prediction_horizon_secs)
+        });
+    Ok(
+        (suggested_horizon_secs > 0).then_some(ClassicalCandidateScores {
+            composite_score,
+            confidence,
+            liquidity_score,
+            data_quality_score,
+            suggested_horizon_secs,
+        }),
+    )
 }
 
 impl MarketInferenceContext {
@@ -954,6 +1001,7 @@ mod tests {
                 serialized_model_hash: self.model_bytes_hash,
                 serialization_format: self.serialization_format,
                 input_transform: self.input_transform.clone(),
+                tree_shap: self.tree_shap.clone(),
                 metrics: self.metrics.clone(),
             }
         }

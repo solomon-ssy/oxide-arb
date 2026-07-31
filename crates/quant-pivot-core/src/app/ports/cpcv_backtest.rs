@@ -317,8 +317,8 @@ impl CoreCpcvBacktestPort {
             .await
             .map_err(QuantError::from)?;
 
-        // CPCV persists path sets only; publish binding is explicit via
-        // `ModelGovernanceService::bind_publish_path_set` (never silent auto-bind).
+        // CPCV persists path sets only. A candidate manifest later binds the
+        // immutable path-set hash together with the final promotion gate.
         Ok(BacktestPathSetView::from(info))
     }
 

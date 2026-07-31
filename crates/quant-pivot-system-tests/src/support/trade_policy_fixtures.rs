@@ -30,8 +30,8 @@ use quant_pivot_models::{
         execution::ExitReason,
         model::ModelFamily,
         quant::{
-            DatasetPurpose, ExitSettlementMode, FillRequirement, OutcomeSide, PublicationStatus,
-            RedeemPolicy, ResearchJobKind, ResearchJobStatus, ResearchReadinessEvidenceKind,
+            DatasetPurpose, ExitSettlementMode, FillRequirement, OutcomeSide, RedeemPolicy,
+            ResearchJobKind, ResearchJobStatus, ResearchReadinessEvidenceKind,
             TradePolicyGovernanceAction, TradePolicyStatus, TradePolicyTrialScope,
             TradePolicyTrialStatus,
         },
@@ -490,7 +490,7 @@ impl PolicySubjectFixture {
         let bindings = contract.bindings();
         let category_scope = bindings.model.category_scope;
         let profile_ref = bindings.model.profile_ref.clone();
-        ModelVersionFixture::persist_published(
+        ModelVersionFixture::persist_route_candidate(
             seed.db,
             NewModelVersion {
                 model_version_id,
@@ -503,14 +503,9 @@ impl PolicySubjectFixture {
                 training_dataset_id: Some(dataset.training_dataset_id),
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,
-                publish_path_set_id: None,
                 derivation: NewModelVersion::training_derivation(),
                 metrics: ModelVersionMetrics::not_measured("system policy subject"),
                 training_objective: ModelTrainingObjective::hand_authored("system policy subject"),
-                quality_gate_report: None,
-                publication_status: PublicationStatus::Candidate,
-                published_at: None,
-                retired_at: None,
             },
         )
         .await

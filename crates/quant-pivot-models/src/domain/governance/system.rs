@@ -505,6 +505,35 @@ pub struct NewPolicyActivation {
     pub audit_event_id: AuditEventId,
 }
 
+/// Insert payload for one first-champion model-route bootstrap activation.
+///
+/// Bootstrap links the generic policy ledger to its WORM model-governance
+/// audit without manufacturing a promotion permit or promotion hash.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::policy_activation::ActiveModel")]
+pub struct NewModelBootstrapActivation {
+    pub bundle_generation: PolicyBundleGeneration,
+    pub expected_bundle_generation: PolicyBundleGeneration,
+    pub policy_activation_id: PolicyActivationId,
+    pub resource_kind: ConfigResourceKind,
+    pub policy_revision_id: PolicyRevisionId,
+    pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    pub policy_approval_id: PolicyApprovalId,
+    pub activated_by_kind: PolicyActorKind,
+    pub activated_by_user_id: UserId,
+    pub activated_by_label: String,
+    pub reason: String,
+    pub activation_kind: PolicyActivationKind,
+    pub expected_active_revision_id: PolicyRevisionId,
+    pub previous_policy_revision_id: PolicyRevisionId,
+    pub rollback_target_revision_id: Option<PolicyRevisionId>,
+    pub preflight_token_hash: ContentHash,
+    pub idempotency_key: PolicyIdempotencyKey,
+    pub activation_request_hash: ContentHash,
+    pub audit_event_id: AuditEventId,
+    pub model_governance_audit_id: ModelGovernanceAuditId,
+}
+
 /// Insert payload for one model-route promotion activation.
 ///
 /// The subtype bindings are required here even though the shared table stores

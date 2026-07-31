@@ -40,13 +40,14 @@ pub use deployment::DeploymentConfig;
 pub use domain_sources::{
     AirNowPm25ReportingAreaBindingConfig, AirNowPm25SiteBindingConfig, AirNowSourceConfig,
     AviationWeatherSourceConfig, BinanceSourceConfig, ChainlinkDataStreamFeedConfig,
-    ChainlinkDataStreamsSourceConfig, DomainSourcesConfig, GefsSourceConfig, GhcnhSourceConfig,
-    HkoDailyTemperatureBindingConfig, HkoOpenDataSourceConfig, HkoRainfallBindingConfig,
-    NasaGistempSourceConfig, NhcHistoricalStormBindingConfig, NhcSourceConfig,
-    NsidcSeaIceSourceConfig, NwsObservationSourceConfig, NwsWindStationBindingConfig,
-    PolymarketRtdsSourceConfig, TornadoRegionBindingConfig, TornadoSourceConfig,
-    WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS, WeatherHistoricalBindingKind,
-    WeatherStationProfileConfig, WeatherVerticalBindingsConfig, builtin_weather_station_profiles,
+    ChainlinkDataStreamsSourceConfig, DomainSourcesConfig, GefsSourceConfig, GhcndSourceConfig,
+    GhcnhSourceConfig, HkoDailyTemperatureBindingConfig, HkoOpenDataSourceConfig,
+    HkoRainfallBindingConfig, NasaGistempSourceConfig, NhcHistoricalStormBindingConfig,
+    NhcSourceConfig, NsidcSeaIceSourceConfig, NwsObservationSourceConfig,
+    NwsWindStationBindingConfig, PolymarketRtdsSourceConfig, TornadoRegionBindingConfig,
+    TornadoRegionScopeConfig, TornadoSourceConfig, WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
+    WeatherHistoricalBindingKind, WeatherStationProfileConfig, WeatherVerticalBindingsConfig,
+    builtin_weather_station_profiles,
 };
 pub use keys::KeysConfig;
 pub use market_data::{

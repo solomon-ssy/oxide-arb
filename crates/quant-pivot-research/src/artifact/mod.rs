@@ -101,16 +101,24 @@ pub enum ArtifactNamespace {
     Dataset,
     /// Included rows and outcome lineage for frozen feedback cohorts.
     FeedbackCohort,
+    /// Canonical truth projector frontiers at one feedback cutoff.
+    FeedbackTruth,
     /// Frozen coverage counts and exact champion-compatible evaluation rows.
     FeedbackCoverage,
     /// Data/concept/label drift detail and immutable stage decision.
     FeedbackDrift,
+    /// PIT-safe attribution inputs admitted to the next recipe planner.
+    FeedbackAttribution,
+    /// Immutable explanation, counterfactual, association, and trajectory artifacts.
+    Attribution,
     /// Dataset/training/calibration/CPCV feedback-stage batch evidence.
     FeedbackLearning,
+    /// Sole candidate quality-gate reports and full trial universe.
+    FeedbackValidation,
     /// Reserved same-window Romano-Wolf candidate-family evidence.
     FeedbackComparison,
     /// Exact published-generation production-shadow gate evidence.
-    FeedbackShadowReplay,
+    FeedbackShadow,
     /// Evidence-only terminal feedback decision.
     FeedbackDecision,
     /// Serialized model artifacts (`models/`).
@@ -136,11 +144,15 @@ impl ArtifactNamespace {
         match self {
             Self::Dataset => "datasets",
             Self::FeedbackCohort => "feedback-cohorts",
+            Self::FeedbackTruth => "feedback-truth",
             Self::FeedbackCoverage => "feedback-coverage",
             Self::FeedbackDrift => "feedback-drift",
+            Self::FeedbackAttribution => "feedback-attribution",
+            Self::Attribution => "attribution",
             Self::FeedbackLearning => "feedback-learning",
+            Self::FeedbackValidation => "feedback-validation",
             Self::FeedbackComparison => "feedback-comparison",
-            Self::FeedbackShadowReplay => "feedback-shadow-replay",
+            Self::FeedbackShadow => "feedback-shadow",
             Self::FeedbackDecision => "feedback-decision",
             Self::Model => "models",
             Self::Backtest => "backtests",

@@ -3,7 +3,7 @@
 //! The reference CDF is fitted from raw factor values in a training partition,
 //! serialized into the weighted-model artifact, and applied unchanged by
 //! serving. It is deliberately independent of online factor history: an online
-//! write can never change the transform a published model applies.
+//! write can never change the transform an immutable model artifact applies.
 
 use std::collections::BTreeMap;
 

@@ -25,8 +25,7 @@ use quant_pivot_models::{
         model::ClassicalKind,
         quant::{
             FeatureParityEventStatus, FeatureParityRunKind, FeatureParityRunStatus,
-            FeatureParityStage, FeatureParityStateTransition, PublicationStatus,
-            TrainingDatasetStatus,
+            FeatureParityStage, FeatureParityStateTransition, TrainingDatasetStatus,
         },
     },
     types::{
@@ -241,19 +240,6 @@ impl FrozenModelParityService {
         &self,
         version: &ModelVersionInfo,
     ) -> QuantResult<(TrainingDatasetInfo, ModelSpecInfo)> {
-        if !matches!(
-            version.publication_status,
-            PublicationStatus::Candidate | PublicationStatus::Shadow | PublicationStatus::Retired
-        ) {
-            return Err(ResearchError::Determinism {
-                detail: format!(
-                    "frozen model parity only verifies candidate, shadow, or retired rollback subjects, got {} for {}",
-                    version.publication_status.as_str(),
-                    version.model_version_id
-                ),
-            }
-            .into());
-        }
         let dataset_id =
             version
                 .training_dataset_id
@@ -871,7 +857,7 @@ mod tests {
             model::{ClassicalKind, ModelFamily},
             quant::{
                 DataQualityStatus, DatasetPurpose, FeatureParityRunKind, FeatureParityRunStatus,
-                ModelSerializationFormat, PublicationStatus, TrainingDatasetStatus,
+                ModelSerializationFormat, TrainingDatasetStatus,
             },
         },
         runtime_config::ImmutableProfileArtifacts,
@@ -1050,6 +1036,7 @@ mod tests {
                         model_payload_hash: hash('9'),
                         serialized_model_hash: hash('a'),
                         serialization_format: ModelSerializationFormat::Bincode,
+                        tree_shap: None,
                     },
                     calibration: None,
                 },
@@ -1082,17 +1069,12 @@ mod tests {
                 training_dataset_id: Some(self.training_dataset_id),
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,
-                publish_path_set_id: None,
                 derivation_kind: ModelVersionInfo::training_derivation_kind(),
                 parent_model_version_id: None,
                 calibration_artifact_id: None,
                 derivation_evidence_hash: None,
                 metrics: ModelVersionMetrics::not_measured("test fixture"),
                 training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-                quality_gate_report: None,
-                publication_status: PublicationStatus::Candidate,
-                published_at: None,
-                retired_at: None,
                 created_at: self.now,
             }
         }

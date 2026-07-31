@@ -1,9 +1,9 @@
-//! NOAA/NSIDC Sea Ice Index v4 daily extent adapter.
+//! NOAA/NSIDC Sea Ice Index v4 daily and monthly extent adapters.
 
 use std::{fmt::Display, str::FromStr, time::Duration};
 
-use chrono::{DateTime, NaiveDate, Utc};
-use csv::{ReaderBuilder, StringRecord};
+use chrono::{DateTime, Months, NaiveDate, Utc};
+use csv::{ReaderBuilder, StringRecord, Trim};
 use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::NsidcSeaIceSourceConfig,
@@ -30,8 +30,15 @@ impl SeaIceHemisphere {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::North => "arctic",
-            Self::South => "antarctic",
+            Self::North => "north",
+            Self::South => "south",
+        }
+    }
+
+    const fn file_prefix(self) -> &'static str {
+        match self {
+            Self::North => "N",
+            Self::South => "S",
         }
     }
 }
@@ -75,13 +82,37 @@ impl NsidcSeaIceSource {
         available_at: DateTime<Utc>,
     ) -> QuantResult<SeaIceDataset> {
         let url = match hemisphere {
-            SeaIceHemisphere::North => &self.config.north_csv_url,
-            SeaIceHemisphere::South => &self.config.south_csv_url,
+            SeaIceHemisphere::North => &self.config.north_daily_csv_url,
+            SeaIceHemisphere::South => &self.config.south_daily_csv_url,
         };
         let body = get_text_with_retry(&self.http, &self.retry_policy, url)
             .await
             .map_err(QuantError::from)?;
-        parse_extent(&body, hemisphere, available_at)
+        parse_daily_extent(&body, hemisphere, available_at)
+    }
+
+    pub async fn monthly_extent(
+        &self,
+        hemisphere: SeaIceHemisphere,
+        month: u32,
+        available_at: DateTime<Utc>,
+    ) -> QuantResult<SeaIceDataset> {
+        if !(1..=12).contains(&month) {
+            return Err(parse_error("monthly extent month must be in 1..=12").into());
+        }
+        let base_url = match hemisphere {
+            SeaIceHemisphere::North => &self.config.north_monthly_base_url,
+            SeaIceHemisphere::South => &self.config.south_monthly_base_url,
+        };
+        let url = format!(
+            "{}/{}_{month:02}_extent_v4.0.csv",
+            base_url.trim_end_matches('/'),
+            hemisphere.file_prefix()
+        );
+        let body = get_text_with_retry(&self.http, &self.retry_policy, &url)
+            .await
+            .map_err(QuantError::from)?;
+        parse_monthly_extent(&body, hemisphere, month, available_at)
     }
 }
 
@@ -95,7 +126,18 @@ struct CanonicalSeaIceDay<'a> {
     source_data: &'a str,
 }
 
-fn parse_extent(
+#[derive(Serialize)]
+struct CanonicalSeaIceMonth<'a> {
+    product: &'static str,
+    hemisphere: &'a str,
+    year: i32,
+    month: u32,
+    extent_million_square_km: Decimal,
+    area_million_square_km: Decimal,
+    source_dataset: &'a str,
+}
+
+fn parse_daily_extent(
     body: &str,
     hemisphere: SeaIceHemisphere,
     available_at: DateTime<Utc>,
@@ -168,9 +210,9 @@ fn parse_extent(
             serde_json::to_string(&canonical).map_err(|error| parse_error(error.to_string()))?;
         reports.push(WeatherObservationReport {
             source_id: DomainSourceId::nsidc_sea_ice_index(),
-            instrument_key: DomainInstrumentKey::nsidc_sea_ice_extent(hemisphere.as_str()),
+            instrument_key: DomainInstrumentKey::nsidc_daily_extent(hemisphere.as_str()),
             subject_key: hemisphere.as_str().to_owned(),
-            report_kind: WeatherObservationReportKind::NsidcSeaIce,
+            report_kind: WeatherObservationReportKind::NsidcDailySeaIce,
             variable: WeatherVariable::SeaIceExtent,
             value: extent,
             unit: DomainMeasurementUnit::MillionSquareKilometer,
@@ -182,6 +224,113 @@ fn parse_extent(
                     .and_utc(),
             ),
             valid_to: Some(observed_at),
+            published_at: available_at,
+            available_at,
+            report_hash,
+            raw_report,
+        });
+    }
+    reports.sort_by_key(|report| report.observed_at);
+    Ok(SeaIceDataset { file_hash, reports })
+}
+
+fn parse_monthly_extent(
+    body: &str,
+    hemisphere: SeaIceHemisphere,
+    requested_month: u32,
+    available_at: DateTime<Utc>,
+) -> QuantResult<SeaIceDataset> {
+    let file_hash = CanonicalDigest::content_hash_bytes(body.as_bytes());
+    let mut reader = ReaderBuilder::new()
+        .has_headers(true)
+        .trim(Trim::All)
+        .from_reader(body.as_bytes());
+    let headers = reader
+        .headers()
+        .map_err(|error| parse_error(error.to_string()))?;
+    let expected = ["year", "mo", "source_dataset", "region", "extent", "area"];
+    if headers.iter().ne(expected) {
+        return Err(parse_error("unexpected monthly extent header contract").into());
+    }
+    let mut reports = Vec::new();
+    for row in reader.records() {
+        let row = row.map_err(|error| parse_error(error.to_string()))?;
+        if row.len() != expected.len() {
+            return Err(parse_error("monthly extent row must have six fields").into());
+        }
+        let year = parse_component::<i32>(&row, 0, "year")?;
+        let month = parse_component::<u32>(&row, 1, "month")?;
+        if month != requested_month {
+            return Err(parse_error(format!(
+                "monthly extent partition {requested_month:02} contains month {month:02}"
+            ))
+            .into());
+        }
+        let source_dataset = row
+            .get(2)
+            .ok_or_else(|| parse_error("missing monthly source dataset"))?;
+        if source_dataset != "NSIDC-0051" {
+            return Err(parse_error(format!(
+                "unsupported monthly source dataset `{source_dataset}`"
+            ))
+            .into());
+        }
+        let region = row
+            .get(3)
+            .ok_or_else(|| parse_error("missing monthly region"))?;
+        if region != hemisphere.file_prefix() {
+            return Err(parse_error(format!(
+                "monthly extent region `{region}` does not match requested hemisphere"
+            ))
+            .into());
+        }
+        let extent = parse_component::<Decimal>(&row, 4, "extent")?;
+        let area = parse_component::<Decimal>(&row, 5, "area")?;
+        if extent < Decimal::ZERO || area < Decimal::ZERO || area > extent {
+            return Err(parse_error("monthly extent/area relationship is invalid").into());
+        }
+        let start_date = NaiveDate::from_ymd_opt(year, month, 1)
+            .ok_or_else(|| parse_error("invalid monthly extent date"))?;
+        let end_date = start_date
+            .checked_add_months(Months::new(1))
+            .ok_or_else(|| parse_error("monthly extent date overflow"))?;
+        let start_at = start_date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| parse_error("invalid monthly extent start"))?
+            .and_utc();
+        let end_at = end_date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| parse_error("invalid monthly extent end"))?
+            .and_utc();
+        if end_at > available_at {
+            return Err(
+                parse_error("monthly extent file contains an incomplete future month").into(),
+            );
+        }
+        let canonical = CanonicalSeaIceMonth {
+            product: "NOAA_NSIDC_Sea_Ice_Index_v4_monthly_mean",
+            hemisphere: hemisphere.as_str(),
+            year,
+            month,
+            extent_million_square_km: extent,
+            area_million_square_km: area,
+            source_dataset,
+        };
+        let report_hash = CanonicalDigest::content_hash_json(&canonical)?;
+        let raw_report =
+            serde_json::to_string(&canonical).map_err(|error| parse_error(error.to_string()))?;
+        reports.push(WeatherObservationReport {
+            source_id: DomainSourceId::nsidc_sea_ice_index(),
+            instrument_key: DomainInstrumentKey::nsidc_monthly_extent(hemisphere.as_str()),
+            subject_key: hemisphere.as_str().to_owned(),
+            report_kind: WeatherObservationReportKind::NsidcMonthlySeaIce,
+            variable: WeatherVariable::SeaIceExtent,
+            value: extent,
+            unit: DomainMeasurementUnit::MillionSquareKilometer,
+            precision: Decimal::new(1, 2),
+            observed_at: end_at,
+            valid_from: Some(start_at),
+            valid_to: Some(end_at),
             published_at: available_at,
             available_at,
             report_hash,
@@ -235,7 +384,7 @@ mod tests {
             .mount(&server)
             .await;
         let source = NsidcSeaIceSource::connect(NsidcSeaIceSourceConfig {
-            north_csv_url: server.uri(),
+            north_daily_csv_url: server.uri(),
             ..NsidcSeaIceSourceConfig::default()
         })
         .expect("source");
@@ -251,7 +400,7 @@ mod tests {
         assert!(dataset.reports[0].raw_report.contains("0.010"));
         assert_eq!(
             dataset.reports[0].report_kind,
-            WeatherObservationReportKind::NsidcSeaIce
+            WeatherObservationReportKind::NsidcDailySeaIce
         );
     }
 
@@ -268,7 +417,7 @@ mod tests {
             .mount(&server)
             .await;
         let source = NsidcSeaIceSource::connect(NsidcSeaIceSourceConfig {
-            north_csv_url: server.uri(),
+            north_daily_csv_url: server.uri(),
             ..NsidcSeaIceSourceConfig::default()
         })
         .expect("source");
@@ -277,6 +426,48 @@ mod tests {
                 .daily_extent(SeaIceHemisphere::North, Utc::now())
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn monthly_product_is_distinct() {
+        let server = MockServer::start().await;
+        let body = concat!(
+            "year, mo,source_dataset, region, extent,   area\n",
+            "2025,  7,    NSIDC-0051,      N,  10.31,   6.69\n",
+        );
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let source = NsidcSeaIceSource::connect(NsidcSeaIceSourceConfig {
+            north_monthly_base_url: server.uri(),
+            ..NsidcSeaIceSourceConfig::default()
+        })
+        .expect("source");
+        let dataset = source
+            .monthly_extent(
+                SeaIceHemisphere::North,
+                7,
+                Utc.with_ymd_and_hms(2026, 7, 18, 0, 0, 0).unwrap(),
+            )
+            .await
+            .expect("dataset");
+        let [report] = dataset.reports.as_slice() else {
+            panic!("one monthly report expected")
+        };
+        assert_eq!(report.value, dec!(10.31));
+        assert_eq!(
+            report.report_kind,
+            WeatherObservationReportKind::NsidcMonthlySeaIce
+        );
+        assert_eq!(
+            report.valid_from,
+            Some(Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap())
+        );
+        assert_eq!(
+            report.valid_to,
+            Some(Utc.with_ymd_and_hms(2025, 8, 1, 0, 0, 0).unwrap())
         );
     }
 }

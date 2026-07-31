@@ -17,12 +17,17 @@ use chrono_tz::Tz;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::quant::{
-        CryptoSubject, GroundingField, GroundingKind, GroundingProof, LinkageSourceMetadata,
-        LinkageValidationFailure, MarketSubject, ResolutionOracle,
+        CryptoSubject, GlobalTemperatureOutcome, GlobalTemperatureRank, GroundingField,
+        GroundingKind, GroundingProof, LinkageSourceMetadata, LinkageValidationFailure,
+        MarketSubject, ResolutionOracle, SeaIceAggregation, SeaIceHemisphere, SeaIceProduct,
+        TropicalCycloneOutcome, WeatherContractWindow, WeatherGlobalTemperatureSubject,
+        WeatherSeaIceSubject, WeatherSubject, WeatherTornadoFinalization, WeatherTruthPolicy,
+        WeatherValueComparator,
     },
     enums::domain::ResolverTier,
-    types::{DomainInstrumentKey, Probability},
+    types::{DomainInstrumentKey, DomainSourceId, IcaoStation, Probability},
 };
+use rust_decimal::Decimal;
 
 use crate::linkage::ruleset::rule_for_alias;
 
@@ -182,11 +187,231 @@ impl SubjectValidator for DefaultSubjectValidator {
 
 impl ExtractedCandidate {
     fn validate_weather_candidate(&self) -> ValidationOutcome {
-        let MarketSubject::Weather(subject) = &self.subject else {
-            return ValidationOutcome::Rejected {
+        match &self.subject {
+            MarketSubject::Weather(subject) => self.validate_temperature(subject),
+            MarketSubject::WeatherPrecipitation(subject) => self.validate_contract(
+                &subject.window,
+                Some(&subject.comparator),
+                &["site_key", "comparator", "truth_policy"],
+                &["window", "rounding"],
+                DomainInstrumentKey::hko_daily_rainfall(&subject.site_key),
+                matches!(
+                    &subject.truth_policy,
+                    WeatherTruthPolicy::ObservationWithForecast {
+                        observation_source,
+                        forecast_source,
+                    } if observation_source == &DomainSourceId::hko_open_data()
+                        && forecast_source == &DomainSourceId::gefs()
+                ),
+            ),
+            MarketSubject::WeatherAqi(subject) => self.validate_contract(
+                &subject.window,
+                Some(&subject.comparator),
+                &[
+                    "reporting_area_key",
+                    "comparator",
+                    "aggregation",
+                    "truth_policy",
+                ],
+                &["window"],
+                DomainInstrumentKey::airnow_pm25_observation(&subject.reporting_area_key),
+                matches!(
+                    &subject.truth_policy,
+                    WeatherTruthPolicy::FinalOnly { final_source }
+                        if final_source == &DomainSourceId::airnow()
+                ),
+            ),
+            MarketSubject::WeatherTornado(subject) => {
+                let (instrument, final_source, finalization_valid) = match &subject.finalization {
+                    WeatherTornadoFinalization::StormEventsArchive => (
+                        DomainInstrumentKey::ncei_tornado(&subject.region_key),
+                        DomainSourceId::ncei_storm_events(),
+                        true,
+                    ),
+                    WeatherTornadoFinalization::FirstPublishedAfter { not_before } => (
+                        DomainInstrumentKey::ncei_tornado_time_series(),
+                        DomainSourceId::ncei_tornado_time_series(),
+                        *not_before >= subject.window.end_at,
+                    ),
+                };
+                self.validate_contract(
+                    &subject.window,
+                    Some(&subject.comparator),
+                    &["region_key", "comparator", "finalization", "truth_policy"],
+                    &["window"],
+                    instrument,
+                    finalization_valid
+                        && matches!(
+                            &subject.truth_policy,
+                            WeatherTruthPolicy::PreliminaryThenFinal {
+                                preliminary_source,
+                                final_source: bound_final_source,
+                            } if preliminary_source == &DomainSourceId::spc_storm_reports()
+                                && bound_final_source == &final_source
+                        ),
+                )
+            }
+            MarketSubject::WeatherTropicalCyclone(subject) => {
+                let outcome_valid = match &subject.outcome {
+                    TropicalCycloneOutcome::MaximumSustainedWind { comparator } => {
+                        comparator.is_valid()
+                    }
+                    TropicalCycloneOutcome::LandfallAtOrAbove {
+                        minimum_category,
+                        minimum_sustained_wind_knots,
+                    } => {
+                        (1..=5).contains(minimum_category)
+                            && minimum_sustained_wind_knots.is_sign_positive()
+                    }
+                };
+                self.validate_contract(
+                    &subject.window,
+                    None,
+                    &["basin", "storm_key", "outcome", "truth_policy"],
+                    &["window"],
+                    DomainInstrumentKey::nhc_hurdat2(&subject.basin, &subject.storm_key),
+                    outcome_valid
+                        && matches!(
+                            &subject.truth_policy,
+                            WeatherTruthPolicy::PreliminaryThenFinal {
+                                preliminary_source,
+                                final_source,
+                            } if preliminary_source == &DomainSourceId::nhc_advisory()
+                                && final_source == &DomainSourceId::nhc_hurdat2()
+                        ),
+                )
+            }
+            MarketSubject::WeatherGlobalTemperature(subject) => {
+                self.validate_global_temperature(subject)
+            }
+            MarketSubject::WeatherSeaIce(subject) => self.validate_sea_ice(subject),
+            MarketSubject::WeatherWindExtreme(subject) => {
+                let Ok(station) = IcaoStation::parse(&subject.station_key) else {
+                    return ValidationOutcome::Rejected {
+                        reason: LinkageValidationFailure::UnsupportedSubject,
+                    };
+                };
+                self.validate_contract(
+                    &subject.window,
+                    Some(&subject.comparator),
+                    &["station_key", "statistic", "comparator", "truth_policy"],
+                    &["window", "rounding"],
+                    DomainInstrumentKey::nws_wind_gust(&station),
+                    matches!(
+                        &subject.truth_policy,
+                        WeatherTruthPolicy::ObservationWithForecast {
+                            observation_source,
+                            forecast_source,
+                        } if observation_source == &DomainSourceId::nws_observation()
+                            && forecast_source == &DomainSourceId::gefs()
+                    ),
+                )
+            }
+            MarketSubject::Crypto(_) => ValidationOutcome::Rejected {
                 reason: LinkageValidationFailure::UnsupportedSubject,
-            };
+            },
+        }
+    }
+
+    fn validate_global_temperature(
+        &self,
+        subject: &WeatherGlobalTemperatureSubject,
+    ) -> ValidationOutcome {
+        let (outcome_valid, instrument) = match &subject.outcome {
+            GlobalTemperatureOutcome::MonthlyAnomaly { comparator } => (
+                comparator.is_valid(),
+                DomainInstrumentKey::nasa_gistemp_loti(),
+            ),
+            GlobalTemperatureOutcome::MonthlyRecordRank { rank } => {
+                let rank = match rank {
+                    GlobalTemperatureRank::Exact { rank }
+                    | GlobalTemperatureRank::AtLeast { rank } => *rank,
+                };
+                (rank > 0, DomainInstrumentKey::nasa_gistemp_loti())
+            }
+            GlobalTemperatureOutcome::AnnualRecordRank { rank } => {
+                let rank = match rank {
+                    GlobalTemperatureRank::Exact { rank }
+                    | GlobalTemperatureRank::AtLeast { rank } => *rank,
+                };
+                (rank > 0, DomainInstrumentKey::nasa_gistemp_loti_annual())
+            }
         };
+        let version_valid = subject.dataset_version == 4
+            && subject.base_period_start_year == 1951
+            && subject.base_period_end_year == 1980;
+        if !version_valid {
+            return ValidationOutcome::Rejected {
+                reason: LinkageValidationFailure::InvalidWeatherDatasetVersion,
+            };
+        }
+        self.validate_contract(
+            &subject.window,
+            None,
+            &["outcome", "dataset_version", "truth_policy"],
+            &["window", "base_period"],
+            instrument,
+            outcome_valid
+                && matches!(
+                    &subject.truth_policy,
+                    WeatherTruthPolicy::FinalOnly { final_source }
+                        if final_source == &DomainSourceId::nasa_gistemp()
+                ),
+        )
+    }
+
+    fn validate_sea_ice(&self, subject: &WeatherSeaIceSubject) -> ValidationOutcome {
+        if subject.dataset_version != 4
+            || subject.concentration_threshold_percent != Decimal::from(15)
+        {
+            return ValidationOutcome::Rejected {
+                reason: LinkageValidationFailure::InvalidWeatherDatasetVersion,
+            };
+        }
+        let hemisphere = match subject.hemisphere {
+            SeaIceHemisphere::Northern => "north",
+            SeaIceHemisphere::Southern => "south",
+        };
+        let product_valid = matches!(
+            (subject.product, subject.aggregation),
+            (
+                SeaIceProduct::DailyExtent,
+                SeaIceAggregation::MinimumDailyExtent | SeaIceAggregation::MaximumDailyExtent
+            ) | (
+                SeaIceProduct::MonthlyExtent,
+                SeaIceAggregation::MonthlyMeanExtent
+            )
+        );
+        let instrument = match subject.product {
+            SeaIceProduct::DailyExtent => DomainInstrumentKey::nsidc_daily_extent(hemisphere),
+            SeaIceProduct::MonthlyExtent => DomainInstrumentKey::nsidc_monthly_extent(hemisphere),
+        };
+        self.validate_contract(
+            &subject.window,
+            Some(&subject.comparator),
+            &[
+                "hemisphere",
+                "product",
+                "aggregation",
+                "comparator",
+                "truth_policy",
+            ],
+            &[
+                "window",
+                "dataset_version",
+                "concentration_threshold_percent",
+            ],
+            instrument,
+            product_valid
+                && matches!(
+                    &subject.truth_policy,
+                    WeatherTruthPolicy::FinalOnly { final_source }
+                        if final_source == &DomainSourceId::nsidc_sea_ice_index()
+                ),
+        )
+    }
+
+    fn validate_temperature(&self, subject: &WeatherSubject) -> ValidationOutcome {
         for field in [
             "decision_group.station",
             "decision_group.settlement_rule_url",
@@ -239,6 +464,59 @@ impl ExtractedCandidate {
             return ValidationOutcome::Rejected {
                 reason: LinkageValidationFailure::WeatherInstrumentMismatch {
                     expected,
+                    actual: self.instrument_key.clone(),
+                },
+            };
+        }
+        ValidationOutcome::Accepted
+    }
+
+    fn validate_contract(
+        &self,
+        window: &WeatherContractWindow,
+        comparator: Option<&WeatherValueComparator>,
+        literal_fields: &[&str],
+        grounded_fields: &[&str],
+        expected_instrument: DomainInstrumentKey,
+        policy_valid: bool,
+    ) -> ValidationOutcome {
+        for field in literal_fields {
+            if !has_span_of_kind(self, field, GroundingKind::LiteralSpan) {
+                return ValidationOutcome::Rejected {
+                    reason: LinkageValidationFailure::MissingLiteralGrounding {
+                        subject_field: (*field).to_owned(),
+                    },
+                };
+            }
+        }
+        for field in grounded_fields {
+            if !has_span(self, field) {
+                return ValidationOutcome::Rejected {
+                    reason: LinkageValidationFailure::MissingGrounding {
+                        subject_field: (*field).to_owned(),
+                    },
+                };
+            }
+        }
+        if !window.is_valid() {
+            return ValidationOutcome::Rejected {
+                reason: LinkageValidationFailure::InvalidWeatherWindow,
+            };
+        }
+        if comparator.is_some_and(|value| !value.is_valid()) {
+            return ValidationOutcome::Rejected {
+                reason: LinkageValidationFailure::InvalidWeatherComparator,
+            };
+        }
+        if !policy_valid {
+            return ValidationOutcome::Rejected {
+                reason: LinkageValidationFailure::InvalidWeatherTruthPolicy,
+            };
+        }
+        if self.instrument_key != expected_instrument {
+            return ValidationOutcome::Rejected {
+                reason: LinkageValidationFailure::WeatherInstrumentMismatch {
+                    expected: expected_instrument,
                     actual: self.instrument_key.clone(),
                 },
             };

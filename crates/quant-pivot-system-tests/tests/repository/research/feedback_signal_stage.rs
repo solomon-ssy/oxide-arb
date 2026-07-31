@@ -10,14 +10,13 @@ use quant_pivot_core::service::{
 use quant_pivot_models::{
     domain::quant::{
         CompleteFeatureParityRun, FeatureParityStateInfo, FeedbackCohortWindow, FeedbackCycleInfo,
-        FeedbackCycleKey, FeedbackCycleKeyInput, FeedbackStageJobIdentity, NewDriftReport,
-        NewFeatureParityRun, NewFeedbackCycle, NewResearchJob, ResearchJobArtifactRef,
-        ResearchJobFinalization, ResearchJobInfo, ResearchJobResultRef,
+        FeedbackStageJobIdentity, NewDriftReport, NewFeatureParityRun, NewFeedbackCycle,
+        NewResearchJob, ResearchJobArtifactRef, ResearchJobFinalization, ResearchJobInfo,
+        ResearchJobResultRef,
     },
     enums::quant::{
         DatasetPurpose, FeatureParityRunKind, FeatureParityRunStatus, FeedbackCycleStatus,
-        FeedbackDecision, FeedbackDriftMetric, FeedbackStage, FeedbackTriggerFamily,
-        ResearchJobResultKind,
+        FeedbackDecision, FeedbackDriftMetric, FeedbackStage, ResearchJobResultKind,
     },
     types::{
         ArtifactUri, DatasetCohortCounts, FeatureParityRunId, FeatureValue,
@@ -46,6 +45,7 @@ use quant_pivot_research::{
 use quant_pivot_system_tests::{
     postgres::setup_pg, support::artifact_store::ReadTamperArtifactStoreFixture,
 };
+use sea_orm::DatabaseConnection;
 
 use super::feedback_boot_schema::{FeedbackSchemaFixture, content_hash, prepare_fixture};
 
@@ -139,6 +139,7 @@ fn coverage_artifact(
         .map(|_| FeedbackMatureLabel {
             recommendation_id: RecommendationId::from_v7(),
             model_version_id: other_model,
+            decision_at: evaluation_window.window_start() + Duration::seconds(30),
             candidate_available_at: evaluation_window.window_start() + Duration::minutes(1),
             label_available_at: evaluation_window.window_start() + Duration::minutes(2),
             outcome_hash: content_hash('6'),
@@ -438,6 +439,41 @@ struct SignalStageHarness {
     adapter: FeedbackSignalStageAdapter,
 }
 
+fn signal_harness(
+    db: &DatabaseConnection,
+    artifact_root: &ArtifactRoot,
+) -> (SignalStageHarness, PgFeatureParityRepository) {
+    let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
+    let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
+    let parity = PgFeatureParityRepository::new(db.clone());
+    let store: Arc<dyn ArtifactStore> =
+        Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
+    let adapter = FeedbackSignalStageAdapter::try_new(FeedbackSignalStageDeps {
+        jobs: Arc::clone(&jobs) as Arc<dyn ResearchJobRepository>,
+        artifacts: Arc::clone(&store),
+        max_recovery_attempts: 3,
+    })
+    .expect("feedback signal stage adapter");
+    (
+        SignalStageHarness {
+            cycles,
+            jobs,
+            store,
+            adapter,
+        },
+        parity,
+    )
+}
+
+fn assert_parity_unchanged(before: &FeatureParityStateInfo, after: &FeatureParityStateInfo) {
+    assert_eq!(after.state_id, before.state_id);
+    assert_eq!(after.state, before.state);
+    assert_eq!(after.transition, before.transition);
+    assert_eq!(after.cause_run_id, before.cause_run_id);
+    assert_eq!(after.recovery_run_id, before.recovery_run_id);
+    assert_eq!(after.previous_state_id, before.previous_state_id);
+}
+
 impl SignalStageHarness {
     async fn verify_coverage_no_action(
         &self,
@@ -613,60 +649,12 @@ impl SignalStageHarness {
     }
 }
 
-impl FeedbackSchemaFixture {
-    fn low_coverage_cycle(&self) -> NewFeedbackCycle {
-        let feedback_policy_hash = self
-            .profile_ref
-            .resolve_builtin_research_profile()
-            .expect("resolve low-coverage ResearchProfile")
-            .spec
-            .feedback_policy
-            .content_hash()
-            .expect("hash low-coverage policy");
-        NewFeedbackCycle::try_seal(
-            FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
-                trigger_family: FeedbackTriggerFamily::Manual,
-                profile_ref: self.profile_ref.clone(),
-                feedback_policy_hash,
-                label_cutoff: self.label_cutoff,
-                capability_registry_hashes: self
-                    .candidate_family
-                    .shared_evaluation()
-                    .source_lineage
-                    .capability_registry_hashes
-                    .clone(),
-                champion_model_version_id: self.champion_model_version_id,
-                champion_serving_contract_hash: self.champion_serving_contract_hash,
-                candidate_family: self.candidate_family.clone(),
-            })
-            .expect("freeze low-coverage cycle key"),
-        )
-        .expect("seal low-coverage cycle")
-    }
-}
-
 pub async fn signal_stages_isolate_parity() {
-    let (pool, _container) = setup_pg().await;
+    let (pool, container) = setup_pg().await;
     let db = pool.connection().clone();
     let fixture = Box::pin(prepare_fixture(&db)).await;
-    let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
-    let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
-    let parity = PgFeatureParityRepository::new(db);
     let artifact_root = ArtifactRoot::create();
-    let store: Arc<dyn ArtifactStore> =
-        Arc::new(LocalArtifactStore::new(artifact_root.path.clone()));
-    let adapter = FeedbackSignalStageAdapter::try_new(FeedbackSignalStageDeps {
-        jobs: Arc::clone(&jobs) as Arc<dyn ResearchJobRepository>,
-        artifacts: Arc::clone(&store),
-        max_recovery_attempts: 3,
-    })
-    .expect("feedback signal stage adapter");
-    let harness = SignalStageHarness {
-        cycles,
-        jobs,
-        store,
-        adapter,
-    };
+    let (harness, parity) = signal_harness(&db, &artifact_root);
     let parity_before = open_parity(&parity).await;
     harness
         .verify_coverage_no_action(
@@ -676,28 +664,39 @@ pub async fn signal_stages_isolate_parity() {
             CoverageNoActionReason::NoPolicyObservations,
         )
         .await;
-    let low_coverage = fixture.low_coverage_cycle();
     harness
         .verify_coverage_no_action(
             &fixture,
-            &low_coverage,
+            &fixture.second_cycle,
             CoverageScenario::LowCoverage,
             CoverageNoActionReason::InsufficientCoverage,
         )
         .await;
-    harness.verify_drift(&fixture).await;
     let parity_after = parity
         .current_state()
         .await
         .expect("read parity latch after drift")
         .expect("parity latch remains initialized");
-    assert_eq!(parity_after.state_id, parity_before.state_id);
-    assert_eq!(parity_after.state, parity_before.state);
-    assert_eq!(parity_after.transition, parity_before.transition);
-    assert_eq!(parity_after.cause_run_id, parity_before.cause_run_id);
-    assert_eq!(parity_after.recovery_run_id, parity_before.recovery_run_id);
-    assert_eq!(
-        parity_after.previous_state_id,
-        parity_before.previous_state_id
-    );
+    assert_parity_unchanged(&parity_before, &parity_after);
+    drop(harness);
+    drop(parity);
+    drop(artifact_root);
+    drop(fixture);
+    drop(db);
+    drop(pool);
+    drop(container);
+
+    let (drift_pool, _drift_container) = setup_pg().await;
+    let drift_db = drift_pool.connection().clone();
+    let drift_fixture = Box::pin(prepare_fixture(&drift_db)).await;
+    let drift_artifact_root = ArtifactRoot::create();
+    let (drift_harness, drift_parity) = signal_harness(&drift_db, &drift_artifact_root);
+    let drift_parity_before = open_parity(&drift_parity).await;
+    drift_harness.verify_drift(&drift_fixture).await;
+    let drift_parity_after = drift_parity
+        .current_state()
+        .await
+        .expect("read parity latch after statistical drift")
+        .expect("statistical-drift parity latch remains initialized");
+    assert_parity_unchanged(&drift_parity_before, &drift_parity_after);
 }

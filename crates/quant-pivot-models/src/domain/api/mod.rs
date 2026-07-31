@@ -16,7 +16,6 @@ mod health;
 mod market;
 mod market_linkage;
 mod menu;
-mod model_governance;
 mod model_training;
 mod operation_log;
 mod permission;
@@ -46,7 +45,7 @@ pub use backtest_path_set::{
 };
 pub use backtest_report::{BacktestReportListQuery, BacktestReportView, RunBacktestRequest};
 pub use calibration_artifact::{
-    ActivateCalibrationArtifactRequest, BindCalibrationRequest, CalibrationArtifactDetailView,
+    ActivateCalibrationArtifactRequest, CalibrationArtifactDetailView,
     CalibrationArtifactListQuery, CalibrationArtifactSummaryView, FitBiasTableRequest,
     FitModelCalibratorRequest, ModelCalibrationFitPreflightQuery, ModelCalibrationFitPreflightView,
 };
@@ -71,13 +70,18 @@ pub use feature_integrity::{
     RunFullFeatureParityRequest,
 };
 pub use feedback::{
-    CancelFeedbackCycleRequest, DriftReportListQuery, DriftReportView, FeedbackCohortCountsView,
-    FeedbackCoverageDecision, FeedbackCoverageView, FeedbackCycleDetailView,
-    FeedbackCycleListQuery, FeedbackCycleMutationView, FeedbackCycleView,
-    FeedbackEvaluationUseView, FeedbackOverviewView, FeedbackProfileOverviewView,
-    FeedbackQueueView, FeedbackReadinessView, FeedbackStageEventView, IssuePromotionPermitRequest,
-    PromotionPermitListQuery, PromotionPermitMutationView, PromotionPermitView,
-    RevokePromotionPermitRequest, TriggerFeedbackCycleRequest,
+    ActivateModelRouteRequest, BootstrapModelRouteRequest, CancelFeedbackCycleRequest,
+    DriftReportListQuery, DriftReportView, FeedbackAttributionSummaryView,
+    FeedbackCandidateComparisonView, FeedbackCandidateReadyView, FeedbackCandidateShadowView,
+    FeedbackCohortCountsView, FeedbackCoverageDecision, FeedbackCoverageView,
+    FeedbackCycleDetailView, FeedbackCycleListQuery, FeedbackCycleMutationView,
+    FeedbackCycleTriggerView, FeedbackCycleView, FeedbackEvaluationUseView, FeedbackOverviewView,
+    FeedbackProfileOverviewView, FeedbackQueueView, FeedbackReadinessView, FeedbackRouteDiffView,
+    FeedbackSchedulerControlRequest, FeedbackSchedulerListView, FeedbackSchedulerMutationView,
+    FeedbackSchedulerStateView, FeedbackStageEventView, FeedbackTriggerEventView,
+    FeedbackTruthOperationsView, IssuePromotionPermitRequest, ModelRouteActivationReceiptView,
+    ModelRouteBootstrapReceiptView, PromotionPermitListQuery, PromotionPermitMutationView,
+    PromotionPermitView, RevokePromotionPermitRequest, TriggerFeedbackCycleRequest,
 };
 pub use health::{DependencyCheck, HealthStatus, ReadinessReport, ReadinessStatus};
 pub use market::{
@@ -93,7 +97,6 @@ pub use market_linkage::{
     OverrideSourceBindingInput, ResolveLinkagesRequest,
 };
 pub use menu::{CreateMenuRequest, UpdateMenuRequest};
-pub use model_governance::{BindPublishPathSetRequest, PublishModelRequest, RetireModelRequest};
 pub use model_training::{
     ModelDetailQuery, ModelDetailView, ModelPromotionLineageView, ModelPromotionRole,
     ModelVersionListQuery, TrainModelRequest, TrainedModelView,
@@ -115,8 +118,8 @@ pub use quant_execution::{
     PositionListQuery, PositionSummary, PositionView, RejectIntentRequest,
 };
 pub use quant_model::{
-    CreateModelSpecRequest, ModelPickerSide, ModelPublishedCatalogQuery, ModelSpecListQuery,
-    PublishedModelOptionView, QuantModelSpecView,
+    CreateModelSpecRequest, ModelPickerSide, ModelRouteCandidateQuery, ModelRouteCandidateView,
+    ModelSpecListQuery, QuantModelSpecView,
 };
 pub use quant_recommendation::{
     QuantEvidenceView, QuantRecommendationView, RecommendationViewContext,

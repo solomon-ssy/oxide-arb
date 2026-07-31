@@ -219,10 +219,28 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::GuardFactorValue,
     },
     TriggerSpec {
+        name: "trg_quant_attribution_artifact_append_only",
+        table: "quant_attribution_artifact",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_model_candidate_manifest_append_only",
+        table: "quant_model_candidate_manifest",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
         name: "trg_quant_feedback_cycle_lifecycle_guard",
         table: "quant_feedback_cycle",
         events: TriggerEvents::DeleteOrUpdate,
         program: TriggerProgram::GuardFeedbackCycle,
+    },
+    TriggerSpec {
+        name: "trg_quant_feedback_scheduler_updated_at",
+        table: "quant_feedback_scheduler_state",
+        events: TriggerEvents::Update,
+        program: TriggerProgram::SetUpdatedAt,
     },
     TriggerSpec {
         name: "trg_quant_feedback_evaluation_use_append_only",
@@ -245,6 +263,12 @@ const TRIGGERS: &[TriggerSpec] = &[
     TriggerSpec {
         name: "trg_quant_feedback_stage_event_append_only",
         table: "quant_feedback_stage_event",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_feedback_trigger_event_append_only",
+        table: "quant_feedback_trigger_event",
         events: TriggerEvents::DeleteOrUpdate,
         program: TriggerProgram::DenyWrite,
     },
@@ -309,10 +333,10 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
-        name: "trg_quant_model_version_lifecycle_guard",
+        name: "trg_quant_model_version_append_only",
         table: "quant_model_version",
-        events: TriggerEvents::InsertOrDeleteOrUpdate,
-        program: TriggerProgram::GuardModelVersion,
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
     },
     TriggerSpec {
         name: "trg_quant_order_intent_updated_at",
@@ -327,8 +351,38 @@ const TRIGGERS: &[TriggerSpec] = &[
         program: TriggerProgram::SetUpdatedAt,
     },
     TriggerSpec {
-        name: "trg_quant_recommendation_execution_outcome_append_only",
-        table: "quant_recommendation_execution_outcome",
+        name: "trg_quant_execution_attempt_outcome_append_only",
+        table: "quant_execution_attempt_outcome",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_execution_attempt_task_updated_at",
+        table: "quant_execution_attempt_reconciliation_task",
+        events: TriggerEvents::Update,
+        program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_execution_rollup_task_updated_at",
+        table: "quant_execution_rollup_reconciliation_task",
+        events: TriggerEvents::Update,
+        program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_resolution_outcome_task_updated_at",
+        table: "quant_resolution_outcome_reconciliation_task",
+        events: TriggerEvents::Update,
+        program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_execution_rollup_append_only",
+        table: "quant_recommendation_execution_rollup",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_execution_rollup_attempt_append_only",
+        table: "quant_recommendation_execution_rollup_attempt",
         events: TriggerEvents::DeleteOrUpdate,
         program: TriggerProgram::DenyWrite,
     },
@@ -341,6 +395,18 @@ const TRIGGERS: &[TriggerSpec] = &[
     TriggerSpec {
         name: "trg_quant_reconciliation_updated_at",
         table: "quant_reconciliation",
+        events: TriggerEvents::Update,
+        program: TriggerProgram::SetUpdatedAt,
+    },
+    TriggerSpec {
+        name: "trg_quant_resolution_inbox_append_only",
+        table: "quant_resolution_observation_inbox",
+        events: TriggerEvents::DeleteOrUpdate,
+        program: TriggerProgram::DenyWrite,
+    },
+    TriggerSpec {
+        name: "trg_quant_resolution_projection_updated_at",
+        table: "quant_resolution_observation_projection",
         events: TriggerEvents::Update,
         program: TriggerProgram::SetUpdatedAt,
     },
@@ -570,11 +636,11 @@ mod tests {
     fn model_contract_is_worm() {
         let trigger = TRIGGERS
             .iter()
-            .find(|trigger| trigger.name == "trg_quant_model_version_lifecycle_guard")
-            .expect("model-version lifecycle trigger");
+            .find(|trigger| trigger.name == "trg_quant_model_version_append_only")
+            .expect("model-version append-only trigger");
         assert_eq!(trigger.table, "quant_model_version");
-        assert_eq!(trigger.events, TriggerEvents::InsertOrDeleteOrUpdate);
-        assert_eq!(trigger.program, TriggerProgram::GuardModelVersion);
+        assert_eq!(trigger.events, TriggerEvents::DeleteOrUpdate);
+        assert_eq!(trigger.program, TriggerProgram::DenyWrite);
     }
 
     #[test]

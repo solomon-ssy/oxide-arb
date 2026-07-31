@@ -7,23 +7,21 @@ use chrono_tz::{Asia::Hong_Kong, Tz};
 use quant_pivot_api::weather::{
     airnow::AirNowSource,
     gistemp::NasaGistempSource,
-    hko::HkoOpenDataSource,
+    hko::{HkoDailyRainfallRequest, HkoOpenDataSource},
     nhc::{NhcBasin, NhcSource},
     nsidc::{NsidcSeaIceSource, SeaIceHemisphere},
     nws::NwsObservationSource,
-    tornado::TornadoSource,
+    tornado::{NceiTornadoSeries, TornadoSource},
 };
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::{
         AirNowPm25SiteBindingConfig, AirNowSourceConfig, HkoOpenDataSourceConfig,
-        NasaGistempSourceConfig, NhcSourceConfig, NsidcSeaIceSourceConfig,
-        NwsObservationSourceConfig, TornadoSourceConfig, WeatherVerticalBindingsConfig,
+        HkoRainfallBindingConfig, NasaGistempSourceConfig, NhcSourceConfig,
+        NsidcSeaIceSourceConfig, NwsObservationSourceConfig, TornadoRegionScopeConfig,
+        TornadoSourceConfig, WeatherVerticalBindingsConfig,
     },
-    domain::data_plane::{
-        DomainCursorStatus, DomainSourceCheckpoint, UpsertDomainSourceCursor,
-        WeatherObservationReport,
-    },
+    domain::data_plane::{DomainCursorStatus, DomainSourceCheckpoint, UpsertDomainSourceCursor},
     hashing::CanonicalDigest,
     types::{
         DomainInstrumentKey, DomainSourceId, HkoStation, IcaoStation, WeatherTemperatureStatistic,
@@ -84,6 +82,11 @@ pub struct WeatherPublicIngestDeps {
     pub bindings: WeatherVerticalBindingsConfig,
 }
 
+struct NwsCheckpoints {
+    speed: DomainSourceCheckpoint,
+    gust: DomainSourceCheckpoint,
+}
+
 impl WeatherPublicIngestWorker {
     #[must_use]
     pub fn new(deps: WeatherPublicIngestDeps) -> Self {
@@ -137,12 +140,9 @@ impl WeatherPublicIngestWorker {
 
     async fn run_local_observation_evidence(&self, failures: &mut Vec<String>) {
         for binding in &self.bindings.hko_rainfall {
-            let instrument = DomainInstrumentKey::hko_rainfall(&binding.place);
+            let instrument = DomainInstrumentKey::hko_daily_rainfall(&binding.station_key);
             let result = match self.hko.as_ref() {
-                Some(source) => {
-                    self.ingest_hko(source, &binding.place, &binding.timezone)
-                        .await
-                }
+                Some(source) => self.ingest_hko_daily_rainfall(source, binding).await,
                 None => Err(QuantError::config("HKO adapter is unavailable")),
             };
             self.complete_evidence_cycle(
@@ -219,7 +219,7 @@ impl WeatherPublicIngestWorker {
             let spc_instrument = DomainInstrumentKey::spc_tornado(&binding.region_id);
             let spc_result = match self.tornado.as_ref() {
                 Some(source) => {
-                    self.ingest_spc(source, &binding.region_id, &binding.spc_state_code)
+                    self.ingest_spc(source, &binding.region_id, &binding.scope)
                         .await
                 }
                 None => Err(QuantError::config("SPC adapter is unavailable")),
@@ -232,26 +232,39 @@ impl WeatherPublicIngestWorker {
             )
             .await;
 
-            let ncei_instrument = DomainInstrumentKey::ncei_tornado(&binding.region_id);
-            let ncei_result = match self.tornado.as_ref() {
-                Some(source) => {
-                    self.ingest_ncei(
-                        source,
-                        &binding.region_id,
-                        &binding.ncei_state_name,
-                        &binding.timezone,
-                    )
-                    .await
-                }
-                None => Err(QuantError::config("NCEI adapter is unavailable")),
-            };
-            self.complete_evidence_cycle(
-                DomainSourceId::ncei_storm_events(),
-                ncei_instrument,
-                ncei_result,
-                failures,
-            )
-            .await;
+            if matches!(&binding.scope, TornadoRegionScopeConfig::UnitedStates) {
+                let series_result = match self.tornado.as_ref() {
+                    Some(source) => self.ingest_ncei_series(source, &binding.timezone).await,
+                    None => Err(QuantError::config("NCEI adapter is unavailable")),
+                };
+                self.complete_evidence_cycle(
+                    DomainSourceId::ncei_tornado_time_series(),
+                    DomainInstrumentKey::ncei_tornado_time_series(),
+                    series_result,
+                    failures,
+                )
+                .await;
+            } else {
+                let ncei_result = match self.tornado.as_ref() {
+                    Some(source) => {
+                        self.ingest_ncei(
+                            source,
+                            &binding.region_id,
+                            &binding.scope,
+                            &binding.timezone,
+                        )
+                        .await
+                    }
+                    None => Err(QuantError::config("NCEI adapter is unavailable")),
+                };
+                self.complete_evidence_cycle(
+                    DomainSourceId::ncei_storm_events(),
+                    DomainInstrumentKey::ncei_tornado(&binding.region_id),
+                    ncei_result,
+                    failures,
+                )
+                .await;
+            }
         }
         if let Some(source) = self.nhc.as_ref()
             && let Err(error) = self.ingest_nhc_advisories(source).await
@@ -279,7 +292,7 @@ impl WeatherPublicIngestWorker {
 
     async fn run_climate_evidence(&self, failures: &mut Vec<String>) {
         let gistemp_result = match self.gistemp.as_ref() {
-            Some(source) => self.ingest_gistemp(source).await,
+            Some(source) => self.ingest_gistemp_monthly(source).await,
             None => Err(QuantError::config("NASA GISTEMP adapter is unavailable")),
         };
         self.complete_evidence_cycle(
@@ -289,16 +302,39 @@ impl WeatherPublicIngestWorker {
             failures,
         )
         .await;
+        let gistemp_annual_result = match self.gistemp.as_ref() {
+            Some(source) => self.ingest_gistemp_annual(source).await,
+            None => Err(QuantError::config("NASA GISTEMP adapter is unavailable")),
+        };
+        self.complete_evidence_cycle(
+            DomainSourceId::nasa_gistemp(),
+            DomainInstrumentKey::nasa_gistemp_loti_annual(),
+            gistemp_annual_result,
+            failures,
+        )
+        .await;
         for hemisphere in [SeaIceHemisphere::North, SeaIceHemisphere::South] {
-            let instrument = DomainInstrumentKey::nsidc_sea_ice_extent(hemisphere.as_str());
-            let result = match self.nsidc.as_ref() {
-                Some(source) => self.ingest_nsidc(source, hemisphere).await,
+            let daily_instrument = DomainInstrumentKey::nsidc_daily_extent(hemisphere.as_str());
+            let daily_result = match self.nsidc.as_ref() {
+                Some(source) => self.ingest_nsidc_daily(source, hemisphere).await,
                 None => Err(QuantError::config("NSIDC adapter is unavailable")),
             };
             self.complete_evidence_cycle(
                 DomainSourceId::nsidc_sea_ice_index(),
-                instrument,
-                result,
+                daily_instrument,
+                daily_result,
+                failures,
+            )
+            .await;
+            let monthly_instrument = DomainInstrumentKey::nsidc_monthly_extent(hemisphere.as_str());
+            let monthly_result = match self.nsidc.as_ref() {
+                Some(source) => self.ingest_nsidc_monthly(source, hemisphere).await,
+                None => Err(QuantError::config("NSIDC adapter is unavailable")),
+            };
+            self.complete_evidence_cycle(
+                DomainSourceId::nsidc_sea_ice_index(),
+                monthly_instrument,
+                monthly_result,
                 failures,
             )
             .await;
@@ -318,13 +354,7 @@ impl WeatherPublicIngestWorker {
                 Some(source) => self.ingest_nws(source, &station, &binding.timezone).await,
                 None => Err(QuantError::config("NWS adapter is unavailable")),
             };
-            self.complete_evidence_cycle(
-                DomainSourceId::nws_observation(),
-                DomainInstrumentKey::nws_wind_gust(&station),
-                result,
-                failures,
-            )
-            .await;
+            self.complete_nws_evidence(&station, result, failures).await;
         }
     }
 
@@ -339,6 +369,7 @@ impl WeatherPublicIngestWorker {
             Arc::clone(&self).run_airnow_loop(shutdown.child_token()),
             Arc::clone(&self).run_spc_loop(shutdown.child_token()),
             Arc::clone(&self).run_ncei_loop(shutdown.child_token()),
+            Arc::clone(&self).run_ncei_series_loop(shutdown.child_token()),
             Arc::clone(&self).run_nhc_advisory_loop(shutdown.child_token()),
             Arc::clone(&self).run_nhc_track_loop(shutdown.child_token()),
             Arc::clone(&self).run_gistemp_loop(shutdown.child_token()),
@@ -350,12 +381,9 @@ impl WeatherPublicIngestWorker {
     async fn run_hko_rainfall_loop(self: Arc<Self>, shutdown: CancellationToken) {
         loop {
             for binding in &self.bindings.hko_rainfall {
-                let instrument = DomainInstrumentKey::hko_rainfall(&binding.place);
+                let instrument = DomainInstrumentKey::hko_daily_rainfall(&binding.station_key);
                 let result = match self.hko.as_ref() {
-                    Some(source) => {
-                        self.ingest_hko(source, &binding.place, &binding.timezone)
-                            .await
-                    }
+                    Some(source) => self.ingest_hko_daily_rainfall(source, binding).await,
                     None => Err(QuantError::config("HKO adapter is unavailable")),
                 };
                 self.finish_cycle(DomainSourceId::hko_open_data(), instrument, result)
@@ -363,7 +391,7 @@ impl WeatherPublicIngestWorker {
             }
             if wait_or_cancel(
                 &shutdown,
-                StdDuration::from_secs(self.hko_config.rainfall_poll_secs.max(1)),
+                StdDuration::from_secs(self.hko_config.daily_rainfall_poll_secs.max(1)),
             )
             .await
             {
@@ -485,28 +513,63 @@ impl WeatherPublicIngestWorker {
         })
     }
 
-    async fn ingest_hko(
+    async fn ingest_hko_daily_rainfall(
         &self,
         source: &HkoOpenDataSource,
-        place: &str,
-        timezone: &str,
+        binding: &HkoRainfallBindingConfig,
     ) -> QuantResult<DomainSourceCheckpoint> {
+        if binding.timezone != "Asia/Hong_Kong" {
+            return Err(QuantError::config(format!(
+                "HKO rainfall station `{}` must use Asia/Hong_Kong timezone",
+                binding.station_key
+            )));
+        }
         let available_at = Utc::now();
-        let report = source
-            .rainfall(place, available_at)
-            .await?
-            .ok_or_else(|| QuantError::config(format!("HKO place `{place}` is absent")))?;
-        let local_date = local_date(&report, timezone)?;
-        self.facts
-            .persist_observations(vec![WeatherObservationCandidate {
-                report: report.clone(),
-                local_date,
-            }])
+        let minimum_date = available_at
+            .with_timezone(&Hong_Kong)
+            .date_naive()
+            .checked_sub_days(Days::new(u64::from(
+                self.hko_config.daily_rainfall_lookback_days,
+            )))
+            .ok_or_else(|| QuantError::config("HKO rainfall lookback underflow"))?;
+        let dataset = source
+            .daily_rainfall(&HkoDailyRainfallRequest {
+                station_key: binding.station_key.clone(),
+                site_key: binding.site_key.clone(),
+                csv_url: binding.daily_csv_url.clone(),
+                minimum_date,
+                available_at,
+            })
             .await?;
-        Ok(DomainSourceCheckpoint::HkoRainfall {
-            window_end: report.observed_at,
-            published_at: report.published_at,
-            report_hash: report.report_hash,
+        let latest = dataset
+            .reports
+            .iter()
+            .max_by_key(|report| (report.observed_at, &report.report_hash))
+            .cloned()
+            .ok_or_else(|| {
+                QuantError::config(format!(
+                    "HKO daily rainfall station `{}` has no completed numeric row since {minimum_date}",
+                    binding.station_key
+                ))
+            })?;
+        let candidates = dataset
+            .reports
+            .into_iter()
+            .map(|report| {
+                let local_date = report
+                    .valid_from
+                    .ok_or_else(|| QuantError::config("HKO daily rainfall has no day start"))?
+                    .with_timezone(&Hong_Kong)
+                    .date_naive();
+                Ok(WeatherObservationCandidate { report, local_date })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        self.facts.persist_observations(candidates).await?;
+        Ok(DomainSourceCheckpoint::HkoDailyRainfall {
+            day_end: latest.observed_at,
+            available_at,
+            file_hash: dataset.response_hash,
+            report_hash: latest.report_hash,
         })
     }
 
@@ -740,7 +803,7 @@ impl WeatherPublicIngestWorker {
                 let instrument = DomainInstrumentKey::spc_tornado(&binding.region_id);
                 let result = match self.tornado.as_ref() {
                     Some(source) => {
-                        self.ingest_spc(source, &binding.region_id, &binding.spc_state_code)
+                        self.ingest_spc(source, &binding.region_id, &binding.scope)
                             .await
                     }
                     None => Err(QuantError::config("SPC adapter is unavailable")),
@@ -763,7 +826,7 @@ impl WeatherPublicIngestWorker {
         &self,
         source: &TornadoSource,
         region_id: &str,
-        state_code: &str,
+        scope: &TornadoRegionScopeConfig,
     ) -> QuantResult<DomainSourceCheckpoint> {
         let available_at = Utc::now();
         let today = available_at.date_naive();
@@ -771,12 +834,12 @@ impl WeatherPublicIngestWorker {
             .pred_opt()
             .ok_or_else(|| QuantError::config("SPC report date underflow"))?;
         let report = match source
-            .spc_preliminary_day(region_id, state_code, today, available_at)
+            .spc_preliminary_day(region_id, scope, today, available_at)
             .await?
         {
             Some(report) => report,
             None => source
-                .spc_preliminary_day(region_id, state_code, yesterday, available_at)
+                .spc_preliminary_day(region_id, scope, yesterday, available_at)
                 .await?
                 .ok_or_else(|| QuantError::config("SPC current and prior partitions are absent"))?,
         };
@@ -798,13 +861,16 @@ impl WeatherPublicIngestWorker {
     async fn run_ncei_loop(self: Arc<Self>, shutdown: CancellationToken) {
         loop {
             for binding in &self.bindings.tornado_regions {
+                if !matches!(&binding.scope, TornadoRegionScopeConfig::State { .. }) {
+                    continue;
+                }
                 let instrument = DomainInstrumentKey::ncei_tornado(&binding.region_id);
                 let result = match self.tornado.as_ref() {
                     Some(source) => {
                         self.ingest_ncei(
                             source,
                             &binding.region_id,
-                            &binding.ncei_state_name,
+                            &binding.scope,
                             &binding.timezone,
                         )
                         .await
@@ -825,11 +891,49 @@ impl WeatherPublicIngestWorker {
         }
     }
 
+    async fn run_ncei_series_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        let source_id = DomainSourceId::ncei_tornado_time_series();
+        let instrument = DomainInstrumentKey::ncei_tornado_time_series();
+        loop {
+            let result = self.tornado.as_ref().map_or_else(
+                || Err(QuantError::config("NCEI adapter is unavailable")),
+                |source| {
+                    self.bindings
+                        .tornado_regions
+                        .iter()
+                        .find(|binding| {
+                            matches!(&binding.scope, TornadoRegionScopeConfig::UnitedStates)
+                        })
+                        .ok_or_else(|| {
+                            QuantError::config("national tornado binding is unavailable")
+                        })
+                        .and_then(|binding| {
+                            parse_timezone(&binding.timezone).map(|timezone| (source, timezone))
+                        })
+                },
+            );
+            let result = match result {
+                Ok((source, timezone)) => self.ingest_ncei_series(source, timezone.name()).await,
+                Err(error) => Err(error),
+            };
+            self.finish_cycle(source_id.clone(), instrument.clone(), result)
+                .await;
+            if wait_or_cancel(
+                &shutdown,
+                StdDuration::from_secs(self.tornado_config.ncei_time_series_poll_secs.max(1)),
+            )
+            .await
+            {
+                return;
+            }
+        }
+    }
+
     async fn ingest_ncei(
         &self,
         source: &TornadoSource,
         region_id: &str,
-        state_name: &str,
+        scope: &TornadoRegionScopeConfig,
         timezone: &str,
     ) -> QuantResult<DomainSourceCheckpoint> {
         let available_at = Utc::now();
@@ -839,22 +943,128 @@ impl WeatherPublicIngestWorker {
             .date_naive()
             .checked_sub_days(Days::new(NCEI_FINALIZATION_LAG_DAYS))
             .ok_or_else(|| QuantError::config("NCEI finalized report date underflow"))?;
-        let day = source
-            .ncei_final_day(region_id, state_name, timezone, report_date, available_at)
-            .await?;
+        let prior_years = i32::from(self.tornado_config.ncei_backfill_years)
+            .checked_sub(1)
+            .ok_or_else(|| QuantError::config("NCEI backfill years must be positive"))?;
+        let first_year = report_date
+            .year()
+            .checked_sub(prior_years)
+            .ok_or_else(|| QuantError::config("NCEI backfill year underflow"))?;
+        let mut reports = Vec::new();
+        let mut manifest = Vec::new();
+        for year in first_year..=report_date.year() {
+            let start_date = NaiveDate::from_ymd_opt(year, 1, 1)
+                .ok_or_else(|| QuantError::config("NCEI backfill year is invalid"))?;
+            let end_date = if year == report_date.year() {
+                report_date
+            } else {
+                NaiveDate::from_ymd_opt(year, 12, 31)
+                    .ok_or_else(|| QuantError::config("NCEI backfill year end is invalid"))?
+            };
+            let period = source
+                .ncei_final_period(
+                    region_id,
+                    scope,
+                    timezone,
+                    start_date,
+                    end_date,
+                    available_at,
+                )
+                .await?;
+            manifest.push((year, period.collection_date, period.file_hash));
+            reports.extend(period.reports);
+        }
+        let latest = reports
+            .iter()
+            .max_by_key(|report| (report.observed_at, report.report_hash))
+            .ok_or_else(|| QuantError::config("NCEI finalized period produced no days"))?;
+        let report_window_end = latest
+            .valid_to
+            .ok_or_else(|| QuantError::config("NCEI finalized report has no window end"))?;
+        let collection_date = manifest
+            .iter()
+            .map(|(_, collection_date, _)| *collection_date)
+            .max()
+            .ok_or_else(|| QuantError::config("NCEI archive manifest is empty"))?;
+        let file_hash =
+            CanonicalDigest::content_hash_json(&("ncei_tornado_archive_manifest_v1", &manifest))?;
         self.facts
-            .persist_observations(vec![WeatherObservationCandidate {
-                local_date: report_date,
-                report: day.report.clone(),
-            }])
+            .persist_observations(
+                reports
+                    .into_iter()
+                    .map(|report| {
+                        let local_date = report
+                            .valid_from
+                            .ok_or_else(|| {
+                                QuantError::config("NCEI finalized report has no window start")
+                            })?
+                            .with_timezone(&timezone)
+                            .date_naive();
+                        Ok(WeatherObservationCandidate { report, local_date })
+                    })
+                    .collect::<QuantResult<Vec<_>>>()?,
+            )
             .await?;
         Ok(DomainSourceCheckpoint::NceiStormEvents {
-            report_window_end: day
-                .report
-                .valid_to
-                .ok_or_else(|| QuantError::config("NCEI finalized report has no window end"))?,
-            collection_date: day.collection_date,
-            file_hash: day.file_hash,
+            report_window_end,
+            collection_date,
+            file_hash,
+        })
+    }
+
+    async fn ingest_ncei_series(
+        &self,
+        source: &TornadoSource,
+        timezone: &str,
+    ) -> QuantResult<DomainSourceCheckpoint> {
+        let available_at = Utc::now();
+        let timezone = parse_timezone(timezone)?;
+        let local_today = available_at.with_timezone(&timezone).date_naive();
+        let prior_month_day = local_today
+            .checked_sub_months(Months::new(1))
+            .ok_or_else(|| QuantError::config("NCEI prior month underflow"))?;
+        let series = [
+            NceiTornadoSeries::Month(prior_month_day.month()),
+            NceiTornadoSeries::Annual,
+        ];
+        let mut reports = Vec::new();
+        let mut manifest = Vec::new();
+        for partition in series {
+            let dataset = source
+                .ncei_time_series(partition, timezone, available_at)
+                .await?;
+            manifest.push(dataset.file_hash);
+            reports.extend(dataset.reports);
+        }
+        let last_period_end = reports
+            .iter()
+            .map(|report| report.observed_at)
+            .max()
+            .ok_or_else(|| QuantError::config("NCEI time series returned no periods"))?;
+        let file_hash = CanonicalDigest::content_hash_json(&(
+            "ncei_tornado_time_series_manifest_v1",
+            available_at,
+            &manifest,
+        ))?;
+        self.facts
+            .persist_observations(
+                reports
+                    .into_iter()
+                    .map(|report| WeatherObservationCandidate {
+                        local_date: report
+                            .valid_from
+                            .unwrap_or(report.observed_at)
+                            .with_timezone(&timezone)
+                            .date_naive(),
+                        report,
+                    })
+                    .collect(),
+            )
+            .await?;
+        Ok(DomainSourceCheckpoint::NceiTornadoTimeSeries {
+            last_period_end,
+            available_at,
+            file_hash,
         })
     }
 
@@ -974,14 +1184,27 @@ impl WeatherPublicIngestWorker {
 
     async fn run_gistemp_loop(self: Arc<Self>, shutdown: CancellationToken) {
         let source_id = DomainSourceId::nasa_gistemp();
-        let instrument = DomainInstrumentKey::nasa_gistemp_loti();
         loop {
-            let result = match self.gistemp.as_ref() {
-                Some(source) => self.ingest_gistemp(source).await,
+            let monthly_result = match self.gistemp.as_ref() {
+                Some(source) => self.ingest_gistemp_monthly(source).await,
                 None => Err(QuantError::config("NASA GISTEMP adapter is unavailable")),
             };
-            self.finish_cycle(source_id.clone(), instrument.clone(), result)
-                .await;
+            self.finish_cycle(
+                source_id.clone(),
+                DomainInstrumentKey::nasa_gistemp_loti(),
+                monthly_result,
+            )
+            .await;
+            let annual_result = match self.gistemp.as_ref() {
+                Some(source) => self.ingest_gistemp_annual(source).await,
+                None => Err(QuantError::config("NASA GISTEMP adapter is unavailable")),
+            };
+            self.finish_cycle(
+                source_id.clone(),
+                DomainInstrumentKey::nasa_gistemp_loti_annual(),
+                annual_result,
+            )
+            .await;
             if wait_or_cancel(
                 &shutdown,
                 StdDuration::from_secs(self.gistemp_config.refresh_secs.max(1)),
@@ -993,13 +1216,13 @@ impl WeatherPublicIngestWorker {
         }
     }
 
-    async fn ingest_gistemp(
+    async fn ingest_gistemp_monthly(
         &self,
         source: &NasaGistempSource,
     ) -> QuantResult<DomainSourceCheckpoint> {
         let available_at = Utc::now();
         let dataset = source.monthly_anomalies(available_at).await?;
-        let last_month_end = dataset
+        let last_period_end = dataset
             .reports
             .iter()
             .map(|report| report.observed_at)
@@ -1018,7 +1241,38 @@ impl WeatherPublicIngestWorker {
             )
             .await?;
         Ok(DomainSourceCheckpoint::NasaGistemp {
-            last_month_end,
+            last_period_end,
+            available_at,
+            file_hash: dataset.file_hash,
+        })
+    }
+
+    async fn ingest_gistemp_annual(
+        &self,
+        source: &NasaGistempSource,
+    ) -> QuantResult<DomainSourceCheckpoint> {
+        let available_at = Utc::now();
+        let dataset = source.annual_anomalies(available_at).await?;
+        let last_period_end = dataset
+            .reports
+            .iter()
+            .map(|report| report.observed_at)
+            .max()
+            .ok_or_else(|| QuantError::config("GISTEMP returned no annual anomalies"))?;
+        self.facts
+            .persist_observations(
+                dataset
+                    .reports
+                    .into_iter()
+                    .map(|report| WeatherObservationCandidate {
+                        local_date: report.observed_at.date_naive(),
+                        report,
+                    })
+                    .collect(),
+            )
+            .await?;
+        Ok(DomainSourceCheckpoint::NasaGistemp {
+            last_period_end,
             available_at,
             file_hash: dataset.file_hash,
         })
@@ -1027,13 +1281,29 @@ impl WeatherPublicIngestWorker {
     async fn run_nsidc_loop(self: Arc<Self>, shutdown: CancellationToken) {
         loop {
             for hemisphere in [SeaIceHemisphere::North, SeaIceHemisphere::South] {
-                let instrument = DomainInstrumentKey::nsidc_sea_ice_extent(hemisphere.as_str());
-                let result = match self.nsidc.as_ref() {
-                    Some(source) => self.ingest_nsidc(source, hemisphere).await,
+                let daily_instrument = DomainInstrumentKey::nsidc_daily_extent(hemisphere.as_str());
+                let daily_result = match self.nsidc.as_ref() {
+                    Some(source) => self.ingest_nsidc_daily(source, hemisphere).await,
                     None => Err(QuantError::config("NSIDC adapter is unavailable")),
                 };
-                self.finish_cycle(DomainSourceId::nsidc_sea_ice_index(), instrument, result)
-                    .await;
+                self.finish_cycle(
+                    DomainSourceId::nsidc_sea_ice_index(),
+                    daily_instrument,
+                    daily_result,
+                )
+                .await;
+                let monthly_instrument =
+                    DomainInstrumentKey::nsidc_monthly_extent(hemisphere.as_str());
+                let monthly_result = match self.nsidc.as_ref() {
+                    Some(source) => self.ingest_nsidc_monthly(source, hemisphere).await,
+                    None => Err(QuantError::config("NSIDC adapter is unavailable")),
+                };
+                self.finish_cycle(
+                    DomainSourceId::nsidc_sea_ice_index(),
+                    monthly_instrument,
+                    monthly_result,
+                )
+                .await;
             }
             if wait_or_cancel(
                 &shutdown,
@@ -1046,7 +1316,7 @@ impl WeatherPublicIngestWorker {
         }
     }
 
-    async fn ingest_nsidc(
+    async fn ingest_nsidc_daily(
         &self,
         source: &NsidcSeaIceSource,
         hemisphere: SeaIceHemisphere,
@@ -1064,17 +1334,66 @@ impl WeatherPublicIngestWorker {
                 dataset
                     .reports
                     .into_iter()
-                    .map(|report| WeatherObservationCandidate {
-                        local_date: report.observed_at.date_naive(),
-                        report,
+                    .map(|report| {
+                        let local_date = report
+                            .valid_from
+                            .map(|value| value.date_naive())
+                            .ok_or_else(|| {
+                                QuantError::config("NSIDC daily extent has no day start")
+                            })?;
+                        Ok(WeatherObservationCandidate { report, local_date })
                     })
-                    .collect(),
+                    .collect::<QuantResult<Vec<_>>>()?,
             )
             .await?;
-        Ok(DomainSourceCheckpoint::NsidcSeaIce {
+        Ok(DomainSourceCheckpoint::NsidcDailySeaIce {
             last_day_end,
             available_at,
             file_hash: dataset.file_hash,
+        })
+    }
+
+    async fn ingest_nsidc_monthly(
+        &self,
+        source: &NsidcSeaIceSource,
+        hemisphere: SeaIceHemisphere,
+    ) -> QuantResult<DomainSourceCheckpoint> {
+        let available_at = Utc::now();
+        let mut reports = Vec::new();
+        let mut partition_hashes = Vec::with_capacity(12);
+        for month in 1..=12 {
+            let dataset = source
+                .monthly_extent(hemisphere, month, available_at)
+                .await?;
+            partition_hashes.push(dataset.file_hash);
+            reports.extend(dataset.reports);
+        }
+        let last_month_end = reports
+            .iter()
+            .map(|report| report.observed_at)
+            .max()
+            .ok_or_else(|| QuantError::config("NSIDC returned no monthly extents"))?;
+        let partition_set_hash = CanonicalDigest::content_hash_json(&partition_hashes)?;
+        self.facts
+            .persist_observations(
+                reports
+                    .into_iter()
+                    .map(|report| {
+                        let local_date = report
+                            .valid_from
+                            .map(|value| value.date_naive())
+                            .ok_or_else(|| {
+                                QuantError::config("NSIDC monthly extent has no month start")
+                            })?;
+                        Ok(WeatherObservationCandidate { report, local_date })
+                    })
+                    .collect::<QuantResult<Vec<_>>>()?,
+            )
+            .await?;
+        Ok(DomainSourceCheckpoint::NsidcMonthlySeaIce {
+            last_month_end,
+            available_at,
+            partition_set_hash,
         })
     }
 
@@ -1092,12 +1411,7 @@ impl WeatherPublicIngestWorker {
                     Some(source) => self.ingest_nws(source, &station, &binding.timezone).await,
                     None => Err(QuantError::config("NWS adapter is unavailable")),
                 };
-                self.finish_cycle(
-                    DomainSourceId::nws_observation(),
-                    DomainInstrumentKey::nws_wind_gust(&station),
-                    result,
-                )
-                .await;
+                self.finish_nws_cycle(&station, result).await;
             }
             if wait_or_cancel(
                 &shutdown,
@@ -1115,7 +1429,7 @@ impl WeatherPublicIngestWorker {
         source: &NwsObservationSource,
         station: &IcaoStation,
         timezone: &str,
-    ) -> QuantResult<DomainSourceCheckpoint> {
+    ) -> QuantResult<NwsCheckpoints> {
         let reports = source.recent_wind(station, Utc::now()).await?;
         let timezone = parse_timezone(timezone)?;
         self.facts
@@ -1130,19 +1444,103 @@ impl WeatherPublicIngestWorker {
                     .collect(),
             )
             .await?;
-        let latest = reports
+        let speed_instrument = DomainInstrumentKey::nws_wind_speed(station);
+        let gust_instrument = DomainInstrumentKey::nws_wind_gust(station);
+        let latest_speed = reports
             .iter()
+            .filter(|report| report.instrument_key == speed_instrument)
             .max_by_key(|report| (report.observed_at, &report.report_hash))
             .ok_or_else(|| {
                 QuantError::config(format!(
-                    "NWS returned no accepted wind observation for {station}"
+                    "NWS returned no accepted wind-speed observation for {station}"
                 ))
             })?;
-        Ok(DomainSourceCheckpoint::NwsObservation {
-            observed_at: latest.observed_at,
-            available_at: latest.available_at,
-            report_hash: latest.report_hash,
+        let latest_gust = reports
+            .iter()
+            .filter(|report| report.instrument_key == gust_instrument)
+            .max_by_key(|report| (report.observed_at, &report.report_hash))
+            .ok_or_else(|| {
+                QuantError::config(format!(
+                    "NWS returned no accepted wind-gust observation for {station}"
+                ))
+            })?;
+        Ok(NwsCheckpoints {
+            speed: DomainSourceCheckpoint::NwsObservation {
+                observed_at: latest_speed.observed_at,
+                available_at: latest_speed.available_at,
+                report_hash: latest_speed.report_hash,
+            },
+            gust: DomainSourceCheckpoint::NwsObservation {
+                observed_at: latest_gust.observed_at,
+                available_at: latest_gust.available_at,
+                report_hash: latest_gust.report_hash,
+            },
         })
+    }
+
+    async fn finish_nws_cycle(&self, station: &IcaoStation, result: QuantResult<NwsCheckpoints>) {
+        let source_id = DomainSourceId::nws_observation();
+        match result {
+            Ok(checkpoints) => {
+                self.finish_cycle(
+                    source_id.clone(),
+                    DomainInstrumentKey::nws_wind_speed(station),
+                    Ok(checkpoints.speed),
+                )
+                .await;
+                self.finish_cycle(
+                    source_id,
+                    DomainInstrumentKey::nws_wind_gust(station),
+                    Ok(checkpoints.gust),
+                )
+                .await;
+            }
+            Err(error) => {
+                for instrument in [
+                    DomainInstrumentKey::nws_wind_speed(station),
+                    DomainInstrumentKey::nws_wind_gust(station),
+                ] {
+                    self.mark_failed(&source_id, &instrument, &error).await;
+                }
+                tracing::warn!(%station, %error, "NWS Weather source cycle failed");
+            }
+        }
+    }
+
+    async fn complete_nws_evidence(
+        &self,
+        station: &IcaoStation,
+        result: QuantResult<NwsCheckpoints>,
+        failures: &mut Vec<String>,
+    ) {
+        let source_id = DomainSourceId::nws_observation();
+        match result {
+            Ok(checkpoints) => {
+                self.complete_evidence_cycle(
+                    source_id.clone(),
+                    DomainInstrumentKey::nws_wind_speed(station),
+                    Ok(checkpoints.speed),
+                    failures,
+                )
+                .await;
+                self.complete_evidence_cycle(
+                    source_id,
+                    DomainInstrumentKey::nws_wind_gust(station),
+                    Ok(checkpoints.gust),
+                    failures,
+                )
+                .await;
+            }
+            Err(error) => {
+                for instrument in [
+                    DomainInstrumentKey::nws_wind_speed(station),
+                    DomainInstrumentKey::nws_wind_gust(station),
+                ] {
+                    self.mark_failed(&source_id, &instrument, &error).await;
+                    failures.push(format!("{source_id}/{instrument}: {error}"));
+                }
+            }
+        }
     }
 
     async fn finish_cycle(
@@ -1267,13 +1665,6 @@ impl WeatherPublicIngestWorker {
             tracing::error!(%source_id, %instrument_key, %status_error, "Weather expectation failure status could not be persisted");
         }
     }
-}
-
-fn local_date(report: &WeatherObservationReport, timezone: &str) -> QuantResult<NaiveDate> {
-    Ok(report
-        .observed_at
-        .with_timezone(&parse_timezone(timezone)?)
-        .date_naive())
 }
 
 fn hko_latest_publishable_date(available_at: DateTime<Utc>) -> QuantResult<NaiveDate> {

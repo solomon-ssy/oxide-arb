@@ -19,7 +19,8 @@ use quant_pivot_models::{
             FeedbackCalibrationCommand, FeedbackCalibrationJobParams, FeedbackCpcvCommand,
             FeedbackCpcvJobParams, FeedbackDatasetBuildCommand, FeedbackDatasetRole,
             FeedbackDatasetSealJobParams, FeedbackLearningStageArtifactRef,
-            FeedbackTrainingCommand, FeedbackTrainingJobParams, ModelCalibrationFitJobParams,
+            FeedbackTrainingCommand, FeedbackTrainingJobParams, GovernanceActor,
+            ModelCalibrationFitJobParams,
         },
         quant::{
             FeedbackCycleInfo, FeedbackStageJobIdentity, NewResearchJob, ResearchJobArtifactRef,
@@ -532,9 +533,9 @@ impl ExactChainFixture {
                         reason: "feedback calibration contract".to_owned(),
                     },
                     decision_policy_snapshot_id: policy_id,
+                    downside_source: DownsideSource::MfeMae,
+                    actor: GovernanceActor::system(),
                 },
-                downside_source: DownsideSource::MfeMae,
-                bind_reason: "bind exact feedback calibrator".to_owned(),
             }],
         )
         .expect("Calibration params");
@@ -619,7 +620,6 @@ impl ExactChainFixture {
                         path_set_id: Some(path_set_id),
                     },
                 },
-                bind_reason: "bind exact feedback CPCV path".to_owned(),
             }],
         )
         .expect("CPCV params");
@@ -637,7 +637,7 @@ impl ExactChainFixture {
             self.cycle.candidate_family_hash,
             params.input_hash().expect("CPCV input hash"),
             Some(params.previous.clone()),
-            FeedbackLearningStageResults::Cpcv(vec![FeedbackCpcvStageResult {
+            FeedbackLearningStageResults::Cpcv(vec![FeedbackCpcvStageResult::Evaluated {
                 candidate_recipe_hash: self.recipe,
                 model_version_id: calibration.calibrated_model_version_id,
                 training_dataset_id: dataset.training_dataset_id,
@@ -730,14 +730,22 @@ pub async fn exact_chain_replays() {
     let second_training = second.train(&second_dataset).await;
     let second_calibration = second.calibrate(&second_dataset, &second_training).await;
     let second_cpcv = second.run_cpcv(&second_dataset, &second_calibration).await;
-    FeedbackEvaluationReservationService::new(FeedbackEvaluationReservationDeps {
-        cycles: Arc::new(PgFeedbackCycleRepository::new(db.clone()))
-            as Arc<dyn FeedbackCycleRepository>,
-        datasets: Arc::new(PgTrainingDatasetRepository::new(db))
-            as Arc<dyn TrainingDatasetRepository>,
-        learning_stages: Arc::new(stage_adapter(&second.jobs, Arc::clone(&second.store))),
-    })
-    .reserve(second.lease, second_cpcv)
-    .await
-    .expect_err("another candidate family must not reuse the consumed Evaluation Dataset");
+    let second_reservation =
+        FeedbackEvaluationReservationService::new(FeedbackEvaluationReservationDeps {
+            cycles: Arc::new(PgFeedbackCycleRepository::new(db.clone()))
+                as Arc<dyn FeedbackCycleRepository>,
+            datasets: Arc::new(PgTrainingDatasetRepository::new(db))
+                as Arc<dyn TrainingDatasetRepository>,
+            learning_stages: Arc::new(stage_adapter(&second.jobs, Arc::clone(&second.store))),
+        })
+        .reserve(second.lease, second_cpcv)
+        .await
+        .expect("another cadence window owns a distinct Evaluation Dataset");
+    let FeedbackEvaluationWriteOutcome::Inserted(second_use) = second_reservation else {
+        panic!("first reservation for the prior cadence window must be inserted");
+    };
+    assert_ne!(
+        second_use.evaluation_dataset_id,
+        inserted.evaluation_dataset_id
+    );
 }

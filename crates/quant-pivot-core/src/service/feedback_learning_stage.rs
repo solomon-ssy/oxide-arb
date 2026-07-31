@@ -13,7 +13,8 @@ use quant_pivot_models::{
             FeedbackCalibrationCommand, FeedbackCalibrationJobParams, FeedbackCandidateRecipe,
             FeedbackCpcvCommand, FeedbackCpcvJobParams, FeedbackDatasetBuildCommand,
             FeedbackDatasetRole, FeedbackDatasetSealJobParams, FeedbackLearningStageArtifactRef,
-            FeedbackTrainingCommand, FeedbackTrainingJobParams, ModelCalibrationFitJobParams,
+            FeedbackTrainingCommand, FeedbackTrainingJobParams, GovernanceActor,
+            ModelCalibrationFitJobParams,
         },
         quant::{
             FeedbackCycleInfo, FeedbackStageJobIdentity, NewResearchJob, ResearchJobArtifactRef,
@@ -21,8 +22,7 @@ use quant_pivot_models::{
         },
     },
     enums::quant::{
-        DatasetPurpose, FeedbackDecision, FeedbackStage, ResearchJobKind, ResearchJobResultKind,
-        ResearchJobStatus,
+        DatasetPurpose, FeedbackStage, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
     },
     types::{
         BacktestPathSetId, ContentHash, FeedbackCycleId, FeedbackLearningStageArtifactId,
@@ -33,8 +33,8 @@ use quant_pivot_repository::traits::ResearchJobRepository;
 use quant_pivot_research::{
     artifact::ArtifactStore,
     feedback_learning::{
-        FeedbackCalibrationStageResult, FeedbackLearningStageArtifact, FeedbackLearningStageCodec,
-        FeedbackLearningStageResults, FeedbackTrainingStageResult,
+        FeedbackCalibrationStageResult, FeedbackCpcvStageResult, FeedbackLearningStageArtifact,
+        FeedbackLearningStageCodec, FeedbackLearningStageResults, FeedbackTrainingStageResult,
     },
 };
 
@@ -42,10 +42,7 @@ use crate::service::feedback_coordinator::FeedbackStageSuccess;
 
 const TRAIN_REASON: &str = "feedback_candidate_training";
 const CALIBRATION_REASON: &str = "feedback_candidate_calibration";
-const CALIBRATION_BIND_REASON: &str = "feedback_calibrated_candidate";
 const CPCV_REASON: &str = "feedback_candidate_cpcv";
-const CPCV_BIND_REASON: &str = "feedback_candidate_path_set";
-const CALIBRATION_INSUFFICIENT_REASON: &str = "calibration_all_candidates_insufficient";
 
 struct LearningJobExpectation {
     kind: ResearchJobKind,
@@ -220,32 +217,7 @@ impl FeedbackLearningStageAdapter {
         cycle: &FeedbackCycleInfo,
         job: &ResearchJobInfo,
     ) -> QuantResult<FeedbackStageSuccess> {
-        let (artifact, result) = self
-            .load_verified(cycle, job, FeedbackStage::Calibration)
-            .await?;
-        artifact.validate()?;
-        let FeedbackLearningStageResults::Calibration(results) = &artifact.results else {
-            return Err(Self::invalid(
-                "Calibration job returned another learning-stage result",
-            ));
-        };
-        if results
-            .iter()
-            .all(|result| matches!(result, FeedbackCalibrationStageResult::Insufficient { .. }))
-        {
-            FeedbackStageSuccess::try_complete(
-                result.uri,
-                result.content_hash,
-                FeedbackDecision::NoAction,
-                CALIBRATION_INSUFFICIENT_REASON.to_owned(),
-            )
-            .map_err(Into::into)
-        } else {
-            Ok(FeedbackStageSuccess::advance(
-                result.uri,
-                result.content_hash,
-            ))
-        }
+        self.succeeded(cycle, job, FeedbackStage::Calibration).await
     }
 
     /// Revalidate a succeeded CPCV job and advance.
@@ -375,9 +347,9 @@ impl FeedbackLearningStageAdapter {
                         reason: CALIBRATION_REASON.to_owned(),
                     },
                     decision_policy_snapshot_id: candidate.decision_policy_snapshot_id(),
+                    downside_source: candidate.downside_source(),
+                    actor: GovernanceActor::system(),
                 },
-                downside_source: candidate.downside_source(),
-                bind_reason: CALIBRATION_BIND_REASON.to_owned(),
             });
         }
         FeedbackCalibrationJobParams::try_new(
@@ -430,7 +402,6 @@ impl FeedbackLearningStageAdapter {
                         )),
                     },
                 },
-                bind_reason: CPCV_BIND_REASON.to_owned(),
             });
         }
         FeedbackCpcvJobParams::try_new(
@@ -744,7 +715,7 @@ impl FeedbackLearningStageAdapter {
                         || command.params.request.calibration_dataset_id
                             != candidate.calibration().training_dataset_id
                         || command.params.request.method != candidate.calibration_method()
-                        || command.downside_source != candidate.downside_source()
+                        || command.params.downside_source != candidate.downside_source()
                         || command.params.decision_policy_snapshot_id
                             != candidate.decision_policy_snapshot_id()
                 })
@@ -1041,19 +1012,49 @@ impl FeedbackLearningStageAdapter {
                 ResearchJobParams::FeedbackCpcv(params),
                 FeedbackLearningStageResults::Cpcv(results),
             ) => {
-                params.commands.len() == results.len()
-                    && params
-                        .commands
+                let evaluated = results.iter().filter_map(|result| match result {
+                    FeedbackCpcvStageResult::Evaluated {
+                        candidate_recipe_hash,
+                        model_version_id,
+                        training_dataset_id,
+                        path_set_id,
+                        model_run_id,
+                        ..
+                    } => Some((
+                        candidate_recipe_hash,
+                        model_version_id,
+                        training_dataset_id,
+                        path_set_id,
+                        model_run_id,
+                    )),
+                    FeedbackCpcvStageResult::CalibrationInsufficient { .. } => None,
+                });
+                params.commands.len()
+                    == results
                         .iter()
-                        .zip(results)
-                        .all(|(command, result)| {
-                            command.candidate_recipe_hash == result.candidate_recipe_hash
-                                && command.params.model_version_id == result.model_version_id
-                                && command.params.model_run_id == result.model_run_id
-                                && command.params.request.training_dataset_id
-                                    == result.training_dataset_id
-                                && command.params.request.path_set_id == Some(result.path_set_id)
+                        .filter(|result| {
+                            matches!(result, FeedbackCpcvStageResult::Evaluated { .. })
                         })
+                        .count()
+                    && params.commands.iter().zip(evaluated).all(
+                        |(
+                            command,
+                            (
+                                candidate_recipe_hash,
+                                model_version_id,
+                                training_dataset_id,
+                                path_set_id,
+                                model_run_id,
+                            ),
+                        )| {
+                            command.candidate_recipe_hash == *candidate_recipe_hash
+                                && command.params.model_version_id == *model_version_id
+                                && command.params.model_run_id == *model_run_id
+                                && command.params.request.training_dataset_id
+                                    == *training_dataset_id
+                                && command.params.request.path_set_id == Some(*path_set_id)
+                        },
+                    )
             }
             _ => false,
         };

@@ -23,7 +23,7 @@ use quant_pivot_research::{
     feedback_decision::{
         FeedbackDecisionArtifact, FeedbackDecisionArtifactInput, FeedbackDecisionCodec,
     },
-    feedback_shadow::{FeedbackShadowReplayArtifact, FeedbackShadowReplayCodec},
+    feedback_shadow::{FeedbackShadowArtifact, FeedbackShadowCodec},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -96,21 +96,18 @@ impl FeedbackDecisionExecutionService {
         &self,
         params: &FeedbackDecisionJobParams,
         cancel: &CancellationToken,
-    ) -> QuantResult<FeedbackShadowReplayArtifact> {
+    ) -> QuantResult<FeedbackShadowArtifact> {
         Self::require_active(cancel, "shadow_load")?;
-        let bytes = self
-            .artifacts
-            .get(&params.shadow_replay.artifact.uri)
-            .await?;
+        let bytes = self.artifacts.get(&params.shadow.artifact.uri).await?;
         Self::require_hash(
             "shadow",
-            params.shadow_replay.artifact.content_hash,
-            FeedbackShadowReplayCodec::bytes_hash(&bytes),
+            params.shadow.artifact.content_hash,
+            FeedbackShadowCodec::bytes_hash(&bytes),
         )?;
-        let artifact = FeedbackShadowReplayCodec::decode(&bytes)?;
-        if artifact.artifact_id() != params.shadow_replay.artifact_id
+        let artifact = FeedbackShadowCodec::decode(&bytes)?;
+        if artifact.artifact_id() != params.shadow.artifact_id
             || artifact.feedback_cycle_id() != params.feedback_cycle_id
-            || artifact.job_input_hash() != params.shadow_replay.input_hash
+            || artifact.job_input_hash() != params.shadow.input_hash
         {
             return Err(Self::invalid(
                 "Decision shadow object differs from its frozen reference",

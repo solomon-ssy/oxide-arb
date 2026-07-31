@@ -41,9 +41,9 @@ use quant_pivot_models::{
         },
     },
     enums::quant::{
-        DatasetPurpose, PublicationStatus, SourceSliceStatus, TradePolicyGovernanceAction,
-        TradePolicyStatus, TradePolicyTrialScope, TradePolicyTrialStatus,
-        TradePolicyValidationStatus, TrainingDatasetStatus,
+        DatasetPurpose, SourceSliceStatus, TradePolicyGovernanceAction, TradePolicyStatus,
+        TradePolicyTrialScope, TradePolicyTrialStatus, TradePolicyValidationStatus,
+        TrainingDatasetStatus,
     },
     hashing::CanonicalDigest,
     runtime_config::{BuyModelRoute, PolicyValidationConfig},
@@ -417,12 +417,10 @@ impl TradePolicyService {
                 entity: "quant_model_version",
                 id: model_version_id.to_string(),
             })?;
-        if model_version.publication_status != PublicationStatus::Published
-            || model_version.profile_ref != profile.profile_ref
-        {
+        if model_version.profile_ref != profile.profile_ref {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
-                    "fit model {} must be Published and bind profile {} exactly",
+                    "fit model {} must be the active route artifact and bind profile {} exactly",
                     model_version_id, profile.profile_ref.id
                 ),
             }

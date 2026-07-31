@@ -23,18 +23,15 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use chrono_tz::Tz;
+use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
         data_plane::{
             DecisionBoundary, DecisionSource, WeatherForecastPoint, WeatherObservationFact,
-            WeatherObservationReportKind,
         },
         quant::{
             DomainAvailability, LinkageOutcome, MarketLinkageInfo, MarketSubject, ResolvedBinding,
-            WeatherSubject,
         },
     },
     enums::{
@@ -42,11 +39,12 @@ use quant_pivot_models::{
         domain::{DomainFamily, DomainMetric, LinkageSourceRole, LinkageStatus},
     },
     runtime_config::DomainConfig,
-    types::{DomainInstrumentKey, DomainSourceId, IcaoStation, MarketId},
+    types::{DomainInstrumentKey, MarketId},
 };
 use quant_pivot_repository::traits::{MarketLinkageRepository, QuantFactReadRepository};
 use quant_pivot_research::domain::{
-    DomainAvailabilityFacts, domain_availability_at, source_binding,
+    DomainAvailabilityFacts, domain_availability_at, source_binding, valid_weather_sources,
+    weather_contract_bounds, weather_forecast_in_window, weather_observation_in_window,
 };
 
 use crate::prefetch::historical_window::Prefetched;
@@ -136,8 +134,8 @@ pub async fn resolve_domain_availability(
 enum AvailabilityBinding {
     Crypto(DomainInstrumentKey),
     Weather {
-        station: IcaoStation,
-        local_date: NaiveDate,
+        subject_key: String,
+        subject: Box<MarketSubject>,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     },
@@ -146,14 +144,14 @@ enum AvailabilityBinding {
 struct AvailabilityResolution {
     binding_by_market: HashMap<MarketId, AvailabilityBinding>,
     instruments: HashSet<DomainInstrumentKey>,
-    weather_stations: HashSet<IcaoStation>,
+    weather_subject_keys: HashSet<String>,
     weather_from: Option<DateTime<Utc>>,
     weather_to: Option<DateTime<Utc>>,
 }
 
 struct WeatherAvailability {
-    observations: HashMap<IcaoStation, Vec<WeatherObservationFact>>,
-    forecasts: HashMap<IcaoStation, Vec<WeatherForecastPoint>>,
+    observations: HashMap<String, Vec<WeatherObservationFact>>,
+    forecasts: HashMap<String, Vec<WeatherForecastPoint>>,
 }
 
 fn resolve_availability_bindings(
@@ -162,7 +160,7 @@ fn resolve_availability_bindings(
     let mut resolved = AvailabilityResolution {
         binding_by_market: HashMap::new(),
         instruments: HashSet::new(),
-        weather_stations: HashSet::new(),
+        weather_subject_keys: HashSet::new(),
         weather_from: None,
         weather_to: None,
     };
@@ -186,12 +184,19 @@ fn resolve_availability_bindings(
                     AvailabilityBinding::Crypto(feature.instrument_key.clone()),
                 );
             }
-            MarketSubject::Weather(subject) => {
+            subject @ (MarketSubject::Weather(_)
+            | MarketSubject::WeatherPrecipitation(_)
+            | MarketSubject::WeatherAqi(_)
+            | MarketSubject::WeatherTornado(_)
+            | MarketSubject::WeatherTropicalCyclone(_)
+            | MarketSubject::WeatherGlobalTemperature(_)
+            | MarketSubject::WeatherSeaIce(_)
+            | MarketSubject::WeatherWindExtreme(_)) => {
                 let Some(binding) = weather_availability_binding(&binding, subject)? else {
                     continue;
                 };
                 let AvailabilityBinding::Weather {
-                    ref station,
+                    ref subject_key,
                     from,
                     to,
                     ..
@@ -206,7 +211,7 @@ fn resolve_availability_bindings(
                 );
                 resolved.weather_to =
                     Some(resolved.weather_to.map_or(to, |current| current.max(to)));
-                resolved.weather_stations.insert(station.clone());
+                resolved.weather_subject_keys.insert(subject_key.clone());
                 resolved.binding_by_market.insert(market_id, binding);
             }
         }
@@ -216,33 +221,18 @@ fn resolve_availability_bindings(
 
 fn weather_availability_binding(
     binding: &ResolvedBinding,
-    subject: &WeatherSubject,
+    subject: &MarketSubject,
 ) -> QuantResult<Option<AvailabilityBinding>> {
-    let Some(live) = source_binding(binding, LinkageSourceRole::LiveEvent) else {
-        return Ok(None);
-    };
-    let Some(forecast) = source_binding(binding, LinkageSourceRole::Forecast) else {
-        return Ok(None);
-    };
-    let Some(calibration) = source_binding(binding, LinkageSourceRole::HistoricalCalibration)
-    else {
-        return Ok(None);
-    };
-    let sources_match = live.source_id == DomainSourceId::aviation_weather()
-        && live.instrument_key
-            == DomainInstrumentKey::aviation_weather(&subject.decision_group.station)
-        && forecast.source_id == DomainSourceId::gefs()
-        && forecast.instrument_key == DomainInstrumentKey::gefs(&subject.decision_group.station)
-        && calibration.source_id == DomainSourceId::ghcnh()
-        && calibration.instrument_key
-            == DomainInstrumentKey::ghcnh(&subject.decision_group.station);
-    if !sources_match {
+    if !valid_weather_sources(binding, subject) {
         return Ok(None);
     }
-    let (from, to) = weather_day_bounds(subject)?;
+    let Some(subject_key) = subject.weather_subject_key() else {
+        return Ok(None);
+    };
+    let (from, to) = weather_contract_bounds(subject)?;
     Ok(Some(AvailabilityBinding::Weather {
-        station: subject.decision_group.station.clone(),
-        local_date: subject.decision_group.local_date,
+        subject_key,
+        subject: Box::new(subject.clone()),
         from,
         to,
     }))
@@ -282,19 +272,23 @@ async fn load_weather_availability(
     let (Some(from), Some(to)) = (resolution.weather_from, resolution.weather_to) else {
         return Ok(available);
     };
-    let stations = resolution
-        .weather_stations
+    let subject_keys = resolution
+        .weather_subject_keys
         .iter()
-        .map(ToString::to_string)
+        .cloned()
         .collect::<Vec<_>>();
     let source_cutoff = boundary
         .cutoff_for(DecisionSource::DomainWeather)
         .timestamp_millis();
+    let observation_to = to
+        .timestamp_millis()
+        .checked_add(1)
+        .ok_or_else(|| QuantError::config("Weather availability window overflowed i64"))?;
     for row in fact_read
         .weather_observation_facts_between(
-            stations.clone(),
+            subject_keys.clone(),
             from.timestamp_millis(),
-            to.timestamp_millis(),
+            observation_to,
             source_cutoff,
             boundary.decision_at().timestamp_millis(),
         )
@@ -304,21 +298,15 @@ async fn load_weather_availability(
         let fact = WeatherObservationFact::from_clickhouse_row(row).ok_or_else(|| {
             QuantError::config("invalid Weather observation in availability projection")
         })?;
-        let station = fact.station().ok_or_else(|| {
-            QuantError::config(format!(
-                "Weather observation subject `{}` is not an ICAO station",
-                fact.subject_key
-            ))
-        })?;
         available
             .observations
-            .entry(station)
+            .entry(fact.subject_key.clone())
             .or_default()
             .push(fact);
     }
     for row in fact_read
         .weather_forecast_facts_between(
-            stations,
+            subject_keys,
             from.timestamp_millis(),
             to.timestamp_millis(),
             source_cutoff,
@@ -329,13 +317,11 @@ async fn load_weather_availability(
     {
         let fact = WeatherForecastPoint::from_clickhouse_row(row)
             .ok_or_else(|| QuantError::config("invalid GEFS point in availability projection"))?;
-        let station = fact.station().ok_or_else(|| {
-            QuantError::config(format!(
-                "Weather forecast subject `{}` is not an ICAO station",
-                fact.subject_key
-            ))
-        })?;
-        available.forecasts.entry(station).or_default().push(fact);
+        available
+            .forecasts
+            .entry(fact.subject_key.clone())
+            .or_default()
+            .push(fact);
     }
     Ok(available)
 }
@@ -356,23 +342,23 @@ fn project_availability(
                 })?
             }
             AvailabilityBinding::Weather {
-                station,
-                local_date,
+                subject_key,
+                subject,
                 from,
                 to,
             } => {
-                let has_observation = weather.observations.get(&station).is_some_and(|facts| {
-                    facts.iter().any(|fact| {
-                        fact.local_date == local_date
-                            && fact.report_kind != WeatherObservationReportKind::HistoricalGhcnh
-                    })
-                });
-                let has_forecast = weather.forecasts.get(&station).is_some_and(|facts| {
+                let has_observation = weather.observations.get(&subject_key).is_some_and(|facts| {
                     facts
                         .iter()
-                        .any(|fact| fact.valid_time >= from && fact.valid_time < to)
+                        .any(|fact| weather_observation_in_window(fact, from, to))
                 });
-                has_observation || has_forecast
+                let has_forecast = weather.forecasts.get(&subject_key).is_some_and(|facts| {
+                    facts
+                        .iter()
+                        .any(|fact| weather_forecast_in_window(fact, from, to))
+                });
+                subject.weather_subject_key().as_ref() == Some(&subject_key)
+                    && (has_observation || has_forecast)
             }
         };
         by_market.insert(
@@ -385,37 +371,6 @@ fn project_availability(
         );
     }
     Ok(())
-}
-
-fn weather_day_bounds(subject: &WeatherSubject) -> QuantResult<(DateTime<Utc>, DateTime<Utc>)> {
-    let timezone = subject
-        .decision_group
-        .timezone
-        .parse::<Tz>()
-        .map_err(|error| {
-            QuantError::config(format!("invalid Weather linkage timezone: {error}"))
-        })?;
-    let next_date = subject
-        .decision_group
-        .local_date
-        .succ_opt()
-        .ok_or_else(|| QuantError::config("Weather local date overflow"))?;
-    let local_start = subject
-        .decision_group
-        .local_date
-        .and_hms_opt(0, 0, 0)
-        .ok_or_else(|| QuantError::config("invalid Weather local day start"))?;
-    let local_end = next_date
-        .and_hms_opt(0, 0, 0)
-        .ok_or_else(|| QuantError::config("invalid Weather local day end"))?;
-    let resolve = |local| {
-        timezone
-            .from_local_datetime(&local)
-            .single()
-            .map(|value| value.with_timezone(&Utc))
-            .ok_or_else(|| QuantError::config("Weather local midnight is ambiguous or missing"))
-    };
-    Ok((resolve(local_start)?, resolve(local_end)?))
 }
 
 /// Live-repository [`DomainAvailabilitySource`] backend.
@@ -507,6 +462,7 @@ impl DomainAvailabilitySource for PrefetchedDomainAvailabilitySource<'_> {
                     DomainAvailabilityFacts {
                         observations: &self.prefetched.domain_observations,
                         weather_observations: &self.prefetched.weather_observations,
+                        weather_forecasts: &self.prefetched.weather_forecasts,
                     },
                 );
                 (market_id.clone(), availability)

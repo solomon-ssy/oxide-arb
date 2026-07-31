@@ -9,8 +9,8 @@ use quant_pivot_models::{
         quant::{
             DriftReportInfo, FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackEvaluationUseInfo,
             FeedbackOutboxEntry, FeedbackQueueSnapshot, FeedbackStageEventInfo,
-            GovernedFeedbackCancellation, GovernedFeedbackTrigger, NewDriftReport,
-            NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent,
+            FeedbackTriggerEventInfo, GovernedFeedbackCancellation, GovernedFeedbackTrigger,
+            NewDriftReport, NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent,
         },
     },
     types::{FeedbackCycleId, ModelVersionId, WorkerId},
@@ -28,6 +28,21 @@ pub enum FeedbackCycleWriteOutcome {
 pub enum FeedbackStageWriteOutcome {
     Inserted(FeedbackStageEventInfo),
     AlreadyPresent(FeedbackStageEventInfo),
+}
+
+/// Outcome of an idempotent append-only trigger-provenance insert.
+#[derive(Debug, Clone)]
+pub enum FeedbackTriggerWriteOutcome {
+    Inserted(FeedbackTriggerEventInfo),
+    AlreadyPresent(FeedbackTriggerEventInfo),
+}
+
+/// Atomic result of converging one trigger intent on a canonical cycle.
+#[derive(Debug, Clone)]
+pub struct FeedbackTriggerCommit {
+    pub cycle: FeedbackCycleWriteOutcome,
+    pub stage: FeedbackStageWriteOutcome,
+    pub trigger: FeedbackTriggerWriteOutcome,
 }
 
 /// Outcome of an idempotent drift-report append.
@@ -147,19 +162,26 @@ pub trait FeedbackCycleRepository: FeedbackOutboxRepository {
         &self,
         cycle: NewFeedbackCycle,
         trigger: NewFeedbackStageEvent,
-    ) -> Result<(FeedbackCycleWriteOutcome, FeedbackStageWriteOutcome), StorageError>;
+    ) -> Result<FeedbackTriggerCommit, StorageError>;
 
     /// Authorize an operator and atomically persist one server-frozen cycle
     /// plus database-timestamped trigger evidence.
     async fn record_governed_trigger(
         &self,
         command: GovernedFeedbackTrigger,
-    ) -> Result<(FeedbackCycleWriteOutcome, FeedbackStageWriteOutcome), FeedbackCycleCommandError>;
+    ) -> Result<FeedbackTriggerCommit, FeedbackCycleCommandError>;
 
     async fn find_cycle(
         &self,
         cycle_id: &FeedbackCycleId,
     ) -> Result<Option<FeedbackCycleInfo>, StorageError>;
+
+    /// List every immutable manual/scheduled trigger intent for one converged
+    /// cycle in authoritative occurrence order.
+    async fn list_trigger_events(
+        &self,
+        cycle_id: &FeedbackCycleId,
+    ) -> Result<Vec<FeedbackTriggerEventInfo>, StorageError>;
 
     /// Page cycles newest first using hardened SQL pagination.
     async fn page_cycles(

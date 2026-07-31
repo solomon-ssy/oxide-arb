@@ -18,8 +18,9 @@ use quant_pivot_repository::{
         CalibrationArtifactRepository, CatalogLedgerRepository, ClobMarketInfoRepository,
         FactWriter, FactorRepository, FeatureParityRepository, FeatureRepository,
         FeedbackCycleRepository, MarketLinkageRepository, MarketRepository,
-        MarketSelectionRepository, ModelComparisonReportRepository, ModelGovernanceAuditRepository,
-        ModelRegistryRepository, ModelRoutePromotionRepository, ModelRunRepository,
+        MarketSelectionRepository, ModelCandidateManifestRepository,
+        ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
+        ModelRouteBootstrapRepository, ModelRoutePromotionRepository, ModelRunRepository,
         PolicyRepository, PositionRepository, PromotionPermitRepository, QuantFactReadRepository,
         ResearchJobRepository, ResearchReadinessEvidenceRepository, RuntimeControlRepository,
         ShadowComparisonRepository, SourceSliceRepository, TradePolicyRepository,
@@ -43,11 +44,12 @@ use crate::{
     service::{
         bias_table_fit::BiasTableFitService,
         factor_pipeline::FactorPipelineService,
-        feature_integrity::RepositoryFeatureParityGate,
         feature_pipeline::{FeaturePipelineDeps, FeaturePipelineService},
         feedback_decision_stage::{FeedbackDecisionStageAdapter, FeedbackDecisionStageDeps},
         frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
-        model_route_promotion::{ModelRoutePromotionService, ModelRoutePromotionServiceDeps},
+        model_route_bootstrap::{ModelRouteBootstrapService, ModelRouteBootstrapServiceDeps},
+        model_route_evidence::{ModelRouteEvidenceDeps, ModelRouteEvidenceService},
+        model_route_governance::{ModelRouteGovernanceService, ModelRouteGovernanceServiceDeps},
         model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
         model_serving_generation::ModelServingGenerationStore,
         model_serving_preimage::{ModelServingPreimageDeps, ModelServingPreimageService},
@@ -121,10 +123,16 @@ pub struct ResearchBundle {
     /// Sole atomic owner of complete active/shadow/category serving
     /// generations.
     pub serving_generations: Arc<ModelServingGenerationStore>,
+    /// Shared current policy/runtime/model/parity resolver for route governance.
+    pub model_route_evidence: Arc<ModelRouteEvidenceService>,
+    /// Dedicated first-champion route bootstrap preflight.
+    pub model_route_bootstrap: Arc<ModelRouteBootstrapService>,
     /// Read-only server-derived permit and promotion preflight boundary.
     pub promotion_preflight: Arc<PromotionPreflightService>,
+    /// Canonical verifier for the terminal feedback decision evidence graph.
+    pub feedback_decisions: Arc<FeedbackDecisionStageAdapter>,
     /// Governed owner of the exact preflight-to-transaction handoff.
-    pub model_route_promotion: Arc<ModelRoutePromotionService>,
+    pub model_route_governance: Arc<ModelRouteGovernanceService>,
     /// Process-wide verifier for signed operational readiness evidence.
     pub research_readiness: Arc<ResearchReadinessEvidenceService>,
     /// Canonical resolver for immutable trade-policy evidence graphs.
@@ -210,10 +218,27 @@ struct ModelGovernanceAssembly<'a, 'b> {
 #[derive(Clone, Copy)]
 struct PromotionPreflightAssembly<'a, 'b> {
     deps: &'a ResearchBundleDeps<'b>,
+    decisions: &'a Arc<FeedbackDecisionStageAdapter>,
+    route_evidence: &'a Arc<ModelRouteEvidenceService>,
+}
+
+#[derive(Clone, Copy)]
+struct RouteServiceAssembly<'a, 'b> {
+    deps: &'a ResearchBundleDeps<'b>,
     artifact_store: &'a Arc<dyn ArtifactStore>,
     model_registry_repo: &'a Arc<dyn ModelRegistryRepository>,
     runtime_registry: &'a Arc<ModelServingRuntimeRegistry>,
     serving_generations: &'a Arc<ModelServingGenerationStore>,
+    offline: &'a OfflineResearchRepos,
+    model_governance: &'a Arc<dyn ModelGovernancePort>,
+}
+
+struct RouteServices {
+    evidence: Arc<ModelRouteEvidenceService>,
+    bootstrap: Arc<ModelRouteBootstrapService>,
+    promotion_preflight: Arc<PromotionPreflightService>,
+    feedback_decisions: Arc<FeedbackDecisionStageAdapter>,
+    governance: Arc<ModelRouteGovernanceService>,
 }
 
 fn assemble_research_pipelines(
@@ -343,30 +368,12 @@ impl ResearchBundle {
         let serving_generations =
             Self::assemble_serving_generations(deps, &model_registry_repo, &runtime_registry)
                 .await?;
-        let promotion_preflight = Self::assemble_promotion_preflight(PromotionPreflightAssembly {
-            deps,
-            artifact_store: &artifact_store,
-            model_registry_repo: &model_registry_repo,
-            runtime_registry: &runtime_registry,
-            serving_generations: &serving_generations,
-        })?;
-        let model_route_promotion = Arc::new(ModelRoutePromotionService::new(
-            ModelRoutePromotionServiceDeps {
-                preflight: Arc::clone(&promotion_preflight),
-                repository: Arc::clone(&repos.model_route_promotion)
-                    as Arc<dyn ModelRoutePromotionRepository>,
-                policies: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
-                policy_apply: Arc::clone(&deps.governance.committed_policy)
-                    as Arc<dyn CommittedPolicyApplyPort>,
-            },
-        ));
         deps.governance
             .applicator
             .attach_model_serving(Arc::clone(&serving_generations))?;
         let model_runner = Self::assemble_model_runner(
             deps,
             &model_run_repo,
-            &model_registry_repo,
             &shadow_comparison_repo,
             &serving_generations,
             &pipelines.factor_pipeline,
@@ -390,6 +397,21 @@ impl ResearchBundle {
             frozen_model_parity: &frozen_model_parity,
             serving_preimages: &serving_preimages,
         });
+        let RouteServices {
+            evidence: model_route_evidence,
+            bootstrap: model_route_bootstrap,
+            promotion_preflight,
+            feedback_decisions,
+            governance: model_route_governance,
+        } = Self::assemble_route_services(RouteServiceAssembly {
+            deps,
+            artifact_store: &artifact_store,
+            model_registry_repo: &model_registry_repo,
+            runtime_registry: &runtime_registry,
+            serving_generations: &serving_generations,
+            offline: &offline,
+            model_governance: &model_governance,
+        })?;
         let model_spec: Arc<dyn ModelSpecPort> = Arc::new(ModelSpecService::new(ModelSpecDeps {
             model_registry: Arc::clone(&model_registry_repo),
             runtime_config: Arc::clone(&deps.governance.runtime_config),
@@ -413,8 +435,11 @@ impl ResearchBundle {
             serving_preimages,
             runtime_registry,
             serving_generations,
+            model_route_evidence,
+            model_route_bootstrap,
             promotion_preflight,
-            model_route_promotion,
+            feedback_decisions,
+            model_route_governance,
             research_readiness: evidence.readiness,
             trade_policy_evidence: evidence.trade_policy,
             trade_policy_preimages,
@@ -475,14 +500,12 @@ impl ResearchBundle {
     fn assemble_model_runner(
         deps: &ResearchBundleDeps<'_>,
         model_run_repo: &Arc<dyn ModelRunRepository>,
-        model_registry_repo: &Arc<dyn ModelRegistryRepository>,
         shadow_comparison_repo: &Arc<dyn ShadowComparisonRepository>,
         serving_generations: &Arc<ModelServingGenerationStore>,
         factor_pipeline: &Arc<FactorPipelineService>,
     ) -> Arc<ModelRunner> {
         Arc::new(ModelRunner::new(ModelRunnerDeps {
             model_run_repo: Arc::clone(model_run_repo),
-            model_registry_repo: Arc::clone(model_registry_repo),
             shadow_comparison_repo: Arc::clone(shadow_comparison_repo),
             serving_generations: Arc::clone(serving_generations),
             factor_pipeline: Arc::clone(factor_pipeline),
@@ -512,16 +535,51 @@ impl ResearchBundle {
 
     fn assemble_promotion_preflight(
         assembly: PromotionPreflightAssembly<'_, '_>,
-    ) -> QuantResult<Arc<PromotionPreflightService>> {
+    ) -> Arc<PromotionPreflightService> {
         let PromotionPreflightAssembly {
+            deps,
+            decisions,
+            route_evidence,
+        } = assembly;
+        let repos = &deps.infra.repos;
+        Arc::new(PromotionPreflightService::new(
+            PromotionPreflightServiceDeps {
+                permits: Arc::clone(&repos.promotion_permit) as Arc<dyn PromotionPermitRepository>,
+                cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
+                decisions: Arc::clone(decisions),
+                manifests: Arc::clone(&repos.model_candidate_manifest)
+                    as Arc<dyn ModelCandidateManifestRepository>,
+                route_evidence: Arc::clone(route_evidence),
+                metrics: Arc::clone(&deps.infra.metrics),
+            },
+        ))
+    }
+
+    fn assemble_route_services(
+        assembly: RouteServiceAssembly<'_, '_>,
+    ) -> QuantResult<RouteServices> {
+        let RouteServiceAssembly {
             deps,
             artifact_store,
             model_registry_repo,
             runtime_registry,
             serving_generations,
+            offline,
+            model_governance,
         } = assembly;
         let repos = &deps.infra.repos;
-        let decisions = Arc::new(FeedbackDecisionStageAdapter::try_new(
+        let evidence = Arc::new(ModelRouteEvidenceService::new(ModelRouteEvidenceDeps {
+            policies: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
+            durable_runtime: Arc::clone(&repos.runtime_control)
+                as Arc<dyn RuntimeControlRepository>,
+            runtime_controls: deps.governance.runtime_controls.clone(),
+            policy_store: Arc::clone(&deps.governance.runtime_config),
+            models: Arc::clone(model_registry_repo),
+            feature_parity: Arc::clone(&repos.feature_parity) as Arc<dyn FeatureParityRepository>,
+            runtime_registry: Arc::clone(runtime_registry),
+            serving_generations: Arc::clone(serving_generations),
+        }));
+        let feedback_decisions = Arc::new(FeedbackDecisionStageAdapter::try_new(
             FeedbackDecisionStageDeps {
                 cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
                 jobs: Arc::clone(&repos.research_job) as Arc<dyn ResearchJobRepository>,
@@ -529,23 +587,40 @@ impl ResearchBundle {
                 max_recovery_attempts: deps.deploy.quant.research_jobs.max_recovery_attempts,
             },
         )?);
-        Ok(Arc::new(PromotionPreflightService::new(
-            PromotionPreflightServiceDeps {
-                permits: Arc::clone(&repos.promotion_permit) as Arc<dyn PromotionPermitRepository>,
+        let promotion_preflight = Self::assemble_promotion_preflight(PromotionPreflightAssembly {
+            deps,
+            decisions: &feedback_decisions,
+            route_evidence: &evidence,
+        });
+        let bootstrap = Arc::new(ModelRouteBootstrapService::new(
+            ModelRouteBootstrapServiceDeps {
+                route_evidence: Arc::clone(&evidence),
+                path_sets: Arc::clone(&offline.backtest_path_set),
+                backtests: Arc::clone(&offline.backtest_report),
                 cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
-                decisions,
-                policies: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
-                durable_runtime: Arc::clone(&repos.runtime_control)
-                    as Arc<dyn RuntimeControlRepository>,
-                runtime_controls: deps.governance.runtime_controls.clone(),
-                policy_store: Arc::clone(&deps.governance.runtime_config),
-                models: Arc::clone(model_registry_repo),
-                feature_parity: Arc::clone(&repos.feature_parity)
-                    as Arc<dyn FeatureParityRepository>,
-                runtime_registry: Arc::clone(runtime_registry),
-                serving_generations: Arc::clone(serving_generations),
+                model_governance: Arc::clone(model_governance),
             },
-        )))
+        ));
+        let governance = Arc::new(ModelRouteGovernanceService::new(
+            ModelRouteGovernanceServiceDeps {
+                bootstrap_preflight: Arc::clone(&bootstrap),
+                bootstrap_repository: Arc::clone(&repos.model_route_bootstrap)
+                    as Arc<dyn ModelRouteBootstrapRepository>,
+                preflight: Arc::clone(&promotion_preflight),
+                repository: Arc::clone(&repos.model_route_promotion)
+                    as Arc<dyn ModelRoutePromotionRepository>,
+                policies: Arc::clone(&repos.runtime_config) as Arc<dyn PolicyRepository>,
+                policy_apply: Arc::clone(&deps.governance.committed_policy)
+                    as Arc<dyn CommittedPolicyApplyPort>,
+            },
+        ));
+        Ok(RouteServices {
+            evidence,
+            bootstrap,
+            promotion_preflight,
+            feedback_decisions,
+            governance,
+        })
     }
 
     async fn assemble_serving_generations(
@@ -601,10 +676,6 @@ impl ResearchBundle {
             calibration_loader: Arc::clone(calibration_loader),
             gate,
             runtime_config: Arc::clone(&deps.governance.runtime_config),
-            feature_parity_gate: Arc::new(RepositoryFeatureParityGate::new(Arc::clone(
-                &deps.infra.repos.feature_parity,
-            )
-                as Arc<dyn FeatureParityRepository>)),
             frozen_model_parity: Arc::clone(frozen_model_parity),
         }))
     }

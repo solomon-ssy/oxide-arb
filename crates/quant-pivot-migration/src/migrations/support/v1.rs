@@ -243,6 +243,7 @@ BEGIN
 
     definition_count := jsonb_array_length(plane->'definitions');
     IF model_family_name = ANY (ARRAY[
+           'classical_gradient_boosted_trees',
            'classical_random_forest', 'classical_extra_trees',
            'classical_logistic_regression', 'classical_ridge',
            'classical_lasso', 'classical_elastic_net'
@@ -492,139 +493,6 @@ const RESEARCH_JOB_GUARD_SQL: &str = "CREATE FUNCTION \
     NEW.updated_at = statement_timestamp(); \
     RETURN NEW; END; $function$";
 
-const MODEL_VERSION_GUARD_SQL: &str = r"
-CREATE FUNCTION public.trigger_guard_model_version()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $function$
-BEGIN
-    IF TG_OP = 'INSERT' THEN
-        IF NEW.publication_status <> 'candidate'::public.qp_publication_status
-           OR NEW.publish_path_set_id IS NOT NULL
-           OR NEW.quality_gate_report IS NOT NULL
-           OR NEW.published_at IS NOT NULL
-           OR NEW.retired_at IS NOT NULL
-        THEN
-            RAISE EXCEPTION 'model-version must be inserted as an ungated Candidate';
-        END IF;
-        RETURN NEW;
-    END IF;
-
-    IF TG_OP = 'DELETE' THEN
-        RAISE EXCEPTION 'model-version row is immutable; DELETE is not permitted';
-    END IF;
-
-    IF (to_jsonb(NEW) - ARRAY[
-        'publish_path_set_id', 'quality_gate_report', 'publication_status',
-        'published_at', 'retired_at'
-    ]) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY[
-        'publish_path_set_id', 'quality_gate_report', 'publication_status',
-        'published_at', 'retired_at'
-    ]) THEN
-        RAISE EXCEPTION 'model-version artifact, serving contract, and lineage are immutable';
-    END IF;
-
-    IF NEW.publication_status IS DISTINCT FROM OLD.publication_status
-       AND NOT (
-           (OLD.publication_status IN (
-               'candidate'::public.qp_publication_status,
-               'shadow'::public.qp_publication_status
-           ) AND NEW.publication_status IN (
-               'shadow'::public.qp_publication_status,
-               'published'::public.qp_publication_status
-           ))
-           OR (OLD.publication_status = 'published'::public.qp_publication_status
-               AND NEW.publication_status = 'retired'::public.qp_publication_status)
-           OR (OLD.publication_status = 'retired'::public.qp_publication_status
-               AND NEW.publication_status = 'published'::public.qp_publication_status)
-       )
-    THEN
-        RAISE EXCEPTION 'illegal model-version publication transition from % to %',
-            OLD.publication_status, NEW.publication_status;
-    END IF;
-
-    IF OLD.publication_status IN (
-           'published'::public.qp_publication_status,
-           'retired'::public.qp_publication_status
-       )
-       AND (
-           NEW.publish_path_set_id IS DISTINCT FROM OLD.publish_path_set_id
-           OR NEW.quality_gate_report IS DISTINCT FROM OLD.quality_gate_report
-       )
-    THEN
-        RAISE EXCEPTION 'published model-version gate evidence is immutable';
-    END IF;
-
-    IF NEW.publication_status = 'published'::public.qp_publication_status
-       AND OLD.publication_status <> 'published'::public.qp_publication_status
-    THEN
-        IF NOT pg_try_advisory_xact_lock(285626433) THEN
-            RAISE EXCEPTION 'model-version publication latch is busy';
-        END IF;
-        IF NEW.published_at IS NULL
-           OR NEW.retired_at IS NOT NULL
-           OR (
-               SELECT state
-               FROM public.quant_feature_parity_state
-               ORDER BY created_at DESC, state_id DESC
-               LIMIT 1
-           ) IS DISTINCT FROM 'clear'::public.qp_feature_parity_latch_state
-           OR NOT EXISTS (
-               SELECT 1
-               FROM public.quant_feature_parity_run AS run
-               INNER JOIN public.quant_feature_parity_subject AS subject
-                   ON subject.run_id = run.run_id
-               WHERE run.kind = 'full'::public.qp_feature_parity_run_kind
-                 AND run.status = 'passed'::public.qp_feature_parity_run_status
-                 AND run.report_id IS NULL
-                 AND run.model_version_id = NEW.model_version_id
-                 AND run.training_dataset_id = NEW.training_dataset_id
-                 AND run.total_count > 0
-                 AND run.compared_count = run.total_count
-                 AND run.matched_count = run.total_count
-                 AND run.mismatched_count = 0
-                 AND run.pending_materialization_count = 0
-                 AND run.feature_contract_hash =
-                     NEW.serving_contract #>> '{bindings,schemas,feature_schema_hash}'
-                 AND run.transform_hash =
-                     NEW.serving_contract #>> '{bindings,transform,input_transform_hash}'
-                 AND run.finished_at >= NEW.created_at
-                 AND subject.subject_kind =
-                     'model_version'::public.qp_parity_subject_kind
-                 AND subject.model_version_id = NEW.model_version_id
-                 AND subject.training_dataset_id = NEW.training_dataset_id
-                 AND subject.subject_generation = NEW.artifact_hash
-           )
-        THEN
-            RAISE EXCEPTION 'model-version publication requires an exact passed full parity proof and clear latch';
-        END IF;
-    ELSIF NEW.publication_status = 'retired'::public.qp_publication_status THEN
-        IF NEW.published_at IS NULL
-           OR NEW.retired_at IS NULL
-           OR NEW.retired_at < NEW.published_at
-        THEN
-            RAISE EXCEPTION 'retired model-version requires ordered publication timestamps';
-        END IF;
-    ELSIF NEW.publication_status IN (
-        'candidate'::public.qp_publication_status,
-        'shadow'::public.qp_publication_status
-    ) AND (NEW.published_at IS NOT NULL OR NEW.retired_at IS NOT NULL) THEN
-        RAISE EXCEPTION 'unpublished model-version cannot carry publication timestamps';
-    END IF;
-
-    IF NEW.publication_status = OLD.publication_status
-       AND (
-           NEW.published_at IS DISTINCT FROM OLD.published_at
-           OR NEW.retired_at IS DISTINCT FROM OLD.retired_at
-       )
-    THEN
-        RAISE EXCEPTION 'model-version lifecycle timestamps require a status transition';
-    END IF;
-
-    RETURN NEW;
-END;
-$function$";
-
 /// Fail closed unless `public` contains only the migration infrastructure.
 /// `PostgreSQL`'s heterogeneous catalog cannot be expressed by `SeaQuery`, so the
 /// complete static statement is sealed inside this versioned dialect module.
@@ -678,7 +546,6 @@ pub(in crate::migrations) enum TriggerProgram {
     GuardPromotionPermit,
     GuardFactorValue,
     GuardModelRun,
-    GuardModelVersion,
     GuardResearchJob,
     GuardSourceSlice,
     GuardTrainingDataset,
@@ -695,7 +562,6 @@ impl TriggerProgram {
             Self::GuardPromotionPermit => "trigger_guard_promotion_permit",
             Self::GuardFactorValue => "trigger_guard_factor_value",
             Self::GuardModelRun => "trigger_guard_model_run",
-            Self::GuardModelVersion => "trigger_guard_model_version",
             Self::GuardResearchJob => "trigger_guard_research_job",
             Self::GuardSourceSlice => "trigger_guard_source_slice",
             Self::GuardTrainingDataset => "trigger_guard_training_dataset",
@@ -858,7 +724,6 @@ pub(in crate::migrations) async fn create_trigger_programs(
          RAISE EXCEPTION 'model-run finish precedes its lifecycle start or an owned factor value'; \
          END IF; \
          RETURN NEW; END; $function$",
-        MODEL_VERSION_GUARD_SQL,
         "CREATE FUNCTION public.trigger_guard_source_slice() RETURNS trigger LANGUAGE plpgsql AS \
          $function$ BEGIN \
          IF TG_OP = 'DELETE' THEN \
@@ -927,7 +792,6 @@ pub(in crate::migrations) async fn drop_trigger_programs(
         "trigger_set_updated_at",
         "trigger_guard_training_dataset",
         "trigger_guard_source_slice",
-        "trigger_guard_model_version",
         "trigger_guard_model_run",
         "trigger_guard_research_job",
         "trigger_guard_factor_value",
@@ -1008,7 +872,7 @@ mod tests {
     use super::{
         CALIBRATION_ARTIFACT_GUARD_SQL, CONTENT_HASH_ARRAY_VALIDATOR_SQL, ConstraintKind,
         ConstraintSpec, FACTOR_DEFINITION_VALIDATOR_SQL, FACTOR_EXPLANATION_VALIDATOR_SQL,
-        FACTOR_PLANE_VALIDATOR_SQL, MODEL_VERSION_GUARD_SQL, index_predicate,
+        FACTOR_PLANE_VALIDATOR_SQL, index_predicate,
     };
 
     #[test]
@@ -1075,28 +939,6 @@ mod tests {
             FACTOR_PLANE_VALIDATOR_SQL
                 .contains("(item->>'output_schema_version')::numeric > 2147483647::numeric")
         );
-    }
-
-    #[test]
-    fn publication_requires_proof() {
-        for binding in [
-            "pg_try_advisory_xact_lock(285626433)",
-            "quant_feature_parity_state",
-            "qp_feature_parity_latch_state",
-            "quant_feature_parity_run",
-            "quant_feature_parity_subject",
-            "run.total_count > 0",
-            "run.compared_count = run.total_count",
-            "run.matched_count = run.total_count",
-            "{bindings,schemas,feature_schema_hash}",
-            "{bindings,transform,input_transform_hash}",
-            "subject.subject_generation = NEW.artifact_hash",
-        ] {
-            assert!(
-                MODEL_VERSION_GUARD_SQL.contains(binding),
-                "missing model-publication proof binding {binding}"
-            );
-        }
     }
 
     #[test]

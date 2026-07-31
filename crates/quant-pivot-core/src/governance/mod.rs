@@ -28,10 +28,7 @@ pub use model_governance::{ModelGovernanceDeps, ModelGovernanceService};
 pub use model_spec::{ModelSpecDeps, ModelSpecService};
 pub use operational_phase::operational_phase_from_readiness;
 pub use promotion_permit::PromotionPermitService;
-pub use quality_gate_load::{
-    active_load_ok, active_publication_status_ok, quality_gate_passed_ok,
-    quality_gate_staleness_ok, shadow_load_ok, shadow_publication_status_ok,
-};
+pub use quality_gate_load::{active_load_ok, model_contract_ok, shadow_load_ok};
 pub use runtime_control::QuantRuntimeControl;
 pub use runtime_controls::RuntimeControlsHandle;
 pub use system_capability::SystemCapabilityService;

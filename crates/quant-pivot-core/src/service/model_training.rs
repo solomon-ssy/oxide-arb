@@ -30,8 +30,7 @@ use quant_pivot_models::{
         factor::FactorFamily,
         model::{ClassicalKind, ModelFamily},
         quant::{
-            CalibrationKind, DatasetPurpose, ModelRunErrorCode, ModelRunKind, PublicationStatus,
-            TrainingDatasetStatus,
+            CalibrationKind, DatasetPurpose, ModelRunErrorCode, ModelRunKind, TrainingDatasetStatus,
         },
     },
     types::{
@@ -1152,14 +1151,9 @@ impl ModelTrainerService {
                     training_dataset_id: Some(input.training_dataset_id),
                     trade_policy_artifact_id: trade_policy.map(|binding| binding.0),
                     trade_policy_hash: trade_policy.map(|binding| binding.1),
-                    publish_path_set_id: None,
                     derivation: ModelVersionDerivation::Training,
                     metrics,
                     training_objective: prepared.objective,
-                    quality_gate_report: None,
-                    publication_status: PublicationStatus::Candidate,
-                    published_at: None,
-                    retired_at: None,
                 },
             )
             .await?;
@@ -1586,6 +1580,7 @@ impl ModelTrainerService {
                 serialized_model_hash: output.model_bytes_hash,
                 serialization_format: ModelSerializationFormat::Bincode,
                 input_transform: output.input_transform,
+                tree_shap: output.tree_shap,
                 metrics: output.metrics,
             })),
             transform: ModelServingTransformBinding {
@@ -1714,7 +1709,7 @@ mod tests {
     use quant_pivot_research::features::{
         FeatureSchema,
         names::{
-            book::MID, domain_crypto::DISTANCE_TO_STRIKE, domain_weather::ENSEMBLE_BIN_PROBABILITY,
+            book::MID, domain_crypto::DISTANCE_TO_STRIKE, domain_weather::CONTRACT_PROBABILITY,
         },
     };
 
@@ -1741,7 +1736,7 @@ mod tests {
         let input_contract = ModelInputContract {
             inputs: vec![
                 ModelInputSpec::required(DISTANCE_TO_STRIKE.to_string()),
-                ModelInputSpec::required(ENSEMBLE_BIN_PROBABILITY.to_string()),
+                ModelInputSpec::required(CONTRACT_PROBABILITY.to_string()),
             ],
         };
 

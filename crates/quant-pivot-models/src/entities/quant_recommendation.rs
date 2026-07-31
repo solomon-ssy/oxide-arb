@@ -4,8 +4,10 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use super::{
-    event, market, quant_order_intent, quant_recommendation_report,
-    quant_recommendation_resolution_outcome, research_profile_artifact,
+    event, market, quant_execution_rollup_reconciliation_task, quant_order_intent,
+    quant_recommendation_execution_rollup, quant_recommendation_report,
+    quant_recommendation_resolution_outcome, quant_resolution_outcome_reconciliation_task,
+    research_profile_artifact,
 };
 use crate::{
     enums::quant::{OutcomeSide, RecommendationStatus},
@@ -53,6 +55,7 @@ pub struct Model {
     pub valid_from: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
     pub status: RecommendationStatus,
+    pub status_changed_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(
@@ -88,6 +91,14 @@ pub struct Model {
     pub order_intent: HasMany<quant_order_intent::Entity>,
     #[sea_orm(has_one, relation_enum = "ResolutionOutcome")]
     pub resolution_outcome: HasOne<quant_recommendation_resolution_outcome::Entity>,
+    #[sea_orm(has_one, relation_enum = "ExecutionRollup")]
+    pub execution_rollup: HasOne<quant_recommendation_execution_rollup::Entity>,
+    #[sea_orm(has_one, relation_enum = "ExecutionRollupReconciliationTask")]
+    pub execution_rollup_reconciliation_task:
+        HasOne<quant_execution_rollup_reconciliation_task::Entity>,
+    #[sea_orm(has_one, relation_enum = "ResolutionOutcomeReconciliationTask")]
+    pub resolution_outcome_reconciliation_task:
+        HasOne<quant_resolution_outcome_reconciliation_task::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

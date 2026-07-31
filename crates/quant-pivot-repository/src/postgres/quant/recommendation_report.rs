@@ -559,6 +559,7 @@ impl PgRecommendationReportRepository {
         }
         QuantRecommendationEntity::update_many()
             .col_expr(Column::Status, Expr::value(to))
+            .col_expr(Column::StatusChangedAt, Expr::cust("statement_timestamp()"))
             .filter(Column::RecommendationReportId.eq(*report_id))
             .filter(Column::Status.is_in(from.iter().copied()))
             .exec(db)

@@ -11,12 +11,13 @@ use chrono_tz::Tz;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use quant_pivot_api::weather::{
     AviationWeatherSource, GefsDecodedMember, GefsSource, GefsStationBinding, GhcnhSource,
+    ghcnd::GhcndSource,
 };
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{WeatherForecastFactRow, WeatherObservationFactRow},
     config::{
-        AviationWeatherSourceConfig, GefsSourceConfig, GhcnhSourceConfig,
+        AviationWeatherSourceConfig, GefsSourceConfig, GhcndSourceConfig, GhcnhSourceConfig,
         WeatherStationProfileConfig,
     },
     domain::{
@@ -37,7 +38,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         CalibrationArtifactId, ContentHash, DomainInstrumentKey, DomainMeasurementUnit,
-        DomainSourceId, IcaoStation, WeatherVariable,
+        DomainSourceId, IcaoStation, WeatherTemperatureStatistic, WeatherVariable,
     },
 };
 use quant_pivot_repository::traits::{
@@ -69,6 +70,7 @@ struct WeatherTarget {
     latitude: Decimal,
     longitude: Decimal,
     ghcnh_station_id: Option<String>,
+    ghcnd_station_id: Option<String>,
     station_profile_hash: ContentHash,
 }
 
@@ -88,9 +90,11 @@ pub struct WeatherIngestWorker {
     runtime_config: Arc<DecisionPolicyStore>,
     aviation: Option<Arc<AviationWeatherSource>>,
     ghcnh: Option<Arc<GhcnhSource>>,
+    ghcnd: Option<Arc<GhcndSource>>,
     gefs: Option<Arc<GefsSource>>,
     aviation_config: AviationWeatherSourceConfig,
     ghcnh_config: GhcnhSourceConfig,
+    ghcnd_config: GhcndSourceConfig,
     gefs_config: GefsSourceConfig,
     station_profiles: BTreeMap<String, WeatherStationProfileConfig>,
 }
@@ -107,9 +111,11 @@ pub struct WeatherIngestDeps {
     pub runtime_config: Arc<DecisionPolicyStore>,
     pub aviation: Option<Arc<AviationWeatherSource>>,
     pub ghcnh: Option<Arc<GhcnhSource>>,
+    pub ghcnd: Option<Arc<GhcndSource>>,
     pub gefs: Option<Arc<GefsSource>>,
     pub aviation_config: AviationWeatherSourceConfig,
     pub ghcnh_config: GhcnhSourceConfig,
+    pub ghcnd_config: GhcndSourceConfig,
     pub gefs_config: GefsSourceConfig,
     pub station_profiles: BTreeMap<String, WeatherStationProfileConfig>,
 }
@@ -133,9 +139,11 @@ impl WeatherIngestWorker {
             runtime_config: deps.runtime_config,
             aviation: deps.aviation,
             ghcnh: deps.ghcnh,
+            ghcnd: deps.ghcnd,
             gefs: deps.gefs,
             aviation_config: deps.aviation_config,
             ghcnh_config: deps.ghcnh_config,
+            ghcnd_config: deps.ghcnd_config,
             gefs_config: deps.gefs_config,
             station_profiles: deps.station_profiles,
         }
@@ -240,6 +248,46 @@ impl WeatherIngestWorker {
             None => failures.push("ghcnh: adapter is unavailable".to_owned()),
         }
 
+        match self.ghcnd.as_ref() {
+            Some(source) => {
+                let tasks = selected_stations
+                    .iter()
+                    .filter_map(|(station, targets)| {
+                        targets
+                            .first()
+                            .filter(|target| target.ghcnd_station_id.is_some())
+                            .cloned()
+                            .map(|target| (station.clone(), target))
+                    })
+                    .collect::<Vec<_>>();
+                let outcomes = stream::iter(tasks)
+                    .map(|(station, target)| async move {
+                        let result = self.ingest_ghcnd_station(source, &station, &target).await;
+                        (station.clone(), result)
+                    })
+                    .buffer_unordered(self.ghcnd_config.max_concurrency)
+                    .collect::<Vec<_>>()
+                    .await;
+                for (station, result) in outcomes {
+                    if let Err(error) = result {
+                        for statistic in [
+                            WeatherTemperatureStatistic::Maximum,
+                            WeatherTemperatureStatistic::Minimum,
+                        ] {
+                            self.record_evidence_failure(
+                                &DomainSourceId::ghcnd(),
+                                &DomainInstrumentKey::ghcnd_temperature(&station, statistic),
+                                &error,
+                                &mut failures,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+            None => failures.push("ghcnd: adapter is unavailable".to_owned()),
+        }
+
         match self.gefs.as_ref() {
             Some(source) => {
                 if let Err(error) = self.ingest_gefs_cycle(source, &bindings, Utc::now()).await {
@@ -257,15 +305,18 @@ impl WeatherIngestWorker {
             None => failures.push("gefs: adapter is unavailable".to_owned()),
         }
 
+        Self::finish_evidence_pass(&failures)
+    }
+
+    fn finish_evidence_pass(failures: &[String]) -> QuantResult<()> {
         if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(QuantError::config(format!(
-                "Weather daily-temperature evidence pass failed for {} bindings: {}",
-                failures.len(),
-                failures.join(" | ")
-            )))
+            return Ok(());
         }
+        Err(QuantError::config(format!(
+            "Weather daily-temperature evidence pass failed for {} bindings: {}",
+            failures.len(),
+            failures.join(" | ")
+        )))
     }
 
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken) {
@@ -274,10 +325,11 @@ impl WeatherIngestWorker {
             return;
         }
         let weather = Arc::clone(&self).run_weather_loop(shutdown.child_token());
-        let ghcnh = Arc::clone(&self).run_ghcnh_loop(shutdown.child_token());
+        let hourly_archive = Arc::clone(&self).run_ghcnh_loop(shutdown.child_token());
+        let daily_archive = Arc::clone(&self).run_ghcnd_loop(shutdown.child_token());
         let gefs = Arc::clone(&self).run_gefs_loop(shutdown.child_token());
         let calibration = Arc::clone(&self).run_weather_calibration_loop(shutdown.child_token());
-        tokio::join!(weather, ghcnh, gefs, calibration);
+        tokio::join!(weather, hourly_archive, daily_archive, gefs, calibration);
     }
 
     pub(super) async fn run_backfill(self: Arc<Self>, shutdown: CancellationToken) {
@@ -383,6 +435,7 @@ impl WeatherIngestWorker {
                         latitude: profile.latitude,
                         longitude: profile.longitude,
                         ghcnh_station_id: profile.ghcnh_station_id.clone(),
+                        ghcnd_station_id: profile.ghcnd_station_id.clone(),
                         station_profile_hash: profile_hash,
                     },
                 );
@@ -613,6 +666,188 @@ impl WeatherIngestWorker {
                 () = tokio::time::sleep(StdDuration::from_secs(self.ghcnh_config.refresh_secs.max(1))) => {}
             }
         }
+    }
+
+    async fn run_ghcnd_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        loop {
+            if shutdown.is_cancelled() {
+                return;
+            }
+            let bindings = match self.discover().await {
+                Ok(bindings) => bindings.weather,
+                Err(error) => {
+                    tracing::warn!(%error, "GHCNd binding discovery failed");
+                    tokio::time::sleep(StdDuration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            if let Some(source) = self.ghcnd.as_ref() {
+                let stations = weather_stations(&bindings);
+                let worker = Arc::clone(&self);
+                let source = Arc::clone(source);
+                let outcomes = stream::iter(stations)
+                    .map(move |(station, targets)| {
+                        let worker = Arc::clone(&worker);
+                        let source = Arc::clone(&source);
+                        let target = targets
+                            .into_iter()
+                            .find(|target| target.ghcnd_station_id.is_some());
+                        async move {
+                            let result = match target {
+                                Some(target) => {
+                                    worker
+                                        .ingest_ghcnd_station(&source, &station, &target)
+                                        .await
+                                }
+                                None => Ok(()),
+                            };
+                            (station.clone(), result)
+                        }
+                    })
+                    .buffer_unordered(self.ghcnd_config.max_concurrency)
+                    .collect::<Vec<_>>()
+                    .await;
+                for (station, result) in outcomes {
+                    if let Err(error) = result {
+                        tracing::warn!(%station, %error, "GHCNd station resolution ingest failed");
+                    }
+                }
+            }
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(StdDuration::from_secs(self.ghcnd_config.refresh_secs.max(1))) => {}
+            }
+        }
+    }
+
+    async fn ingest_ghcnd_station(
+        &self,
+        source: &GhcndSource,
+        station: &IcaoStation,
+        target: &WeatherTarget,
+    ) -> QuantResult<()> {
+        let available_at = Utc::now();
+        let years = i32::from(self.ghcnd_config.lookback_years);
+        let first_year = available_at
+            .year()
+            .checked_sub(years.saturating_sub(1))
+            .ok_or_else(|| QuantError::config("GHCNd lookback year underflow"))?;
+        let ghcnd_station_id = target.ghcnd_station_id.as_deref().ok_or_else(|| {
+            QuantError::config(format!(
+                "GHCNd daily resolution is unavailable for {station}"
+            ))
+        })?;
+        let station_file = source
+            .station_daily(
+                station,
+                ghcnd_station_id,
+                target.timezone,
+                first_year,
+                available_at,
+            )
+            .await?
+            .ok_or_else(|| {
+                QuantError::config(format!(
+                    "GHCNd station file `{ghcnd_station_id}` is unpublished"
+                ))
+            })?;
+        let file_hash = station_file.file_hash;
+        let statistics = [
+            WeatherTemperatureStatistic::Maximum,
+            WeatherTemperatureStatistic::Minimum,
+        ];
+        for statistic in statistics {
+            let instrument = DomainInstrumentKey::ghcnd_temperature(station, statistic);
+            if !station_file
+                .reports
+                .iter()
+                .any(|report| report.instrument_key == instrument)
+            {
+                return Err(QuantError::config(format!(
+                    "GHCNd station file has no accepted {} summary for {station}",
+                    statistic.as_str()
+                )));
+            }
+        }
+        let mut cursors = Vec::with_capacity(statistics.len());
+        for statistic in statistics {
+            let instrument = DomainInstrumentKey::ghcnd_temperature(station, statistic);
+            let existing = self
+                .cursors
+                .find(&DomainSourceId::ghcnd(), &instrument)
+                .await?;
+            cursors.push((statistic, instrument, existing));
+        }
+        let unchanged = cursors.iter().all(|(_, _, cursor)| {
+            cursor.as_ref().is_some_and(|cursor| {
+                matches!(
+                    &cursor.checkpoint_json,
+                    DomainSourceCheckpoint::Ghcnd {
+                        file_hash: existing_hash,
+                        ..
+                    } if existing_hash == &file_hash
+                )
+            })
+        });
+        if !unchanged {
+            self.facts
+                .persist_observations(
+                    station_file
+                        .reports
+                        .iter()
+                        .cloned()
+                        .map(|report| WeatherObservationCandidate {
+                            local_date: report.valid_from.map_or_else(
+                                || {
+                                    report
+                                        .observed_at
+                                        .with_timezone(&target.timezone)
+                                        .date_naive()
+                                },
+                                |start| start.with_timezone(&target.timezone).date_naive(),
+                            ),
+                            report,
+                        })
+                        .collect(),
+                )
+                .await?;
+        }
+        for (statistic, instrument, existing) in cursors {
+            let last_day_end = station_file
+                .reports
+                .iter()
+                .filter(|report| report.instrument_key == instrument)
+                .map(|report| report.observed_at)
+                .max()
+                .or_else(|| {
+                    existing.as_ref().and_then(|cursor| {
+                        matches!(
+                            &cursor.checkpoint_json,
+                            DomainSourceCheckpoint::Ghcnd {
+                                file_hash: existing_hash,
+                                ..
+                            } if existing_hash == &file_hash
+                        )
+                        .then(|| cursor.checkpoint_json.event_time())
+                    })
+                })
+                .ok_or_else(|| {
+                    QuantError::config(format!(
+                        "GHCNd station file lost its {} summary for {station}",
+                        statistic.as_str()
+                    ))
+                })?;
+            self.upsert_source_cursor(
+                DomainSourceId::ghcnd(),
+                instrument,
+                DomainSourceCheckpoint::Ghcnd {
+                    last_day_end,
+                    file_hash,
+                },
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     async fn ingest_ghcnh_station(
@@ -1414,6 +1649,7 @@ fn configured_weather_targets(
                     latitude: profile.latitude,
                     longitude: profile.longitude,
                     ghcnh_station_id: profile.ghcnh_station_id.clone(),
+                    ghcnd_station_id: profile.ghcnd_station_id.clone(),
                     station_profile_hash,
                 },
             );
@@ -1641,6 +1877,7 @@ mod tests {
                 longitude: dec!(-73.7789),
                 elevation_meters: dec!(4),
                 ghcnh_station_id: Some("USW00094789".to_owned()),
+                ghcnd_station_id: Some("USW00094789".to_owned()),
                 historical_binding_kind: WeatherHistoricalBindingKind::ExactStation,
             },
         )]);
@@ -1671,6 +1908,7 @@ mod tests {
             latitude: dec!(40.6398),
             longitude: dec!(-73.7789),
             ghcnh_station_id: Some("USW00094789".to_owned()),
+            ghcnd_station_id: Some("USW00094789".to_owned()),
             station_profile_hash: hash('d'),
         };
         let now = Utc.with_ymd_and_hms(2026, 7, 2, 6, 0, 0).unwrap();

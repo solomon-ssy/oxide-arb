@@ -10,10 +10,10 @@ use quant_pivot_models::{
     enums::{
         common::MarketCategory,
         model::ModelFamily,
-        quant::{ModelGovernanceAction, ModelWeightSource, PublicationStatus},
+        quant::{ModelGovernanceAction, ModelWeightSource},
     },
     types::{
-        AuditEventId, ContentHash, DecisionPolicySnapshotId, FeatureParityStateId,
+        AuditEventId, CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId,
         ModelGovernanceAuditId, ModelInputContract, ModelSpecId, ModelTrainingContract,
         ModelVersionId, PolicyBundleGeneration, Probability, ResearchProfileArtifactId, RoleCode,
         ShadowComparisonId,
@@ -212,7 +212,7 @@ pub async fn quant_shadow_comparison_crud() {
     for (overlap, hard, hours_ago, weight_source, hash_seed) in [
         (dec!(0.80), false, 23_i64, ModelWeightSource::Artifact, 'g'),
         (dec!(0.60), true, 1, ModelWeightSource::Artifact, 'h'),
-        (dec!(1), false, 0, ModelWeightSource::ConfigOverlay, 'i'),
+        (dec!(1), false, 0, ModelWeightSource::Artifact, 'i'),
     ] {
         repo.create(fixture.comparison(
             now - ChronoDuration::hours(hours_ago),
@@ -232,15 +232,13 @@ pub async fn quant_shadow_comparison_crud() {
         )
         .await
         .expect("summary");
-    assert_eq!(summary.sample_count, 2);
-    // Config-overlay comparisons describe behavior that is not frozen in the
-    // artifact and therefore cannot count as publication stability evidence.
+    assert_eq!(summary.sample_count, 3);
     assert!(
         summary.any_hard_divergence,
         "the window includes a divergence"
     );
-    // Mean of 0.80 and 0.60.
-    assert_eq!(summary.mean_topn_overlap, Probability::new(dec!(0.70)));
+    // Mean of 0.80, 0.60, and 1.00.
+    assert_eq!(summary.mean_topn_overlap, Probability::new(dec!(0.80)));
     assert!(summary.window_start.is_some() && summary.window_end.is_some());
 }
 
@@ -323,16 +321,6 @@ pub async fn shadow_window_is_exact() {
         .await
         .expect("insert mismatched-category row");
 
-    repo.create(fixture.comparison(
-        now,
-        Probability::new(dec!(0.10)),
-        true,
-        ModelWeightSource::ConfigOverlay,
-        'q',
-    ))
-    .await
-    .expect("insert non-artifact row");
-
     let observed = repo
         .observation_window(&fixture.query(window_start, window_end))
         .await
@@ -375,38 +363,36 @@ pub async fn quant_model_governance_crud() {
     let repo = PgModelGovernanceAuditRepository::new(db.clone());
 
     let audit_id = ModelGovernanceAuditId::from_v7();
+    let calibrated_version_id = ModelVersionId::from_v7();
     let created = repo
         .create(NewModelGovernanceAudit {
             audit_id,
             model_version_id: Some(fixture.active_model_version_id),
             training_dataset_id: None,
-            action: ModelGovernanceAction::Publish,
+            action: ModelGovernanceAction::SealCalibration,
             actor_user_id: None,
             actor_username: "operator".to_owned(),
             actor_role: Some(RoleCode::new("risk_manager")),
-            reason: "publish after gate pass".to_owned(),
-            before_status: PublicationStatus::Candidate,
-            after_status: PublicationStatus::Published,
-            detail: ModelGovernanceAuditDetail::Publish {
-                artifact_hash: content_hash('a'),
-                gate_report_hash: content_hash('g'),
-                shadow_samples: 5,
-                shadow_mean_overlap: Probability::new(dec!(0.75)),
-                feature_parity_state_id: FeatureParityStateId::from_v7(),
-                required_shadow_window_secs: 86_400,
+            reason: "seal calibrated child artifact".to_owned(),
+            detail: ModelGovernanceAuditDetail::SealCalibration {
+                source_version_id: fixture.active_model_version_id,
+                source_artifact_hash: content_hash('a'),
+                calibrated_version_id,
+                calibrated_artifact_hash: content_hash('g'),
+                calibrator_id: CalibrationArtifactId::from_v7(),
             },
             audit_event_id: AuditEventId::from_v7(),
         })
         .await
         .expect("create audit");
     assert_eq!(created.audit_id, audit_id);
-    assert_eq!(created.action, ModelGovernanceAction::Publish);
+    assert_eq!(created.action, ModelGovernanceAction::SealCalibration);
     assert!(matches!(
         created.detail,
-        ModelGovernanceAuditDetail::Publish {
-            shadow_samples: 5,
+        ModelGovernanceAuditDetail::SealCalibration {
+            calibrated_version_id: id,
             ..
-        }
+        } if id == calibrated_version_id
     ));
 
     let listed = repo

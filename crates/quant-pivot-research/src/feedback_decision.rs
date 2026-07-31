@@ -10,7 +10,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         ContentHash, FeedbackComparisonArtifactId, FeedbackCycleId, FeedbackDecisionArtifactId,
-        FeedbackDriftArtifactId, FeedbackShadowReplayArtifactId, ModelVersionId,
+        FeedbackDriftArtifactId, FeedbackShadowArtifactId, ModelVersionId,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ use crate::{
         RomanoWolfGateVerdict, RomanoWolfOutcome,
     },
     feedback_shadow::{
-        FeedbackShadowEvidence, FeedbackShadowOutcome, FeedbackShadowReplayArtifact,
+        FeedbackShadowArtifact, FeedbackShadowEvidence, FeedbackShadowOutcome,
         FeedbackShadowUnstableReason,
     },
 };
@@ -291,7 +291,7 @@ impl FeedbackDecisionEvaluator {
         params: &FeedbackDecisionJobParams,
         drift: &FeedbackDriftArtifact,
         comparison: &FeedbackComparisonArtifact,
-        shadow: &FeedbackShadowReplayArtifact,
+        shadow: &FeedbackShadowArtifact,
     ) -> Result<FeedbackDecisionOutcome, FeedbackError> {
         Self::validate_lineage(params, drift, comparison, shadow)?;
         let projection = Self::project_comparison(comparison)?;
@@ -455,7 +455,7 @@ impl FeedbackDecisionEvaluator {
         params: &FeedbackDecisionJobParams,
         drift: &FeedbackDriftArtifact,
         comparison: &FeedbackComparisonArtifact,
-        shadow: &FeedbackShadowReplayArtifact,
+        shadow: &FeedbackShadowArtifact,
     ) -> Result<(), FeedbackError> {
         params.validate()?;
         drift
@@ -478,8 +478,8 @@ impl FeedbackDecisionEvaluator {
             || comparison.champion_model_version_id() != params.champion_model_version_id
             || comparison.champion_serving_contract_hash() != params.champion_serving_contract_hash
             || shadow.feedback_cycle_id() != params.feedback_cycle_id
-            || shadow.artifact_id() != params.shadow_replay.artifact_id
-            || shadow.job_input_hash() != params.shadow_replay.input_hash
+            || shadow.artifact_id() != params.shadow.artifact_id
+            || shadow.job_input_hash() != params.shadow.input_hash
             || shadow.previous() != &params.comparison
             || shadow.profile_ref() != &params.profile_ref
             || shadow.feedback_policy_hash() != params.feedback_policy_hash
@@ -498,7 +498,7 @@ pub struct FeedbackDecisionArtifactInput<'a> {
     pub params: &'a FeedbackDecisionJobParams,
     pub drift: &'a FeedbackDriftArtifact,
     pub comparison: &'a FeedbackComparisonArtifact,
-    pub shadow: &'a FeedbackShadowReplayArtifact,
+    pub shadow: &'a FeedbackShadowArtifact,
 }
 
 /// Immutable evidence-only terminal decision artifact.
@@ -512,7 +512,7 @@ pub struct FeedbackDecisionArtifact {
     job_input_hash: ContentHash,
     drift_artifact_id: FeedbackDriftArtifactId,
     comparison_artifact_id: FeedbackComparisonArtifactId,
-    shadow_artifact_id: FeedbackShadowReplayArtifactId,
+    shadow_artifact_id: FeedbackShadowArtifactId,
     champion_model_version_id: ModelVersionId,
     drift_outcome: DriftGateOutcome,
     drift_observations: Vec<DriftObservation>,
@@ -529,7 +529,7 @@ struct FeedbackDecisionArtifactDocument {
     job_input_hash: ContentHash,
     drift_artifact_id: FeedbackDriftArtifactId,
     comparison_artifact_id: FeedbackComparisonArtifactId,
-    shadow_artifact_id: FeedbackShadowReplayArtifactId,
+    shadow_artifact_id: FeedbackShadowArtifactId,
     champion_model_version_id: ModelVersionId,
     drift_outcome: DriftGateOutcome,
     drift_observations: Vec<DriftObservation>,
@@ -544,7 +544,7 @@ struct FeedbackDecisionArtifactPreimage<'a> {
     job_input_hash: ContentHash,
     drift_artifact_id: FeedbackDriftArtifactId,
     comparison_artifact_id: FeedbackComparisonArtifactId,
-    shadow_artifact_id: FeedbackShadowReplayArtifactId,
+    shadow_artifact_id: FeedbackShadowArtifactId,
     champion_model_version_id: ModelVersionId,
     drift_outcome: &'a DriftGateOutcome,
     drift_observations: &'a [DriftObservation],
@@ -566,7 +566,7 @@ impl FeedbackDecisionArtifact {
             job_input_hash: input.params.input_hash()?,
             drift_artifact_id: input.params.drift.artifact_id,
             comparison_artifact_id: input.params.comparison.artifact_id,
-            shadow_artifact_id: input.params.shadow_replay.artifact_id,
+            shadow_artifact_id: input.params.shadow.artifact_id,
             champion_model_version_id: input.params.champion_model_version_id,
             drift_outcome: &input.drift.gate_outcome,
             drift_observations: &input.drift.observations,
@@ -580,7 +580,7 @@ impl FeedbackDecisionArtifact {
             job_input_hash: input.params.input_hash()?,
             drift_artifact_id: input.params.drift.artifact_id,
             comparison_artifact_id: input.params.comparison.artifact_id,
-            shadow_artifact_id: input.params.shadow_replay.artifact_id,
+            shadow_artifact_id: input.params.shadow.artifact_id,
             champion_model_version_id: input.params.champion_model_version_id,
             drift_outcome: input.drift.gate_outcome.clone(),
             drift_observations: input.drift.observations.clone(),
@@ -599,7 +599,7 @@ impl FeedbackDecisionArtifact {
             || self.comparison_artifact_id
                 != FeedbackComparisonArtifactId::from_cycle_id(self.feedback_cycle_id)
             || self.shadow_artifact_id
-                != FeedbackShadowReplayArtifactId::from_cycle_id(self.feedback_cycle_id)
+                != FeedbackShadowArtifactId::from_cycle_id(self.feedback_cycle_id)
             || !matches!(self.drift_outcome, DriftGateOutcome::Advance { .. })
             || drift_gate(&self.drift_observations) != self.drift_outcome
             || self.artifact_hash != Self::derive_hash(&self.preimage())?
@@ -616,7 +616,7 @@ impl FeedbackDecisionArtifact {
         params: &FeedbackDecisionJobParams,
         drift: &FeedbackDriftArtifact,
         comparison: &FeedbackComparisonArtifact,
-        shadow: &FeedbackShadowReplayArtifact,
+        shadow: &FeedbackShadowArtifact,
     ) -> Result<(), FeedbackError> {
         self.validate()?;
         let expected = FeedbackDecisionEvaluator::evaluate(params, drift, comparison, shadow)?;
@@ -625,7 +625,7 @@ impl FeedbackDecisionArtifact {
             || self.job_input_hash != params.input_hash()?
             || self.drift_artifact_id != params.drift.artifact_id
             || self.comparison_artifact_id != params.comparison.artifact_id
-            || self.shadow_artifact_id != params.shadow_replay.artifact_id
+            || self.shadow_artifact_id != params.shadow.artifact_id
             || self.champion_model_version_id != params.champion_model_version_id
             || self.drift_outcome != drift.gate_outcome
             || self.drift_observations != drift.observations

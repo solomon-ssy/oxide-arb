@@ -1216,7 +1216,7 @@
       "type": "object",
       "properties": {
         "active_exit_model_version_id": {
-          "description": "Active published Sell-side hold-vs-exit scorer version. The\nopportunistic-Sell exit evaluator loads this; a distinct pointer from\n`active_model_version_id` so Buy and Sell models are governed separately.",
+          "description": "Champion Sell-side hold-vs-exit scorer version. The\nopportunistic-Sell exit evaluator loads this; a distinct pointer from\n`active_model_version_id` so Buy and Sell models are governed separately.",
           "anyOf": [
             {
               "$ref": "#/$defs/ModelVersionRef"
@@ -1228,7 +1228,7 @@
           "default": null
         },
         "active_model_version_id": {
-          "description": "Active published model for the explicit pooled Buy route.\n\nThis route may score only non-Crypto/non-Weather report scopes. It is\nnot a fallback for a missing vertical route.",
+          "description": "Champion model for the explicit pooled Buy route.\n\nThis route may score only non-Crypto/non-Weather report scopes. It is\nnot a fallback for a missing vertical route.",
           "anyOf": [
             {
               "$ref": "#/$defs/ModelVersionRef"
@@ -1255,7 +1255,7 @@
           "default": "0.00"
         },
         "category_model_pointers": {
-          "description": "Category-specific Buy-side model pointers (`ModelRouting`).\n\nOnly Crypto and Weather may appear here. An enabled vertical must be the\nsole category in its report and must have its exact pointer; missing,\nunloadable, unpublished, or mis-scoped routes fail before selection.\nNon-vertical categories use the explicit pooled\n`active_model_version_id`. Governed exactly like the pooled/shadow\npointers.",
+          "description": "Category-specific Buy-side model pointers (`ModelRouting`).\n\nOnly Crypto and Weather may appear here. An enabled vertical must be the\nsole category in its report and must have its exact pointer; missing,\nunloadable or mis-scoped routes fail before selection.\nNon-vertical categories use the explicit pooled\n`active_model_version_id`. Governed exactly like the pooled/shadow\npointers.",
           "type": "object",
           "properties": {
             "crypto": {
@@ -1297,13 +1297,6 @@
           "$ref": "#/$defs/DecimalValue",
           "default": "0.50"
         },
-        "min_quality_gate_age_secs": {
-          "description": "Maximum age of a quality-gate report before model load is denied.\nConsumed by governance (`ModelQualityGate` / load-time deny), not by\nthe `ModelRunner` inference path.",
-          "type": "integer",
-          "format": "uint64",
-          "default": 86400,
-          "minimum": 0
-        },
         "shadow_diff_threshold": {
           "description": "Shadow/live diff threshold.",
           "$ref": "#/$defs/DecimalValue",
@@ -1342,7 +1335,6 @@
             "candidate_score_floor": "0.00",
             "category_model_pointers": {},
             "min_model_confidence": "0.50",
-            "min_quality_gate_age_secs": 86400,
             "shadow_diff_threshold": "0.10",
             "shadow_model_version_id": null
           }
@@ -1476,6 +1468,7 @@
       "enum": [
         "initial",
         "promote",
+        "model_bootstrap",
         "model_promotion",
         "rollback"
       ]

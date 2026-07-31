@@ -106,8 +106,9 @@ pub trait QuantFactReadRepository: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Weather observations, explicitly deduplicated by station, observation,
-    /// revision, and report hash while retaining later COR revisions.
+    /// Weather observations effective by the decision boundary, explicitly
+    /// deduplicated by station, observation, revision, and report hash while
+    /// retaining later COR revisions.
     async fn weather_observation_facts_between(
         &self,
         _stations: Vec<String>,

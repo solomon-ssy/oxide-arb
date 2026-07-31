@@ -445,11 +445,7 @@ mod tests {
     use quant_pivot_models::{
         config::ModelServingRegistryConfig,
         domain::quant::ModelVersionInfo,
-        enums::{
-            common::MarketCategory,
-            model::ModelFamily,
-            quant::{ModelWeightSource, PublicationStatus},
-        },
+        enums::{common::MarketCategory, model::ModelFamily, quant::ModelWeightSource},
         runtime_config::FactorCrossSectionConfig,
         types::{
             ContentHash, ModelVersionId, factor::FactorServingPlane, stable_name::FeatureName,
@@ -613,7 +609,7 @@ mod tests {
 
     fn version_and_entry() -> (ModelVersionInfo, Arc<LoadedModelServingRuntime>) {
         let artifact = model_artifact(None);
-        let version = model_version(&artifact, PublicationStatus::Published, None);
+        let version = model_version(&artifact);
         let bindings = version.serving_contract.bindings();
         let runtime: Arc<dyn QuantModelRuntime> = Arc::new(StubRuntime {
             version_id: version.model_version_id,

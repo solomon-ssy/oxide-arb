@@ -113,16 +113,16 @@ pub(super) const DATA_QUALITY_SCORE: &str = concat!(
     "quant-pivot/data-quality-confidence@1+",
     "quant-pivot/factor-normalization-boundary@1"
 );
-pub(super) const WEATHER_ENSEMBLE_PROBABILITY: &str = concat!(
-    "quant-pivot/raw-weather-category-probability-centered@3+",
+pub(super) const WEATHER_CONTRACT_PROBABILITY: &str = concat!(
+    "quant-pivot/raw-weather-contract-probability-centered@4+",
     "quant-pivot/factor-normalization-boundary@1"
 );
 pub(super) const WEATHER_CONTEXT_IDENTITY: &str = concat!(
     "quant-pivot/raw-weather-category-context-identity@3+",
     "quant-pivot/factor-normalization-boundary@1"
 );
-pub(super) const WEATHER_OBSERVED_BAND_DISTANCE: &str = concat!(
-    "quant-pivot/raw-weather-observed-band-distance@3+",
+pub(super) const WEATHER_BOUNDARY_DISTANCE: &str = concat!(
+    "quant-pivot/raw-weather-contract-boundary-distance@4+",
     "quant-pivot/factor-normalization-boundary@1"
 );
 pub(super) const CRYPTO_STRIKE_PRESSURE: &str = concat!(
@@ -188,8 +188,8 @@ mod tests {
         DATA_QUALITY_SCORE, FAVORITE_LONGSHOT, FEATURE_SCALAR_IDENTITY, NEGRISK_CONVERT_EDGE,
         NEGRISK_LEG_SUM_DRIFT, NORMALIZATION, PARTICIPANT_CONCENTRATION, PRIMARY_EMA_SLOPE,
         PRIMARY_REALIZED_VOL, PRIMARY_ROC, PRIMARY_VOL_ADJUSTED, RESOLUTION_PROXIMITY,
-        REVERSAL_AFTER_SHOCK, WEATHER_CONTEXT_IDENTITY, WEATHER_ENSEMBLE_PROBABILITY,
-        WEATHER_OBSERVED_BAND_DISTANCE,
+        REVERSAL_AFTER_SHOCK, WEATHER_BOUNDARY_DISTANCE, WEATHER_CONTEXT_IDENTITY,
+        WEATHER_CONTRACT_PROBABILITY,
     };
     use crate::factors::{
         domain::{crypto_domain_factors, weather_domain_factors},
@@ -261,32 +261,39 @@ mod tests {
                 DATA_QUALITY_SCORE,
             ),
             (
-                "domain.weather.ensemble_bin_probability",
-                YES_ALPHA,
-                FactorNormalization::MinMax,
-                false,
-                WEATHER_ENSEMBLE_PROBABILITY,
-            ),
-            (
-                "domain.weather.ensemble_spread",
-                LOW_CONTEXT,
-                FactorNormalization::Rank,
-                false,
-                WEATHER_CONTEXT_IDENTITY,
-            ),
-            (
-                "domain.weather.noaa_resolution_basis_risk",
-                LOW_CONTEXT,
-                FactorNormalization::Rank,
-                false,
-                WEATHER_CONTEXT_IDENTITY,
-            ),
-            (
-                "domain.weather.observed_extreme_headroom",
+                "domain.weather.boundary_distance",
                 FactorOutputSemantics::Diagnostic,
                 FactorNormalization::Rank,
                 false,
-                WEATHER_OBSERVED_BAND_DISTANCE,
+                WEATHER_BOUNDARY_DISTANCE,
+            ),
+            (
+                "domain.weather.contract_probability",
+                YES_ALPHA,
+                FactorNormalization::MinMax,
+                false,
+                WEATHER_CONTRACT_PROBABILITY,
+            ),
+            (
+                "domain.weather.forecast_dispersion",
+                LOW_CONTEXT,
+                FactorNormalization::Rank,
+                false,
+                WEATHER_CONTEXT_IDENTITY,
+            ),
+            (
+                "domain.weather.source_basis_risk",
+                LOW_CONTEXT,
+                FactorNormalization::Rank,
+                false,
+                WEATHER_CONTEXT_IDENTITY,
+            ),
+            (
+                "domain.weather.truth_maturity_risk",
+                LOW_CONTEXT,
+                FactorNormalization::MinMax,
+                false,
+                WEATHER_CONTEXT_IDENTITY,
             ),
             (
                 "domain_crypto_beta_regime",

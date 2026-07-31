@@ -16,7 +16,9 @@ use std::{
 use chrono::Utc;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    config::{WeatherStationProfileConfig, WeatherVerticalBindingsConfig},
+    config::{
+        TornadoRegionScopeConfig, WeatherStationProfileConfig, WeatherVerticalBindingsConfig,
+    },
     domain::{
         data_plane::{
             DomainSourceExpectationDefinition, DomainSourceExpectationTransition,
@@ -359,6 +361,17 @@ fn compile_expectations(
             {
                 continue;
             }
+            if binding.source_id == DomainSourceId::ghcnd()
+                && matches!(
+                    &resolved.subject,
+                    MarketSubject::Weather(subject)
+                        if weather_stations
+                            .get(subject.decision_group.station.as_str())
+                            .is_some_and(|profile| profile.ghcnd_station_id.is_none())
+                )
+            {
+                continue;
+            }
             let (required, credential_required, freshness_secs) =
                 source_policy(registry, linkage.domain_family, &binding.source_id)?;
             merge_binding(
@@ -419,6 +432,15 @@ fn render_static_bindings(
                         weather_stations
                             .get(station)
                             .is_some_and(|profile| profile.ghcnh_station_id.is_none())
+                    })
+                {
+                    return None;
+                }
+                if binding.source_id == DomainSourceId::ghcnd()
+                    && values.get("station").is_some_and(|station| {
+                        weather_stations
+                            .get(station)
+                            .is_some_and(|profile| profile.ghcnd_station_id.is_none())
                     })
                 {
                     return None;
@@ -486,11 +508,19 @@ fn static_binding_substitutions(
         DomainContractFamily::WeatherDailyTemperature => (
             weather_stations
                 .keys()
-                .map(|station| BTreeMap::from([("station", station.clone())]))
+                .flat_map(|station| {
+                    ["TMAX", "TMIN"].into_iter().map(move |statistic| {
+                        BTreeMap::from([
+                            ("station", station.clone()),
+                            ("temperature_statistic", statistic.to_owned()),
+                        ])
+                    })
+                })
                 .collect(),
             Some(BTreeSet::from([
                 DomainSourceId::aviation_weather(),
                 DomainSourceId::ghcnh(),
+                DomainSourceId::ghcnd(),
                 DomainSourceId::gefs(),
             ])),
         ),
@@ -498,7 +528,12 @@ fn static_binding_substitutions(
             weather_vertical_bindings
                 .hko_rainfall
                 .iter()
-                .map(|binding| BTreeMap::from([("station", binding.place.clone())]))
+                .map(|binding| {
+                    BTreeMap::from([
+                        ("station", binding.station_key.clone()),
+                        ("site", binding.site_key.clone()),
+                    ])
+                })
                 .collect(),
             Some(BTreeSet::from([DomainSourceId::hko_open_data()])),
         ),
@@ -521,17 +556,32 @@ fn static_binding_substitutions(
                 .collect(),
             Some(BTreeSet::from([DomainSourceId::airnow()])),
         ),
-        DomainContractFamily::WeatherTornado => (
-            weather_vertical_bindings
+        DomainContractFamily::WeatherTornado => {
+            let national = contract
+                .source_bindings
+                .iter()
+                .any(|binding| binding.source_id == DomainSourceId::ncei_tornado_time_series());
+            let substitutions = weather_vertical_bindings
                 .tornado_regions
                 .iter()
+                .filter(|binding| {
+                    national == matches!(&binding.scope, TornadoRegionScopeConfig::UnitedStates)
+                })
                 .map(|binding| BTreeMap::from([("region", binding.region_id.clone())]))
-                .collect(),
-            Some(BTreeSet::from([
-                DomainSourceId::spc_storm_reports(),
-                DomainSourceId::ncei_storm_events(),
-            ])),
-        ),
+                .collect();
+            let sources = if national {
+                BTreeSet::from([
+                    DomainSourceId::spc_storm_reports(),
+                    DomainSourceId::ncei_tornado_time_series(),
+                ])
+            } else {
+                BTreeSet::from([
+                    DomainSourceId::spc_storm_reports(),
+                    DomainSourceId::ncei_storm_events(),
+                ])
+            };
+            (substitutions, Some(sources))
+        }
         DomainContractFamily::WeatherTropicalCyclone => (
             weather_vertical_bindings
                 .nhc_historical_storms
@@ -700,6 +750,7 @@ mod tests {
                     longitude: dec!(-73.8740),
                     elevation_meters: dec!(6.4),
                     ghcnh_station_id: Some("USW00014732".to_owned()),
+                    ghcnd_station_id: Some("USW00014732".to_owned()),
                     historical_binding_kind: WeatherHistoricalBindingKind::ExactStation,
                 },
             ),
@@ -711,6 +762,7 @@ mod tests {
                     longitude: dec!(116.5846),
                     elevation_meters: dec!(35),
                     ghcnh_station_id: None,
+                    ghcnd_station_id: None,
                     historical_binding_kind: WeatherHistoricalBindingKind::Unavailable,
                 },
             ),
@@ -769,7 +821,7 @@ mod tests {
             row.source_id != DomainSourceId::ghcnh() || row.instrument_key.as_str() != "GHCNH:ZBAA"
         }));
         for (source, instrument) in [
-            (DomainSourceId::hko_open_data(), "HKO:North District:RAIN"),
+            (DomainSourceId::hko_open_data(), "HKO:HKO:RAIN"),
             (DomainSourceId::hko_open_data(), "HKO:HKO:TMAX"),
             (DomainSourceId::hko_open_data(), "HKO:HKO:TMIN"),
             (
@@ -790,11 +842,14 @@ mod tests {
             (DomainSourceId::nsidc_sea_ice_index(), "NSIDC:arctic:EXTENT"),
             (DomainSourceId::nws_observation(), "NWS:KMWN:GUST"),
         ] {
-            assert!(rows.iter().any(|row| {
-                row.family == DomainFamily::Weather
-                    && row.source_id == source
-                    && row.instrument_key.as_str() == instrument
-            }));
+            assert!(
+                rows.iter().any(|row| {
+                    row.family == DomainFamily::Weather
+                        && row.source_id == source
+                        && row.instrument_key.as_str() == instrument
+                }),
+                "missing static Weather binding {source}/{instrument}"
+            );
         }
         assert!(rows.iter().all(|row| !row.affected_profile_ids.is_empty()));
         assert_eq!(builtin_research_profiles().expect("profiles").len(), 3);

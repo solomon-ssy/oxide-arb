@@ -295,7 +295,9 @@ impl Default for FactorNormalizationConfig {
             "data_quality",
             // Weather probability is centered to signed alpha before the
             // normalization boundary; its magnitude therefore remains [0, 1].
-            "domain.weather.ensemble_bin_probability",
+            "domain.weather.contract_probability",
+            // Preliminary/final maturity is a closed binary risk.
+            "domain.weather.truth_maturity_risk",
         ] {
             per_factor.insert(
                 factor_name.to_owned(),
@@ -793,14 +795,14 @@ impl Default for ModelCalibrationConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
-    /// Active published model for the explicit pooled Buy route.
+    /// Champion model for the explicit pooled Buy route.
     ///
     /// This route may score only non-Crypto/non-Weather report scopes. It is
     /// not a fallback for a missing vertical route.
     pub active_model_version_id: Option<ModelVersionRef>,
     /// Shadow model version id.
     pub shadow_model_version_id: Option<ModelVersionRef>,
-    /// Active published Sell-side hold-vs-exit scorer version. The
+    /// Champion Sell-side hold-vs-exit scorer version. The
     /// opportunistic-Sell exit evaluator loads this; a distinct pointer from
     /// `active_model_version_id` so Buy and Sell models are governed separately.
     pub active_exit_model_version_id: Option<ModelVersionRef>,
@@ -808,17 +810,13 @@ pub struct ModelConfig {
     ///
     /// Only Crypto and Weather may appear here. An enabled vertical must be the
     /// sole category in its report and must have its exact pointer; missing,
-    /// unloadable, unpublished, or mis-scoped routes fail before selection.
+    /// unloadable or mis-scoped routes fail before selection.
     /// Non-vertical categories use the explicit pooled
     /// `active_model_version_id`. Governed exactly like the pooled/shadow
     /// pointers.
     pub category_model_pointers: BTreeMap<MarketCategory, ModelVersionRef>,
     /// Minimum model confidence.
     pub min_model_confidence: DecimalValue,
-    /// Maximum age of a quality-gate report before model load is denied.
-    /// Consumed by governance (`ModelQualityGate` / load-time deny), not by
-    /// the `ModelRunner` inference path.
-    pub min_quality_gate_age_secs: u64,
     /// Minimum candidate score to enter portfolio pruning.
     pub candidate_score_floor: DecimalValue,
     /// Shadow/live diff threshold.
@@ -835,7 +833,6 @@ impl Default for ModelConfig {
             active_exit_model_version_id: None,
             category_model_pointers: BTreeMap::new(),
             min_model_confidence: DecimalValue::new(rust_decimal_macros::dec!(0.50)),
-            min_quality_gate_age_secs: 86_400,
             candidate_score_floor: DecimalValue::new(rust_decimal_macros::dec!(0.00)),
             shadow_diff_threshold: DecimalValue::new(rust_decimal_macros::dec!(0.10)),
             calibration: ModelCalibrationConfig::default(),
@@ -900,7 +897,7 @@ pub struct QualityGateConfig {
     pub max_drawdown: DecimalValue,
     /// Minimum liquidity-exit feasibility in `[0, 1]` (auto-execution gate).
     pub min_liquidity_exit_feasibility: DecimalValue,
-    /// Minimum shadow overlap stability in `[0, 1]` (publish gate).
+    /// Minimum shadow overlap stability in `[0, 1]` (route-promotion gate).
     pub min_shadow_overlap_stability: DecimalValue,
     /// Maximum (soft) per-category sample concentration in `[0, 1]`.
     pub max_category_concentration: DecimalValue,

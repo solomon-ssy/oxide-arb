@@ -8,7 +8,7 @@ use quant_pivot_models::{
         domain::DomainFamily,
         factor::{FactorFamily, FactorNormalization},
         model::ModelFamily,
-        quant::{CalibrationKind, DatasetPurpose, PublicationStatus},
+        quant::{CalibrationKind, DatasetPurpose},
     },
     hashing::CanonicalDigest,
     runtime_config::{
@@ -26,7 +26,6 @@ use quant_pivot_models::{
             FactorDefinitionRef, FactorOutputSemantics, FactorServingPlane,
         },
         model_metrics::ModelVersionMetrics,
-        model_quality::QualityGateReport,
         model_serving::{
             ModelServingBindings, ModelServingCalibrationArtifactRef, ModelServingContract,
             ModelServingDatasetBinding, ModelServingEstimatorBinding, ModelServingFactorBinding,
@@ -39,9 +38,7 @@ use quant_pivot_models::{
 use quant_pivot_research::{
     factors::{
         FrozenReferenceQuantiles,
-        names::{
-            DOMAIN_CRYPTO_STRIKE_PRESSURE, DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY, MOMENTUM_ROC,
-        },
+        names::{DOMAIN_CRYPTO_STRIKE_PRESSURE, DOMAIN_WEATHER_CONTRACT_PROBABILITY, MOMENTUM_ROC},
     },
     model::{
         HorizonMultipliers, ModelArtifact, ReturnModelSpec, SubstitutionConfidenceRules,
@@ -63,7 +60,7 @@ fn factor_plane(category_scope: Option<MarketCategory>) -> FactorServingPlane {
     let (name, family) = match category_scope {
         Some(MarketCategory::Crypto) => (DOMAIN_CRYPTO_STRIKE_PRESSURE, FactorFamily::DomainCrypto),
         Some(MarketCategory::Weather) => (
-            DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY,
+            DOMAIN_WEATHER_CONTRACT_PROBABILITY,
             FactorFamily::DomainWeather,
         ),
         _ => (MOMENTUM_ROC, FactorFamily::Momentum),
@@ -388,11 +385,7 @@ pub fn sell_artifact() -> ModelArtifact {
     .seal()
 }
 
-pub fn model_version(
-    artifact: &ModelArtifact,
-    publication_status: PublicationStatus,
-    quality_gate_report: Option<QualityGateReport>,
-) -> ModelVersionInfo {
+pub fn model_version(artifact: &ModelArtifact) -> ModelVersionInfo {
     let serving_contract = artifact.header().serving_contract().clone();
     let bindings = serving_contract.bindings();
     let model = &bindings.model;
@@ -418,7 +411,6 @@ pub fn model_version(
         training_dataset_id: Some(bindings.dataset.manifest.training_dataset_id),
         trade_policy_artifact_id: trade_policy.map(|(artifact_id, _)| artifact_id),
         trade_policy_hash: trade_policy.map(|(_, content_hash)| content_hash),
-        publish_path_set_id: None,
         derivation_kind: ModelVersionInfo::training_derivation_kind(),
         parent_model_version_id: None,
         calibration_artifact_id: model
@@ -428,10 +420,6 @@ pub fn model_version(
         derivation_evidence_hash: None,
         metrics: ModelVersionMetrics::not_measured("test fixture"),
         training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-        quality_gate_report,
-        publication_status,
-        published_at: (publication_status == PublicationStatus::Published).then(Utc::now),
-        retired_at: None,
         created_at: Utc::now(),
         serving_contract,
     }

@@ -39,12 +39,13 @@ use crate::{
         computer::FactorComputer,
         names::{
             DOMAIN_CRYPTO_BETA_REGIME, DOMAIN_CRYPTO_STRIKE_PRESSURE,
-            DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY, DOMAIN_WEATHER_ENSEMBLE_SPREAD,
-            DOMAIN_WEATHER_NOAA_RESOLUTION_BASIS_RISK, DOMAIN_WEATHER_OBSERVED_EXTREME_HEADROOM,
+            DOMAIN_WEATHER_BOUNDARY_DISTANCE, DOMAIN_WEATHER_CONTRACT_PROBABILITY,
+            DOMAIN_WEATHER_FORECAST_DISPERSION, DOMAIN_WEATHER_SOURCE_BASIS_RISK,
+            DOMAIN_WEATHER_TRUTH_MATURITY_RISK,
         },
         semantics::{
-            CRYPTO_BETA_REGIME, CRYPTO_STRIKE_PRESSURE, WEATHER_CONTEXT_IDENTITY,
-            WEATHER_ENSEMBLE_PROBABILITY, WEATHER_OBSERVED_BAND_DISTANCE, contract,
+            CRYPTO_BETA_REGIME, CRYPTO_STRIKE_PRESSURE, WEATHER_BOUNDARY_DISTANCE,
+            WEATHER_CONTEXT_IDENTITY, WEATHER_CONTRACT_PROBABILITY, contract,
         },
         value::{
             FactorAlphaOrientation, FactorContextEffect, FactorDefinitionDocument, FactorDriver,
@@ -60,8 +61,8 @@ use crate::{
                 UNDERLYING_REALIZED_VOL,
             },
             domain_weather::{
-                ENSEMBLE_BIN_PROBABILITY, ENSEMBLE_SPREAD, NOAA_RESOLUTION_BASIS_RISK,
-                OBSERVED_EXTREME_HEADROOM,
+                BOUNDARY_DISTANCE, CONTRACT_PROBABILITY, FORECAST_DISPERSION, SOURCE_BASIS_RISK,
+                TRUTH_MATURITY_RISK,
             },
             market::CATEGORY,
         },
@@ -150,24 +151,24 @@ pub fn crypto_domain_factors() -> Vec<(FactorDefinitionDocument, Arc<dyn FactorC
     vec![strike_pressure_factor(), beta_regime_factor()]
 }
 
-/// The Weather vertical's four governed factors. Each consumes the typed
+/// The Weather vertical's governed factors. Each consumes the typed
 /// feature with the same stable semantic name; category routing prevents
 /// cross-vertical normalization inputs.
 #[must_use]
 pub fn weather_domain_factors() -> Vec<(FactorDefinitionDocument, Arc<dyn FactorComputer>)> {
     [
         (
-            DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY,
-            ENSEMBLE_BIN_PROBABILITY,
+            DOMAIN_WEATHER_CONTRACT_PROBABILITY,
+            CONTRACT_PROBABILITY,
             FactorOutputSemantics::OutcomeAlpha {
                 orientation: FactorAlphaOrientation::CanonicalYes,
             },
             FactorNormalization::MinMax,
-            WEATHER_ENSEMBLE_PROBABILITY,
+            WEATHER_CONTRACT_PROBABILITY,
         ),
         (
-            DOMAIN_WEATHER_ENSEMBLE_SPREAD,
-            ENSEMBLE_SPREAD,
+            DOMAIN_WEATHER_FORECAST_DISPERSION,
+            FORECAST_DISPERSION,
             FactorOutputSemantics::Context {
                 effect: FactorContextEffect::LowerIsSupportive,
             },
@@ -175,23 +176,32 @@ pub fn weather_domain_factors() -> Vec<(FactorDefinitionDocument, Arc<dyn Factor
             WEATHER_CONTEXT_IDENTITY,
         ),
         (
-            DOMAIN_WEATHER_OBSERVED_EXTREME_HEADROOM,
-            OBSERVED_EXTREME_HEADROOM,
+            DOMAIN_WEATHER_BOUNDARY_DISTANCE,
+            BOUNDARY_DISTANCE,
             // Observed distance from the governed band is outcome evidence,
             // not a universally monotone context modifier. Until the
             // projection also binds statistic, remaining maturity, and both
             // band boundaries it remains auditable but estimator-ineligible.
             FactorOutputSemantics::Diagnostic,
             FactorNormalization::Rank,
-            WEATHER_OBSERVED_BAND_DISTANCE,
+            WEATHER_BOUNDARY_DISTANCE,
         ),
         (
-            DOMAIN_WEATHER_NOAA_RESOLUTION_BASIS_RISK,
-            NOAA_RESOLUTION_BASIS_RISK,
+            DOMAIN_WEATHER_SOURCE_BASIS_RISK,
+            SOURCE_BASIS_RISK,
             FactorOutputSemantics::Context {
                 effect: FactorContextEffect::LowerIsSupportive,
             },
             FactorNormalization::Rank,
+            WEATHER_CONTEXT_IDENTITY,
+        ),
+        (
+            DOMAIN_WEATHER_TRUTH_MATURITY_RISK,
+            TRUTH_MATURITY_RISK,
+            FactorOutputSemantics::Context {
+                effect: FactorContextEffect::LowerIsSupportive,
+            },
+            FactorNormalization::MinMax,
             WEATHER_CONTEXT_IDENTITY,
         ),
     ]
@@ -577,8 +587,8 @@ mod tests {
                     UNDERLYING_REALIZED_VOL,
                 },
                 domain_weather::{
-                    ENSEMBLE_BIN_PROBABILITY, ENSEMBLE_SPREAD, NOAA_RESOLUTION_BASIS_RISK,
-                    OBSERVED_EXTREME_HEADROOM,
+                    BOUNDARY_DISTANCE, CONTRACT_PROBABILITY, FORECAST_DISPERSION,
+                    SOURCE_BASIS_RISK, TRUTH_MATURITY_RISK,
                 },
                 market::CATEGORY,
             },
@@ -653,10 +663,11 @@ mod tests {
 
     fn weather_slice() -> DomainFeatureSlice {
         let values = [
-            (ENSEMBLE_BIN_PROBABILITY, dec!(0.6)),
-            (ENSEMBLE_SPREAD, dec!(3.2)),
-            (OBSERVED_EXTREME_HEADROOM, dec!(1.5)),
-            (NOAA_RESOLUTION_BASIS_RISK, dec!(0.1)),
+            (CONTRACT_PROBABILITY, dec!(0.6)),
+            (FORECAST_DISPERSION, dec!(3.2)),
+            (BOUNDARY_DISTANCE, dec!(1.5)),
+            (SOURCE_BASIS_RISK, dec!(0.1)),
+            (TRUTH_MATURITY_RISK, dec!(1)),
         ]
         .into_iter()
         .map(|(name, value)| {
@@ -830,23 +841,29 @@ mod tests {
         let weather = weather_domain_factors();
         let expected_weather = [
             (
-                vec![ENSEMBLE_BIN_PROBABILITY, CATEGORY],
+                vec![CONTRACT_PROBABILITY, CATEGORY],
                 FactorOutputSemantics::OutcomeAlpha {
                     orientation: FactorAlphaOrientation::CanonicalYes,
                 },
             ),
             (
-                vec![ENSEMBLE_SPREAD, CATEGORY],
+                vec![FORECAST_DISPERSION, CATEGORY],
                 FactorOutputSemantics::Context {
                     effect: FactorContextEffect::LowerIsSupportive,
                 },
             ),
             (
-                vec![OBSERVED_EXTREME_HEADROOM, CATEGORY],
+                vec![BOUNDARY_DISTANCE, CATEGORY],
                 FactorOutputSemantics::Diagnostic,
             ),
             (
-                vec![NOAA_RESOLUTION_BASIS_RISK, CATEGORY],
+                vec![SOURCE_BASIS_RISK, CATEGORY],
+                FactorOutputSemantics::Context {
+                    effect: FactorContextEffect::LowerIsSupportive,
+                },
+            ),
+            (
+                vec![TRUTH_MATURITY_RISK, CATEGORY],
                 FactorOutputSemantics::Context {
                     effect: FactorContextEffect::LowerIsSupportive,
                 },
@@ -912,7 +929,7 @@ mod tests {
             }))
             .collect::<Vec<_>>();
 
-        assert_eq!(raw.len(), 6);
+        assert_eq!(raw.len(), 7);
         assert!(raw.iter().all(|factor| factor.raw_value.is_some()));
         assert!(
             raw.iter()

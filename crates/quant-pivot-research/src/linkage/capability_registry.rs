@@ -353,6 +353,12 @@ fn weather_observation_contracts(profile: &ResearchProfileRef) -> Vec<DomainCont
                     86_400,
                 ),
                 public_source(
+                    LinkageSourceRole::Resolution,
+                    "ghcnd",
+                    "GHCND:{station}:{temperature_statistic}",
+                    172_800,
+                ),
+                public_source(
                     LinkageSourceRole::Forecast,
                     "gefs",
                     "GEFS:{station}",
@@ -361,37 +367,7 @@ fn weather_observation_contracts(profile: &ResearchProfileRef) -> Vec<DomainCont
             ],
             profile,
         ),
-        DomainContractCapability {
-            family: DomainFamily::Weather,
-            contract_family: DomainContractFamily::WeatherDailyTemperature,
-            subject_scope: vec!["hko_station".to_owned()],
-            parser_template: "weather_hko_daily_temperature_v1".to_owned(),
-            source_bindings: vec![
-                public_source(
-                    LinkageSourceRole::Feature,
-                    "hko_open_data",
-                    "HKO:{station}:TMAX",
-                    129_600,
-                ),
-                public_source(
-                    LinkageSourceRole::Feature,
-                    "hko_open_data",
-                    "HKO:{station}:TMIN",
-                    129_600,
-                ),
-            ],
-            unit: DomainMeasurementUnit::Celsius,
-            precision: Decimal::new(1, 1),
-            timezone_policy: DomainTimezonePolicy::Named {
-                timezone: "Asia/Hong_Kong".to_owned(),
-            },
-            pit_available: true,
-            profile: Some(profile.clone()),
-            dependency_hashes: Vec::new(),
-            eligibility: CapabilityEligibility::Excluded {
-                reason_code: DomainCapabilityReasonCode::WeatherAmbiguousFractionalBucketOwnership,
-            },
-        },
+        hko_temperature_contract(profile),
         weather_contract(
             DomainContractFamily::WeatherPrecipitation,
             "weather_precipitation_v1",
@@ -444,8 +420,8 @@ fn weather_observation_contracts(profile: &ResearchProfileRef) -> Vec<DomainCont
         ),
         weather_contract(
             DomainContractFamily::WeatherTornado,
-            "weather_tornado_v1",
-            &["us_state", "us_region"],
+            "weather_tornado_state_v2",
+            &["us_state"],
             DomainMeasurementUnit::Count,
             Decimal::ONE,
             vec![
@@ -464,7 +440,63 @@ fn weather_observation_contracts(profile: &ResearchProfileRef) -> Vec<DomainCont
             ],
             profile,
         ),
+        weather_contract(
+            DomainContractFamily::WeatherTornado,
+            "weather_tornado_national_v2",
+            &["united_states"],
+            DomainMeasurementUnit::Count,
+            Decimal::ONE,
+            vec![
+                public_source(
+                    LinkageSourceRole::LiveEvent,
+                    "spc_storm_reports",
+                    "SPC:united_states:TORNADO",
+                    7_200,
+                ),
+                public_source(
+                    LinkageSourceRole::Resolution,
+                    "ncei_tornado_time_series",
+                    "NCEI_TORNADO_TS:united_states:TORNADO",
+                    900,
+                ),
+            ],
+            profile,
+        ),
     ]
+}
+
+fn hko_temperature_contract(profile: &ResearchProfileRef) -> DomainContractCapability {
+    DomainContractCapability {
+        family: DomainFamily::Weather,
+        contract_family: DomainContractFamily::WeatherDailyTemperature,
+        subject_scope: vec!["hko_station".to_owned()],
+        parser_template: "weather_hko_daily_temperature_v1".to_owned(),
+        source_bindings: vec![
+            public_source(
+                LinkageSourceRole::Feature,
+                "hko_open_data",
+                "HKO:{station}:TMAX",
+                129_600,
+            ),
+            public_source(
+                LinkageSourceRole::Feature,
+                "hko_open_data",
+                "HKO:{station}:TMIN",
+                129_600,
+            ),
+        ],
+        unit: DomainMeasurementUnit::Celsius,
+        precision: Decimal::new(1, 1),
+        timezone_policy: DomainTimezonePolicy::Named {
+            timezone: "Asia/Hong_Kong".to_owned(),
+        },
+        pit_available: true,
+        profile: Some(profile.clone()),
+        dependency_hashes: Vec::new(),
+        eligibility: CapabilityEligibility::Excluded {
+            reason_code: DomainCapabilityReasonCode::WeatherAmbiguousFractionalBucketOwnership,
+        },
+    }
 }
 
 fn weather_climate_contracts(profile: &ResearchProfileRef) -> Vec<DomainContractCapability> {
@@ -498,16 +530,24 @@ fn weather_climate_contracts(profile: &ResearchProfileRef) -> Vec<DomainContract
         ),
         weather_contract(
             DomainContractFamily::WeatherGlobalTemperature,
-            "weather_global_temperature_v1",
-            &["global_monthly_anomaly"],
+            "weather_global_temperature_v2",
+            &["global_annual_rank", "global_monthly_anomaly"],
             DomainMeasurementUnit::CelsiusAnomaly,
             Decimal::new(1, 2),
-            vec![public_source(
-                LinkageSourceRole::Resolution,
-                "nasa_gistemp",
-                "GISTEMP:LOTI",
-                3_888_000,
-            )],
+            vec![
+                public_source(
+                    LinkageSourceRole::Resolution,
+                    "nasa_gistemp",
+                    "GISTEMP:LOTI",
+                    3_888_000,
+                ),
+                public_source(
+                    LinkageSourceRole::Resolution,
+                    "nasa_gistemp",
+                    "GISTEMP:LOTI:ANNUAL",
+                    3_888_000,
+                ),
+            ],
             profile,
         ),
         weather_contract(
@@ -535,6 +575,24 @@ fn weather_climate_contracts(profile: &ResearchProfileRef) -> Vec<DomainContract
                     LinkageSourceRole::LiveEvent,
                     "nws_observation",
                     "NWS:{station}:GUST",
+                    1_800,
+                ),
+                public_source(
+                    LinkageSourceRole::Resolution,
+                    "nws_observation",
+                    "NWS:{station}:GUST",
+                    1_800,
+                ),
+                public_source(
+                    LinkageSourceRole::LiveEvent,
+                    "nws_observation",
+                    "NWS:{station}:SPEED",
+                    1_800,
+                ),
+                public_source(
+                    LinkageSourceRole::Resolution,
+                    "nws_observation",
+                    "NWS:{station}:SPEED",
                     1_800,
                 ),
                 public_source(

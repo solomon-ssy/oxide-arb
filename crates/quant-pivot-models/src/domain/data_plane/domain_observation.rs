@@ -134,6 +134,10 @@ pub enum DomainSourceCheckpoint {
         file_hash: ContentHash,
         unpublished_years: Vec<i32>,
     },
+    Ghcnd {
+        last_day_end: DateTime<Utc>,
+        file_hash: ContentHash,
+    },
     Gefs {
         reference_time: DateTime<Utc>,
         request_hash: ContentHash,
@@ -144,9 +148,10 @@ pub enum DomainSourceCheckpoint {
         request_hash: ContentHash,
         manifest_hash: ContentHash,
     },
-    HkoRainfall {
-        window_end: DateTime<Utc>,
-        published_at: DateTime<Utc>,
+    HkoDailyRainfall {
+        day_end: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        file_hash: ContentHash,
         report_hash: ContentHash,
     },
     HkoDailyTemperature {
@@ -183,6 +188,11 @@ pub enum DomainSourceCheckpoint {
         collection_date: NaiveDate,
         file_hash: ContentHash,
     },
+    NceiTornadoTimeSeries {
+        last_period_end: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        file_hash: ContentHash,
+    },
     NhcAdvisory {
         issuance: DateTime<Utc>,
         storm_id: String,
@@ -195,14 +205,19 @@ pub enum DomainSourceCheckpoint {
         file_hash: ContentHash,
     },
     NasaGistemp {
-        last_month_end: DateTime<Utc>,
+        last_period_end: DateTime<Utc>,
         available_at: DateTime<Utc>,
         file_hash: ContentHash,
     },
-    NsidcSeaIce {
+    NsidcDailySeaIce {
         last_day_end: DateTime<Utc>,
         available_at: DateTime<Utc>,
         file_hash: ContentHash,
+    },
+    NsidcMonthlySeaIce {
+        last_month_end: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+        partition_set_hash: ContentHash,
     },
     NwsObservation {
         observed_at: DateTime<Utc>,
@@ -229,6 +244,9 @@ impl DomainSourceCheckpoint {
                 observation_time, ..
             } => *observation_time,
             Self::Ghcnh { last_hour, .. } => *last_hour,
+            Self::Ghcnd { last_day_end, .. } | Self::NsidcDailySeaIce { last_day_end, .. } => {
+                *last_day_end
+            }
             Self::Gefs { reference_time, .. } | Self::AirNowPm25Forecast { reference_time, .. } => {
                 *reference_time
             }
@@ -245,8 +263,9 @@ impl DomainSourceCheckpoint {
                 completed_reference_time,
                 ..
             } => *completed_reference_time,
-            Self::HkoRainfall { window_end, .. } => *window_end,
-            Self::HkoDailyTemperature { day_end, .. } => *day_end,
+            Self::HkoDailyRainfall { day_end, .. } | Self::HkoDailyTemperature { day_end, .. } => {
+                *day_end
+            }
             Self::AirNowPm25Area { valid_time, .. } => *valid_time,
             Self::SpcTornado {
                 report_window_end, ..
@@ -254,12 +273,17 @@ impl DomainSourceCheckpoint {
             | Self::NceiStormEvents {
                 report_window_end, ..
             } => *report_window_end,
+            Self::NceiTornadoTimeSeries {
+                last_period_end, ..
+            }
+            | Self::NasaGistemp {
+                last_period_end, ..
+            } => *last_period_end,
             Self::NhcAdvisory { issuance, .. } => *issuance,
             Self::NhcHurdat2 {
                 last_observation, ..
             } => *last_observation,
-            Self::NasaGistemp { last_month_end, .. } => *last_month_end,
-            Self::NsidcSeaIce { last_day_end, .. } => *last_day_end,
+            Self::NsidcMonthlySeaIce { last_month_end, .. } => *last_month_end,
             Self::NwsObservation { observed_at, .. } => *observed_at,
         }
     }
@@ -272,12 +296,16 @@ impl DomainSourceCheckpoint {
     pub const fn freshness_time(&self, cursor_updated_at: DateTime<Utc>) -> DateTime<Utc> {
         match self {
             Self::Ghcnh { .. }
+            | Self::Ghcnd { .. }
             | Self::GefsBackfill { .. }
+            | Self::HkoDailyRainfall { .. }
             | Self::HkoDailyTemperature { .. }
             | Self::NceiStormEvents { .. }
+            | Self::NceiTornadoTimeSeries { .. }
             | Self::NhcHurdat2 { .. }
             | Self::NasaGistemp { .. }
-            | Self::NsidcSeaIce { .. } => cursor_updated_at,
+            | Self::NsidcDailySeaIce { .. }
+            | Self::NsidcMonthlySeaIce { .. } => cursor_updated_at,
             _ => self.event_time(),
         }
     }

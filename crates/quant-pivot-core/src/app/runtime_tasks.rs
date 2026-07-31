@@ -8,7 +8,7 @@ use quant_pivot_api::{
     exchange::ExchangeLogClient,
     rtds::PolymarketRtdsSource,
     weather::{
-        AviationWeatherSource, GefsSource, GhcnhSource, airnow::AirNowSource,
+        AviationWeatherSource, GefsSource, GhcnhSource, airnow::AirNowSource, ghcnd::GhcndSource,
         gistemp::NasaGistempSource, hko::HkoOpenDataSource, nhc::NhcSource,
         nsidc::NsidcSeaIceSource, nws::NwsObservationSource, tornado::TornadoSource,
     },
@@ -63,6 +63,7 @@ struct ConnectedDomainSources {
     rtds: Option<Arc<PolymarketRtdsSource>>,
     aviation: Option<Arc<AviationWeatherSource>>,
     ghcnh: Option<Arc<GhcnhSource>>,
+    ghcnd: Option<Arc<GhcndSource>>,
     gefs: Option<Arc<GefsSource>>,
     weather_public: ConnectedPublicWeatherSources,
 }
@@ -236,11 +237,19 @@ impl AppContext {
                 })
                 .ok()
         }).flatten();
-        let ghcnh = sources.ghcnh.enabled.then(|| {
+        let ghcn_hourly = sources.ghcnh.enabled.then(|| {
             GhcnhSource::connect(sources.ghcnh.clone())
                 .map(Arc::new)
                 .map_err(|error| {
                     tracing::error!(%error, "GHCNh unavailable; Weather calibration remains blocked");
+                })
+                .ok()
+        }).flatten();
+        let ghcn_daily = sources.ghcnd.enabled.then(|| {
+            GhcndSource::connect(sources.ghcnd.clone())
+                .map(Arc::new)
+                .map_err(|error| {
+                    tracing::error!(%error, "GHCNd unavailable; Weather daily labels remain blocked");
                 })
                 .ok()
         }).flatten();
@@ -260,7 +269,8 @@ impl AppContext {
             chainlink,
             rtds,
             aviation,
-            ghcnh,
+            ghcnh: ghcn_hourly,
+            ghcnd: ghcn_daily,
             gefs,
             weather_public,
         }
@@ -377,6 +387,7 @@ impl AppContext {
             rtds,
             aviation,
             ghcnh,
+            ghcnd,
             gefs,
             weather_public:
                 ConnectedPublicWeatherSources {
@@ -462,9 +473,11 @@ impl AppContext {
             runtime_config: Arc::clone(&self.governance.runtime_config),
             aviation,
             ghcnh,
+            ghcnd,
             gefs,
             aviation_config: sources.aviation_weather.clone(),
             ghcnh_config: sources.ghcnh.clone(),
+            ghcnd_config: sources.ghcnd.clone(),
             gefs_config: sources.gefs.clone(),
             station_profiles: sources.weather_stations.clone(),
         }));

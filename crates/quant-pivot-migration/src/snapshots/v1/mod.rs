@@ -21,6 +21,7 @@ pub mod policy_approval;
 pub mod policy_profile_artifact;
 pub mod policy_revision;
 pub mod quant_account_snapshot;
+pub mod quant_attribution_artifact;
 pub mod quant_backtest_path_set;
 pub mod quant_backtest_report;
 pub mod quant_basis_alert;
@@ -38,7 +39,10 @@ pub mod quant_entry_condition_evaluation_outbox;
 pub mod quant_entry_condition_instance;
 pub mod quant_equity_snapshot;
 pub mod quant_execution_account;
+pub mod quant_execution_attempt_outcome;
+pub mod quant_execution_attempt_reconciliation_task;
 pub mod quant_execution_order;
+pub mod quant_execution_rollup_reconciliation_task;
 pub mod quant_execution_trade_ref;
 pub mod quant_execution_transaction_ref;
 pub mod quant_factor_definition;
@@ -52,11 +56,14 @@ pub mod quant_feedback_cycle;
 pub mod quant_feedback_evaluation_use;
 pub mod quant_feedback_event_outbox;
 pub mod quant_feedback_promotion_permit;
+pub mod quant_feedback_scheduler_state;
 pub mod quant_feedback_stage_event;
+pub mod quant_feedback_trigger_event;
 pub mod quant_market_linkage;
 pub mod quant_market_linkage_source;
 pub mod quant_market_selection;
 pub mod quant_market_selection_member;
+pub mod quant_model_candidate_manifest;
 pub mod quant_model_comparison_report;
 pub mod quant_model_governance_audit;
 pub mod quant_model_run;
@@ -66,7 +73,8 @@ pub mod quant_order_intent;
 pub mod quant_portfolio_plan;
 pub mod quant_position;
 pub mod quant_recommendation;
-pub mod quant_recommendation_execution_outcome;
+pub mod quant_recommendation_execution_rollup;
+pub mod quant_recommendation_execution_rollup_attempt;
 pub mod quant_recommendation_report;
 pub mod quant_recommendation_resolution_outcome;
 pub mod quant_reconciliation;
@@ -77,6 +85,9 @@ pub mod quant_report_schedule_gap;
 pub mod quant_report_schedule_state;
 pub mod quant_research_job;
 pub mod quant_research_readiness_evidence;
+pub mod quant_resolution_observation_inbox;
+pub mod quant_resolution_observation_projection;
+pub mod quant_resolution_outcome_reconciliation_task;
 pub mod quant_settlement_authorization;
 pub mod quant_settlement_chain_submission;
 pub mod quant_settlement_external_cursor;
@@ -129,6 +140,7 @@ pub const TABLES: &[&str] = &[
     "policy_profile_artifact",
     "policy_revision",
     "quant_account_snapshot",
+    "quant_attribution_artifact",
     "quant_backtest_path_set",
     "quant_backtest_report",
     "quant_basis_alert",
@@ -146,6 +158,7 @@ pub const TABLES: &[&str] = &[
     "quant_entry_condition_instance",
     "quant_equity_snapshot",
     "quant_execution_account",
+    "quant_execution_attempt_reconciliation_task",
     "quant_execution_order",
     "quant_execution_trade_ref",
     "quant_execution_transaction_ref",
@@ -155,7 +168,9 @@ pub const TABLES: &[&str] = &[
     "quant_feedback_evaluation_use",
     "quant_feedback_event_outbox",
     "quant_feedback_promotion_permit",
+    "quant_feedback_scheduler_state",
     "quant_feedback_stage_event",
+    "quant_feedback_trigger_event",
     "quant_feature_parity_candidate",
     "quant_feature_parity_run",
     "quant_feature_parity_state",
@@ -165,6 +180,7 @@ pub const TABLES: &[&str] = &[
     "quant_market_linkage_source",
     "quant_market_selection",
     "quant_market_selection_member",
+    "quant_model_candidate_manifest",
     "quant_model_comparison_report",
     "quant_model_governance_audit",
     "quant_model_run",
@@ -174,10 +190,16 @@ pub const TABLES: &[&str] = &[
     "quant_portfolio_plan",
     "quant_position",
     "quant_recommendation",
-    "quant_recommendation_execution_outcome",
+    "quant_execution_attempt_outcome",
+    "quant_execution_rollup_reconciliation_task",
+    "quant_recommendation_execution_rollup",
+    "quant_recommendation_execution_rollup_attempt",
     "quant_recommendation_resolution_outcome",
     "quant_recommendation_report",
     "quant_reconciliation",
+    "quant_resolution_observation_inbox",
+    "quant_resolution_observation_projection",
+    "quant_resolution_outcome_reconciliation_task",
     "quant_report_data_quality_snapshot",
     "quant_report_fact_delivery",
     "quant_report_run",
@@ -216,6 +238,8 @@ pub const TABLES: &[&str] = &[
 pub const ENUMS: &[&str] = &[
     "qp_account_source",
     "qp_approval_status",
+    "qp_attribution_artifact_kind",
+    "qp_attribution_cohort",
     "qp_calibration_kind",
     "qp_capital_allocation_state",
     "qp_catalog_change_type",
@@ -289,17 +313,18 @@ pub const ENUMS: &[&str] = &[
     "qp_profile_artifact_kind",
     "qp_policy_revision_status",
     "qp_position_ledger_state",
-    "qp_publication_status",
     "qp_quant_runtime_mode",
     "qp_redeem_policy",
     "qp_research_evaluation_track",
-    "qp_recommendation_execution_no_fill_reason",
-    "qp_recommendation_execution_terminal_state",
+    "qp_execution_attempt_no_fill_reason",
+    "qp_execution_attempt_terminal_state",
     "qp_recommendation_resolution_kind",
     "qp_recommendation_report_status",
     "qp_recommendation_status",
     "qp_reconciliation_result",
     "qp_report_fact_delivery_status",
+    "qp_resolution_projection_status",
+    "qp_outcome_reconciliation_task_status",
     "qp_report_kind",
     "qp_report_run_status",
     "qp_report_run_terminal_reason",
@@ -366,6 +391,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("policy_profile_artifact.rs"),
     include_bytes!("policy_revision.rs"),
     include_bytes!("quant_account_snapshot.rs"),
+    include_bytes!("quant_attribution_artifact.rs"),
     include_bytes!("quant_backtest_path_set.rs"),
     include_bytes!("quant_backtest_report.rs"),
     include_bytes!("quant_basis_alert.rs"),
@@ -383,6 +409,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_entry_condition_instance.rs"),
     include_bytes!("quant_equity_snapshot.rs"),
     include_bytes!("quant_execution_account.rs"),
+    include_bytes!("quant_execution_attempt_reconciliation_task.rs"),
     include_bytes!("quant_execution_order.rs"),
     include_bytes!("quant_execution_trade_ref.rs"),
     include_bytes!("quant_execution_transaction_ref.rs"),
@@ -392,7 +419,9 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_feedback_evaluation_use.rs"),
     include_bytes!("quant_feedback_event_outbox.rs"),
     include_bytes!("quant_feedback_promotion_permit.rs"),
+    include_bytes!("quant_feedback_scheduler_state.rs"),
     include_bytes!("quant_feedback_stage_event.rs"),
+    include_bytes!("quant_feedback_trigger_event.rs"),
     include_bytes!("quant_feature_parity_candidate.rs"),
     include_bytes!("quant_feature_parity_run.rs"),
     include_bytes!("quant_feature_parity_state.rs"),
@@ -402,6 +431,7 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_market_linkage_source.rs"),
     include_bytes!("quant_market_selection.rs"),
     include_bytes!("quant_market_selection_member.rs"),
+    include_bytes!("quant_model_candidate_manifest.rs"),
     include_bytes!("quant_model_comparison_report.rs"),
     include_bytes!("quant_model_governance_audit.rs"),
     include_bytes!("quant_model_run.rs"),
@@ -411,10 +441,16 @@ pub const ARTIFACTS: &[&[u8]] = &[
     include_bytes!("quant_portfolio_plan.rs"),
     include_bytes!("quant_position.rs"),
     include_bytes!("quant_recommendation.rs"),
-    include_bytes!("quant_recommendation_execution_outcome.rs"),
+    include_bytes!("quant_execution_attempt_outcome.rs"),
+    include_bytes!("quant_execution_rollup_reconciliation_task.rs"),
+    include_bytes!("quant_recommendation_execution_rollup.rs"),
+    include_bytes!("quant_recommendation_execution_rollup_attempt.rs"),
     include_bytes!("quant_recommendation_report.rs"),
     include_bytes!("quant_recommendation_resolution_outcome.rs"),
     include_bytes!("quant_reconciliation.rs"),
+    include_bytes!("quant_resolution_observation_inbox.rs"),
+    include_bytes!("quant_resolution_observation_projection.rs"),
+    include_bytes!("quant_resolution_outcome_reconciliation_task.rs"),
     include_bytes!("quant_report_data_quality_snapshot.rs"),
     include_bytes!("quant_report_fact_delivery.rs"),
     include_bytes!("quant_report_run.rs"),

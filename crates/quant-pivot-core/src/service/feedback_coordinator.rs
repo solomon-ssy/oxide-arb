@@ -5,7 +5,7 @@
 //! completion latency; bounded polling recovers every lost wake and every
 //! process restart.
 
-use std::{sync::Arc, time::Duration};
+use std::{cmp, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -18,9 +18,9 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     config::ResearchJobsConfig,
     domain::quant::{
-        FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackStageEventInfo, FeedbackStageEventInput,
-        FeedbackStageJobIdentity, NewDriftReport, NewFeedbackStageEvent, NewResearchJob,
-        ResearchJobInfo,
+        FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackSchedulerStateInfo,
+        FeedbackStageEventInfo, FeedbackStageEventInput, FeedbackStageJobIdentity, NewDriftReport,
+        NewFeedbackStageEvent, NewResearchJob, ResearchJobInfo,
     },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
@@ -32,8 +32,11 @@ use quant_pivot_models::{
     types::{ArtifactUri, ContentHash, FeedbackCycleId, ResearchJobError, ResearchJobId},
 };
 use quant_pivot_repository::traits::{
-    FeedbackCycleCasOutcome, FeedbackCycleClaim, FeedbackCycleClaimMode, FeedbackCycleLeaseGuard,
-    FeedbackCycleRepository, FeedbackStageWriteOutcome, ResearchJobEnqueueOutcome,
+    ExecutionAttemptOutcomeRepository, FeedbackCycleCasOutcome, FeedbackCycleClaim,
+    FeedbackCycleClaimMode, FeedbackCycleLeaseGuard, FeedbackCycleRepository,
+    FeedbackSchedulerRepository, FeedbackStageWriteOutcome,
+    RecommendationExecutionRollupRepository, ResearchJobEnqueueOutcome,
+    ResolutionObservationRepository,
 };
 use tokio::{
     sync::watch::{self, Receiver, Sender},
@@ -376,6 +379,10 @@ pub trait FeedbackStagePort: Send + Sync {
 /// Dependencies for the one resident feedback coordinator.
 pub struct FeedbackCoordinatorDeps {
     pub cycles: Arc<dyn FeedbackCycleRepository>,
+    pub scheduler: Arc<dyn FeedbackSchedulerRepository>,
+    pub resolutions: Arc<dyn ResolutionObservationRepository>,
+    pub attempts: Arc<dyn ExecutionAttemptOutcomeRepository>,
+    pub rollups: Arc<dyn RecommendationExecutionRollupRepository>,
     pub jobs: ResearchJobEngine,
     pub stages: Arc<dyn FeedbackStagePort>,
     pub metrics: Arc<MetricsHub>,
@@ -387,6 +394,10 @@ pub struct FeedbackCoordinatorDeps {
 #[derive(Clone)]
 pub struct FeedbackCoordinator {
     cycles: Arc<dyn FeedbackCycleRepository>,
+    scheduler: Arc<dyn FeedbackSchedulerRepository>,
+    resolutions: Arc<dyn ResolutionObservationRepository>,
+    attempts: Arc<dyn ExecutionAttemptOutcomeRepository>,
+    rollups: Arc<dyn RecommendationExecutionRollupRepository>,
     jobs: ResearchJobEngine,
     stages: Arc<dyn FeedbackStagePort>,
     wake: FeedbackCoordinatorWake,
@@ -402,6 +413,10 @@ impl FeedbackCoordinator {
         let wake = deps.jobs.feedback_wake();
         Self {
             cycles: deps.cycles,
+            scheduler: deps.scheduler,
+            resolutions: deps.resolutions,
+            attempts: deps.attempts,
+            rollups: deps.rollups,
             jobs: deps.jobs,
             stages: deps.stages,
             wake,
@@ -451,6 +466,7 @@ impl FeedbackCoordinator {
                 }
             }
             self.refresh_queue().await;
+            self.refresh_operations().await;
             if shutdown.is_cancelled() {
                 break;
             }
@@ -580,6 +596,7 @@ impl FeedbackCoordinator {
                         event_sequence: timeline.next_sequence,
                         stage,
                         event_kind: FeedbackStageEventKind::LeaseRecovered,
+                        trigger_family: None,
                         research_job_id: Some(job_id),
                         actor: None,
                         reason_code: Some(CYCLE_RECOVERED_REASON.to_owned()),
@@ -701,6 +718,7 @@ impl FeedbackCoordinator {
                 event_sequence: timeline.next_sequence,
                 stage,
                 event_kind: FeedbackStageEventKind::Started,
+                trigger_family: None,
                 research_job_id: Some(job_id),
                 actor: None,
                 reason_code: None,
@@ -750,6 +768,7 @@ impl FeedbackCoordinator {
                     event_sequence: timeline.next_sequence,
                     stage,
                     event_kind: FeedbackStageEventKind::Succeeded,
+                    trigger_family: None,
                     research_job_id: Some(job_id),
                     actor: None,
                     reason_code: None,
@@ -774,6 +793,7 @@ impl FeedbackCoordinator {
                     event_sequence: timeline.next_sequence,
                     stage,
                     event_kind,
+                    trigger_family: None,
                     research_job_id: Some(job_id),
                     actor: None,
                     reason_code: Some(reason_code),
@@ -859,6 +879,7 @@ impl FeedbackCoordinator {
             event_sequence,
             stage,
             event_kind: FeedbackStageEventKind::JobLinked,
+            trigger_family: None,
             research_job_id: Some(job.job_id),
             actor: None,
             reason_code: None,
@@ -982,6 +1003,125 @@ impl FeedbackCoordinator {
                     .record_research_heartbeat("feedback_queue", "storage_error");
                 warn!(%error, "feedback-cycle queue snapshot failed");
             }
+        }
+    }
+
+    async fn refresh_operations(&self) {
+        let database_time = match self.cycles.database_time().await {
+            Ok(database_time) => database_time,
+            Err(error) => {
+                self.metrics
+                    .record_research_heartbeat("feedback_operations_clock", "storage_error");
+                warn!(%error, "feedback operations monitor could not read database time");
+                return;
+            }
+        };
+        let snapshot = tokio::try_join!(
+            self.resolutions.barrier(database_time),
+            self.attempts.barrier(database_time),
+            self.rollups.barrier(database_time),
+            self.scheduler.list_states(),
+        );
+        let (resolution, attempts, rollups, scheduler) = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.metrics
+                    .record_research_heartbeat("feedback_operations", "storage_error");
+                warn!(%error, "feedback operations snapshot failed");
+                return;
+            }
+        };
+        let inbox_age_secs = resolution
+            .oldest_unresolved_at
+            .map_or(0, |oldest| Self::database_lag(database_time, oldest));
+        self.metrics.set_feedback_truth(
+            inbox_age_secs,
+            resolution.quarantined_count,
+            Self::database_lag(database_time, resolution.verified_through),
+            Self::database_lag(database_time, attempts.sealed_through),
+            Self::database_lag(database_time, rollups.sealed_through),
+        );
+        let (overdue_profiles, max_overdue_secs) =
+            Self::scheduler_overdue(database_time, &scheduler);
+        self.metrics
+            .set_scheduler_overdue(overdue_profiles, max_overdue_secs);
+        if resolution.quarantined_count > 0 {
+            self.dispatch_ops_alert(Alert::new(
+                "feedback-resolution-quarantine",
+                AlertLevel::Critical,
+                AlertCategory::SchedulerHealth,
+                AlertSource::Scheduler,
+                "Resolution observations are quarantined",
+                format!(
+                    "quarantined={} unresolved={} oldest_age_secs={}; TruthFreeze remains fail-closed",
+                    resolution.quarantined_count, resolution.unresolved_count, inbox_age_secs
+                ),
+                database_time,
+            ))
+            .await;
+        }
+        if overdue_profiles > 0 {
+            self.dispatch_ops_alert(Alert::new(
+                "feedback-scheduler-overdue",
+                AlertLevel::Warning,
+                AlertCategory::SchedulerHealth,
+                AlertSource::Scheduler,
+                "Automatic retraining scheduler is overdue",
+                format!(
+                    "overdue_profiles={overdue_profiles} max_overdue_secs={max_overdue_secs}; durable scheduler state remains authoritative"
+                ),
+                database_time,
+            ))
+            .await;
+        }
+    }
+
+    fn database_lag(database_time: DateTime<Utc>, frontier: DateTime<Utc>) -> u64 {
+        database_time
+            .signed_duration_since(frontier)
+            .to_std()
+            .map_or(0, |duration| duration.as_secs())
+    }
+
+    fn scheduler_overdue(
+        database_time: DateTime<Utc>,
+        states: &[FeedbackSchedulerStateInfo],
+    ) -> (u64, u64) {
+        let mut profiles = 0_u64;
+        let mut max_overdue_secs = 0_u64;
+        for state in states {
+            if state.paused
+                || state
+                    .lease_expires_at
+                    .is_some_and(|expires_at| expires_at > database_time)
+            {
+                continue;
+            }
+            let effective_due = [state.cooldown_until, state.retry_at]
+                .into_iter()
+                .flatten()
+                .fold(state.next_due_at, cmp::max);
+            if effective_due >= database_time {
+                continue;
+            }
+            profiles = profiles.saturating_add(1);
+            max_overdue_secs =
+                max_overdue_secs.max(Self::database_lag(database_time, effective_due));
+        }
+        (profiles, max_overdue_secs)
+    }
+
+    async fn dispatch_ops_alert(&self, alert: Alert) {
+        let alert = alert
+            .with_dedupe_secs(self.config.alert_dedupe_secs())
+            .with_affects_trading(false)
+            .with_visible_toast(true);
+        if tokio::time::timeout(self.config.alert_timeout(), self.alerts.dispatch(alert))
+            .await
+            .is_err()
+        {
+            self.metrics
+                .record_research_heartbeat("feedback_operations_alert", "timeout");
         }
     }
 

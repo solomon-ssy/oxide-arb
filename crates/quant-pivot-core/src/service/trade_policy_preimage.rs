@@ -8,7 +8,7 @@ use quant_pivot_models::{
         ModelSpecInfo, ModelVersionInfo, TradePolicyArtifactInfo, TrainingDatasetInfo,
         TrainingDatasetMaterialization,
     },
-    enums::quant::{DatasetPurpose, PublicationStatus, TradePolicyStatus, TrainingDatasetStatus},
+    enums::quant::{DatasetPurpose, TradePolicyStatus, TrainingDatasetStatus},
     types::{
         ContentHash, ResearchProfileArtifact, TradePolicyArtifactId,
         model_serving::{ModelServingPolicySnapshotBinding, ModelServingTradePolicyBinding},
@@ -192,13 +192,10 @@ impl TradePolicyCrossBindings<'_> {
                 ),
             }
         })?;
-        if subject_contract != serving
-            || self.subject.publication_status != PublicationStatus::Published
-            || self.subject.model_version_id != fit.model_version_id
-        {
+        if subject_contract != serving || self.subject.model_version_id != fit.model_version_id {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
-                    "trade-policy {} model subject is not the exact Published serving artifact",
+                    "trade-policy {} model subject is not the exact route-bound serving artifact",
                     self.policy.artifact_id
                 ),
             }

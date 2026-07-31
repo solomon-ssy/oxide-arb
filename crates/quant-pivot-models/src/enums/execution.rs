@@ -216,7 +216,7 @@ wire_enum! {
         ReportStatus => "report_status",
         RuntimeMode => "runtime_mode",
         SettlementRecovery => "settlement_recovery",
-        ModelPublication => "model_publication",
+        ModelRouteBinding => "model_route_binding",
         DataQuality => "data_quality",
         BookFreshness => "book_freshness",
         VenueMetadata => "venue_metadata",

@@ -3,16 +3,16 @@
 use sea_orm::entity::prelude::*;
 
 use super::sea_orm_active_enums::{
-    QpExecutionOrderState, QpExitReason, QpPositionLedgerState, QpQuantRuntimeMode,
-    QpRecommendationExecutionNoFillReason, QpRecommendationExecutionTerminalState,
+    QpExecutionAttemptNoFillReason, QpExecutionAttemptTerminalState, QpExecutionOrderState,
+    QpExitReason, QpPositionLedgerState, QpQuantRuntimeMode,
 };
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "quant_recommendation_execution_outcome")]
+#[sea_orm(table_name = "quant_execution_attempt_outcome")]
 pub struct Model {
-    #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_id: Uuid,
+    #[sea_orm(primary_key, auto_increment = false)]
     pub order_intent_id: Uuid,
     pub entry_execution_order_id: Uuid,
     pub entry_reconciliation_id: Uuid,
@@ -24,8 +24,8 @@ pub struct Model {
     pub token_id: String,
     #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode")"#)]
     pub runtime_mode: QpQuantRuntimeMode,
-    pub terminal_state: QpRecommendationExecutionTerminalState,
-    pub no_fill_reason: Option<QpRecommendationExecutionNoFillReason>,
+    pub terminal_state: QpExecutionAttemptTerminalState,
+    pub no_fill_reason: Option<QpExecutionAttemptNoFillReason>,
     pub entry_order_state: QpExecutionOrderState,
     #[sea_orm(column_type = "Decimal(Some((38, 18)))")]
     pub requested_shares: Decimal,
@@ -49,10 +49,6 @@ pub struct Model {
     pub settlement_payout_usd: Option<Decimal>,
     #[sea_orm(column_type = "Decimal(Some((28, 8)))")]
     pub realized_pnl_usd: Option<Decimal>,
-    #[sea_orm(column_type = "Decimal(Some((10, 4)))")]
-    pub max_adverse_excursion_bps: Option<Decimal>,
-    #[sea_orm(column_type = "Decimal(Some((10, 4)))")]
-    pub max_favorable_excursion_bps: Option<Decimal>,
     pub terminal_at: DateTimeWithTimeZone,
     pub source_observed_at: DateTimeWithTimeZone,
     pub available_at: DateTimeWithTimeZone,

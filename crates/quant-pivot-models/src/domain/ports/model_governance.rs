@@ -1,26 +1,28 @@
-//! Admin port for the offline model-governance closure.
+//! Port for immutable model evidence and candidate validation.
 //!
-//! The dependency-inversion boundary between an operator-facing caller (HTTP
-//! routes, jobs, tests) and the core governance service. The [`GovernanceActor`]
-//! is recorded in the audit trail; Casbin role enforcement is applied at the HTTP
-//! layer via governed publication policies.
+//! The dependency-inversion boundary between feedback jobs, read-only
+//! diagnostics, tests, and the core governance service.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     domain::{
-        api::{
-            BindCalibrationRequest, BindPublishPathSetRequest, GatePreviewIntent,
-            QualityGateReportView,
-        },
+        api::{GatePreviewIntent, QualityGateReportView},
         quant::ModelVersionInfo,
     },
-    types::{BacktestReportId, ModelVersionId, RoleCode, UserId},
+    enums::quant::DownsideSource,
+    types::{
+        BacktestPathSetId, BacktestReportId, CalibrationArtifactId, ContentHash, ModelVersionId,
+        RoleCode, UserId, model_quality::QualityGateReport,
+    },
 };
 
 /// Who initiated a governance action. Recorded for audit provenance.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GovernanceActor {
     /// Authenticated internal user identity; absent only for system automation.
     pub user_id: Option<UserId>,
@@ -51,49 +53,51 @@ impl GovernanceActor {
     }
 }
 
-/// Service input to publish a candidate / shadow model version.
+/// Exact immutable CPCV evidence evaluated by the sole candidate quality gate.
+///
+/// The path set is carried by the feedback job instead of being rebound onto a
+/// mutable model-version row. The governance service verifies both ownership
+/// and content hash before evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateQualityGateEvidence {
+    Cpcv {
+        path_set_id: BacktestPathSetId,
+        path_set_hash: ContentHash,
+    },
+    CalibrationInsufficient,
+}
+
+/// Exact CPCV and backtest identities evaluated for first-route bootstrap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootstrapQualityGateInput {
+    pub candidate: CandidateQualityGateEvidence,
+    pub backtest_report_id: BacktestReportId,
+    pub backtest_report_hash: ContentHash,
+}
+
+/// Exact quality and backtest evidence returned for first-route bootstrap.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublishModelCommand {
-    /// The candidate / shadow version to publish.
-    pub model_version_id: ModelVersionId,
-    /// Operator reason (audited).
+pub struct BootstrapQualityGateEvidence {
+    pub quality_gate_report: QualityGateReport,
+    pub backtest_report_id: BacktestReportId,
+    pub backtest_report_hash: ContentHash,
+}
+
+/// Inputs that seal a new calibrated model artifact from an immutable source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalibratedModelSealCommand {
+    pub calibrator_ref: CalibrationArtifactId,
+    pub downside_source: DownsideSource,
     pub reason: String,
 }
 
-/// Service input to retire a published model version without restoring a predecessor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RetireModelCommand {
-    /// The published version to retire.
-    pub model_version_id: ModelVersionId,
-    /// Operator reason (audited).
-    pub reason: String,
-}
-
-/// Governance orchestration boundary for artifact publication lifecycle,
+/// Governance orchestration boundary for immutable model evidence,
 /// implemented in `quant-pivot-core` and injected into `AppContext`.
 #[async_trait]
 pub trait ModelGovernancePort: Send + Sync {
-    /// Publish a candidate / shadow version: enforce the quality gate + shadow
-    /// stability, persist the gate report, flip the status to `Published`, and
-    /// write a governance audit row. Fails if any gate is not cleared.
-    async fn publish(
-        &self,
-        command: PublishModelCommand,
-        actor: GovernanceActor,
-    ) -> QuantResult<ModelVersionInfo>;
-
-    /// Retire a published version only after all `ModelRouting` references have
-    /// moved away from it.
-    async fn retire(
-        &self,
-        command: RetireModelCommand,
-        actor: GovernanceActor,
-    ) -> QuantResult<ModelVersionInfo>;
-
-    /// Evaluate the quality gate for a version as a read-only dry-run — the same
-    /// evaluator `publish` uses, but with no persistence and no state change.
-    /// Drives the SPA publish-readiness scorecard. `backtest_report_id` selects
-    /// a specific frozen report; `None` uses the version's most recent one.
+    /// Evaluate the quality gate for a version as a read-only dry-run.
+    /// Drives the SPA quality scorecard. `backtest_report_id` selects a specific
+    /// frozen report; `None` uses the version's most recent one.
     async fn preview_gate(
         &self,
         model_version_id: &ModelVersionId,
@@ -101,21 +105,29 @@ pub trait ModelGovernancePort: Send + Sync {
         backtest_report_id: Option<&BacktestReportId>,
     ) -> QuantResult<QualityGateReportView>;
 
-    /// Bind a `model_score` calibrator to a candidate version, minting a new
-    /// candidate whose `return_model` is `Calibrated { … }`.
-    async fn bind_calibration(
+    /// Evaluate the sole candidate gate at a database-authoritative timestamp.
+    async fn evaluate_candidate(
         &self,
         model_version_id: &ModelVersionId,
-        request: BindCalibrationRequest,
-        actor: GovernanceActor,
-    ) -> QuantResult<ModelVersionInfo>;
+        evidence: CandidateQualityGateEvidence,
+        evaluated_at: DateTime<Utc>,
+    ) -> QuantResult<QualityGateReport>;
 
-    /// Bind the CPCV path set that publish/promote quality gates must evaluate.
-    /// The path set must belong to this model version. Candidate/Shadow only.
-    async fn bind_publish_path_set(
+    /// Evaluate a first-route candidate against one exact latest backtest and
+    /// return the immutable source identity alongside the sole gate report.
+    async fn evaluate_bootstrap(
         &self,
         model_version_id: &ModelVersionId,
-        request: BindPublishPathSetRequest,
+        input: BootstrapQualityGateInput,
+        evaluated_at: DateTime<Utc>,
+    ) -> QuantResult<BootstrapQualityGateEvidence>;
+
+    /// Derive a new immutable model version whose `return_model` is
+    /// `Calibrated { … }`. The source version is never rebound or mutated.
+    async fn seal_calibrated_model(
+        &self,
+        model_version_id: &ModelVersionId,
+        command: CalibratedModelSealCommand,
         actor: GovernanceActor,
     ) -> QuantResult<ModelVersionInfo>;
 }

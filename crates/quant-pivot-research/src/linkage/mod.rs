@@ -23,6 +23,7 @@ pub mod oracle;
 pub mod ruleset;
 pub mod tier0_slug;
 pub mod tier1_template;
+pub mod weather_contracts;
 pub mod weather_daily_temperature;
 
 use chrono::{DateTime, Utc};
@@ -33,17 +34,22 @@ pub use extractor::{
 pub use manual_evidence::validate_manual_override;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
+    config::WeatherVerticalBindingsConfig,
     domain::quant::{
-        LinkageOutcome, LinkageSourceMetadata, LinkageUnresolvedReason, MarketSubject,
-        ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
+        CryptoSubject, GlobalTemperatureOutcome, LinkageOutcome, LinkageSourceMetadata,
+        LinkageUnresolvedReason, MarketSubject, ResolutionOracle, ResolvedBinding,
+        ResolvedSourceBinding, SeaIceHemisphere, SeaIceProduct, WeatherGlobalTemperatureSubject,
+        WeatherSeaIceSubject, WeatherTornadoFinalization, WeatherWindExtremeSubject,
+        WeatherWindStatistic,
     },
     enums::domain::{LinkageSourceRole, ResolverTier},
     hashing::CanonicalDigest,
-    types::{DomainInstrumentKey, DomainSourceId, Probability, ResolverVersion},
+    types::{DomainInstrumentKey, DomainSourceId, IcaoStation, Probability, ResolverVersion},
 };
 pub use ruleset::{AssetRule, DOMAIN_RESOLVER_VERSION, find_alias, rule_for_alias, rules};
 pub use tier0_slug::Tier0SlugExtractor;
 pub use tier1_template::CryptoSubjectParser;
+pub use weather_contracts::WeatherContractExtractor;
 pub use weather_daily_temperature::{
     WeatherDailyTemperatureExtractor, WeatherDecisionGroupMember, WeatherDecisionGroupValidation,
     WeatherStationRegistry, validate_weather_decision_group, weather_station_profile_hash,
@@ -72,11 +78,15 @@ pub struct LayeredResolver {
 impl LayeredResolver {
     /// The production resolver: Tier 0 → Tier 1, default grounding gate.
     #[must_use]
-    pub fn deterministic(weather_stations: WeatherStationRegistry) -> Self {
+    pub fn deterministic(
+        weather_stations: WeatherStationRegistry,
+        weather_bindings: &WeatherVerticalBindingsConfig,
+    ) -> Self {
         Self {
             tiers: vec![
                 Box::new(Tier0SlugExtractor),
                 Box::new(CryptoSubjectParser),
+                Box::new(WeatherContractExtractor::new(weather_bindings)),
                 Box::new(WeatherDailyTemperatureExtractor::new(weather_stations)),
             ],
             validator: Box::new(DefaultSubjectValidator),
@@ -161,61 +171,7 @@ pub fn source_bindings_for_subject(
     available_at: DateTime<Utc>,
 ) -> QuantResult<Vec<ResolvedSourceBinding>> {
     let (specs, binding_context) = match subject {
-        MarketSubject::Crypto(subject) => {
-            let ticker = subject.asset.as_str().to_lowercase();
-            let rule = rule_for_alias(&ticker).ok_or_else(|| {
-                QuantError::config(format!(
-                    "asset `{}` has no frozen source rule",
-                    subject.asset
-                ))
-            })?;
-            let mut specs = vec![(
-                LinkageSourceRole::Feature,
-                rule.kline_source_id(),
-                rule.instrument_key(),
-            )];
-            match &subject.resolution_oracle {
-                ResolutionOracle::ChainlinkDataStreams { .. } => {
-                    let (source_id, instrument) = if rule.public_rtds_supported() {
-                        (
-                            DomainSourceId::polymarket_rtds_chainlink(),
-                            rule.rtds_chainlink_instrument(),
-                        )
-                    } else {
-                        (
-                            DomainSourceId::chainlink_data_streams(),
-                            rule.chainlink_instrument(),
-                        )
-                    };
-                    specs.push((
-                        LinkageSourceRole::LiveEvent,
-                        source_id.clone(),
-                        instrument.clone(),
-                    ));
-                    specs.push((LinkageSourceRole::Resolution, source_id, instrument));
-                }
-                ResolutionOracle::BinanceKline { interval, .. } => {
-                    let (source_id, instrument) = if rule.public_rtds_supported() {
-                        (
-                            DomainSourceId::polymarket_rtds_binance(),
-                            rule.rtds_binance_instrument(),
-                        )
-                    } else {
-                        (
-                            rule.binance_event_source_id(),
-                            rule.binance_event_instrument(),
-                        )
-                    };
-                    specs.push((LinkageSourceRole::LiveEvent, source_id, instrument));
-                    specs.push((
-                        LinkageSourceRole::Resolution,
-                        rule.kline_source_id(),
-                        rule.kline_instrument(*interval),
-                    ));
-                }
-            }
-            (specs, subject.asset.to_string())
-        }
+        MarketSubject::Crypto(subject) => crypto_source_plan(subject)?,
         MarketSubject::Weather(subject) => (
             vec![
                 (
@@ -229,6 +185,14 @@ pub fn source_bindings_for_subject(
                     DomainInstrumentKey::ghcnh(&subject.decision_group.station),
                 ),
                 (
+                    LinkageSourceRole::Resolution,
+                    DomainSourceId::ghcnd(),
+                    DomainInstrumentKey::ghcnd_temperature(
+                        &subject.decision_group.station,
+                        subject.decision_group.temperature_statistic,
+                    ),
+                ),
+                (
                     LinkageSourceRole::Forecast,
                     DomainSourceId::gefs(),
                     DomainInstrumentKey::gefs(&subject.decision_group.station),
@@ -236,6 +200,89 @@ pub fn source_bindings_for_subject(
             ],
             subject.decision_group.station.to_string(),
         ),
+        MarketSubject::WeatherPrecipitation(subject) => (
+            vec![
+                (
+                    LinkageSourceRole::Resolution,
+                    DomainSourceId::hko_open_data(),
+                    DomainInstrumentKey::hko_daily_rainfall(&subject.station_key),
+                ),
+                (
+                    LinkageSourceRole::Forecast,
+                    DomainSourceId::gefs(),
+                    DomainInstrumentKey::new(format!(
+                        "GEFS:GEO:{:.6}:{:.6}:APCP",
+                        subject.latitude, subject.longitude
+                    )),
+                ),
+            ],
+            subject.site_key.clone(),
+        ),
+        MarketSubject::WeatherAqi(subject) => (
+            vec![
+                (
+                    LinkageSourceRole::LiveEvent,
+                    DomainSourceId::airnow(),
+                    DomainInstrumentKey::airnow_pm25_observation(&subject.reporting_area_key),
+                ),
+                (
+                    LinkageSourceRole::Resolution,
+                    DomainSourceId::airnow(),
+                    DomainInstrumentKey::airnow_pm25_observation(&subject.reporting_area_key),
+                ),
+                (
+                    LinkageSourceRole::Forecast,
+                    DomainSourceId::airnow(),
+                    DomainInstrumentKey::airnow_pm25_forecast(&subject.reporting_area_key),
+                ),
+            ],
+            subject.reporting_area_key.clone(),
+        ),
+        MarketSubject::WeatherTornado(subject) => {
+            let (final_source, final_instrument) = match &subject.finalization {
+                WeatherTornadoFinalization::StormEventsArchive => (
+                    DomainSourceId::ncei_storm_events(),
+                    DomainInstrumentKey::ncei_tornado(&subject.region_key),
+                ),
+                WeatherTornadoFinalization::FirstPublishedAfter { .. } => (
+                    DomainSourceId::ncei_tornado_time_series(),
+                    DomainInstrumentKey::ncei_tornado_time_series(),
+                ),
+            };
+            (
+                vec![
+                    (
+                        LinkageSourceRole::LiveEvent,
+                        DomainSourceId::spc_storm_reports(),
+                        DomainInstrumentKey::spc_tornado(&subject.region_key),
+                    ),
+                    (
+                        LinkageSourceRole::Resolution,
+                        final_source,
+                        final_instrument,
+                    ),
+                ],
+                subject.region_key.clone(),
+            )
+        }
+        MarketSubject::WeatherTropicalCyclone(subject) => (
+            vec![
+                (
+                    LinkageSourceRole::LiveEvent,
+                    DomainSourceId::nhc_advisory(),
+                    DomainInstrumentKey::nhc_advisory(&subject.basin, &subject.storm_key),
+                ),
+                (
+                    LinkageSourceRole::Resolution,
+                    DomainSourceId::nhc_hurdat2(),
+                    DomainInstrumentKey::nhc_hurdat2(&subject.basin, &subject.storm_key),
+                ),
+            ],
+            format!("{}:{}", subject.basin, subject.storm_key),
+        ),
+        MarketSubject::WeatherGlobalTemperature(subject) => global_temperature_plan(subject),
+        MarketSubject::WeatherSeaIce(subject) => sea_ice_source_plan(subject),
+        MarketSubject::WeatherWindExtreme(subject) => wind_source_plan(subject)?,
     };
     specs
         .into_iter()
@@ -259,10 +306,147 @@ pub fn source_bindings_for_subject(
         .collect()
 }
 
+type SourceBindingSpec = (LinkageSourceRole, DomainSourceId, DomainInstrumentKey);
+type SourceBindingPlan = (Vec<SourceBindingSpec>, String);
+
+fn crypto_source_plan(subject: &CryptoSubject) -> QuantResult<SourceBindingPlan> {
+    let ticker = subject.asset.as_str().to_lowercase();
+    let rule = rule_for_alias(&ticker).ok_or_else(|| {
+        QuantError::config(format!(
+            "asset `{}` has no frozen source rule",
+            subject.asset
+        ))
+    })?;
+    let mut specs = vec![(
+        LinkageSourceRole::Feature,
+        rule.kline_source_id(),
+        rule.instrument_key(),
+    )];
+    match &subject.resolution_oracle {
+        ResolutionOracle::ChainlinkDataStreams { .. } => {
+            let (source_id, instrument) = if rule.public_rtds_supported() {
+                (
+                    DomainSourceId::polymarket_rtds_chainlink(),
+                    rule.rtds_chainlink_instrument(),
+                )
+            } else {
+                (
+                    DomainSourceId::chainlink_data_streams(),
+                    rule.chainlink_instrument(),
+                )
+            };
+            specs.push((
+                LinkageSourceRole::LiveEvent,
+                source_id.clone(),
+                instrument.clone(),
+            ));
+            specs.push((LinkageSourceRole::Resolution, source_id, instrument));
+        }
+        ResolutionOracle::BinanceKline { interval, .. } => {
+            let (source_id, instrument) = if rule.public_rtds_supported() {
+                (
+                    DomainSourceId::polymarket_rtds_binance(),
+                    rule.rtds_binance_instrument(),
+                )
+            } else {
+                (
+                    rule.binance_event_source_id(),
+                    rule.binance_event_instrument(),
+                )
+            };
+            specs.push((LinkageSourceRole::LiveEvent, source_id, instrument));
+            specs.push((
+                LinkageSourceRole::Resolution,
+                rule.kline_source_id(),
+                rule.kline_instrument(*interval),
+            ));
+        }
+    }
+    Ok((specs, subject.asset.to_string()))
+}
+
+fn global_temperature_plan(subject: &WeatherGlobalTemperatureSubject) -> SourceBindingPlan {
+    let instrument = match &subject.outcome {
+        GlobalTemperatureOutcome::MonthlyAnomaly { .. }
+        | GlobalTemperatureOutcome::MonthlyRecordRank { .. } => {
+            DomainInstrumentKey::nasa_gistemp_loti()
+        }
+        GlobalTemperatureOutcome::AnnualRecordRank { .. } => {
+            DomainInstrumentKey::nasa_gistemp_loti_annual()
+        }
+    };
+    (
+        vec![(
+            LinkageSourceRole::Resolution,
+            DomainSourceId::nasa_gistemp(),
+            instrument,
+        )],
+        "GISTEMP:LOTI:v4:1951-1980".to_owned(),
+    )
+}
+
+fn sea_ice_source_plan(subject: &WeatherSeaIceSubject) -> SourceBindingPlan {
+    let hemisphere = match subject.hemisphere {
+        SeaIceHemisphere::Northern => "north",
+        SeaIceHemisphere::Southern => "south",
+    };
+    let instrument = match subject.product {
+        SeaIceProduct::DailyExtent => DomainInstrumentKey::nsidc_daily_extent(hemisphere),
+        SeaIceProduct::MonthlyExtent => DomainInstrumentKey::nsidc_monthly_extent(hemisphere),
+    };
+    (
+        vec![(
+            LinkageSourceRole::Resolution,
+            DomainSourceId::nsidc_sea_ice_index(),
+            instrument,
+        )],
+        format!("NSIDC:{hemisphere}:v4"),
+    )
+}
+
+fn wind_source_plan(subject: &WeatherWindExtremeSubject) -> QuantResult<SourceBindingPlan> {
+    let station = IcaoStation::parse(&subject.station_key).map_err(|error| {
+        QuantError::config(format!(
+            "wind subject station `{}` is invalid: {error}",
+            subject.station_key
+        ))
+    })?;
+    let observation_instrument = match subject.statistic {
+        WeatherWindStatistic::MaximumGust => DomainInstrumentKey::nws_wind_gust(&station),
+        WeatherWindStatistic::MaximumSustainedWind => DomainInstrumentKey::nws_wind_speed(&station),
+    };
+    Ok((
+        vec![
+            (
+                LinkageSourceRole::LiveEvent,
+                DomainSourceId::nws_observation(),
+                observation_instrument.clone(),
+            ),
+            (
+                LinkageSourceRole::Resolution,
+                DomainSourceId::nws_observation(),
+                observation_instrument,
+            ),
+            (
+                LinkageSourceRole::HistoricalCalibration,
+                DomainSourceId::ghcnh(),
+                DomainInstrumentKey::ghcnh(&station),
+            ),
+            (
+                LinkageSourceRole::Forecast,
+                DomainSourceId::gefs(),
+                DomainInstrumentKey::new(format!("GEFS:{station}:GUST")),
+            ),
+        ],
+        station.to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
+        config::WeatherVerticalBindingsConfig,
         domain::quant::{
             GroundingField, LinkageOutcome, LinkageSourceMetadata, ResolvedSourceBinding,
         },
@@ -294,7 +478,10 @@ mod tests {
 
     #[test]
     fn tier0_wins_before_rejects() {
-        let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
+        let resolver = LayeredResolver::deterministic(
+            WeatherStationRegistry::default(),
+            &WeatherVerticalBindingsConfig::default(),
+        );
 
         let tier0 = resolver
             .resolve(
@@ -363,7 +550,10 @@ mod tests {
 
     #[test]
     fn public_chainlink_assets_rejects() {
-        let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
+        let resolver = LayeredResolver::deterministic(
+            WeatherStationRegistry::default(),
+            &WeatherVerticalBindingsConfig::default(),
+        );
         let btc = resolver
             .resolve(
                 &metadata(
@@ -412,7 +602,10 @@ mod tests {
 
     #[test]
     fn public_binance_routes_rtds() {
-        let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
+        let resolver = LayeredResolver::deterministic(
+            WeatherStationRegistry::default(),
+            &WeatherVerticalBindingsConfig::default(),
+        );
         let outcome = resolver
             .resolve(
                 &metadata(

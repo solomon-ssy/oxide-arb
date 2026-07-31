@@ -1,9 +1,10 @@
-//! Airport local-day maximum/minimum-temperature features.
+//! Typed cross-family Weather contract features.
 //!
-//! Forecast features are emitted only from a complete 31-member GEFS run after
-//! every target lead has a station-specific bias estimate backed by distinct
-//! `GHCNh` observations. Missing calibration is an explicit missing feature,
-//! never an assumed zero correction.
+//! Airport temperature retains its station-by-lead GEFS calibration. Other
+//! Weather families consume the same canonical contract projector used by
+//! final labels and emit forecast probability only from a complete member
+//! distribution. A deterministic point forecast is never mislabeled as a
+//! probability.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,9 +14,16 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
         data_plane::{WeatherForecastPoint, WeatherObservationFact, WeatherObservationReportKind},
-        quant::{MarketSubject, WeatherSubject},
+        quant::{
+            MarketSubject, ResolvedBinding, WeatherPrecipitationSubject, WeatherRoundingRule,
+            WeatherSubject, WeatherValueComparator, WeatherWindExtremeSubject,
+            WeatherWindStatistic,
+        },
     },
-    enums::{domain::DomainFamily, feature::EvidenceSourceKind},
+    enums::{
+        domain::{DomainFamily, LinkageSourceRole},
+        feature::EvidenceSourceKind,
+    },
     hashing::CanonicalDigest,
     runtime_config::WeatherDomainConfig,
     types::{
@@ -24,16 +32,20 @@ use quant_pivot_models::{
         calibration::{WeatherLeadBiasV1, WeatherStationBiasV1, WeatherStationLeadBiasArtifactV1},
     },
 };
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 
 use crate::{
-    domain::WeatherFactWindow,
+    domain::{
+        WeatherFactWindow, WeatherProjectionFailure, WeatherProjectionPurpose,
+        WeatherTruthMaturity, project_weather_contract, weather_contract_bounds,
+        weather_forecast_in_window,
+    },
     features::{
         builder::RawFeature,
         domain::{DomainComputeCtx, DomainFeatureBuilder, DomainSliceDataRef},
         names::domain_weather::{
-            ENSEMBLE_BIN_PROBABILITY, ENSEMBLE_SPREAD, NOAA_RESOLUTION_BASIS_RISK,
-            OBSERVED_EXTREME_HEADROOM,
+            BOUNDARY_DISTANCE, CONTRACT_PROBABILITY, FORECAST_DISPERSION, SOURCE_BASIS_RISK,
+            TRUTH_MATURITY_RISK,
         },
         value::{EvidenceSourceRef, FeatureValue, NullReason},
     },
@@ -192,6 +204,7 @@ fn forecast_statistic(point: &WeatherForecastPoint) -> Option<WeatherTemperature
         | WeatherVariable::WindGust
         | WeatherVariable::TornadoCount
         | WeatherVariable::CycloneIntensity
+        | WeatherVariable::CycloneLandfallIntensity
         | WeatherVariable::GlobalTemperatureAnomaly
         | WeatherVariable::SeaIceExtent => None,
     }
@@ -333,22 +346,35 @@ impl DomainFeatureBuilder for WeatherDomainFeatureBuilder {
     }
 
     fn compute(&self, ctx: &DomainComputeCtx<'_>) -> Vec<RawFeature> {
-        let (MarketSubject::Weather(subject), DomainSliceDataRef::Weather(window)) =
-            (&ctx.binding.subject, ctx.data)
-        else {
+        let DomainSliceDataRef::Weather(window) = ctx.data else {
             return Vec::new();
         };
-        compute_weather_features(subject, window, &ctx.domain.weather)
+        match &ctx.binding.subject {
+            MarketSubject::Weather(subject) => {
+                compute_temperature_features(ctx.binding, subject, window, &ctx.domain.weather)
+            }
+            MarketSubject::WeatherPrecipitation(_)
+            | MarketSubject::WeatherAqi(_)
+            | MarketSubject::WeatherTornado(_)
+            | MarketSubject::WeatherTropicalCyclone(_)
+            | MarketSubject::WeatherGlobalTemperature(_)
+            | MarketSubject::WeatherSeaIce(_)
+            | MarketSubject::WeatherWindExtreme(_) => {
+                compute_contract_features(ctx.binding, window, &ctx.domain.weather)
+            }
+            MarketSubject::Crypto(_) => Vec::new(),
+        }
     }
 }
 
-fn compute_weather_features(
+fn compute_temperature_features(
+    binding: &ResolvedBinding,
     subject: &WeatherSubject,
     window: &WeatherFactWindow,
     config: &WeatherDomainConfig,
 ) -> Vec<RawFeature> {
     let ensemble = calibrated_ensemble(subject, window, config);
-    let (ensemble_probability, ensemble_spread) = match ensemble {
+    let (ensemble_probability, forecast_dispersion) = match ensemble {
         Ok(ensemble) => {
             let count = ensemble
                 .member_extremes
@@ -362,56 +388,285 @@ fn compute_weather_features(
             let probability = Decimal::from(count) / Decimal::from(ensemble.member_extremes.len());
             (
                 RawFeature::present(
-                    ENSEMBLE_BIN_PROBABILITY,
+                    CONTRACT_PROBABILITY,
                     FeatureValue::Probability(Probability::new(probability)),
                     ensemble.evidence.clone(),
                 ),
                 RawFeature::present(
-                    ENSEMBLE_SPREAD,
+                    FORECAST_DISPERSION,
                     FeatureValue::Decimal(ensemble_standard_deviation(&ensemble.member_extremes)),
                     ensemble.evidence,
                 ),
             )
         }
         Err(reason) => (
-            RawFeature::missing(ENSEMBLE_BIN_PROBABILITY, reason),
-            RawFeature::missing(ENSEMBLE_SPREAD, reason),
+            RawFeature::missing(CONTRACT_PROBABILITY, reason),
+            RawFeature::missing(FORECAST_DISPERSION, reason),
         ),
     };
 
-    let live_daily = daily_extremes(
-        &window.observations,
-        WeatherObservationReportKind::Metar,
-        Some(WeatherObservationReportKind::Speci),
-        Some(WeatherObservationReportKind::Correction),
-        subject.decision_group.temperature_statistic,
-    );
-    let observed_extreme = live_daily.get(&subject.decision_group.local_date).copied();
-    let observed_evidence = latest_observation_evidence(
-        &window.observations,
-        subject.decision_group.local_date,
-        WeatherObservationReportKind::HistoricalGhcnh,
-        false,
-    );
-    let observed_headroom = match (observed_extreme, observed_evidence) {
-        (Some(extreme), Some(evidence)) => RawFeature::present(
-            OBSERVED_EXTREME_HEADROOM,
-            FeatureValue::Decimal(observed_band_distance(subject, extreme)),
-            evidence,
+    let projection = project_weather_contract(binding, window, WeatherProjectionPurpose::Feature);
+    let (boundary_distance, maturity_risk) = match projection {
+        Ok(projection) => (
+            RawFeature::present(
+                BOUNDARY_DISTANCE,
+                FeatureValue::Decimal(projection.boundary_distance),
+                projection.evidence(),
+            ),
+            RawFeature::present(
+                TRUTH_MATURITY_RISK,
+                FeatureValue::Decimal(projection.maturity.risk_value()),
+                projection.evidence(),
+            ),
         ),
-        _ => RawFeature::missing(
-            OBSERVED_EXTREME_HEADROOM,
-            NullReason::DomainSourceUnavailable,
-        ),
+        Err(failure) => {
+            let reason = failure.null_reason();
+            (
+                RawFeature::missing(BOUNDARY_DISTANCE, reason),
+                RawFeature::missing(TRUTH_MATURITY_RISK, reason),
+            )
+        }
     };
 
-    let basis_risk = noaa_basis_risk(subject, window, config);
+    let basis_risk = source_basis_risk(subject, window, config);
     vec![
         ensemble_probability,
-        ensemble_spread,
-        observed_headroom,
+        forecast_dispersion,
+        boundary_distance,
         basis_risk,
+        maturity_risk,
     ]
+}
+
+fn compute_contract_features(
+    binding: &ResolvedBinding,
+    window: &WeatherFactWindow,
+    config: &WeatherDomainConfig,
+) -> Vec<RawFeature> {
+    let forecast = contract_forecast(binding, window, config);
+    let (probability, dispersion) = match forecast {
+        Ok(forecast) => (
+            RawFeature::present(
+                CONTRACT_PROBABILITY,
+                FeatureValue::Probability(Probability::new(forecast.probability)),
+                forecast.evidence.clone(),
+            ),
+            RawFeature::present(
+                FORECAST_DISPERSION,
+                FeatureValue::Decimal(decimal_standard_deviation(&forecast.values)),
+                forecast.evidence,
+            ),
+        ),
+        Err(reason) => (
+            RawFeature::missing(CONTRACT_PROBABILITY, reason),
+            RawFeature::missing(FORECAST_DISPERSION, reason),
+        ),
+    };
+    let projection = project_weather_contract(binding, window, WeatherProjectionPurpose::Feature);
+    let (boundary, maturity) = match projection {
+        Ok(projection) => (
+            RawFeature::present(
+                BOUNDARY_DISTANCE,
+                FeatureValue::Decimal(projection.boundary_distance),
+                projection.evidence(),
+            ),
+            RawFeature::present(
+                TRUTH_MATURITY_RISK,
+                FeatureValue::Decimal(projection.maturity.risk_value()),
+                projection.evidence(),
+            ),
+        ),
+        Err(failure) => {
+            let reason = failure.null_reason();
+            (
+                RawFeature::missing(BOUNDARY_DISTANCE, reason),
+                RawFeature::missing(TRUTH_MATURITY_RISK, reason),
+            )
+        }
+    };
+    vec![
+        probability,
+        dispersion,
+        boundary,
+        RawFeature::missing(SOURCE_BASIS_RISK, NullReason::InsufficientHistory),
+        maturity,
+    ]
+}
+
+struct ContractForecast {
+    values: Vec<Decimal>,
+    probability: Decimal,
+    evidence: EvidenceSourceRef,
+}
+
+fn contract_forecast(
+    binding: &ResolvedBinding,
+    window: &WeatherFactWindow,
+    config: &WeatherDomainConfig,
+) -> Result<ContractForecast, NullReason> {
+    let (variable, unit, comparator, rounding) = match &binding.subject {
+        MarketSubject::WeatherPrecipitation(subject) => precipitation_forecast(subject),
+        MarketSubject::WeatherWindExtreme(subject) => wind_forecast(subject),
+        MarketSubject::WeatherAqi(_)
+        | MarketSubject::WeatherTornado(_)
+        | MarketSubject::WeatherTropicalCyclone(_)
+        | MarketSubject::WeatherGlobalTemperature(_)
+        | MarketSubject::WeatherSeaIce(_)
+        | MarketSubject::Weather(_)
+        | MarketSubject::Crypto(_) => return Err(NullReason::NotApplicable),
+    };
+    let source = binding
+        .source_bindings
+        .iter()
+        .find(|source| source.role == LinkageSourceRole::Forecast)
+        .ok_or(NullReason::DomainSourceUnavailable)?;
+    let (from, to) =
+        weather_contract_bounds(&binding.subject).map_err(|_| NullReason::LinkageUnresolved)?;
+    let max_age =
+        i64::try_from(config.max_forecast_age_secs).map_err(|_| NullReason::OutOfValidRange)?;
+    let mut runs =
+        BTreeMap::<(DateTime<Utc>, ContentHash, ContentHash), Vec<&WeatherForecastPoint>>::new();
+    for point in &window.forecasts {
+        if point.source_id != source.source_id
+            || point.instrument_key != source.instrument_key
+            || point.variable != variable
+            || point.unit != unit
+            || !weather_forecast_in_window(point, from, to)
+            || point.reference_time > window.decision_at
+            || window
+                .decision_at
+                .signed_duration_since(point.reference_time)
+                .num_seconds()
+                > max_age
+        {
+            continue;
+        }
+        runs.entry((
+            point.reference_time,
+            point.run_manifest_hash,
+            point.grid_binding_hash,
+        ))
+        .or_default()
+        .push(point);
+    }
+    let ((reference_time, run_manifest_hash, _), points) = runs
+        .into_iter()
+        .rev()
+        .find(|(_, points)| complete_forecast_members(points, config.minimum_complete_members))
+        .ok_or(NullReason::DomainSourceUnavailable)?;
+    let values = points
+        .iter()
+        .map(|point| round_contract_value(point.value, rounding))
+        .collect::<Vec<_>>();
+    let yes_count = values
+        .iter()
+        .filter(|value| comparator.includes(**value))
+        .count();
+    let probability = Decimal::from(yes_count) / Decimal::from(values.len());
+    let available_at = points
+        .iter()
+        .map(|point| point.available_at)
+        .max()
+        .ok_or(NullReason::DomainSourceUnavailable)?;
+    Ok(ContractForecast {
+        values,
+        probability,
+        evidence: EvidenceSourceRef {
+            source_kind: EvidenceSourceKind::DomainWeather,
+            reference: format!(
+                "weather-forecast:{}:{}#{}",
+                source.source_id, source.instrument_key, run_manifest_hash
+            ),
+            effective_at: reference_time,
+            available_at: Some(available_at),
+        },
+    })
+}
+
+const fn precipitation_forecast(
+    subject: &WeatherPrecipitationSubject,
+) -> (
+    WeatherVariable,
+    DomainMeasurementUnit,
+    &WeatherValueComparator,
+    WeatherRoundingRule,
+) {
+    (
+        WeatherVariable::Precipitation,
+        DomainMeasurementUnit::Millimeter,
+        &subject.comparator,
+        subject.rounding,
+    )
+}
+
+const fn wind_forecast(
+    subject: &WeatherWindExtremeSubject,
+) -> (
+    WeatherVariable,
+    DomainMeasurementUnit,
+    &WeatherValueComparator,
+    WeatherRoundingRule,
+) {
+    (
+        match subject.statistic {
+            WeatherWindStatistic::MaximumGust => WeatherVariable::WindGust,
+            WeatherWindStatistic::MaximumSustainedWind => WeatherVariable::WindSpeed,
+        },
+        DomainMeasurementUnit::Knot,
+        &subject.comparator,
+        subject.rounding,
+    )
+}
+
+fn complete_forecast_members(points: &[&WeatherForecastPoint], required: u8) -> bool {
+    if required == 0 || points.len() != usize::from(required) {
+        return false;
+    }
+    points
+        .iter()
+        .filter_map(|point| point.member)
+        .collect::<BTreeSet<_>>()
+        == (0..u16::from(required)).collect::<BTreeSet<_>>()
+}
+
+fn round_contract_value(value: Decimal, rounding: WeatherRoundingRule) -> Decimal {
+    match rounding {
+        WeatherRoundingRule::Exact => value,
+        WeatherRoundingRule::DecimalPlaces { places } => {
+            value.round_dp_with_strategy(places, RoundingStrategy::MidpointAwayFromZero)
+        }
+        WeatherRoundingRule::WholeUnit => {
+            value.round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero)
+        }
+    }
+}
+
+impl WeatherTruthMaturity {
+    const fn risk_value(self) -> Decimal {
+        match self {
+            Self::Preliminary => Decimal::ONE,
+            Self::Final => Decimal::ZERO,
+        }
+    }
+}
+
+impl WeatherProjectionFailure {
+    const fn null_reason(&self) -> NullReason {
+        match self {
+            Self::SourceUnavailable { .. } | Self::WindowOpen { .. } => {
+                NullReason::DomainSourceUnavailable
+            }
+            Self::InsufficientCoverage => NullReason::InsufficientHistory,
+            Self::UnsupportedOfficialProduct => NullReason::NotApplicable,
+            Self::NonWeatherSubject | Self::InvalidSourceBinding | Self::SubjectKeyMismatch => {
+                NullReason::LinkageUnresolved
+            }
+            Self::AmbiguousRevision { .. }
+            | Self::AggregationOverflow
+            | Self::UnitMismatch { .. }
+            | Self::EvidenceAfterDecision { .. } => NullReason::OutOfValidRange,
+        }
+    }
 }
 
 struct CalibratedEnsemble {
@@ -615,57 +870,7 @@ fn daily_extremes(
     extremes
 }
 
-fn latest_observation_evidence(
-    facts: &[WeatherObservationFact],
-    local_date: NaiveDate,
-    excluded: WeatherObservationReportKind,
-    include_excluded: bool,
-) -> Option<EvidenceSourceRef> {
-    facts
-        .iter()
-        .filter(|fact| {
-            fact.local_date == local_date && (include_excluded || fact.report_kind != excluded)
-        })
-        .max_by(|left, right| {
-            (left.observed_at, left.revision, left.report_hash).cmp(&(
-                right.observed_at,
-                right.revision,
-                right.report_hash,
-            ))
-        })
-        .map(|fact| EvidenceSourceRef {
-            source_kind: EvidenceSourceKind::DomainWeather,
-            reference: format!(
-                "{}:{}@{}#{}",
-                fact.source_id,
-                fact.subject_key,
-                fact.observed_at.timestamp_millis(),
-                fact.report_hash,
-            ),
-            effective_at: fact.published_at,
-            available_at: Some(fact.available_at),
-        })
-}
-
-/// Non-negative distance of the observed daily extreme from the complete
-/// outcome band. A bounded band evaluates both boundaries; using only its
-/// upper bound would incorrectly treat an observation far below the lower
-/// bound as strongly favorable.
-fn observed_band_distance(subject: &WeatherSubject, extreme: TemperatureCelsius) -> Decimal {
-    let extreme = extreme.whole_degrees(subject.decision_group.market_unit);
-    match (
-        subject.outcome_band.lower_inclusive,
-        subject.outcome_band.upper_inclusive,
-    ) {
-        (Some(lower), Some(_)) if extreme < lower => lower - extreme,
-        (Some(_), Some(upper)) if extreme > upper => extreme - upper,
-        (Some(_), Some(_)) | (None, None) => Decimal::ZERO,
-        (None, Some(upper)) => (extreme - upper).max(Decimal::ZERO),
-        (Some(lower), None) => (lower - extreme).max(Decimal::ZERO),
-    }
-}
-
-fn noaa_basis_risk(
+fn source_basis_risk(
     subject: &WeatherSubject,
     window: &WeatherFactWindow,
     config: &WeatherDomainConfig,
@@ -696,10 +901,10 @@ fn noaa_basis_risk(
         })
         .collect::<Vec<_>>();
     let Ok(sample_count) = u64::try_from(differences.len()) else {
-        return RawFeature::missing(NOAA_RESOLUTION_BASIS_RISK, NullReason::OutOfValidRange);
+        return RawFeature::missing(SOURCE_BASIS_RISK, NullReason::OutOfValidRange);
     };
     if sample_count < u64::from(config.minimum_bias_samples_per_lead) {
-        return RawFeature::missing(NOAA_RESOLUTION_BASIS_RISK, NullReason::InsufficientHistory);
+        return RawFeature::missing(SOURCE_BASIS_RISK, NullReason::InsufficientHistory);
     }
     let overlap_dates = live
         .keys()
@@ -743,16 +948,16 @@ fn noaa_basis_risk(
         .collect::<Vec<_>>();
     let risk = differences.iter().copied().sum::<Decimal>() / Decimal::from(differences.len());
     let Ok(evidence_hash) = CanonicalDigest::content_hash_json(&(
-        "weather_noaa_cross_product_basis_v1",
+        "weather_source_cross_product_basis_v2",
         subject.decision_group.station.as_str(),
         statistic,
         &differences,
         evidence_reports,
     )) else {
-        return RawFeature::missing(NOAA_RESOLUTION_BASIS_RISK, NullReason::OutOfValidRange);
+        return RawFeature::missing(SOURCE_BASIS_RISK, NullReason::OutOfValidRange);
     };
     RawFeature::present(
-        NOAA_RESOLUTION_BASIS_RISK,
+        SOURCE_BASIS_RISK,
         FeatureValue::Decimal(risk),
         EvidenceSourceRef {
             source_kind: EvidenceSourceKind::DomainWeather,
@@ -767,15 +972,18 @@ fn noaa_basis_risk(
 }
 
 fn ensemble_standard_deviation(values: &[TemperatureCelsius]) -> Decimal {
+    decimal_standard_deviation(&values.iter().map(|value| value.value()).collect::<Vec<_>>())
+}
+
+fn decimal_standard_deviation(values: &[Decimal]) -> Decimal {
     if values.is_empty() {
         return Decimal::ZERO;
     }
-    let mean =
-        values.iter().map(|value| value.value()).sum::<Decimal>() / Decimal::from(values.len());
+    let mean = values.iter().copied().sum::<Decimal>() / Decimal::from(values.len());
     let variance = values
         .iter()
         .map(|value| {
-            let delta = value.value() - mean;
+            let delta = *value - mean;
             delta * delta
         })
         .sum::<Decimal>()

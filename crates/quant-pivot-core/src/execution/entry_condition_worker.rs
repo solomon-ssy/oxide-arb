@@ -14,7 +14,7 @@ use quant_pivot_models::{
         quant::{ApplyEntryConditionEvaluation, EntryConditionInstanceInfo, MarketLinkageInfo},
         runtime::{CoreEvent, CoreEventPublisher, EntryConditionLifecycleEvent},
     },
-    enums::{domain::LinkageStatus, quant::PublicationStatus},
+    enums::domain::LinkageStatus,
     hashing::CanonicalDigest,
     runtime_config::EntryConditionWorkerConfig,
     types::{
@@ -173,9 +173,7 @@ impl LiveEntryConditionInputProvider {
             }))
         {
             Some(ConditionUnavailableReason::MarketLinkageMismatch)
-        } else if model
-            .as_ref()
-            .is_none_or(|model| model.publication_status != PublicationStatus::Published)
+        } else if model.is_none()
             || current_runtime_config.as_ref().is_none_or(|config| {
                 config.decision_policy_snapshot_id != expected.decision_policy_snapshot_id
             })

@@ -6,14 +6,16 @@
 //! `dyn QuantModelRuntime`. The estimator union is `bincode`-serialized; loading
 //! verifies the recorded crate version before deserializing.
 //!
-//! Six production kinds are supported, dispatched through
+//! Seven production kinds are supported, dispatched through
 //! [`ClassicalAdapterRegistry`]: the tree ensembles (`RandomForest`,
-//! `ExtraTrees`) and penalized linear models (`Ridge`, `Lasso`, `ElasticNet`) are
-//! continuous return-proxy **regressors** (their output ranks markets); the
-//! `LogisticRegression` **classifier** emits a true yes-probability. Every kind
-//! shares the frozen standardization preprocessing so inference applies the exact
-//! transform the model was fit on, and a shared time-ordered holdout produces an
-//! out-of-sample validation objective.
+//! `ExtraTrees`, `GradientBoostedTrees`) and penalized linear models (`Ridge`,
+//! `Lasso`, `ElasticNet`) are continuous return-proxy **regressors** (their
+//! output ranks markets); the `LogisticRegression` **classifier** emits a true
+//! yes-probability. GBDT additionally freezes an exact portable tree ensemble,
+//! its training-background covers, and `TreeSHAP` verification. Every kind shares
+//! the frozen standardization preprocessing so inference applies the exact
+//! transform the model was fit on, and a shared time-ordered holdout produces
+//! an out-of-sample validation objective.
 
 use ndarray::Array1;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
@@ -40,9 +42,14 @@ use smartcore::{
         logistic_regression::{LogisticRegression, LogisticRegressionParameters},
         ridge_regression::{RidgeRegression, RidgeRegressionParameters},
     },
+    xgboost::{XGRegressor, XGRegressorParameters},
 };
 
 use crate::{
+    attribution::{
+        DecisionTreeSpec, MissingBranch, TreeEnsembleInput, TreeEnsembleSpec, TreeNode,
+        TreeShapModelContract,
+    },
     model::{
         artifact::{
             ClassicalModelMetrics, FeatureImportance, FittedInputTransform,
@@ -60,12 +67,13 @@ use crate::{
 /// mismatch is rejected.
 pub const CLASSICAL_CRATE_NAME: &str = "smartcore";
 /// Recorded crate version (major.minor of the workspace `smartcore` dependency).
-pub const CLASSICAL_CRATE_VERSION: &str = "0.1";
+pub const CLASSICAL_CRATE_VERSION: &str = "0.5";
 
 /// Concrete `smartcore` regressor type aliases (`f64` features + targets, dense
 /// matrix design, dense target vector).
 type Forest = RandomForestRegressor<f64, f64, DenseMatrix<f64>, Vec<f64>>;
 type ExtraForest = ExtraTreesRegressor<f64, f64, DenseMatrix<f64>, Vec<f64>>;
+type GradientBoostedTrees = XGRegressor<f64, f64, DenseMatrix<f64>, Vec<f64>>;
 type RidgeModel = RidgeRegression<f64, f64, DenseMatrix<f64>, Vec<f64>>;
 type LassoModel = Lasso<f64, f64, DenseMatrix<f64>, Vec<f64>>;
 type ElasticNetModel = ElasticNet<f64, f64, DenseMatrix<f64>, Vec<f64>>;
@@ -176,6 +184,8 @@ pub struct ClassicalTrainOutput {
     pub input_transform_hash: ContentHash,
     /// Exact estimator-ready rows plus aligned label vector hash.
     pub training_input_hash: ContentHash,
+    /// Exact portable `TreeSHAP` contract for GBDT; absent for other families.
+    pub tree_shap: Option<TreeShapModelContract>,
     /// Training metrics + feature importances.
     pub metrics: ClassicalModelMetrics,
 }
@@ -304,6 +314,7 @@ impl ClassicalModelAdapter for SmartcoreAdapter {
         let input_transform_hash = input_transform.transform_hash()?;
         let y: Vec<f64> = matrix.labels.to_vec();
         let training_input_hash = training_input_hash(&standardized, &matrix.labels)?;
+        let standardized_rows = standardized.rows().map(<[f64]>::to_vec).collect::<Vec<_>>();
         let mut x = (standardized).dense_matrix()?;
         let model = fit_kind(self.kind, &self.params, &x, &y)?;
 
@@ -316,6 +327,21 @@ impl ClassicalModelAdapter for SmartcoreAdapter {
                 detail: format!("bincode serialize classical model: {error}"),
             })?;
         let model_bytes_hash = CanonicalDigest::content_hash_bytes(&model_bytes);
+        let tree_shap = match self.kind {
+            ClassicalKind::GradientBoostedTrees => Some(extract_tree_shap_contract(
+                &model,
+                model_bytes_hash,
+                input_contract_hash,
+                input_transform
+                    .encoded_columns
+                    .iter()
+                    .map(|column| column.name.to_string())
+                    .collect(),
+                &standardized_rows,
+                &predictions,
+            )?),
+            _ => None,
+        };
 
         Ok(ClassicalTrainOutput {
             kind: self.kind,
@@ -329,6 +355,7 @@ impl ClassicalModelAdapter for SmartcoreAdapter {
             input_contract_hash,
             input_transform_hash,
             training_input_hash,
+            tree_shap,
             metrics: ClassicalModelMetrics {
                 train_samples: u64::try_from(rows).map_err(|error| ResearchError::MatrixBuild {
                     detail: format!("classical training row count does not fit u64: {error}"),
@@ -360,6 +387,8 @@ impl ClassicalModelAdapter for SmartcoreAdapter {
 /// decoupled from `smartcore`'s internal linear-algebra representation.
 #[derive(Serialize, Deserialize)]
 pub(crate) enum SmartcoreModel {
+    /// Gradient-boosted tree regressor.
+    GradientBoostedTrees(GradientBoostedTrees),
     /// Random-forest regressor.
     RandomForest(Forest),
     /// Extra-trees regressor.
@@ -386,6 +415,7 @@ impl SmartcoreModel {
     /// score); the logistic classifier returns the yes-probability `σ(wᵀx + b)`.
     pub(crate) fn predict(&self, x: &DenseMatrix<f64>) -> QuantResult<Vec<f64>> {
         match self {
+            Self::GradientBoostedTrees(model) => regressor_predict(model.predict(x)),
             Self::RandomForest(model) => regressor_predict(model.predict(x)),
             Self::ExtraTrees(model) => regressor_predict(model.predict(x)),
             Self::Ridge(model) => regressor_predict(model.predict(x)),
@@ -402,7 +432,10 @@ impl SmartcoreModel {
     pub(crate) const fn matches_kind(&self, kind: ClassicalKind) -> bool {
         matches!(
             (self, kind),
-            (Self::RandomForest(_), ClassicalKind::RandomForest)
+            (
+                Self::GradientBoostedTrees(_),
+                ClassicalKind::GradientBoostedTrees
+            ) | (Self::RandomForest(_), ClassicalKind::RandomForest)
                 | (Self::ExtraTrees(_), ClassicalKind::ExtraTrees)
                 | (Self::Ridge(_), ClassicalKind::Ridge)
                 | (Self::Lasso(_), ClassicalKind::Lasso)
@@ -463,6 +496,20 @@ fn fit_kind(
     let forest = &params.forest;
     let linear = &params.linear;
     let model = match kind {
+        ClassicalKind::GradientBoostedTrees => {
+            let parameters = XGRegressorParameters::default()
+                .with_n_estimators(forest.n_trees)
+                .with_max_depth(forest.max_depth.unwrap_or(8))
+                .with_min_child_weight(forest.min_samples_leaf)
+                .with_learning_rate(0.1)
+                .with_subsample(1.0)
+                .with_seed(forest.seed);
+            SmartcoreModel::GradientBoostedTrees(fit(GradientBoostedTrees::fit(
+                x,
+                &y.to_vec(),
+                parameters,
+            ))?)
+        }
         ClassicalKind::RandomForest => {
             let mut parameters = RandomForestRegressorParameters::default()
                 .with_n_trees(forest.n_trees)
@@ -769,6 +816,214 @@ fn extract_logistic(model: &Logistic) -> QuantResult<(Vec<f64>, f64)> {
     Ok((weights, intercept))
 }
 
+#[derive(Deserialize)]
+struct XgModelDocument {
+    regressors: Option<Vec<XgTreeDocument>>,
+    parameters: Option<XgParametersDocument>,
+}
+
+#[derive(Deserialize)]
+struct XgParametersDocument {
+    learning_rate: f64,
+    base_score: f64,
+}
+
+#[derive(Deserialize)]
+struct XgTreeDocument {
+    left: Option<Box<Self>>,
+    right: Option<Box<Self>>,
+    value: f64,
+    threshold: f64,
+    split_feature_idx: usize,
+}
+
+fn extract_tree_shap_contract(
+    model: &SmartcoreModel,
+    serialized_model_hash: ContentHash,
+    input_contract_hash: ContentHash,
+    feature_names: Vec<String>,
+    standardized_rows: &[Vec<f64>],
+    reference_predictions: &[f64],
+) -> QuantResult<TreeShapModelContract> {
+    let SmartcoreModel::GradientBoostedTrees(estimator) = model else {
+        return Err(ResearchError::InvalidModelArtifact {
+            detail: "TreeSHAP extraction requires a GBDT estimator".to_owned(),
+        }
+        .into());
+    };
+    if standardized_rows.is_empty()
+        || standardized_rows.len() != reference_predictions.len()
+        || standardized_rows
+            .iter()
+            .any(|row| row.len() != feature_names.len())
+    {
+        return Err(ResearchError::MatrixBuild {
+            detail: "GBDT TreeSHAP background rows are empty or misaligned".to_owned(),
+        }
+        .into());
+    }
+    let document = serde_json::from_value::<XgModelDocument>(
+        serde_json::to_value(estimator).map_err(|error| ResearchError::Serialization {
+            detail: format!("serialize GBDT explanation preimage: {error}"),
+        })?,
+    )
+    .map_err(|error| ResearchError::Serialization {
+        detail: format!("decode GBDT explanation preimage: {error}"),
+    })?;
+    let parameters = document
+        .parameters
+        .ok_or_else(|| ResearchError::InvalidModelArtifact {
+            detail: "GBDT estimator omitted its fitted parameters".to_owned(),
+        })?;
+    let regressors = document
+        .regressors
+        .filter(|trees| !trees.is_empty())
+        .ok_or_else(|| ResearchError::InvalidModelArtifact {
+            detail: "GBDT estimator omitted its fitted trees".to_owned(),
+        })?;
+    let background_bits = standardized_rows
+        .iter()
+        .map(|row| row.iter().map(|value| value.to_bits()).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let background_distribution_hash = CanonicalDigest::content_hash_typed(
+        "quant-pivot/tree-shap-background",
+        1,
+        &(&feature_names, background_bits),
+    )?;
+    let trees = regressors
+        .iter()
+        .map(|tree| portable_tree(tree, parameters.learning_rate, standardized_rows))
+        .collect::<QuantResult<Vec<_>>>()?;
+    let ensemble = TreeEnsembleSpec {
+        serialized_model_hash,
+        input_contract_hash,
+        background_distribution_hash,
+        feature_names,
+        base_value: decimal(parameters.base_score, "GBDT base score")?,
+        trees,
+    };
+    let inputs = standardized_rows
+        .iter()
+        .map(|row| {
+            Ok(TreeEnsembleInput {
+                values: row
+                    .iter()
+                    .map(|value| decimal(*value, "GBDT TreeSHAP input").map(Some))
+                    .collect::<QuantResult<Vec<_>>>()?,
+            })
+        })
+        .collect::<QuantResult<Vec<_>>>()?;
+    let references = reference_predictions
+        .iter()
+        .map(|value| decimal(*value, "GBDT reference prediction"))
+        .collect::<QuantResult<Vec<_>>>()?;
+    TreeShapModelContract::verify(ensemble, &inputs, &references)
+}
+
+fn portable_tree(
+    root: &XgTreeDocument,
+    learning_rate: f64,
+    background: &[Vec<f64>],
+) -> QuantResult<DecisionTreeSpec> {
+    if !learning_rate.is_finite() || learning_rate <= 0.0 {
+        return Err(ResearchError::InvalidModelArtifact {
+            detail: "GBDT learning rate must be finite and positive".to_owned(),
+        }
+        .into());
+    }
+    let mut nodes = Vec::new();
+    flatten_xg_tree(root, learning_rate, &mut nodes)?;
+    let mut covers = vec![0_u64; nodes.len()];
+    for row in background {
+        let mut node_index = 0_usize;
+        loop {
+            let cover =
+                covers
+                    .get_mut(node_index)
+                    .ok_or_else(|| ResearchError::InvalidModelArtifact {
+                        detail: "portable GBDT traversal reached an unknown node".to_owned(),
+                    })?;
+            *cover = cover
+                .checked_add(1)
+                .ok_or_else(|| ResearchError::InvalidModelArtifact {
+                    detail: "portable GBDT cover count overflowed u64".to_owned(),
+                })?;
+            match &nodes[node_index] {
+                TreeNode::Leaf { .. } => break,
+                TreeNode::Split {
+                    feature_index,
+                    threshold,
+                    left_child,
+                    right_child,
+                    ..
+                } => {
+                    let value = row.as_slice().get(*feature_index).ok_or_else(|| {
+                        ResearchError::InvalidModelArtifact {
+                            detail: format!(
+                                "portable GBDT split feature {feature_index} exceeds row width {}",
+                                row.len()
+                            ),
+                        }
+                    })?;
+                    let goes_left = decimal(*value, "GBDT background value")? <= *threshold;
+                    node_index = if goes_left { *left_child } else { *right_child };
+                }
+            }
+        }
+    }
+    for (node, cover) in nodes.iter_mut().zip(covers) {
+        let cover = Decimal::from(cover);
+        match node {
+            TreeNode::Split {
+                cover: node_cover, ..
+            }
+            | TreeNode::Leaf {
+                cover: node_cover, ..
+            } => *node_cover = cover,
+        }
+    }
+    Ok(DecisionTreeSpec { nodes })
+}
+
+fn flatten_xg_tree(
+    node: &XgTreeDocument,
+    learning_rate: f64,
+    nodes: &mut Vec<TreeNode>,
+) -> QuantResult<usize> {
+    let node_index = nodes.len();
+    nodes.push(TreeNode::Leaf {
+        value: Decimal::ZERO,
+        cover: Decimal::ZERO,
+    });
+    match (&node.left, &node.right) {
+        (None, None) => {
+            nodes[node_index] = TreeNode::Leaf {
+                value: decimal(node.value * learning_rate, "GBDT leaf value")?,
+                cover: Decimal::ZERO,
+            };
+        }
+        (Some(left), Some(right)) => {
+            let left_child = flatten_xg_tree(left, learning_rate, nodes)?;
+            let right_child = flatten_xg_tree(right, learning_rate, nodes)?;
+            nodes[node_index] = TreeNode::Split {
+                feature_index: node.split_feature_idx,
+                threshold: decimal(node.threshold, "GBDT split threshold")?,
+                missing_branch: MissingBranch::Left,
+                left_child,
+                right_child,
+                cover: Decimal::ZERO,
+            };
+        }
+        _ => {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "GBDT tree node has only one child".to_owned(),
+            }
+            .into());
+        }
+    }
+    Ok(node_index)
+}
+
 impl DenseInputMatrix {
     /// Build a `smartcore` dense matrix from standardized rows.
     fn dense_matrix(self) -> QuantResult<DenseMatrix<f64>> {
@@ -1022,6 +1277,7 @@ mod tests {
     fn classical_kind_validates_roundtrips() {
         let matrix = TrainingMatrix::classical_fixture();
         for kind in [
+            ClassicalKind::GradientBoostedTrees,
             ClassicalKind::RandomForest,
             ClassicalKind::ExtraTrees,
             ClassicalKind::Ridge,
@@ -1039,6 +1295,11 @@ mod tests {
                 "{kind}: estimator serialized"
             );
             assert_eq!(output.metrics.feature_importances.len(), 2, "{kind}");
+            assert_eq!(
+                output.tree_shap.is_some(),
+                kind == ClassicalKind::GradientBoostedTrees,
+                "{kind}"
+            );
 
             let validation = adapter
                 .validate(
@@ -1055,7 +1316,8 @@ mod tests {
             let model: SmartcoreModel = bincode::deserialize(&output.model_bytes)
                 .unwrap_or_else(|e| panic!("{kind} bincode roundtrip: {e}"));
             match (kind, &model) {
-                (ClassicalKind::RandomForest, SmartcoreModel::RandomForest(_))
+                (ClassicalKind::GradientBoostedTrees, SmartcoreModel::GradientBoostedTrees(_))
+                | (ClassicalKind::RandomForest, SmartcoreModel::RandomForest(_))
                 | (ClassicalKind::ExtraTrees, SmartcoreModel::ExtraTrees(_))
                 | (ClassicalKind::Ridge, SmartcoreModel::Ridge(_))
                 | (ClassicalKind::Lasso, SmartcoreModel::Lasso(_))

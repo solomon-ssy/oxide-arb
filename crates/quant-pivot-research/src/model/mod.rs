@@ -44,7 +44,7 @@ pub use classical::{
     ClassicalParams, ClassicalTrainOutput, ForestParams, LinearParams, replay_training_matrix,
 };
 #[cfg(feature = "ml-classical")]
-pub use classical_runtime::ClassicalRuntime;
+pub use classical_runtime::{ClassicalDecisionProjection, ClassicalRuntime};
 pub use degrade::{DegradeAction, InferenceStage};
 pub use favorite_longshot::{BiasFitConfig, BiasSample, FavoriteLongshotBiasTable};
 pub use objective::{ObjectiveComponentReport, RankingDiagnostics};

@@ -12,6 +12,7 @@
 //! zero skew is structural, not tested-for.
 
 pub mod slice;
+pub mod weather_contract;
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
@@ -25,6 +26,12 @@ use rust_decimal::Decimal;
 pub use slice::{
     DomainAvailabilityFacts, DomainFactWindows, build_domain_slice_inputs, crypto_lookback_secs,
     domain_availability_at, linkage_valid_at, oracle_instrument, source_binding,
+    valid_weather_sources, weather_contract_bounds, weather_forecast_in_window,
+    weather_history_start, weather_observation_in_window,
+};
+pub use weather_contract::{
+    WeatherComparisonUnit, WeatherContractProjection, WeatherProjectionFailure,
+    WeatherProjectionPurpose, WeatherTruthMaturity, project_weather_contract,
 };
 
 /// A pre-fetched, PIT-bounded window of observations for one instrument.
@@ -46,14 +53,15 @@ pub struct CryptoPriceReportWindow {
     pub reports: Vec<CryptoPriceReport>,
 }
 
-/// PIT-bounded typed Weather facts for one station.
+/// PIT-bounded typed Weather facts for one exact contract subject.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WeatherFactWindow {
     /// System decision instant bounding every fact's availability.
     pub decision_at: DateTime<Utc>,
-    /// `AviationWeather` live reports and `GHCNh` calibration observations.
+    /// Source-native observations after visibility filtering.
     pub observations: Vec<WeatherObservationFact>,
-    /// Raw GEFS ensemble points; bias is applied only by the governed builder.
+    /// Source-native forecast points; calibration is applied only by the
+    /// governed family-specific builder.
     pub forecasts: Vec<WeatherForecastPoint>,
     /// Latest immutable calibration publication visible at `decision_at`.
     pub calibration: Option<PublishedWeatherStationLeadBias>,

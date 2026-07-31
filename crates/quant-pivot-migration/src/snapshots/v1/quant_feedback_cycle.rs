@@ -2,9 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{
-    QpFeedbackCycleStatus, QpFeedbackDecision, QpFeedbackTriggerFamily,
-};
+use super::sea_orm_active_enums::{QpFeedbackCycleStatus, QpFeedbackDecision};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -16,7 +14,6 @@ pub struct Model {
     pub idempotency_hash: String,
     #[sea_orm(column_type = "JsonBinary")]
     pub idempotency_key: Json,
-    pub trigger_family: QpFeedbackTriggerFamily,
     #[sea_orm(column_type = "JsonBinary")]
     pub profile_ref: Json,
     #[sea_orm(column_type = "Text")]

@@ -16,6 +16,7 @@ pub struct Model {
     pub scope_hash: String,
     #[sea_orm(column_type = "Text")]
     pub issuance_hash: String,
+    pub feedback_cycle_id: Uuid,
     #[sea_orm(column_type = "JsonBinary")]
     pub profile_ref: Json,
     #[sea_orm(column_type = "Text")]
@@ -25,12 +26,19 @@ pub struct Model {
     #[sea_orm(column_type = r#"custom("qp_market_category")"#)]
     pub category: QpMarketCategory,
     pub expected_policy_generation: i64,
+    pub expected_runtime_control_revision: i64,
     pub expected_decision_policy_snapshot_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub expected_snapshot_hash: String,
     pub champion_model_version_id: Uuid,
     #[sea_orm(column_type = "Text")]
     pub champion_serving_contract_hash: String,
+    pub candidate_model_version_id: Uuid,
+    pub candidate_manifest_id: Uuid,
+    #[sea_orm(column_type = "Text")]
+    pub candidate_manifest_hash: String,
+    #[sea_orm(column_type = "Text")]
+    pub promotion_gate_hash: String,
     #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode[]")"#)]
     pub allowed_runtime_modes: Vec<QpQuantRuntimeMode>,
     #[sea_orm(column_type = "Text")]
@@ -69,6 +77,15 @@ pub struct Model {
     pub research_profile_artifact: BelongsTo<super::research_profile_artifact::Entity>,
     #[sea_orm(
         belongs_to,
+        relation_enum = "FeedbackCycle",
+        from = "feedback_cycle_id",
+        to = "feedback_cycle_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub feedback_cycle: BelongsTo<super::quant_feedback_cycle::Entity>,
+    #[sea_orm(
+        belongs_to,
         relation_enum = "ExpectedPolicySnapshot",
         from = "expected_decision_policy_snapshot_id",
         to = "decision_policy_snapshot_id",
@@ -85,6 +102,24 @@ pub struct Model {
         on_delete = "NoAction"
     )]
     pub champion_model_version: BelongsTo<super::quant_model_version::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "CandidateModelVersion",
+        from = "candidate_model_version_id",
+        to = "model_version_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub candidate_model_version: BelongsTo<super::quant_model_version::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "CandidateManifest",
+        from = "candidate_manifest_id",
+        to = "manifest_id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    pub candidate_manifest: BelongsTo<super::quant_model_candidate_manifest::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "IssuedByUser",

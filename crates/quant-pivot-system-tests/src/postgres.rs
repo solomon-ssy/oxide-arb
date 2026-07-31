@@ -16,13 +16,15 @@ use quant_pivot_storage::postgres::{PostgresPool, migration::finalize_schema_dep
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
 
 use crate::stack::BOOTSTRAP_ADMIN_PASSWORD;
 
 const MAINTENANCE_DATABASE: &str = "postgres";
+const MAX_PARALLEL_POSTGRES_SUITES: usize = 4;
 const TEMPLATE_DATABASE: &str = "quant_pivot_repository_template";
 const POSTGRES_IMAGE_TAG: &str = "16";
+static POSTGRES_SUITE_LIMIT: Semaphore = Semaphore::const_new(MAX_PARALLEL_POSTGRES_SUITES);
 
 tokio::task_local! {
     static ACTIVE_SUITE: Arc<PostgresSuite>;
@@ -146,6 +148,10 @@ pub async fn with_postgres_suite<F>(future: F) -> Result<F::Output>
 where
     F: Future,
 {
+    let _suite_permit = POSTGRES_SUITE_LIMIT
+        .acquire()
+        .await
+        .context("acquire bounded PostgreSQL suite capacity")?;
     let suite = Arc::new(PostgresSuite::start().await?);
     Ok(ACTIVE_SUITE.scope(suite, future).await)
 }

@@ -45,10 +45,16 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::{
-    postgres::{PgFeedbackCycleRepository, PgResearchJobRepository},
+    postgres::{
+        PgExecutionAttemptOutcomeRepository, PgFeedbackCycleRepository,
+        PgFeedbackSchedulerRepository, PgRecommendationExecutionRollupRepository,
+        PgResearchJobRepository, PgResolutionObservationRepository,
+    },
     traits::{
-        FeedbackCycleGeneration, FeedbackCycleLeaseGuard, FeedbackCycleRepository,
-        ResearchJobRepository,
+        ExecutionAttemptOutcomeRepository, FeedbackCycleGeneration, FeedbackCycleLeaseGuard,
+        FeedbackCycleRepository, FeedbackSchedulerRepository,
+        RecommendationExecutionRollupRepository, ResearchJobRepository,
+        ResolutionObservationRepository,
     },
 };
 use quant_pivot_system_tests::postgres::setup_pg;
@@ -170,6 +176,10 @@ impl FeedbackStagePort for CoordinatorStagePort {
 
 struct CoordinatorHarness {
     cycles: Arc<PgFeedbackCycleRepository>,
+    scheduler: Arc<PgFeedbackSchedulerRepository>,
+    resolutions: Arc<PgResolutionObservationRepository>,
+    attempts: Arc<PgExecutionAttemptOutcomeRepository>,
+    rollups: Arc<PgRecommendationExecutionRollupRepository>,
     jobs: Arc<PgResearchJobRepository>,
     engine: ResearchJobEngine,
     stages: Arc<CoordinatorStagePort>,
@@ -181,6 +191,10 @@ struct CoordinatorHarness {
 impl CoordinatorHarness {
     fn new(db: DatabaseConnection) -> Self {
         let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
+        let scheduler = Arc::new(PgFeedbackSchedulerRepository::new(db.clone()));
+        let resolutions = Arc::new(PgResolutionObservationRepository::new(db.clone()));
+        let attempts = Arc::new(PgExecutionAttemptOutcomeRepository::new(db.clone()));
+        let rollups = Arc::new(PgRecommendationExecutionRollupRepository::new(db.clone()));
         let jobs = Arc::new(PgResearchJobRepository::new(db));
         let (events, _receiver) = CoreEventPublisher::bounded(64);
         let engine =
@@ -188,6 +202,10 @@ impl CoordinatorHarness {
         let recordings = Arc::new(Mutex::new(Vec::new()));
         Self {
             cycles,
+            scheduler,
+            resolutions,
+            attempts,
+            rollups,
             jobs,
             engine,
             stages: Arc::new(CoordinatorStagePort::new()),
@@ -200,6 +218,10 @@ impl CoordinatorHarness {
     fn start(&self, config: FeedbackCoordinatorConfig) -> (CancellationToken, JoinHandle<()>) {
         let coordinator = FeedbackCoordinator::new(FeedbackCoordinatorDeps {
             cycles: Arc::clone(&self.cycles) as Arc<dyn FeedbackCycleRepository>,
+            scheduler: Arc::clone(&self.scheduler) as Arc<dyn FeedbackSchedulerRepository>,
+            resolutions: Arc::clone(&self.resolutions) as Arc<dyn ResolutionObservationRepository>,
+            attempts: Arc::clone(&self.attempts) as Arc<dyn ExecutionAttemptOutcomeRepository>,
+            rollups: Arc::clone(&self.rollups) as Arc<dyn RecommendationExecutionRollupRepository>,
             jobs: self.engine.clone(),
             stages: Arc::clone(&self.stages) as Arc<dyn FeedbackStagePort>,
             metrics: Arc::clone(&self.metrics),
@@ -314,8 +336,8 @@ async fn wait_job(
                 )
             })
             .collect::<Vec<_>>();
-        let coverage_id = FeedbackStageJobIdentity::try_root(cycle_id, FeedbackStage::Coverage)
-            .expect("freeze diagnostic coverage root")
+        let coverage_id = FeedbackStageJobIdentity::try_root(cycle_id, FeedbackStage::TruthFreeze)
+            .expect("freeze diagnostic truth-freeze root")
             .job_id();
         let coverage = harness
             .jobs
@@ -448,8 +470,8 @@ async fn wait_status(
                 )
             })
             .collect::<Vec<_>>();
-        let root_id = FeedbackStageJobIdentity::try_root(cycle_id, FeedbackStage::Coverage)
-            .expect("freeze diagnostic coverage root")
+        let root_id = FeedbackStageJobIdentity::try_root(cycle_id, FeedbackStage::TruthFreeze)
+            .expect("freeze diagnostic truth-freeze root")
             .job_id();
         let root = harness
             .jobs
@@ -487,6 +509,7 @@ async fn request_cancel(
         event_sequence: i64::try_from(events.len() + 1).expect("test sequence fits bigint"),
         stage,
         event_kind: FeedbackStageEventKind::CancellationRequested,
+        trigger_family: None,
         research_job_id: None,
         actor: Some("operator".to_owned()),
         reason_code: Some("test_cancelled".to_owned()),
@@ -603,8 +626,8 @@ pub async fn enqueue_gap_recovers() {
         .await
         .expect("load queued cycle")
         .expect("queued cycle exists");
-    let identity = FeedbackStageJobIdentity::try_root(fixture.cycle_id, FeedbackStage::Coverage)
-        .expect("freeze coverage root");
+    let identity = FeedbackStageJobIdentity::try_root(fixture.cycle_id, FeedbackStage::TruthFreeze)
+        .expect("freeze truth-freeze root");
     let job = CoordinatorStagePort::job(&cycle, identity).expect("prepare pre-crash job");
     harness
         .jobs
@@ -626,7 +649,7 @@ pub async fn enqueue_gap_recovers() {
         "durable pre-enqueued root must be linked without rebuilding payload"
     );
 
-    request_cancel(&harness, &fixture, FeedbackStage::Coverage).await;
+    request_cancel(&harness, &fixture, FeedbackStage::TruthFreeze).await;
     wait_status(&harness, fixture.cycle_id, FeedbackCycleStatus::Cancelled).await;
     let job = harness
         .jobs
@@ -645,11 +668,11 @@ pub async fn terminal_wake_advances() {
     let harness = CoordinatorHarness::new(db);
     record_cycle(&harness, &fixture).await;
     let (shutdown, task) = harness.start(long_poll_config());
-    let coverage = wait_job(&harness, fixture.cycle_id, FeedbackStage::Coverage).await;
+    let coverage = wait_job(&harness, fixture.cycle_id, FeedbackStage::TruthFreeze).await;
 
     succeed_job(&harness, &coverage, WorkerId::from_v7()).await;
 
-    wait_job(&harness, fixture.cycle_id, FeedbackStage::Drift).await;
+    wait_job(&harness, fixture.cycle_id, FeedbackStage::Coverage).await;
     wait_event(
         &harness,
         fixture.cycle_id,
@@ -657,7 +680,7 @@ pub async fn terminal_wake_advances() {
     )
     .await;
 
-    request_cancel(&harness, &fixture, FeedbackStage::Drift).await;
+    request_cancel(&harness, &fixture, FeedbackStage::Coverage).await;
     wait_status(&harness, fixture.cycle_id, FeedbackCycleStatus::Cancelled).await;
     stop_task(shutdown, task).await;
 }
@@ -669,7 +692,7 @@ pub async fn running_cancel_waits() {
     let harness = CoordinatorHarness::new(db);
     record_cycle(&harness, &fixture).await;
     let (shutdown, task) = harness.start(long_poll_config());
-    let coverage = wait_job(&harness, fixture.cycle_id, FeedbackStage::Coverage).await;
+    let coverage = wait_job(&harness, fixture.cycle_id, FeedbackStage::TruthFreeze).await;
     let worker = WorkerId::from_v7();
     let running = lease_job(&harness, &coverage, worker).await;
     harness
@@ -677,7 +700,7 @@ pub async fn running_cancel_waits() {
         .publish(&running, Some("start".to_owned()), None);
     wait_event(&harness, fixture.cycle_id, FeedbackStageEventKind::Started).await;
 
-    request_cancel(&harness, &fixture, FeedbackStage::Coverage).await;
+    request_cancel(&harness, &fixture, FeedbackStage::TruthFreeze).await;
     sleep(StdDuration::from_millis(100)).await;
     let still_running = harness
         .jobs
@@ -704,8 +727,8 @@ pub async fn running_cancel_waits() {
         .engine
         .publish(&succeeded, Some("finalize".to_owned()), Some(1.0));
     wait_status(&harness, fixture.cycle_id, FeedbackCycleStatus::Cancelled).await;
-    let drift_id = FeedbackStageJobIdentity::try_root(fixture.cycle_id, FeedbackStage::Drift)
-        .expect("freeze absent drift root")
+    let drift_id = FeedbackStageJobIdentity::try_root(fixture.cycle_id, FeedbackStage::Coverage)
+        .expect("freeze absent coverage root")
         .job_id();
     assert!(
         harness
@@ -726,7 +749,7 @@ pub async fn job_orphan_restarts() {
     let harness = CoordinatorHarness::new(db);
     record_cycle(&harness, &fixture).await;
     let (shutdown, task) = harness.start(long_poll_config());
-    let coverage = wait_job(&harness, fixture.cycle_id, FeedbackStage::Coverage).await;
+    let coverage = wait_job(&harness, fixture.cycle_id, FeedbackStage::TruthFreeze).await;
     let first_worker = WorkerId::from_v7();
     let first = lease_job(&harness, &coverage, first_worker).await;
     harness
@@ -772,9 +795,9 @@ pub async fn job_orphan_restarts() {
     harness
         .engine
         .publish(&succeeded, Some("finalize".to_owned()), Some(1.0));
-    wait_job(&harness, fixture.cycle_id, FeedbackStage::Drift).await;
+    wait_job(&harness, fixture.cycle_id, FeedbackStage::Coverage).await;
 
-    request_cancel(&harness, &fixture, FeedbackStage::Drift).await;
+    request_cancel(&harness, &fixture, FeedbackStage::Coverage).await;
     wait_status(&harness, fixture.cycle_id, FeedbackCycleStatus::Cancelled).await;
     stop_task(shutdown, task).await;
 }
@@ -786,7 +809,7 @@ pub async fn failed_job_stops() {
     let harness = CoordinatorHarness::new(db);
     record_cycle(&harness, &fixture).await;
     let (shutdown, task) = harness.start(long_poll_config());
-    let coverage = wait_job(&harness, fixture.cycle_id, FeedbackStage::Coverage).await;
+    let coverage = wait_job(&harness, fixture.cycle_id, FeedbackStage::TruthFreeze).await;
     let worker = WorkerId::from_v7();
     let running = lease_job(&harness, &coverage, worker).await;
     harness
@@ -828,14 +851,17 @@ pub async fn dag_completes() {
     record_cycle(&harness, &fixture).await;
     let (shutdown, task) = harness.start(long_poll_config());
     let stages = [
+        FeedbackStage::TruthFreeze,
         FeedbackStage::Coverage,
+        FeedbackStage::AttributionPlan,
         FeedbackStage::Drift,
         FeedbackStage::DatasetSeal,
         FeedbackStage::Training,
         FeedbackStage::Calibration,
         FeedbackStage::Cpcv,
+        FeedbackStage::Validation,
         FeedbackStage::Comparison,
-        FeedbackStage::ShadowReplay,
+        FeedbackStage::Shadow,
         FeedbackStage::Decision,
     ];
     for stage in stages {
@@ -887,11 +913,11 @@ pub async fn empty_recovery_starts() {
     sleep(StdDuration::from_millis(1_100)).await;
     let recovered = CoordinatorHarness::new(db);
     let (shutdown, task) = recovered.start(long_poll_config());
-    let root = wait_job(&recovered, fixture.cycle_id, FeedbackStage::Coverage).await;
+    let root = wait_job(&recovered, fixture.cycle_id, FeedbackStage::TruthFreeze).await;
     wait_job_link(
         &recovered,
         fixture.cycle_id,
-        FeedbackStage::Coverage,
+        FeedbackStage::TruthFreeze,
         root.job_id,
     )
     .await;
@@ -908,7 +934,7 @@ pub async fn empty_recovery_starts() {
         "lease recovery must not attribute a pre-enqueue crash to a job created after takeover"
     );
 
-    request_cancel(&recovered, &fixture, FeedbackStage::Coverage).await;
+    request_cancel(&recovered, &fixture, FeedbackStage::TruthFreeze).await;
     wait_status(&recovered, fixture.cycle_id, FeedbackCycleStatus::Cancelled).await;
     stop_task(shutdown, task).await;
 }
@@ -920,7 +946,7 @@ pub async fn lease_recovery_resumes() {
     let first = CoordinatorHarness::new(db.clone());
     record_cycle(&first, &fixture).await;
     let (shutdown, task) = first.start(recovery_config());
-    let root = wait_job(&first, fixture.cycle_id, FeedbackStage::Coverage).await;
+    let root = wait_job(&first, fixture.cycle_id, FeedbackStage::TruthFreeze).await;
     wait_event(&first, fixture.cycle_id, FeedbackStageEventKind::JobLinked).await;
     stop_task(shutdown, task).await;
 
@@ -932,7 +958,7 @@ pub async fn lease_recovery_resumes() {
         FeedbackStageEventKind::LeaseRecovered,
     )
     .await;
-    let same_root = wait_job(&recovered, fixture.cycle_id, FeedbackStage::Coverage).await;
+    let same_root = wait_job(&recovered, fixture.cycle_id, FeedbackStage::TruthFreeze).await;
     assert_eq!(same_root.job_id, root.job_id);
     assert_eq!(
         recovered.stages.prepare_calls(),
@@ -940,7 +966,7 @@ pub async fn lease_recovery_resumes() {
         "cycle lease recovery must reuse the durable stage root"
     );
 
-    request_cancel(&recovered, &fixture, FeedbackStage::Coverage).await;
+    request_cancel(&recovered, &fixture, FeedbackStage::TruthFreeze).await;
     wait_status(&recovered, fixture.cycle_id, FeedbackCycleStatus::Cancelled).await;
     stop_task(shutdown, task).await;
 }
@@ -961,7 +987,7 @@ pub async fn bounded_metrics_alerts() {
         .expect("record second feedback cycle");
 
     let (shutdown, task) = harness.start(observability_config());
-    let coverage = wait_job(&harness, fixture.cycle_id, FeedbackStage::Coverage).await;
+    let coverage = wait_job(&harness, fixture.cycle_id, FeedbackStage::TruthFreeze).await;
     sleep(StdDuration::from_millis(300)).await;
     let second = harness
         .cycles
@@ -997,7 +1023,7 @@ pub async fn bounded_metrics_alerts() {
     assert!(text.contains("quant_feedback_outbox_pending 3"));
 
     succeed_job(&harness, &coverage, WorkerId::from_v7()).await;
-    wait_job(&harness, fixture.cycle_id, FeedbackStage::Drift).await;
+    wait_job(&harness, fixture.cycle_id, FeedbackStage::Coverage).await;
     timeout(StdDuration::from_secs(5), async {
         loop {
             let alerted = harness
@@ -1029,13 +1055,17 @@ pub async fn bounded_metrics_alerts() {
     let text = String::from_utf8(text).expect("metrics are UTF-8");
     assert!(text.contains("quant_feedback_stuck_total 1"));
     assert!(text.contains(
-        "quant_feedback_stage_duration_seconds_count{stage=\"coverage\",status=\"succeeded\"} 1"
+        "quant_feedback_stage_duration_seconds_count{stage=\"truth_freeze\",status=\"succeeded\"} 1"
     ));
 
-    request_cancel(&harness, &fixture, FeedbackStage::Drift).await;
+    request_cancel(&harness, &fixture, FeedbackStage::Coverage).await;
     wait_status(&harness, fixture.cycle_id, FeedbackCycleStatus::Cancelled).await;
-    let second_coverage =
-        wait_job(&harness, fixture.second_cycle_id, FeedbackStage::Coverage).await;
+    let second_coverage = wait_job(
+        &harness,
+        fixture.second_cycle_id,
+        FeedbackStage::TruthFreeze,
+    )
+    .await;
     assert_eq!(
         second_coverage.feedback_cycle_id,
         Some(fixture.second_cycle_id)
@@ -1046,7 +1076,7 @@ pub async fn bounded_metrics_alerts() {
         candidate_family_hash: fixture.second_candidate_family_hash,
         ..fixture
     };
-    request_cancel(&harness, &second_fixture, FeedbackStage::Coverage).await;
+    request_cancel(&harness, &second_fixture, FeedbackStage::TruthFreeze).await;
     wait_status(
         &harness,
         second_fixture.cycle_id,

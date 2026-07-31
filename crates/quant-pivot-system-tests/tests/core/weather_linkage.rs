@@ -37,6 +37,7 @@ pub fn station_profiles() -> HashMap<String, WeatherStationProfileConfig> {
             longitude: dec!(-73.8740),
             elevation_meters: dec!(6.4),
             ghcnh_station_id: Some("USW00014732".to_owned()),
+            ghcnd_station_id: Some("USW00014732".to_owned()),
             historical_binding_kind: WeatherHistoricalBindingKind::ExactStation,
         },
     )])

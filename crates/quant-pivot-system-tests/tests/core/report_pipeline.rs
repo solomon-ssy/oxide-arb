@@ -16,12 +16,11 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgEquitySnapshotRepository, PgFactorRepository, PgMarketSelectionRepository,
-        PgModelRegistryRepository, PgOperationLogRepository,
+        PgOperationLogRepository,
     },
     traits::{
         EquitySnapshotRepository, FactorRepository, MarketSelectionRepository,
-        ModelRegistryRepository, OperationLogRepository, RecommendationRepository,
-        ReportRunRepository,
+        OperationLogRepository, RecommendationRepository, ReportRunRepository,
     },
 };
 use quant_pivot_research::precision::RESEARCH_DECIMAL_SCALE;
@@ -117,7 +116,7 @@ pub async fn ad_hoc_publishes_recommendations() {
     assert_eq!(recs[0].market_id.as_str(), MARKET_ID);
 }
 
-pub async fn pinned_route_ignores_registry() {
+pub async fn pinned_route_uses_generation() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let harness = Box::pin(ReportPipelineHarness::bootstrap(
@@ -134,14 +133,10 @@ pub async fn pinned_route_ignores_registry() {
         .await
         .expect("count model runs before route rejection");
 
-    PgModelRegistryRepository::new(db.clone())
-        .retire_model_version(&harness.model_version_id)
-        .await
-        .expect("retire the generation-pinned Weather fixture");
     let report = harness
         .execute_ad_hoc(harness.ad_hoc_request("pinned-weather-route"))
         .await
-        .expect("a complete published generation must not re-read mutable registry state");
+        .expect("a complete route generation must use its immutable model contract");
     assert_eq!(report.model_version_id, harness.model_version_id);
     assert_eq!(
         MarketSelectionEntity::find()

@@ -3,6 +3,7 @@
 pub mod airnow;
 pub mod aviation_weather;
 pub mod gefs;
+pub mod ghcnd;
 pub mod ghcnh;
 pub mod gistemp;
 pub mod hko;

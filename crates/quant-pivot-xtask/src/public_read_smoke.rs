@@ -3,8 +3,8 @@
 use std::{slice::from_ref, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Error, Result, ensure};
-use chrono::{Duration as ChronoDuration, NaiveDate, Timelike, Utc};
-use chrono_tz::{America, Tz};
+use chrono::{Days, Duration as ChronoDuration, NaiveDate, Timelike, Utc};
+use chrono_tz::{America, Asia::Hong_Kong, Tz};
 use polymarket_client_sdk_v2::types::U256;
 use quant_pivot_api::{
     binance::{BinanceAggTradeSource, BinanceKlineSource, BinanceRequestBudget},
@@ -15,7 +15,7 @@ use quant_pivot_api::{
         airnow::AirNowSource,
         ghcnh::GhcnhSource,
         gistemp::NasaGistempSource,
-        hko::HkoOpenDataSource,
+        hko::{HkoDailyRainfallRequest, HkoOpenDataSource},
         nhc::{NhcBasin, NhcSource},
         nsidc::{NsidcSeaIceSource, SeaIceHemisphere},
         nws::NwsObservationSource,
@@ -29,7 +29,8 @@ use quant_pivot_models::{
         AirNowSourceConfig, BinanceSourceConfig, GammaConfig, GhcnhSourceConfig,
         HkoOpenDataSourceConfig, NasaGistempSourceConfig, NhcSourceConfig, NsidcSeaIceSourceConfig,
         NwsObservationSourceConfig, PolymarketConfig, PolymarketRtdsSourceConfig,
-        TornadoSourceConfig, WeatherVerticalBindingsConfig, WebSocketConfig,
+        TornadoRegionScopeConfig, TornadoSourceConfig, WeatherVerticalBindingsConfig,
+        WebSocketConfig,
     },
     domain::data_plane::pipeline::PipelineEvent,
     enums::domain::{DomainFamily, DomainMetric, KlineInterval},
@@ -308,13 +309,34 @@ async fn weather(compute: Arc<ComputeExecutor>) -> Result<()> {
 }
 
 async fn hko() -> Result<()> {
-    let source =
-        HkoOpenDataSource::connect(HkoOpenDataSourceConfig::default()).context("connect HKO")?;
-    let report = source
-        .rainfall("North District", Utc::now())
+    let config = HkoOpenDataSourceConfig::default();
+    let source = HkoOpenDataSource::connect(config.clone()).context("connect HKO")?;
+    let binding = WeatherVerticalBindingsConfig::default()
+        .hko_rainfall
+        .into_iter()
+        .next()
+        .context("default HKO rainfall binding")?;
+    let available_at = Utc::now();
+    let minimum_date = available_at
+        .with_timezone(&Hong_Kong)
+        .date_naive()
+        .checked_sub_days(Days::new(u64::from(config.daily_rainfall_lookback_days)))
+        .context("HKO rainfall lookback underflow")?;
+    let dataset = source
+        .daily_rainfall(&HkoDailyRainfallRequest {
+            station_key: binding.station_key,
+            site_key: binding.site_key,
+            csv_url: binding.daily_csv_url,
+            minimum_date,
+            available_at,
+        })
         .await
-        .context("read HKO rainfall")?
-        .context("HKO omitted configured rainfall place")?;
+        .context("read HKO rainfall")?;
+    let report = dataset
+        .reports
+        .into_iter()
+        .max_by_key(|report| (report.observed_at, report.report_hash))
+        .context("HKO returned no completed rainfall rows")?;
     ensure!(
         report.source_id == DomainSourceId::hko_open_data()
             && report.variable == WeatherVariable::Precipitation
@@ -449,9 +471,13 @@ async fn airnow() -> Result<()> {
 async fn tornado(compute: Arc<ComputeExecutor>) -> Result<()> {
     let source = TornadoSource::connect(TornadoSourceConfig::default(), compute)
         .context("connect tornado sources")?;
+    let oklahoma = TornadoRegionScopeConfig::State {
+        spc_state_code: "OK".to_owned(),
+        ncei_state_name: "OKLAHOMA".to_owned(),
+    };
     let report_date = (Utc::now() - ChronoDuration::days(1)).date_naive();
     let preliminary = source
-        .spc_preliminary_day("oklahoma", "OK", report_date, Utc::now())
+        .spc_preliminary_day("oklahoma", &oklahoma, report_date, Utc::now())
         .await
         .context("read SPC preliminary partition")?
         .context("SPC omitted yesterday's published partition")?;
@@ -464,19 +490,24 @@ async fn tornado(compute: Arc<ComputeExecutor>) -> Result<()> {
 
     let historical_date =
         NaiveDate::from_ymd_opt(2013, 5, 20).context("construct historical date")?;
-    let final_day = source
-        .ncei_final_day(
+    let final_period = source
+        .ncei_final_period(
             "oklahoma",
-            "OKLAHOMA",
+            &oklahoma,
             America::Chicago,
+            historical_date,
             historical_date,
             Utc::now(),
         )
         .await
         .context("read NCEI final tornado day")?;
+    let final_day = final_period
+        .reports
+        .first()
+        .context("NCEI final tornado day is absent")?;
     ensure!(
-        final_day.report.source_id == DomainSourceId::ncei_storm_events()
-            && final_day.report.value > Decimal::ZERO,
+        final_day.source_id == DomainSourceId::ncei_storm_events()
+            && final_day.value > Decimal::ZERO,
         "NCEI final report violated typed provenance"
     );
     Ok(())

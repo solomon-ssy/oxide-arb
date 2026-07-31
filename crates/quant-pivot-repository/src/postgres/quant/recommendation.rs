@@ -140,6 +140,7 @@ impl RecommendationRepository for PgRecommendationRepository {
         .await?;
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(RecommendationStatus::Expired);
+        active.status_changed_at = ActiveValue::Set(expired_at);
         let model = active.update(&txn).await.map_err(StorageError::from)?;
         let after_info: RecommendationInfo = model.clone().into();
         let operation_log =

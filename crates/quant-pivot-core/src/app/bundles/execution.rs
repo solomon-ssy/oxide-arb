@@ -74,12 +74,12 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ClobMarketInfoRepository, DomainSourceCursorRepository,
-    EntryConditionRepository, ExecutionOrderRepository, ExecutionSubmissionRepository,
-    FactorRepository, FeatureParityRepository, MarketRepository, ModelRegistryRepository,
-    OperationLogRepository, OrderIntentRepository, PolicyRepository, PositionRepository,
-    RecommendationExecutionOutcomeRepository, RecommendationReportRepository,
+    EntryConditionRepository, ExecutionAttemptOutcomeRepository, ExecutionOrderRepository,
+    ExecutionSubmissionRepository, FactorRepository, FeatureParityRepository, MarketRepository,
+    ModelRegistryRepository, OperationLogRepository, OrderIntentRepository, PolicyRepository,
+    PositionRepository, RecommendationExecutionRollupRepository, RecommendationReportRepository,
     RecommendationRepository, RecommendationResolutionOutcomeRepository, ReconciliationRepository,
-    TradePolicyRepository,
+    ResolutionObservationRepository, TradePolicyRepository,
     quant::{
         settlement_governance::{
             SettlementExternalCursorRepository, SettlementGovernanceRepository,
@@ -396,11 +396,15 @@ fn build_outcome_reconciliation_service(
             resolution_facts: Arc::clone(&deps.infra.quant_fact_read),
             cursors: Arc::clone(&repos.domain_source_cursor)
                 as Arc<dyn DomainSourceCursorRepository>,
+            resolution_observations: Arc::clone(&repos.resolution_observation)
+                as Arc<dyn ResolutionObservationRepository>,
             markets: Arc::clone(&repos.market) as Arc<dyn MarketRepository>,
             resolution_outcomes: Arc::clone(&repos.recommendation_resolution_outcome)
                 as Arc<dyn RecommendationResolutionOutcomeRepository>,
-            execution_outcomes: Arc::clone(&repos.recommendation_execution_outcome)
-                as Arc<dyn RecommendationExecutionOutcomeRepository>,
+            execution_outcomes: Arc::clone(&repos.execution_attempt_outcome)
+                as Arc<dyn ExecutionAttemptOutcomeRepository>,
+            execution_rollups: Arc::clone(&repos.recommendation_execution_rollup)
+                as Arc<dyn RecommendationExecutionRollupRepository>,
         },
     )))
 }

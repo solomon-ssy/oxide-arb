@@ -3,11 +3,11 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::MarketResolutionRow,
     domain::quant::{
-        InsertResolutionOutcomeResult, RecommendationResolutionOutcomeInfo,
+        InsertResolutionOutcomeResult, OutcomeTaskSettlement, RecommendationResolutionOutcomeInfo,
         RecommendationResolutionOutcomePage, RecommendationResolutionOutcomePageQuery,
-        RecommendationResolutionReconciliationCandidate,
+        ResolutionOutcomeTaskClaim,
     },
-    types::RecommendationId,
+    types::{RecommendationId, WorkerId},
 };
 
 /// Persistence port for immutable recommendation-resolution outcomes.
@@ -33,13 +33,23 @@ pub trait RecommendationResolutionOutcomeRepository: Send + Sync {
         available_through: DateTime<Utc>,
     ) -> Result<Option<DateTime<Utc>>, StorageError>;
 
-    /// Keyset page of terminal-market recommendations that still lack A03 truth.
-    async fn list_reconciliation_candidates(
+    /// Materialize and lease due terminal-market recommendations with
+    /// `FOR UPDATE SKIP LOCKED`.
+    async fn claim_reconciliation(
         &self,
         available_through: DateTime<Utc>,
-        after: Option<RecommendationId>,
+        worker_id: WorkerId,
+        lease_secs: u64,
         limit: u64,
-    ) -> Result<Vec<RecommendationResolutionReconciliationCandidate>, StorageError>;
+    ) -> Result<Vec<ResolutionOutcomeTaskClaim>, StorageError>;
+
+    /// Complete or durably retry a task owned by `worker_id`.
+    async fn settle_reconciliation(
+        &self,
+        recommendation_id: RecommendationId,
+        worker_id: WorkerId,
+        settlement: OutcomeTaskSettlement,
+    ) -> Result<(), StorageError>;
 
     async fn list_available_page(
         &self,

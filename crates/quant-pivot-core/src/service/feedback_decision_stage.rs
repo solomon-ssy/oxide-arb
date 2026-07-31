@@ -6,9 +6,11 @@ use quant_pivot_error::{QuantError, QuantResult, feedback::FeedbackError, storag
 use quant_pivot_models::{
     domain::{
         ports::{
-            FeedbackComparisonArtifactRef, FeedbackDecisionJobInput, FeedbackDecisionJobParams,
-            FeedbackDriftArtifactRef, FeedbackShadowContract, FeedbackShadowReplayArtifactRef,
-            FeedbackShadowSubject,
+            FeedbackAttributionPlanArtifact, FeedbackComparisonArtifactRef,
+            FeedbackDecisionJobInput, FeedbackDecisionJobParams, FeedbackDriftArtifactRef,
+            FeedbackLearningStageArtifactRef, FeedbackShadowArtifactRef, FeedbackShadowContract,
+            FeedbackShadowSubject, FeedbackTruthFreezeArtifact, FeedbackValidationArtifact,
+            FeedbackValidationTrialOutcome,
         },
         quant::{
             FeedbackCycleInfo, FeedbackStageEventInfo, FeedbackStageJobIdentity, NewResearchJob,
@@ -20,8 +22,9 @@ use quant_pivot_models::{
         ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
     },
     types::{
-        ContentHash, FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackShadowReplayArtifactId,
-        ResearchJobParams, RoleCode,
+        BacktestPathSetId, ContentHash, FeedbackCycleId, FeedbackDecisionArtifactId,
+        FeedbackShadowArtifactId, ModelVersionId, ResearchJobParams, RoleCode,
+        model_quality::QualityGateReport,
     },
 };
 use quant_pivot_repository::traits::{
@@ -30,10 +33,17 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     artifact::ArtifactStore,
     feedback::{DriftGateOutcome, FeedbackDriftArtifact, FeedbackDriftCodec},
-    feedback_comparison::{FeedbackComparisonArtifact, FeedbackComparisonCodec},
+    feedback_comparison::{
+        FeedbackComparisonArtifact, FeedbackComparisonCodec, RomanoWolfCandidateResult,
+        RomanoWolfOutcome,
+    },
     feedback_decision::{FeedbackDecisionArtifact, FeedbackDecisionCodec, FeedbackDecisionOutcome},
+    feedback_governance::FeedbackGovernanceCodec,
+    feedback_learning::{
+        FeedbackCpcvStageResult, FeedbackLearningStageCodec, FeedbackLearningStageResults,
+    },
     feedback_shadow::{
-        FeedbackShadowOutcome, FeedbackShadowReplayArtifact, FeedbackShadowReplayCodec,
+        FeedbackShadowArtifact, FeedbackShadowCodec, FeedbackShadowEvidence, FeedbackShadowOutcome,
     },
 };
 
@@ -50,8 +60,8 @@ struct VerifiedComparison {
 }
 
 struct VerifiedShadow {
-    reference: FeedbackShadowReplayArtifactRef,
-    artifact: FeedbackShadowReplayArtifact,
+    reference: FeedbackShadowArtifactRef,
+    artifact: FeedbackShadowArtifact,
 }
 
 struct VerifiedDecisionInputs {
@@ -67,6 +77,12 @@ struct VerifiedDecision {
     job_input_hash: ContentHash,
 }
 
+struct VerifiedValidationGate {
+    reference: ResearchJobArtifactRef,
+    artifact: FeedbackValidationArtifact,
+    cpcv: FeedbackLearningStageArtifactRef,
+}
+
 /// Fully re-read F11 `CandidateReady` evidence accepted as a promotion input.
 ///
 /// Every field is derived from the durable cycle/job/event timeline and
@@ -79,11 +95,31 @@ pub struct PromotionDecisionEvidence {
     pub decision_artifact_hash: ContentHash,
     pub decision_object_hash: ContentHash,
     pub decision_job_input_hash: ContentHash,
-    pub shadow_artifact_id: FeedbackShadowReplayArtifactId,
+    pub shadow_artifact_id: FeedbackShadowArtifactId,
     pub shadow_artifact_hash: ContentHash,
     pub shadow_object_hash: ContentHash,
     pub candidate_recipe_hash: ContentHash,
     pub shadow_contract: FeedbackShadowContract,
+    pub comparison_observation_count: u64,
+    pub comparison: RomanoWolfCandidateResult,
+    pub shadow: FeedbackShadowEvidence,
+    pub dag: PromotionDagEvidence,
+}
+
+/// Complete immutable DAG evidence for the exact `CandidateReady` challenger.
+#[derive(Debug, Clone)]
+pub struct PromotionDagEvidence {
+    pub truth_freeze_hash: ContentHash,
+    pub attribution_plan_hash: ContentHash,
+    pub validation_artifact_hash: ContentHash,
+    pub quality_gate_report_hash: ContentHash,
+    pub comparison_artifact_hash: ContentHash,
+    pub shadow_artifact_hash: ContentHash,
+    pub decision_artifact_hash: ContentHash,
+    pub cpcv_path_set_id: BacktestPathSetId,
+    pub cpcv_path_set_hash: ContentHash,
+    pub attribution_plan: FeedbackAttributionPlanArtifact,
+    pub quality_gate_report: QualityGateReport,
 }
 
 /// Dependencies for [`FeedbackDecisionStageAdapter`].
@@ -143,7 +179,7 @@ impl FeedbackDecisionStageAdapter {
             champion_serving_contract_hash: cycle.champion_serving_contract_hash,
             drift: inputs.drift.reference,
             comparison: inputs.comparison.reference,
-            shadow_replay: inputs.shadow.reference,
+            shadow: inputs.shadow.reference,
         })?;
         self.bind_job(cycle, identity, params)
     }
@@ -222,6 +258,23 @@ impl FeedbackDecisionStageAdapter {
                 "F09/F10/F11 candidate, contract, or stability evidence differs",
             ));
         }
+        let dag = self
+            .load_promotion_dag(
+                &cycle,
+                &events,
+                *candidate_recipe_hash,
+                contract.candidate_model_version_id(),
+                &verified,
+            )
+            .await?;
+        let comparison_observation_count = match verified.inputs.comparison.artifact.outcome() {
+            RomanoWolfOutcome::Compared { evidence } => evidence.observation_count,
+            RomanoWolfOutcome::InsufficientObservations { .. } => {
+                return Err(Self::promotion_invalid(
+                    "CandidateReady comparison has insufficient observations",
+                ));
+            }
+        };
         Ok(PromotionDecisionEvidence {
             cycle,
             decision_artifact_id: verified.artifact.artifact_id(),
@@ -233,6 +286,10 @@ impl FeedbackDecisionStageAdapter {
             shadow_object_hash: verified.inputs.shadow.reference.artifact.content_hash,
             candidate_recipe_hash: *candidate_recipe_hash,
             shadow_contract: contract.as_ref().clone(),
+            comparison_observation_count,
+            comparison: evidence.candidate.comparison.clone(),
+            shadow: evidence.shadow.clone(),
+            dag,
         })
     }
 
@@ -274,7 +331,7 @@ impl FeedbackDecisionStageAdapter {
         let inputs = self.load_inputs(cycle).await?;
         if params.drift != inputs.drift.reference
             || params.comparison != inputs.comparison.reference
-            || params.shadow_replay != inputs.shadow.reference
+            || params.shadow != inputs.shadow.reference
         {
             return Err(Self::invalid(
                 "Decision job predecessors differ from the WORM stage timeline",
@@ -299,6 +356,251 @@ impl FeedbackDecisionStageAdapter {
             inputs,
             job_input_hash: params.input_hash()?,
         })
+    }
+
+    async fn load_promotion_dag(
+        &self,
+        cycle: &FeedbackCycleInfo,
+        events: &[FeedbackStageEventInfo],
+        candidate_recipe_hash: ContentHash,
+        model_version_id: ModelVersionId,
+        decision: &VerifiedDecision,
+    ) -> QuantResult<PromotionDagEvidence> {
+        let (truth_ref, _) = self.load_truth_gate(cycle, events).await?;
+        let (attribution_ref, attribution_plan) = self
+            .load_attribution_gate(cycle, events, &truth_ref)
+            .await?;
+        let validation = self.load_validation_gate(cycle, events).await?;
+        let candidate = validation
+            .artifact
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.candidate_recipe_hash == candidate_recipe_hash
+                    && candidate.model_version_id == model_version_id
+            })
+            .ok_or_else(|| {
+                Self::promotion_invalid(
+                    "CandidateReady challenger is absent from the Validation universe",
+                )
+            })?;
+        if candidate.trial_outcome != FeedbackValidationTrialOutcome::CpcvEvaluated
+            || !candidate.quality_gate_report.passed
+        {
+            return Err(Self::promotion_invalid(
+                "CandidateReady challenger did not pass the sole Validation quality gate",
+            ));
+        }
+        let (cpcv_path_set_id, cpcv_path_set_hash) = self
+            .load_cpcv_gate(
+                cycle,
+                &validation.cpcv,
+                candidate_recipe_hash,
+                model_version_id,
+            )
+            .await?;
+        Ok(PromotionDagEvidence {
+            truth_freeze_hash: truth_ref.content_hash,
+            attribution_plan_hash: attribution_ref.content_hash,
+            validation_artifact_hash: validation.reference.content_hash,
+            quality_gate_report_hash: candidate.quality_gate_report.report_hash,
+            comparison_artifact_hash: decision.inputs.comparison.artifact.artifact_hash(),
+            shadow_artifact_hash: decision.inputs.shadow.artifact.artifact_hash(),
+            decision_artifact_hash: decision.artifact.artifact_hash(),
+            cpcv_path_set_id,
+            cpcv_path_set_hash,
+            attribution_plan,
+            quality_gate_report: candidate.quality_gate_report.clone(),
+        })
+    }
+
+    async fn load_truth_gate(
+        &self,
+        cycle: &FeedbackCycleInfo,
+        events: &[FeedbackStageEventInfo],
+    ) -> QuantResult<(ResearchJobArtifactRef, FeedbackTruthFreezeArtifact)> {
+        let (event, job) = self
+            .load_stage_job(cycle, events, FeedbackStage::TruthFreeze)
+            .await?;
+        let ResearchJobParams::FeedbackTruthFreeze(params) = &job.params_json else {
+            return Err(Self::promotion_invalid(
+                "TruthFreeze predecessor lost its typed parameters",
+            ));
+        };
+        params.validate()?;
+        let reference = Self::require_result(
+            &job,
+            &event,
+            ResearchJobResultRef {
+                kind: ResearchJobResultKind::FeedbackTruthFreezeArtifact,
+                id: params.artifact_id.as_uuid(),
+            },
+        )?;
+        let bytes = self.artifacts.get(&reference.uri).await?;
+        if FeedbackGovernanceCodec::bytes_hash(&bytes) != reference.content_hash {
+            return Err(Self::promotion_invalid(
+                "TruthFreeze bytes differ from their WORM event hash",
+            ));
+        }
+        let artifact = FeedbackGovernanceCodec::decode_truth(&bytes)?;
+        if job.kind != ResearchJobKind::FeedbackTruthFreeze
+            || artifact.feedback_cycle_id != cycle.feedback_cycle_id
+            || artifact.cycle_idempotency_hash != cycle.idempotency_hash
+            || artifact.input_hash != params.input_hash()?
+            || artifact.cutoff != cycle.label_cutoff
+            || !artifact.blockers.is_empty()
+        {
+            return Err(Self::promotion_invalid(
+                "TruthFreeze is incomplete or differs from the promotion cycle",
+            ));
+        }
+        Ok((reference, artifact))
+    }
+
+    async fn load_attribution_gate(
+        &self,
+        cycle: &FeedbackCycleInfo,
+        events: &[FeedbackStageEventInfo],
+        truth: &ResearchJobArtifactRef,
+    ) -> QuantResult<(ResearchJobArtifactRef, FeedbackAttributionPlanArtifact)> {
+        let (event, job) = self
+            .load_stage_job(cycle, events, FeedbackStage::AttributionPlan)
+            .await?;
+        let ResearchJobParams::FeedbackAttributionPlan(params) = &job.params_json else {
+            return Err(Self::promotion_invalid(
+                "AttributionPlan predecessor lost its typed parameters",
+            ));
+        };
+        params.validate()?;
+        let reference = Self::require_result(
+            &job,
+            &event,
+            ResearchJobResultRef {
+                kind: ResearchJobResultKind::FeedbackAttributionPlanArtifact,
+                id: params.artifact_id.as_uuid(),
+            },
+        )?;
+        let bytes = self.artifacts.get(&reference.uri).await?;
+        if FeedbackGovernanceCodec::bytes_hash(&bytes) != reference.content_hash {
+            return Err(Self::promotion_invalid(
+                "AttributionPlan bytes differ from their WORM event hash",
+            ));
+        }
+        let artifact = FeedbackGovernanceCodec::decode_attribution(&bytes)?;
+        if job.kind != ResearchJobKind::FeedbackAttributionPlan
+            || params.truth_artifact != *truth
+            || artifact.feedback_cycle_id != cycle.feedback_cycle_id
+            || artifact.cycle_idempotency_hash != cycle.idempotency_hash
+            || artifact.input_hash != params.input_hash()?
+            || artifact.truth_artifact != *truth
+            || artifact.cutoff != cycle.label_cutoff
+        {
+            return Err(Self::promotion_invalid(
+                "AttributionPlan differs from the promotion cycle or TruthFreeze",
+            ));
+        }
+        Ok((reference, artifact))
+    }
+
+    async fn load_validation_gate(
+        &self,
+        cycle: &FeedbackCycleInfo,
+        events: &[FeedbackStageEventInfo],
+    ) -> QuantResult<VerifiedValidationGate> {
+        let (event, job) = self
+            .load_stage_job(cycle, events, FeedbackStage::Validation)
+            .await?;
+        let ResearchJobParams::FeedbackValidation(params) = &job.params_json else {
+            return Err(Self::promotion_invalid(
+                "Validation predecessor lost its typed parameters",
+            ));
+        };
+        params.validate()?;
+        let reference = Self::require_result(
+            &job,
+            &event,
+            ResearchJobResultRef {
+                kind: ResearchJobResultKind::FeedbackValidationArtifact,
+                id: params.artifact_id.as_uuid(),
+            },
+        )?;
+        let bytes = self.artifacts.get(&reference.uri).await?;
+        if FeedbackGovernanceCodec::bytes_hash(&bytes) != reference.content_hash {
+            return Err(Self::promotion_invalid(
+                "Validation bytes differ from their WORM event hash",
+            ));
+        }
+        let artifact = FeedbackGovernanceCodec::decode_validation(&bytes)?;
+        if job.kind != ResearchJobKind::FeedbackValidation
+            || artifact.feedback_cycle_id != cycle.feedback_cycle_id
+            || artifact.cycle_idempotency_hash != cycle.idempotency_hash
+            || artifact.input_hash != params.input_hash()?
+            || artifact.evaluated_at != params.evaluated_at
+        {
+            return Err(Self::promotion_invalid(
+                "Validation artifact differs from its promotion cycle or job",
+            ));
+        }
+        Ok(VerifiedValidationGate {
+            reference,
+            artifact,
+            cpcv: params.cpcv.clone(),
+        })
+    }
+
+    async fn load_cpcv_gate(
+        &self,
+        cycle: &FeedbackCycleInfo,
+        reference: &FeedbackLearningStageArtifactRef,
+        candidate_recipe_hash: ContentHash,
+        model_version_id: ModelVersionId,
+    ) -> QuantResult<(BacktestPathSetId, ContentHash)> {
+        reference.validate_for(cycle.feedback_cycle_id, FeedbackStage::Cpcv)?;
+        let bytes = self.artifacts.get(&reference.artifact.uri).await?;
+        if FeedbackLearningStageCodec::bytes_hash(&bytes) != reference.artifact.content_hash {
+            return Err(Self::promotion_invalid(
+                "CPCV bytes differ from the Validation lineage hash",
+            ));
+        }
+        let artifact = FeedbackLearningStageCodec::decode(&bytes)?;
+        if artifact.feedback_cycle_id != cycle.feedback_cycle_id
+            || artifact.artifact_id != reference.artifact_id
+            || artifact.input_hash != reference.input_hash
+        {
+            return Err(Self::promotion_invalid(
+                "CPCV artifact differs from its Validation reference",
+            ));
+        }
+        let FeedbackLearningStageResults::Cpcv(results) = artifact.results else {
+            return Err(Self::promotion_invalid(
+                "Validation CPCV reference is not a CPCV artifact",
+            ));
+        };
+        let result = results
+            .into_iter()
+            .find(|result| result.candidate_recipe_hash() == candidate_recipe_hash)
+            .ok_or_else(|| {
+                Self::promotion_invalid(
+                    "CandidateReady challenger is absent from the complete CPCV universe",
+                )
+            })?;
+        let FeedbackCpcvStageResult::Evaluated {
+            model_version_id: evaluated_model,
+            path_set_id,
+            path_set_hash,
+            ..
+        } = result
+        else {
+            return Err(Self::promotion_invalid(
+                "CandidateReady challenger has no evaluated CPCV path set",
+            ));
+        };
+        if evaluated_model != model_version_id {
+            return Err(Self::promotion_invalid(
+                "CPCV candidate model differs from CandidateReady",
+            ));
+        }
+        Ok((path_set_id, path_set_hash))
     }
 
     async fn load_inputs(&self, cycle: &FeedbackCycleInfo) -> QuantResult<VerifiedDecisionInputs> {
@@ -439,42 +741,42 @@ impl FeedbackDecisionStageAdapter {
         comparison: &FeedbackComparisonArtifactRef,
     ) -> QuantResult<VerifiedShadow> {
         let (event, job) = self
-            .load_stage_job(cycle, events, FeedbackStage::ShadowReplay)
+            .load_stage_job(cycle, events, FeedbackStage::Shadow)
             .await?;
-        let ResearchJobParams::FeedbackShadowReplay(params) = &job.params_json else {
+        let ResearchJobParams::FeedbackShadow(params) = &job.params_json else {
             return Err(Self::invalid(
-                "ShadowReplay predecessor lost its typed parameters",
+                "Shadow predecessor lost its typed parameters",
             ));
         };
         params.validate()?;
         let expected = ResearchJobResultRef {
-            kind: ResearchJobResultKind::FeedbackShadowReplayArtifact,
+            kind: ResearchJobResultKind::FeedbackShadowArtifact,
             id: params.artifact_id.as_uuid(),
         };
         let artifact_ref = Self::require_result(&job, &event, expected)?;
         let bytes = self.artifacts.get(&artifact_ref.uri).await?;
-        if FeedbackShadowReplayCodec::bytes_hash(&bytes) != artifact_ref.content_hash {
+        if FeedbackShadowCodec::bytes_hash(&bytes) != artifact_ref.content_hash {
             return Err(Self::invalid(
-                "ShadowReplay predecessor bytes differ from the terminal hash",
+                "Shadow predecessor bytes differ from the terminal hash",
             ));
         }
-        let artifact = FeedbackShadowReplayCodec::decode(&bytes)?;
+        let artifact = FeedbackShadowCodec::decode(&bytes)?;
         artifact.validate_for(params)?;
         let params_cycle_matches = params.feedback_cycle_id == cycle.feedback_cycle_id;
         let params_hash_matches = params.cycle_idempotency_hash == cycle.idempotency_hash;
         if !params_cycle_matches
             || !params_hash_matches
-            || job.kind != ResearchJobKind::FeedbackShadowReplay
+            || job.kind != ResearchJobKind::FeedbackShadow
             || params.profile_ref != cycle.profile_ref
             || params.feedback_policy_hash != cycle.feedback_policy_hash
             || params.previous != *comparison
         {
             return Err(Self::invalid(
-                "ShadowReplay predecessor differs from the cycle and comparison lineage",
+                "Shadow predecessor differs from the cycle and comparison lineage",
             ));
         }
         Ok(VerifiedShadow {
-            reference: FeedbackShadowReplayArtifactRef {
+            reference: FeedbackShadowArtifactRef {
                 feedback_cycle_id: cycle.feedback_cycle_id,
                 job_id: job.job_id,
                 artifact_id: params.artifact_id,

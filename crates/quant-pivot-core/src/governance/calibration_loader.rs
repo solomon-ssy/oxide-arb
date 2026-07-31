@@ -31,7 +31,7 @@ use quant_pivot_research::model::{CalibrationArtifactLoader, ModelArtifact, Reso
 /// `publish` only inspected the `ReturnModelSpec` enum tag
 /// (`ModelArtifact::return_model_is_calibrated`) while `report`/`admission`
 /// re-verified calibrator liveness + content hash, so a calibrator deactivated
-/// between `bind_calibration` and `publish` could pass the gate yet fail every
+/// between calibrated-model sealing and route activation could pass validation yet fail every
 /// downstream consumer — the exact "judged once, drifts later" gap this function
 /// closes.
 ///
@@ -197,7 +197,7 @@ impl CalibrationArtifactLoader for CoreCalibrationArtifactLoader {
         // Fail-closed governance: a calibrator that was never bound/activated
         // (or was superseded — `active` lifecycle) must never
         // resolve. The `Calibrated` return model's `calibrator_ref` is only
-        // ever set by `bind_calibration`, which activates the target row in
+        // ever set by calibrated-model sealing, which activates the target row in
         // the same transaction, so a well-formed reference is always active;
         // a mismatch here means the artifact was deactivated after binding.
         if !info.active {

@@ -97,16 +97,58 @@ impl FeedbackCalibrationStageResult {
     }
 }
 
-/// One exact CPCV path-set result.
+/// Terminal CPCV outcome for every recipe admitted to the feedback trial universe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FeedbackCpcvStageResult {
-    pub candidate_recipe_hash: ContentHash,
-    pub model_version_id: ModelVersionId,
-    pub training_dataset_id: TrainingDatasetId,
-    pub path_set_id: BacktestPathSetId,
-    pub model_run_id: ModelRunId,
-    pub path_set_hash: ContentHash,
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum FeedbackCpcvStageResult {
+    Evaluated {
+        candidate_recipe_hash: ContentHash,
+        model_version_id: ModelVersionId,
+        training_dataset_id: TrainingDatasetId,
+        path_set_id: BacktestPathSetId,
+        model_run_id: ModelRunId,
+        path_set_hash: ContentHash,
+    },
+    CalibrationInsufficient {
+        candidate_recipe_hash: ContentHash,
+        source_model_version_id: ModelVersionId,
+        model_run_id: ModelRunId,
+        calibration_dataset_id: TrainingDatasetId,
+        method: CalibrationMethod,
+        sample_count: u64,
+        total_sample_count: u64,
+        minimum_sample_count: u64,
+        outcome_hash: ContentHash,
+    },
+}
+
+impl FeedbackCpcvStageResult {
+    #[must_use]
+    pub const fn candidate_recipe_hash(&self) -> ContentHash {
+        match self {
+            Self::Evaluated {
+                candidate_recipe_hash,
+                ..
+            }
+            | Self::CalibrationInsufficient {
+                candidate_recipe_hash,
+                ..
+            } => *candidate_recipe_hash,
+        }
+    }
+
+    #[must_use]
+    pub const fn model_version_id(&self) -> ModelVersionId {
+        match self {
+            Self::Evaluated {
+                model_version_id, ..
+            } => *model_version_id,
+            Self::CalibrationInsufficient {
+                source_model_version_id,
+                ..
+            } => *source_model_version_id,
+        }
+    }
 }
 
 /// Stage-specific result body.
@@ -442,20 +484,61 @@ fn validate_calibration_results(results: &[FeedbackCalibrationStageResult]) -> Q
 }
 
 fn validate_cpcv_results(results: &[FeedbackCpcvStageResult]) -> QuantResult<()> {
-    validate_recipe_order(results.iter().map(|result| result.candidate_recipe_hash))?;
+    validate_recipe_order(
+        results
+            .iter()
+            .map(FeedbackCpcvStageResult::candidate_recipe_hash),
+    )?;
     let mut models = HashSet::new();
     let mut runs = HashSet::new();
     let mut datasets = HashSet::new();
     let mut path_sets = HashSet::new();
-    if results.iter().any(|result| {
-        !models.insert(result.model_version_id)
-            || !runs.insert(result.model_run_id)
-            || !datasets.insert(result.training_dataset_id)
-            || !path_sets.insert(result.path_set_id)
-    }) {
-        return Err(contract(
-            "CPCV results reuse a model, model-run, Dataset, or path-set identity",
-        ));
+    let mut outcome_hashes = HashSet::new();
+    for result in results {
+        let (model, run, dataset) = match result {
+            FeedbackCpcvStageResult::Evaluated {
+                model_version_id,
+                training_dataset_id,
+                path_set_id,
+                model_run_id,
+                ..
+            } => {
+                if !path_sets.insert(*path_set_id) {
+                    return Err(contract("CPCV results reuse a path-set identity"));
+                }
+                (*model_version_id, *model_run_id, *training_dataset_id)
+            }
+            FeedbackCpcvStageResult::CalibrationInsufficient {
+                source_model_version_id,
+                model_run_id,
+                calibration_dataset_id,
+                sample_count,
+                total_sample_count,
+                minimum_sample_count,
+                outcome_hash,
+                ..
+            } => {
+                if *minimum_sample_count == 0
+                    || sample_count >= minimum_sample_count
+                    || sample_count > total_sample_count
+                    || !outcome_hashes.insert(*outcome_hash)
+                {
+                    return Err(contract(
+                        "CPCV ineligible result does not prove a unique unmet calibration sample floor",
+                    ));
+                }
+                (
+                    *source_model_version_id,
+                    *model_run_id,
+                    *calibration_dataset_id,
+                )
+            }
+        };
+        if !models.insert(model) || !runs.insert(run) || !datasets.insert(dataset) {
+            return Err(contract(
+                "CPCV results reuse a model, model-run, or Dataset identity",
+            ));
+        }
     }
     Ok(())
 }

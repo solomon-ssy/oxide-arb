@@ -14,7 +14,6 @@ use crate::{
         common::MarketCategory,
         factor::{FactorDefinitionScope, FactorFamily},
         model::ModelFamily,
-        quant::PublicationStatus,
     },
     types::{
         ContentHash, ModelSpecId, ModelVersionId, ResearchProfileRef, factor::FactorOutputSemantics,
@@ -137,7 +136,6 @@ pub struct FactorServingUsageView {
     pub artifact_hash: ContentHash,
     pub serving_contract_version: u32,
     pub serving_contract_hash: ContentHash,
-    pub publication_status: PublicationStatus,
     pub created_at: DateTime<Utc>,
 }
 

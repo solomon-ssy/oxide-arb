@@ -33,13 +33,16 @@ use crate::{
         ArtifactUri, BacktestPathSetId, BacktestReportId, Bps, ContentHash, DatasetSourceLineage,
         DecisionPolicySnapshotId, FeedbackComparisonArtifactId, FeedbackCoverageArtifactId,
         FeedbackCycleId, FeedbackDecisionArtifactId, FeedbackDriftArtifactId,
-        FeedbackEvaluationUseId, FeedbackLearningStageArtifactId, FeedbackShadowReplayArtifactId,
+        FeedbackEvaluationUseId, FeedbackLearningStageArtifactId, FeedbackShadowArtifactId,
         ModelRunId, ModelSpecId, ModelVersionId, PolicyBundleGeneration, Probability,
         ResearchFeedbackPolicy, ResearchJobId, ResearchProfileRef, TrainingDatasetId,
     },
 };
 
-use super::calibration_artifact::ModelCalibrationFitJobParams;
+use super::{
+    calibration_artifact::ModelCalibrationFitJobParams,
+    feedback_governance::FeedbackValidationArtifactRef,
+};
 
 const LEARNING_INPUT_VERSION: u32 = 1;
 const LEARNING_INPUT_DOMAIN: &str = "quant-pivot/feedback-learning-stage-input";
@@ -812,23 +815,21 @@ pub struct FeedbackTrainingCommand {
     pub params: ModelTrainJobParams,
 }
 
-/// One Calibration batch member, including the immutable derived-model binding.
+/// One Calibration batch member. The fit parameters own the immutable
+/// derived-model semantics and actor provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackCalibrationCommand {
     pub candidate_recipe_hash: ContentHash,
     pub params: ModelCalibrationFitJobParams,
-    pub downside_source: DownsideSource,
-    pub bind_reason: String,
 }
 
-/// One CPCV batch member and the governed reason used to bind its path set.
+/// One CPCV batch member carrying its preassigned immutable path-set identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackCpcvCommand {
     pub candidate_recipe_hash: ContentHash,
     pub params: CpcvBacktestJobParams,
-    pub bind_reason: String,
 }
 
 /// Exact terminal artifact of the immediately preceding feedback stage.
@@ -1151,7 +1152,7 @@ pub struct FeedbackComparisonCandidateRef {
     pub backtest_report_id: BacktestReportId,
 }
 
-/// Frozen Comparison stage input and exact CPCV/Evaluation lineage.
+/// Frozen Comparison stage input and exact Validation/Evaluation lineage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackComparisonJobParams {
@@ -1159,7 +1160,7 @@ pub struct FeedbackComparisonJobParams {
     pub cycle_idempotency_hash: ContentHash,
     pub candidate_family_hash: ContentHash,
     pub artifact_id: FeedbackComparisonArtifactId,
-    pub previous: FeedbackLearningStageArtifactRef,
+    pub validation: FeedbackValidationArtifactRef,
     pub evaluation_use: FeedbackEvaluationUseRef,
     pub comparison_contract: FeedbackComparisonContract,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
@@ -1175,7 +1176,7 @@ pub struct FeedbackComparisonJobInput {
     pub feedback_cycle_id: FeedbackCycleId,
     pub cycle_idempotency_hash: ContentHash,
     pub candidate_family_hash: ContentHash,
-    pub previous: FeedbackLearningStageArtifactRef,
+    pub validation: FeedbackValidationArtifactRef,
     pub evaluation_use: FeedbackEvaluationUseRef,
     pub comparison_contract: FeedbackComparisonContract,
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
@@ -1191,7 +1192,7 @@ impl FeedbackComparisonJobParams {
             cycle_idempotency_hash: input.cycle_idempotency_hash,
             candidate_family_hash: input.candidate_family_hash,
             artifact_id: FeedbackComparisonArtifactId::from_cycle_id(input.feedback_cycle_id),
-            previous: input.previous,
+            validation: input.validation,
             evaluation_use: input.evaluation_use,
             comparison_contract: input.comparison_contract,
             decision_policy_snapshot_id: input.decision_policy_snapshot_id,
@@ -1213,13 +1214,12 @@ impl FeedbackComparisonJobParams {
 
     pub fn validate(&self) -> Result<(), FeedbackError> {
         self.comparison_contract.validate()?;
-        self.previous
-            .validate_for(self.feedback_cycle_id, FeedbackStage::Cpcv)?;
+        self.validation.validate_for(self.feedback_cycle_id)?;
         self.evaluation_use.validate_for(
             self.feedback_cycle_id,
             self.candidate_family_hash,
             &self.comparison_contract,
-            &self.previous,
+            &self.validation.cpcv,
         )?;
         if FeedbackCycleId::from_idempotency_hash(&self.cycle_idempotency_hash)
             != self.feedback_cycle_id
@@ -1621,13 +1621,13 @@ pub enum FeedbackShadowSubject {
     },
 }
 
-/// Frozen `ShadowReplay` stage input and exact F09 lineage.
+/// Frozen `Shadow` stage input and exact F09 lineage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackShadowJobParams {
     pub feedback_cycle_id: FeedbackCycleId,
     pub cycle_idempotency_hash: ContentHash,
-    pub artifact_id: FeedbackShadowReplayArtifactId,
+    pub artifact_id: FeedbackShadowArtifactId,
     pub previous: FeedbackComparisonArtifactRef,
     pub profile_ref: ResearchProfileRef,
     pub feedback_policy_hash: ContentHash,
@@ -1644,8 +1644,7 @@ impl FeedbackShadowJobParams {
             })?;
         if FeedbackCycleId::from_idempotency_hash(&self.cycle_idempotency_hash)
             != self.feedback_cycle_id
-            || self.artifact_id
-                != FeedbackShadowReplayArtifactId::from_cycle_id(self.feedback_cycle_id)
+            || self.artifact_id != FeedbackShadowArtifactId::from_cycle_id(self.feedback_cycle_id)
         {
             return Err(FeedbackError::InvalidComparisonEvidence {
                 detail: "shadow job identity or comparison lineage is invalid".to_owned(),
@@ -1674,9 +1673,9 @@ impl FeedbackShadowJobParams {
     }
 }
 
-/// Verified object-store result of one `ShadowReplay` job.
+/// Verified object-store result of one `Shadow` job.
 pub struct FeedbackShadowExecutionResult {
-    pub artifact_id: FeedbackShadowReplayArtifactId,
+    pub artifact_id: FeedbackShadowArtifactId,
     pub artifact: ResearchJobArtifactRef,
 }
 
@@ -1738,23 +1737,23 @@ impl FeedbackDriftArtifactRef {
 /// Immutable pointer to the verified F10 shadow/replay predecessor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FeedbackShadowReplayArtifactRef {
+pub struct FeedbackShadowArtifactRef {
     pub feedback_cycle_id: FeedbackCycleId,
     pub job_id: ResearchJobId,
-    pub artifact_id: FeedbackShadowReplayArtifactId,
+    pub artifact_id: FeedbackShadowArtifactId,
     pub input_hash: ContentHash,
     pub previous: FeedbackComparisonArtifactRef,
     pub artifact: ResearchJobArtifactRef,
 }
 
-impl FeedbackShadowReplayArtifactRef {
+impl FeedbackShadowArtifactRef {
     pub fn validate_for(
         &self,
         feedback_cycle_id: FeedbackCycleId,
         comparison: &FeedbackComparisonArtifactRef,
     ) -> Result<(), FeedbackError> {
         if self.feedback_cycle_id != feedback_cycle_id
-            || self.artifact_id != FeedbackShadowReplayArtifactId::from_cycle_id(feedback_cycle_id)
+            || self.artifact_id != FeedbackShadowArtifactId::from_cycle_id(feedback_cycle_id)
             || &self.previous != comparison
         {
             return Err(FeedbackError::InvalidJobContract {
@@ -1778,7 +1777,7 @@ pub struct FeedbackDecisionJobInput {
     pub champion_serving_contract_hash: ContentHash,
     pub drift: FeedbackDriftArtifactRef,
     pub comparison: FeedbackComparisonArtifactRef,
-    pub shadow_replay: FeedbackShadowReplayArtifactRef,
+    pub shadow: FeedbackShadowArtifactRef,
 }
 
 /// Frozen F11 input with exact F06/F09/F10 content-addressed lineage.
@@ -1796,7 +1795,7 @@ pub struct FeedbackDecisionJobParams {
     pub champion_serving_contract_hash: ContentHash,
     pub drift: FeedbackDriftArtifactRef,
     pub comparison: FeedbackComparisonArtifactRef,
-    pub shadow_replay: FeedbackShadowReplayArtifactRef,
+    pub shadow: FeedbackShadowArtifactRef,
 }
 
 impl FeedbackDecisionJobParams {
@@ -1813,7 +1812,7 @@ impl FeedbackDecisionJobParams {
             champion_serving_contract_hash: input.champion_serving_contract_hash,
             drift: input.drift,
             comparison: input.comparison,
-            shadow_replay: input.shadow_replay,
+            shadow: input.shadow,
         };
         params.validate()?;
         Ok(params)
@@ -1827,7 +1826,7 @@ impl FeedbackDecisionJobParams {
             })?;
         self.drift.validate_for(self.feedback_cycle_id)?;
         self.comparison.validate_for(self.feedback_cycle_id)?;
-        self.shadow_replay
+        self.shadow
             .validate_for(self.feedback_cycle_id, &self.comparison)?;
         if FeedbackCycleId::from_idempotency_hash(&self.cycle_idempotency_hash)
             != self.feedback_cycle_id
@@ -1965,8 +1964,11 @@ fn validate_calibration_commands(
     let mut model_runs = HashSet::new();
     let mut datasets = HashSet::new();
     for command in commands {
-        validate_reason(&command.params.request.reason, 512, "Calibration fit")?;
-        validate_reason(&command.bind_reason, 512, "Calibration bind")?;
+        validate_reason(
+            &command.params.request.reason,
+            512,
+            "Calibration derivation",
+        )?;
         if !recipes.insert(command.candidate_recipe_hash)
             || !models.insert(command.params.request.model_version_id)
             || !model_runs.insert(command.params.model_run_id)
@@ -1981,6 +1983,9 @@ fn validate_calibration_commands(
 }
 
 fn validate_cpcv_commands(commands: &[FeedbackCpcvCommand]) -> Result<(), FeedbackError> {
+    if commands.is_empty() {
+        return Ok(());
+    }
     let mut recipes = BTreeSet::new();
     let mut models = HashSet::new();
     let mut model_runs = HashSet::new();
@@ -1988,7 +1993,6 @@ fn validate_cpcv_commands(commands: &[FeedbackCpcvCommand]) -> Result<(), Feedba
     let mut path_sets = HashSet::new();
     for command in commands {
         validate_reason(&command.params.request.reason, 512, "CPCV")?;
-        validate_reason(&command.bind_reason, 1_024, "CPCV bind")?;
         let path_set_id = command.params.request.path_set_id.ok_or_else(|| {
             invalid_batch("feedback CPCV command requires a preassigned path-set id")
         })?;
@@ -2149,7 +2153,7 @@ mod tests {
                 CpcvBacktestJobParams, FitModelCalibratorRequest, ModelTrainJobParams,
                 RunCpcvBacktestRequest, TrainModelRequest,
             },
-            ports::ModelCalibrationFitJobParams,
+            ports::{GovernanceActor, ModelCalibrationFitJobParams},
             quant::{FeedbackCohortWindow, ResearchJobArtifactRef},
         },
         enums::quant::{CalibrationMethod, DatasetPurpose, DownsideSource, FeedbackStage},
@@ -2404,9 +2408,9 @@ mod tests {
                     reason: "feedback calibration".to_owned(),
                 },
                 decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+                downside_source: DownsideSource::MfeMae,
+                actor: GovernanceActor::system(),
             },
-            downside_source: DownsideSource::MfeMae,
-            bind_reason: "bind exact calibration".to_owned(),
         }
     }
 
@@ -2423,7 +2427,6 @@ mod tests {
                     path_set_id: Some(BacktestPathSetId::from_v7()),
                 },
             },
-            bind_reason: "bind exact CPCV path".to_owned(),
         }
     }
 

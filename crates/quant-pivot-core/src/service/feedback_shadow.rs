@@ -18,8 +18,8 @@ use quant_pivot_repository::traits::ShadowComparisonRepository;
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
     feedback_shadow::{
-        FeedbackShadowEvaluator, FeedbackShadowOutcome, FeedbackShadowReplayArtifact,
-        FeedbackShadowReplayArtifactInput, FeedbackShadowReplayCodec,
+        FeedbackShadowArtifact, FeedbackShadowArtifactInput, FeedbackShadowCodec,
+        FeedbackShadowEvaluator, FeedbackShadowOutcome,
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -78,24 +78,24 @@ impl FeedbackShadowExecutionService {
 
     async fn persist(
         &self,
-        artifact: FeedbackShadowReplayArtifact,
+        artifact: FeedbackShadowArtifact,
     ) -> QuantResult<FeedbackShadowExecutionResult> {
         let artifact_id = artifact.artifact_id();
-        let bytes = FeedbackShadowReplayCodec::encode(&artifact)?;
-        let content_hash = FeedbackShadowReplayCodec::bytes_hash(&bytes);
+        let bytes = FeedbackShadowCodec::encode(&artifact)?;
+        let content_hash = FeedbackShadowCodec::bytes_hash(&bytes);
         let key = ArtifactKey::new(
-            ArtifactNamespace::FeedbackShadowReplay,
+            ArtifactNamespace::FeedbackShadow,
             content_hash.hex(),
             "json",
         )?;
         let uri = self.artifacts.put(key, &bytes).await?;
         let persisted = self.artifacts.get(&uri).await?;
-        if FeedbackShadowReplayCodec::bytes_hash(&persisted) != content_hash
-            || FeedbackShadowReplayCodec::decode(&persisted)? != artifact
+        if FeedbackShadowCodec::bytes_hash(&persisted) != content_hash
+            || FeedbackShadowCodec::decode(&persisted)? != artifact
         {
             return Err(ResearchError::ArtifactHashMismatch {
                 expected: content_hash.to_string(),
-                actual: FeedbackShadowReplayCodec::bytes_hash(&persisted).to_string(),
+                actual: FeedbackShadowCodec::bytes_hash(&persisted).to_string(),
             }
             .into());
         }
@@ -129,7 +129,7 @@ impl FeedbackShadowExecutionPort for FeedbackShadowExecutionService {
         let outcome = self.evaluate(&params, &cancel).await?;
         Self::require_active(&cancel, "artifact_seal")?;
         progress.report(ResearchJobProgress::indeterminate("shadow_artifact", 0));
-        let artifact = FeedbackShadowReplayArtifact::try_seal(FeedbackShadowReplayArtifactInput {
+        let artifact = FeedbackShadowArtifact::try_seal(FeedbackShadowArtifactInput {
             artifact_id: params.artifact_id,
             feedback_cycle_id: params.feedback_cycle_id,
             job_input_hash: params.input_hash()?,

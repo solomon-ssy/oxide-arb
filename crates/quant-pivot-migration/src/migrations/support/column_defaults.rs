@@ -229,6 +229,21 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
+        table: "quant_attribution_artifact",
+        column: "available_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_attribution_artifact",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_model_candidate_manifest",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
         table: "quant_backtest_path_set",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
@@ -424,6 +439,36 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
+        table: "quant_feedback_scheduler_state",
+        column: "attempt",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_scheduler_state",
+        column: "paused",
+        value: DefaultValue::Boolean(false),
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_scheduler_state",
+        column: "pause_revision",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_scheduler_state",
+        column: "revision",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_scheduler_state",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_scheduler_state",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
         table: "quant_feedback_evaluation_use",
         column: "reserved_at",
         value: DefaultValue::StatementTimestamp,
@@ -465,6 +510,16 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     },
     ColumnDefaultSpec {
         table: "quant_feedback_stage_event",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_trigger_event",
+        column: "occurred_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_feedback_trigger_event",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },
@@ -617,11 +672,86 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     },
     ColumnDefaultSpec {
         table: "quant_recommendation",
+        column: "status_changed_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_recommendation",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },
     ColumnDefaultSpec {
-        table: "quant_recommendation_execution_outcome",
+        table: "quant_execution_attempt_outcome",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_execution_attempt_reconciliation_task",
+        column: "status",
+        value: DefaultValue::PostgresLiteral("'pending'::qp_outcome_reconciliation_task_status"),
+    },
+    ColumnDefaultSpec {
+        table: "quant_execution_attempt_reconciliation_task",
+        column: "attempt_count",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_execution_attempt_reconciliation_task",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_execution_attempt_reconciliation_task",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_execution_rollup_reconciliation_task",
+        column: "status",
+        value: DefaultValue::PostgresLiteral("'pending'::qp_outcome_reconciliation_task_status"),
+    },
+    ColumnDefaultSpec {
+        table: "quant_execution_rollup_reconciliation_task",
+        column: "attempt_count",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_execution_rollup_reconciliation_task",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_execution_rollup_reconciliation_task",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_resolution_outcome_reconciliation_task",
+        column: "status",
+        value: DefaultValue::PostgresLiteral("'pending'::qp_outcome_reconciliation_task_status"),
+    },
+    ColumnDefaultSpec {
+        table: "quant_resolution_outcome_reconciliation_task",
+        column: "attempt_count",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_resolution_outcome_reconciliation_task",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_resolution_outcome_reconciliation_task",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_recommendation_execution_rollup",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_recommendation_execution_rollup_attempt",
         column: "created_at",
         value: DefaultValue::StatementTimestamp,
     },
@@ -642,6 +772,31 @@ const COLUMN_DEFAULTS: &[ColumnDefaultSpec] = &[
     },
     ColumnDefaultSpec {
         table: "quant_reconciliation",
+        column: "updated_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_resolution_observation_inbox",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_resolution_observation_projection",
+        column: "status",
+        value: DefaultValue::PostgresLiteral("'pending_mapping'::qp_resolution_projection_status"),
+    },
+    ColumnDefaultSpec {
+        table: "quant_resolution_observation_projection",
+        column: "attempt_count",
+        value: DefaultValue::Integer(0),
+    },
+    ColumnDefaultSpec {
+        table: "quant_resolution_observation_projection",
+        column: "created_at",
+        value: DefaultValue::StatementTimestamp,
+    },
+    ColumnDefaultSpec {
+        table: "quant_resolution_observation_projection",
         column: "updated_at",
         value: DefaultValue::StatementTimestamp,
     },

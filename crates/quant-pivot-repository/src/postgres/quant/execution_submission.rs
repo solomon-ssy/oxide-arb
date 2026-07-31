@@ -62,7 +62,7 @@ use sea_orm::{
 
 use crate::{
     postgres::{
-        error,
+        error, primitives,
         quant::{
             capital_allocation::PgCapitalAllocationRepository,
             entry_condition::{
@@ -1185,6 +1185,7 @@ impl PgExecutionSubmissionRepository {
         if row.status.allows_new_intent() {
             let mut active = row.into_active_model();
             active.status = ActiveValue::Set(RecommendationStatus::Executed);
+            active.status_changed_at = ActiveValue::Set(primitives::statement_timestamp(db).await?);
             active.update(db).await.map_err(StorageError::from)?;
         }
         Ok(())

@@ -657,7 +657,7 @@ async fn assert_read_models(api: &ApiClient, admin: &str, viewer: &str) -> Resul
         "/api/research/models?page=1&size=10",
         "/api/research/feedback-cycles?page=1&size=10",
         "/api/research/drift-reports?page=0&size=1000",
-        "/api/research/feedback-promotion-permits?page=1&size=10",
+        "/api/research/model-route-activation-permits?page=1&size=10",
         "/api/research/factors?page=1&size=10",
     ] {
         let response =
@@ -805,7 +805,8 @@ async fn assert_model_gates(api: &ApiClient, admin: &str) -> Result<()> {
         let model_version_id = model["model_version_id"]
             .as_str()
             .context("model catalog row has no model_version_id")?;
-        let path = format!("/api/research/models/{model_version_id}/quality-gate?intent=publish");
+        let path =
+            format!("/api/research/models/{model_version_id}/quality-gate?intent=route_activation");
         let gate = ensure_status(
             api.get(&path, Some(admin)).await?,
             StatusCode::OK,
@@ -966,11 +967,12 @@ async fn assert_feedback_mutations(api: &ApiClient, admin: &str, viewer: &str) -
     .await?;
     ensure_status(
         api.post(
-            "/api/research/feedback-promotion-permits/00000000-0000-7000-8000-000000000001/revoke",
+            "/api/research/model-route-activation-permits/00000000-0000-7000-8000-000000000001/revoke",
             Some(admin),
             json!({
                 "expected_revision": 0,
-                "reason": "withdraw exact authority",
+                "reason_code": "operator_revoked",
+                "note": "withdraw exact authority",
             }),
         )
         .await?,
@@ -980,12 +982,13 @@ async fn assert_feedback_mutations(api: &ApiClient, admin: &str, viewer: &str) -
     .await?;
     ensure_status(
         api.post_governed(
-            "/api/research/feedback-promotion-permits/00000000-0000-7000-8000-000000000001/revoke",
+            "/api/research/model-route-activation-permits/00000000-0000-7000-8000-000000000001/revoke",
             admin,
             "super_admin",
             json!({
                 "expected_revision": 1,
-                "reason": "invalid_cas_revision",
+                "reason_code": "operator_revoked",
+                "note": "invalid CAS revision",
             }),
         )
         .await?,
@@ -1106,15 +1109,19 @@ async fn assert_feedback_live(
         .as_str()
         .context("trigger response is missing feedback cycle id")?;
     ensure!(
-        first["data"]["replayed"] == false,
-        "first governed trigger was unexpectedly replayed: {first}"
+        first["data"]["trigger_replayed"] == false
+            && first["data"]["cycle_reused"].is_boolean()
+            && first["data"]
+                .as_object()
+                .is_some_and(|data| !data.contains_key("replayed")),
+        "first governed trigger did not distinguish provenance replay from cadence convergence: {first}"
     );
-    let trigger_revision = feedback_revision(api, &admin.access_token).await?;
+    let first_trigger_revision = feedback_revision(api, &admin.access_token).await?;
     ensure!(
-        trigger_revision > initial_revision,
+        first_trigger_revision > initial_revision,
         "governed trigger did not advance the durable outbox"
     );
-    let live = socket.feedback_until(trigger_revision).await?;
+    let live = socket.feedback_until(first_trigger_revision).await?;
     ensure!(
         live.iter()
             .any(|event| feedback_subject(event) == Some(cycle_id)),
@@ -1123,11 +1130,16 @@ async fn assert_feedback_live(
 
     let replay = trigger_feedback(api, &admin.access_token, reason).await?;
     ensure!(
-        replay["data"]["replayed"] == true
+        replay["data"]["trigger_replayed"] == true
+            && replay["data"]["cycle_reused"] == true
             && replay["data"]["cycle"]["feedback_cycle_id"] == cycle_id,
         "exact governed trigger did not replay its frozen cycle: {replay}"
     );
-    let conflict = ensure_status(
+    ensure!(
+        feedback_revision(api, &admin.access_token).await? == first_trigger_revision,
+        "exact governed trigger replay appended another durable revision"
+    );
+    let distinct = ensure_status(
         api.post_governed(
             "/api/research/feedback-cycles",
             &admin.access_token,
@@ -1138,15 +1150,29 @@ async fn assert_feedback_live(
             }),
         )
         .await?,
-        StatusCode::CONFLICT,
-        "feedback trigger immutable conflict",
+        StatusCode::ACCEPTED,
+        "distinct feedback trigger provenance",
     )
     .await?
     .json::<Value>()
     .await?;
     ensure!(
-        conflict["data"].is_null() && conflict["message"].is_string(),
-        "feedback conflict lost typed error envelope: {conflict}"
+        distinct["data"]["trigger_replayed"] == false
+            && distinct["data"]["cycle_reused"] == true
+            && distinct["data"]["cycle"]["feedback_cycle_id"] == cycle_id,
+        "distinct trigger intent did not converge with new provenance: {distinct}"
+    );
+    let trigger_revision = feedback_revision(api, &admin.access_token).await?;
+    ensure!(
+        trigger_revision > first_trigger_revision,
+        "distinct trigger intent did not append a durable provenance revision"
+    );
+    let distinct_live = socket.feedback_until(trigger_revision).await?;
+    ensure!(
+        distinct_live
+            .iter()
+            .any(|event| feedback_subject(event) == Some(cycle_id)),
+        "distinct trigger provenance did not invalidate its canonical cycle: {distinct_live:?}"
     );
     assert_trigger_evidence(api, &admin.access_token, admin_id, cycle_id, reason).await?;
 
@@ -1406,18 +1432,22 @@ async fn assert_trigger_evidence(
     .await?
     .json::<Value>()
     .await?;
-    let timeline = detail["data"]["timeline"]
+    let provenance = detail["data"]["triggers"]
         .as_array()
-        .context("feedback detail timeline is not an array")?;
-    let triggers = timeline
+        .context("feedback detail trigger provenance is not an array")?;
+    let trigger_count = provenance
         .iter()
-        .filter(|event| event["event_kind"] == "triggered")
-        .collect::<Vec<_>>();
+        .filter(|event| {
+            event["trigger_family"] == "manual"
+                && event["actor_user_id"] == admin_id
+                && event["actor_label"] == "admin"
+                && event["actor_role"] == "super_admin"
+                && event["reason_code"] == reason
+        })
+        .count();
     ensure!(
-        triggers.len() == 1
-            && triggers[0]["actor"] == "admin@super_admin"
-            && triggers[0]["reason_code"] == reason,
-        "governed trigger actor/reason/idempotency evidence is invalid: {triggers:?}"
+        trigger_count == 1,
+        "governed trigger actor/reason/idempotency provenance is invalid: {provenance:?}"
     );
 
     let deadline = Instant::now() + Duration::from_secs(5);

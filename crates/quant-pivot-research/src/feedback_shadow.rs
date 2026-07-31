@@ -12,8 +12,7 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     types::{
-        ContentHash, FeedbackCycleId, FeedbackShadowReplayArtifactId, Probability,
-        ResearchProfileRef,
+        ContentHash, FeedbackCycleId, FeedbackShadowArtifactId, Probability, ResearchProfileRef,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -157,8 +156,8 @@ impl FeedbackShadowEvaluator {
 }
 
 /// Sealing input for one immutable F10 artifact.
-pub struct FeedbackShadowReplayArtifactInput {
-    pub artifact_id: FeedbackShadowReplayArtifactId,
+pub struct FeedbackShadowArtifactInput {
+    pub artifact_id: FeedbackShadowArtifactId,
     pub feedback_cycle_id: FeedbackCycleId,
     pub job_input_hash: ContentHash,
     pub previous: FeedbackComparisonArtifactRef,
@@ -170,11 +169,11 @@ pub struct FeedbackShadowReplayArtifactInput {
 
 /// Content-addressed F10 output with no decision or promotion authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, try_from = "FeedbackShadowReplayArtifactDocument")]
-pub struct FeedbackShadowReplayArtifact {
+#[serde(deny_unknown_fields, try_from = "FeedbackShadowArtifactDocument")]
+pub struct FeedbackShadowArtifact {
     format_version: u32,
     artifact_hash: ContentHash,
-    artifact_id: FeedbackShadowReplayArtifactId,
+    artifact_id: FeedbackShadowArtifactId,
     feedback_cycle_id: FeedbackCycleId,
     job_input_hash: ContentHash,
     previous: FeedbackComparisonArtifactRef,
@@ -186,10 +185,10 @@ pub struct FeedbackShadowReplayArtifact {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FeedbackShadowReplayArtifactDocument {
+struct FeedbackShadowArtifactDocument {
     format_version: u32,
     artifact_hash: ContentHash,
-    artifact_id: FeedbackShadowReplayArtifactId,
+    artifact_id: FeedbackShadowArtifactId,
     feedback_cycle_id: FeedbackCycleId,
     job_input_hash: ContentHash,
     previous: FeedbackComparisonArtifactRef,
@@ -200,9 +199,9 @@ struct FeedbackShadowReplayArtifactDocument {
 }
 
 #[derive(Serialize)]
-struct FeedbackShadowReplayArtifactPreimage<'a> {
+struct FeedbackShadowArtifactPreimage<'a> {
     format_version: u32,
-    artifact_id: FeedbackShadowReplayArtifactId,
+    artifact_id: FeedbackShadowArtifactId,
     feedback_cycle_id: FeedbackCycleId,
     job_input_hash: ContentHash,
     previous: &'a FeedbackComparisonArtifactRef,
@@ -212,9 +211,9 @@ struct FeedbackShadowReplayArtifactPreimage<'a> {
     outcome: &'a FeedbackShadowOutcome,
 }
 
-impl FeedbackShadowReplayArtifact {
-    pub fn try_seal(input: FeedbackShadowReplayArtifactInput) -> Result<Self, FeedbackError> {
-        let artifact_hash = Self::derive_hash(&FeedbackShadowReplayArtifactPreimage {
+impl FeedbackShadowArtifact {
+    pub fn try_seal(input: FeedbackShadowArtifactInput) -> Result<Self, FeedbackError> {
+        let artifact_hash = Self::derive_hash(&FeedbackShadowArtifactPreimage {
             format_version: ARTIFACT_FORMAT_VERSION,
             artifact_id: input.artifact_id,
             feedback_cycle_id: input.feedback_cycle_id,
@@ -256,8 +255,7 @@ impl FeedbackShadowReplayArtifact {
             .content_hash()
             .map_err(|error| invalid(error.to_string()))?;
         if self.format_version != ARTIFACT_FORMAT_VERSION
-            || self.artifact_id
-                != FeedbackShadowReplayArtifactId::from_cycle_id(self.feedback_cycle_id)
+            || self.artifact_id != FeedbackShadowArtifactId::from_cycle_id(self.feedback_cycle_id)
             || self.feedback_policy_hash != expected_policy_hash
             || self.artifact_hash != Self::derive_hash(&self.preimage())?
         {
@@ -388,8 +386,8 @@ impl FeedbackShadowReplayArtifact {
         Ok(())
     }
 
-    const fn preimage(&self) -> FeedbackShadowReplayArtifactPreimage<'_> {
-        FeedbackShadowReplayArtifactPreimage {
+    const fn preimage(&self) -> FeedbackShadowArtifactPreimage<'_> {
+        FeedbackShadowArtifactPreimage {
             format_version: self.format_version,
             artifact_id: self.artifact_id,
             feedback_cycle_id: self.feedback_cycle_id,
@@ -403,14 +401,14 @@ impl FeedbackShadowReplayArtifact {
     }
 
     fn derive_hash(
-        preimage: &FeedbackShadowReplayArtifactPreimage<'_>,
+        preimage: &FeedbackShadowArtifactPreimage<'_>,
     ) -> Result<ContentHash, FeedbackError> {
         CanonicalDigest::content_hash_typed(ARTIFACT_HASH_DOMAIN, ARTIFACT_FORMAT_VERSION, preimage)
             .map_err(Into::into)
     }
 
     #[must_use]
-    pub const fn artifact_id(&self) -> FeedbackShadowReplayArtifactId {
+    pub const fn artifact_id(&self) -> FeedbackShadowArtifactId {
         self.artifact_id
     }
 
@@ -455,10 +453,10 @@ impl FeedbackShadowReplayArtifact {
     }
 }
 
-impl TryFrom<FeedbackShadowReplayArtifactDocument> for FeedbackShadowReplayArtifact {
+impl TryFrom<FeedbackShadowArtifactDocument> for FeedbackShadowArtifact {
     type Error = FeedbackError;
 
-    fn try_from(document: FeedbackShadowReplayArtifactDocument) -> Result<Self, Self::Error> {
+    fn try_from(document: FeedbackShadowArtifactDocument) -> Result<Self, Self::Error> {
         let artifact = Self {
             format_version: document.format_version,
             artifact_hash: document.artifact_hash,
@@ -477,17 +475,17 @@ impl TryFrom<FeedbackShadowReplayArtifactDocument> for FeedbackShadowReplayArtif
 }
 
 /// Canonical JSON boundary for F10 artifacts.
-pub struct FeedbackShadowReplayCodec;
+pub struct FeedbackShadowCodec;
 
-impl FeedbackShadowReplayCodec {
-    pub fn encode(artifact: &FeedbackShadowReplayArtifact) -> QuantResult<Vec<u8>> {
+impl FeedbackShadowCodec {
+    pub fn encode(artifact: &FeedbackShadowArtifact) -> QuantResult<Vec<u8>> {
         artifact.validate()?;
         CanonicalDigest::canonical_json_bytes(artifact).map_err(Into::into)
     }
 
-    pub fn decode(bytes: &[u8]) -> QuantResult<FeedbackShadowReplayArtifact> {
+    pub fn decode(bytes: &[u8]) -> QuantResult<FeedbackShadowArtifact> {
         let artifact =
-            serde_json::from_slice::<FeedbackShadowReplayArtifact>(bytes).map_err(|error| {
+            serde_json::from_slice::<FeedbackShadowArtifact>(bytes).map_err(|error| {
                 ResearchError::Serialization {
                     detail: format!("decode feedback shadow artifact: {error}"),
                 }

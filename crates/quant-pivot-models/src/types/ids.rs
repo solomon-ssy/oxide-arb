@@ -171,6 +171,12 @@ impl DomainSourceId {
         Self::new("ghcnh")
     }
 
+    /// NOAA `GHCNd` archive-quality daily summary source.
+    #[must_use]
+    pub fn ghcnd() -> Self {
+        Self::new("ghcnd")
+    }
+
     /// NOAA Global Ensemble Forecast System source.
     #[must_use]
     pub fn gefs() -> Self {
@@ -199,6 +205,12 @@ impl DomainSourceId {
     #[must_use]
     pub fn ncei_storm_events() -> Self {
         Self::new("ncei_storm_events")
+    }
+
+    /// NOAA NCEI published U.S. tornado time-series count.
+    #[must_use]
+    pub fn ncei_tornado_time_series() -> Self {
+        Self::new("ncei_tornado_time_series")
     }
 
     /// NOAA NHC current tropical-cyclone advisory summary.
@@ -332,7 +344,7 @@ pub struct FactorValueId(Uuid);
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelSpecId(Uuid);
 
-/// Published model version identifier.
+/// Immutable model version identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelVersionId(Uuid);
 
@@ -560,6 +572,36 @@ impl FeedbackCoverageArtifactId {
     }
 }
 
+/// Immutable canonical-truth frontier artifact for one feedback cycle.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeedbackTruthFreezeArtifactId(Uuid);
+
+impl FeedbackTruthFreezeArtifactId {
+    #[must_use]
+    pub fn from_cycle_id(feedback_cycle_id: FeedbackCycleId) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f21a);
+        Self::new(Uuid::new_v5(
+            &NAMESPACE,
+            feedback_cycle_id.as_uuid().as_bytes(),
+        ))
+    }
+}
+
+/// Immutable PIT attribution-consumption plan for one feedback cycle.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeedbackAttributionPlanArtifactId(Uuid);
+
+impl FeedbackAttributionPlanArtifactId {
+    #[must_use]
+    pub fn from_cycle_id(feedback_cycle_id: FeedbackCycleId) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f21b);
+        Self::new(Uuid::new_v5(
+            &NAMESPACE,
+            feedback_cycle_id.as_uuid().as_bytes(),
+        ))
+    }
+}
+
 /// Immutable statistical-drift artifact produced once per feedback cycle.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FeedbackDriftArtifactId(Uuid);
@@ -605,6 +647,45 @@ impl FeedbackLearningStageArtifactId {
     }
 }
 
+/// Immutable aggregate quality-gate report for every attempted candidate.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeedbackValidationArtifactId(Uuid);
+
+impl FeedbackValidationArtifactId {
+    #[must_use]
+    pub fn from_cycle_id(feedback_cycle_id: FeedbackCycleId) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f21c);
+        Self::new(Uuid::new_v5(
+            &NAMESPACE,
+            feedback_cycle_id.as_uuid().as_bytes(),
+        ))
+    }
+}
+
+/// Common relational identity for one immutable attribution artifact.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AttributionArtifactId(Uuid);
+
+impl AttributionArtifactId {
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f21d);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
+
+/// Content-addressed identity of one immutable candidate serving manifest.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ModelCandidateManifestId(Uuid);
+
+impl ModelCandidateManifestId {
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f21e);
+        Self::new(uuid_v5_for_content(&NAMESPACE, content_hash))
+    }
+}
+
 /// Immutable same-window comparison artifact for one feedback cycle.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FeedbackComparisonArtifactId(Uuid);
@@ -623,9 +704,9 @@ impl FeedbackComparisonArtifactId {
 
 /// Immutable production-shadow/replay gate artifact for one feedback cycle.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FeedbackShadowReplayArtifactId(Uuid);
+pub struct FeedbackShadowArtifactId(Uuid);
 
-impl FeedbackShadowReplayArtifactId {
+impl FeedbackShadowArtifactId {
     /// Project the cycle identity into the stable shadow/replay namespace.
     #[must_use]
     pub fn from_cycle_id(feedback_cycle_id: FeedbackCycleId) -> Self {
@@ -700,6 +781,19 @@ impl FeedbackStageEventId {
     #[must_use]
     pub fn from_event_hash(event_hash: &ContentHash) -> Self {
         const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f202);
+        Self::new(uuid_v5_for_content(&NAMESPACE, event_hash))
+    }
+}
+
+/// One content-addressed append-only trigger provenance event.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FeedbackTriggerEventId(Uuid);
+
+impl FeedbackTriggerEventId {
+    /// Project the complete immutable trigger-event hash into its UUID domain.
+    #[must_use]
+    pub fn from_event_hash(event_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f222);
         Self::new(uuid_v5_for_content(&NAMESPACE, event_hash))
     }
 }
@@ -828,6 +922,19 @@ pub struct ReportScheduleGapId(Uuid);
 /// Single recommendation row identifier.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RecommendationId(Uuid);
+
+/// Stable identity for one immutable finalized resolution observation.
+#[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResolutionObservationId(Uuid);
+
+impl ResolutionObservationId {
+    /// Project the source checkpoint into the inbox identity domain.
+    #[must_use]
+    pub fn from_checkpoint_hash(checkpoint_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f210);
+        Self::new(uuid_v5_for_content(&NAMESPACE, checkpoint_hash))
+    }
+}
 
 /// Governed bridge from a recommendation to execution.
 #[derive(UuidId, Debug, Clone, Copy, PartialEq, Eq, Hash)]

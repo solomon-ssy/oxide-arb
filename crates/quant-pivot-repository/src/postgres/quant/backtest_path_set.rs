@@ -14,19 +14,24 @@ use quant_pivot_models::{
         quant_backtest_path_set::{Column as PathSetColumn, Entity as PathSetEntity},
         quant_model_run::{Column as ModelRunColumn, Entity as ModelRunEntity},
     },
-    enums::quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
-    types::{BacktestPathSetId, ModelVersionId},
+    enums::{
+        model::ModelFamily,
+        quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
+    },
+    types::{
+        BacktestPathSetId, ModelVersionId, backtest::CpcvFoldCalibrationPolicy,
+        model_lineage::ModelVersionDerivation,
+    },
 };
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, QuerySelect, TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
     sea_query::{Expr, OnConflict},
 };
 
 use crate::{
     postgres::{
-        primitives,
-        query::{list_fk_desc, paginate_mapped},
+        primitives, quant::model_registry::PgModelRegistryRepository, query::paginate_mapped,
     },
     traits::{BacktestPathSetRepository, CpcvPathSetCommit},
 };
@@ -40,28 +45,110 @@ impl PgBacktestPathSetRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
+
+    async fn validate_subject(
+        transaction: &impl ConnectionTrait,
+        path_set: &NewBacktestPathSet,
+    ) -> Result<(), StorageError> {
+        let model = PgModelRegistryRepository::require_version_info(
+            transaction,
+            &path_set.model_version_id,
+        )
+        .await?;
+        let bindings = model
+            .verified_serving_contract()
+            .map_err(|error| {
+                StorageError::invariant_violation(Some(QUANT_BACKTEST_PATH_SET), error.to_string())
+            })?
+            .bindings();
+        let subject = &path_set.subject;
+        let exact_subject = model.training_dataset_id == Some(path_set.training_dataset_id)
+            && bindings.policy_snapshot.decision_policy_snapshot_id
+                == path_set.decision_policy_snapshot_id
+            && subject.model_artifact_hash == model.artifact_hash
+            && subject.serving_contract_hash == model.serving_contract_hash
+            && subject.training_dataset_hash == bindings.transform.training_dataset_hash
+            && subject.dataset_manifest_hash == bindings.dataset.manifest_hash
+            && subject.dataset_artifact_bytes_hash == bindings.dataset.artifact_bytes_hash
+            && subject.policy_snapshot_hash == bindings.policy_snapshot.snapshot_hash;
+        if !exact_subject {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_BACKTEST_PATH_SET),
+                "CPCV path-set subject differs from the immutable model serving graph",
+            ));
+        }
+        let derivation = model.verified_derivation().map_err(|error| {
+            StorageError::invariant_violation(Some(QUANT_BACKTEST_PATH_SET), error.to_string())
+        })?;
+        let fold_policy = &path_set.methodology.fold_calibration;
+        let calibration = bindings.model.calibration.as_ref();
+        let valid_fold_policy = match (model.model_family, derivation, calibration, fold_policy) {
+            (
+                ModelFamily::ClassicalGradientBoostedTrees,
+                ModelVersionDerivation::Training,
+                None,
+                CpcvFoldCalibrationPolicy::NotApplicable,
+            )
+            | (
+                ModelFamily::WeightedFactor,
+                ModelVersionDerivation::Training,
+                None,
+                CpcvFoldCalibrationPolicy::SubjectHeuristic { .. },
+            ) => true,
+            (
+                ModelFamily::WeightedFactor,
+                ModelVersionDerivation::ReturnCalibration {
+                    parent_model_version_id,
+                    calibration_artifact_id,
+                },
+                Some(binding),
+                CpcvFoldCalibrationPolicy::CalibratedSubjectParentHeuristic {
+                    calibration_artifact_id: fold_calibration_id,
+                    calibration_hash,
+                    parent_model_version_id: fold_parent_id,
+                    parent_artifact_hash,
+                    parent_serving_contract_hash,
+                    ..
+                },
+            ) if calibration_artifact_id == binding.artifact_id
+                && calibration_artifact_id == *fold_calibration_id
+                && binding.content_hash == *calibration_hash
+                && parent_model_version_id == *fold_parent_id =>
+            {
+                let parent = PgModelRegistryRepository::require_version_info(
+                    transaction,
+                    &parent_model_version_id,
+                )
+                .await?;
+                parent.artifact_hash == *parent_artifact_hash
+                    && parent.serving_contract_hash == *parent_serving_contract_hash
+                    && parent
+                        .verified_serving_contract()
+                        .map_err(|error| {
+                            StorageError::invariant_violation(
+                                Some(QUANT_BACKTEST_PATH_SET),
+                                error.to_string(),
+                            )
+                        })?
+                        .bindings()
+                        .model
+                        .calibration
+                        .is_none()
+            }
+            _ => false,
+        };
+        if !valid_fold_policy {
+            return Err(StorageError::invariant_violation(
+                Some(QUANT_BACKTEST_PATH_SET),
+                "CPCV fold-calibration policy differs from model family or derivation lineage",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
 impl BacktestPathSetRepository for PgBacktestPathSetRepository {
-    async fn create(
-        &self,
-        path_set: NewBacktestPathSet,
-    ) -> Result<BacktestPathSetInfo, StorageError> {
-        path_set
-            .verify_hash()
-            .map_err(|error| StorageError::InvariantViolation {
-                entity: Some("quant_backtest_path_set"),
-                detail: error.to_string(),
-            })?;
-        let info = PathSetEntity::insert(path_set.into_active_model())
-            .exec_with_returning(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .map(Into::into)?;
-        verify_path_set(info)
-    }
-
     async fn commit_cpcv(
         &self,
         commit: CpcvPathSetCommit,
@@ -75,6 +162,7 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
             })?;
         let path_set_hash = commit.path_set.path_set_hash();
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        Self::validate_subject(&transaction, &commit.path_set).await?;
         let run = ModelRunEntity::find_by_id(commit.path_set.model_run_id)
             .lock_exclusive()
             .one(&transaction)
@@ -205,15 +293,17 @@ impl BacktestPathSetRepository for PgBacktestPathSetRepository {
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<Vec<BacktestPathSetInfo>, StorageError> {
-        let rows = list_fk_desc::<PathSetEntity, _, _, _>(
-            &self.db,
-            PathSetColumn::ModelVersionId,
-            *model_version_id,
-            PathSetColumn::CreatedAt,
-            Into::into,
-        )
-        .await?;
-        rows.into_iter().map(verify_path_set).collect()
+        PathSetEntity::find()
+            .filter(PathSetColumn::ModelVersionId.eq(*model_version_id))
+            .order_by_desc(PathSetColumn::CreatedAt)
+            .order_by_desc(PathSetColumn::PathSetId)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(Into::into)
+            .map(verify_path_set)
+            .collect()
     }
 
     async fn page(

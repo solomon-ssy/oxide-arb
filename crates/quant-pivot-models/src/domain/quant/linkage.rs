@@ -25,7 +25,9 @@
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use chrono::{DateTime, NaiveDate, Utc};
+use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult, hashing::CanonicalDigestError};
+use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 
@@ -226,6 +228,289 @@ impl WeatherSubject {
     }
 }
 
+/// Closed comparison semantics for a canonical Weather measurement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+pub enum WeatherValueComparator {
+    Above {
+        threshold: Decimal,
+        inclusive: bool,
+    },
+    Below {
+        threshold: Decimal,
+        inclusive: bool,
+    },
+    Between {
+        lower: Decimal,
+        upper: Decimal,
+        lower_inclusive: bool,
+        upper_inclusive: bool,
+    },
+}
+
+impl WeatherValueComparator {
+    /// Whether the comparator defines a non-empty outcome set.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::Above { .. } | Self::Below { .. } => true,
+            Self::Between { lower, upper, .. } => lower < upper,
+        }
+    }
+
+    /// Evaluate one canonical-unit measurement at the contract boundary.
+    #[must_use]
+    pub fn includes(&self, value: Decimal) -> bool {
+        match self {
+            Self::Above {
+                threshold,
+                inclusive,
+            } => {
+                if *inclusive {
+                    value >= *threshold
+                } else {
+                    value > *threshold
+                }
+            }
+            Self::Below {
+                threshold,
+                inclusive,
+            } => {
+                if *inclusive {
+                    value <= *threshold
+                } else {
+                    value < *threshold
+                }
+            }
+            Self::Between {
+                lower,
+                upper,
+                lower_inclusive,
+                upper_inclusive,
+            } => {
+                let above_lower = if *lower_inclusive {
+                    value >= *lower
+                } else {
+                    value > *lower
+                };
+                let below_upper = if *upper_inclusive {
+                    value <= *upper
+                } else {
+                    value < *upper
+                };
+                above_lower && below_upper
+            }
+        }
+    }
+}
+
+/// Exact calendar/clock interval over which a Weather contract aggregates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherContractWindow {
+    pub start_at: DateTime<Utc>,
+    pub end_at: DateTime<Utc>,
+    pub timezone: String,
+}
+
+impl WeatherContractWindow {
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.start_at < self.end_at && self.timezone.parse::<Tz>().is_ok()
+    }
+}
+
+/// Frozen market rounding semantics, applied after official aggregation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+pub enum WeatherRoundingRule {
+    Exact,
+    DecimalPlaces { places: u32 },
+    WholeUnit,
+}
+
+/// Source precedence distinguishes realtime features from final label truth.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+pub enum WeatherTruthPolicy {
+    FinalOnly {
+        final_source: DomainSourceId,
+    },
+    PreliminaryThenFinal {
+        preliminary_source: DomainSourceId,
+        final_source: DomainSourceId,
+    },
+    ObservationWithForecast {
+        observation_source: DomainSourceId,
+        forecast_source: DomainSourceId,
+    },
+}
+
+/// Official accumulated-precipitation outcome in canonical millimeters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherPrecipitationSubject {
+    /// Exact market/source location identity.
+    pub site_key: String,
+    /// HKO climate-station code used by the finalized daily product.
+    pub station_key: String,
+    /// Frozen forecast-grid latitude.
+    pub latitude: Decimal,
+    /// Frozen forecast-grid longitude.
+    pub longitude: Decimal,
+    pub window: WeatherContractWindow,
+    pub comparator: WeatherValueComparator,
+    pub rounding: WeatherRoundingRule,
+    pub truth_policy: WeatherTruthPolicy,
+}
+
+/// Only official AirNow/EPA daily PM2.5 AQI can become a daily label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherAqiSubject {
+    pub reporting_area_key: String,
+    pub window: WeatherContractWindow,
+    pub comparator: WeatherValueComparator,
+    pub pollutant: WeatherAqiPollutant,
+    pub aggregation: WeatherAqiAggregation,
+    pub truth_policy: WeatherTruthPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeatherAqiPollutant {
+    Pm25,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeatherAqiAggregation {
+    OfficialDailyAqi,
+}
+
+/// Tornado count with an explicit official finalization/revision contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherTornadoSubject {
+    pub region_key: String,
+    pub window: WeatherContractWindow,
+    pub comparator: WeatherValueComparator,
+    pub finalization: WeatherTornadoFinalization,
+    pub truth_policy: WeatherTruthPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+pub enum WeatherTornadoFinalization {
+    StormEventsArchive,
+    FirstPublishedAfter { not_before: DateTime<Utc> },
+}
+
+/// Tropical-cyclone outcome measured against advisory and post-analysis truth.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherTropicalCycloneSubject {
+    pub basin: String,
+    pub storm_key: String,
+    pub window: WeatherContractWindow,
+    pub outcome: TropicalCycloneOutcome,
+    pub truth_policy: WeatherTruthPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+pub enum TropicalCycloneOutcome {
+    MaximumSustainedWind {
+        comparator: WeatherValueComparator,
+    },
+    LandfallAtOrAbove {
+        minimum_category: u8,
+        minimum_sustained_wind_knots: Decimal,
+    },
+}
+
+/// NASA GISTEMP v4 LOTI anomaly or record-rank outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherGlobalTemperatureSubject {
+    pub window: WeatherContractWindow,
+    pub dataset_version: u16,
+    pub base_period_start_year: i32,
+    pub base_period_end_year: i32,
+    pub outcome: GlobalTemperatureOutcome,
+    pub truth_policy: WeatherTruthPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+pub enum GlobalTemperatureOutcome {
+    MonthlyAnomaly { comparator: WeatherValueComparator },
+    MonthlyRecordRank { rank: GlobalTemperatureRank },
+    AnnualRecordRank { rank: GlobalTemperatureRank },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+pub enum GlobalTemperatureRank {
+    Exact { rank: u16 },
+    AtLeast { rank: u16 },
+}
+
+/// Hemisphere and product are inseparable parts of NSIDC Sea Ice Index truth.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherSeaIceSubject {
+    pub hemisphere: SeaIceHemisphere,
+    pub product: SeaIceProduct,
+    pub aggregation: SeaIceAggregation,
+    pub window: WeatherContractWindow,
+    pub comparator: WeatherValueComparator,
+    pub dataset_version: u16,
+    pub concentration_threshold_percent: Decimal,
+    pub truth_policy: WeatherTruthPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeaIceHemisphere {
+    Northern,
+    Southern,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeaIceProduct {
+    DailyExtent,
+    MonthlyExtent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeaIceAggregation {
+    MinimumDailyExtent,
+    MaximumDailyExtent,
+    MonthlyMeanExtent,
+}
+
+/// Official maximum sustained-wind or gust outcome in canonical knots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeatherWindExtremeSubject {
+    pub station_key: String,
+    pub window: WeatherContractWindow,
+    pub statistic: WeatherWindStatistic,
+    pub comparator: WeatherValueComparator,
+    pub rounding: WeatherRoundingRule,
+    pub truth_policy: WeatherTruthPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeatherWindStatistic {
+    MaximumGust,
+    MaximumSustainedWind,
+}
+
 /// One exact source/instrument binding frozen into a linkage revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -250,6 +535,20 @@ pub enum MarketSubject {
     Crypto(CryptoSubject),
     /// Airport local-day temperature sibling subject.
     Weather(WeatherSubject),
+    /// Official accumulated precipitation.
+    WeatherPrecipitation(WeatherPrecipitationSubject),
+    /// Official AirNow/EPA daily AQI.
+    WeatherAqi(WeatherAqiSubject),
+    /// SPC preliminary → NCEI final tornado count.
+    WeatherTornado(WeatherTornadoSubject),
+    /// NHC advisory → post-analysis tropical-cyclone outcome.
+    WeatherTropicalCyclone(WeatherTropicalCycloneSubject),
+    /// NASA GISTEMP v4 global temperature anomaly/rank.
+    WeatherGlobalTemperature(WeatherGlobalTemperatureSubject),
+    /// NSIDC Sea Ice Index v4 extent.
+    WeatherSeaIce(WeatherSeaIceSubject),
+    /// Official station wind extreme.
+    WeatherWindExtreme(WeatherWindExtremeSubject),
 }
 
 impl MarketSubject {
@@ -258,7 +557,55 @@ impl MarketSubject {
     pub const fn family(&self) -> DomainFamily {
         match self {
             Self::Crypto(_) => DomainFamily::Crypto,
-            Self::Weather(_) => DomainFamily::Weather,
+            Self::Weather(_)
+            | Self::WeatherPrecipitation(_)
+            | Self::WeatherAqi(_)
+            | Self::WeatherTornado(_)
+            | Self::WeatherTropicalCyclone(_)
+            | Self::WeatherGlobalTemperature(_)
+            | Self::WeatherSeaIce(_)
+            | Self::WeatherWindExtreme(_) => DomainFamily::Weather,
+        }
+    }
+
+    /// Exact source-native key used to join Weather facts to this subject.
+    ///
+    /// This key is intentionally distinct from an ICAO station: reporting
+    /// areas, storm ids, regions, and hemispheres are all first-class Weather
+    /// subjects and must never be coerced through the airport vocabulary.
+    #[must_use]
+    pub fn weather_subject_key(&self) -> Option<String> {
+        match self {
+            Self::Crypto(_) => None,
+            Self::Weather(subject) => Some(subject.decision_group.station.to_string()),
+            Self::WeatherPrecipitation(subject) => Some(subject.site_key.clone()),
+            Self::WeatherAqi(subject) => Some(subject.reporting_area_key.clone()),
+            Self::WeatherTornado(subject) => Some(subject.region_key.clone()),
+            Self::WeatherTropicalCyclone(subject) => Some(subject.storm_key.clone()),
+            Self::WeatherGlobalTemperature(_) => Some("global_land_ocean".to_owned()),
+            Self::WeatherSeaIce(subject) => Some(
+                match subject.hemisphere {
+                    SeaIceHemisphere::Northern => "north",
+                    SeaIceHemisphere::Southern => "south",
+                }
+                .to_owned(),
+            ),
+            Self::WeatherWindExtreme(subject) => Some(subject.station_key.clone()),
+        }
+    }
+
+    /// Explicit UTC contract window for non-temperature Weather families.
+    #[must_use]
+    pub const fn weather_window(&self) -> Option<&WeatherContractWindow> {
+        match self {
+            Self::WeatherPrecipitation(subject) => Some(&subject.window),
+            Self::WeatherAqi(subject) => Some(&subject.window),
+            Self::WeatherTornado(subject) => Some(&subject.window),
+            Self::WeatherTropicalCyclone(subject) => Some(&subject.window),
+            Self::WeatherGlobalTemperature(subject) => Some(&subject.window),
+            Self::WeatherSeaIce(subject) => Some(&subject.window),
+            Self::WeatherWindExtreme(subject) => Some(&subject.window),
+            Self::Crypto(_) | Self::Weather(_) => None,
         }
     }
 }
@@ -424,6 +771,10 @@ pub enum LinkageValidationFailure {
     InvalidWeatherDecisionGroupId,
     InvalidWeatherOutcomeBand,
     FractionalWeatherOutcomeBand,
+    InvalidWeatherWindow,
+    InvalidWeatherComparator,
+    InvalidWeatherTruthPolicy,
+    InvalidWeatherDatasetVersion,
     InvalidWeatherTimezone {
         timezone: String,
     },
@@ -494,6 +845,18 @@ impl Display for LinkageValidationFailure {
             }
             Self::FractionalWeatherOutcomeBand => {
                 formatter.write_str("weather outcome band must use whole-degree bounds")
+            }
+            Self::InvalidWeatherWindow => {
+                formatter.write_str("weather contract window is empty or has an invalid timezone")
+            }
+            Self::InvalidWeatherComparator => {
+                formatter.write_str("weather comparator defines an empty outcome")
+            }
+            Self::InvalidWeatherTruthPolicy => {
+                formatter.write_str("weather truth-source precedence is invalid")
+            }
+            Self::InvalidWeatherDatasetVersion => {
+                formatter.write_str("weather dataset version or methodology is invalid")
             }
             Self::InvalidWeatherTimezone { timezone } => {
                 write!(

@@ -8,7 +8,7 @@ use quant_pivot_models::{
         ports::{
             FeedbackCandidateRecipe, FeedbackComparisonCandidateRef, FeedbackComparisonJobInput,
             FeedbackComparisonJobParams, FeedbackEvaluationUseRef,
-            FeedbackLearningStageArtifactRef,
+            FeedbackLearningStageArtifactRef, FeedbackValidationArtifact,
         },
         quant::{
             FeedbackCycleInfo, FeedbackStageJobIdentity, ModelVersionInfo, NewResearchJob,
@@ -16,8 +16,8 @@ use quant_pivot_models::{
         },
     },
     enums::quant::{
-        FeedbackStage, FeedbackStageEventKind, PublicationStatus, ResearchJobKind,
-        ResearchJobResultKind, ResearchJobStatus,
+        FeedbackStage, FeedbackStageEventKind, ResearchJobKind, ResearchJobResultKind,
+        ResearchJobStatus,
     },
     types::{
         BacktestReportId, FeedbackComparisonArtifactId, ModelRunId, ModelVersionId,
@@ -39,6 +39,7 @@ use quant_pivot_research::{
 use crate::service::{
     feedback_coordinator::FeedbackStageSuccess,
     feedback_evaluation::FeedbackEvaluationReservationService,
+    feedback_governance_stage::FeedbackGovernanceStageAdapter,
     feedback_learning_stage::FeedbackLearningStageAdapter,
 };
 
@@ -55,6 +56,7 @@ pub struct FeedbackComparisonStageDeps {
     pub path_sets: Arc<dyn BacktestPathSetRepository>,
     pub artifacts: Arc<dyn ArtifactStore>,
     pub learning_stages: Arc<FeedbackLearningStageAdapter>,
+    pub governance_stages: Arc<FeedbackGovernanceStageAdapter>,
     pub evaluation_reservations: Arc<FeedbackEvaluationReservationService>,
     pub max_recovery_attempts: i32,
 }
@@ -67,6 +69,7 @@ pub struct FeedbackComparisonStageAdapter {
     path_sets: Arc<dyn BacktestPathSetRepository>,
     artifacts: Arc<dyn ArtifactStore>,
     learning_stages: Arc<FeedbackLearningStageAdapter>,
+    governance_stages: Arc<FeedbackGovernanceStageAdapter>,
     evaluation_reservations: Arc<FeedbackEvaluationReservationService>,
     max_recovery_attempts: i32,
 }
@@ -85,6 +88,7 @@ impl FeedbackComparisonStageAdapter {
             path_sets: deps.path_sets,
             artifacts: deps.artifacts,
             learning_stages: deps.learning_stages,
+            governance_stages: deps.governance_stages,
             evaluation_reservations: deps.evaluation_reservations,
             max_recovery_attempts: deps.max_recovery_attempts,
         })
@@ -100,11 +104,17 @@ impl FeedbackComparisonStageAdapter {
     ) -> QuantResult<NewResearchJob> {
         Self::require_identity(cycle, lease, identity)?;
         cycle.validate()?;
+        let validation = self.governance_stages.load_validation(cycle).await?;
         let cpcv = self.load_cpcv(cycle).await?;
+        if validation.reference.cpcv != cpcv.reference {
+            return Err(Self::invalid(
+                "Validation and Comparison resolved different CPCV predecessors",
+            ));
+        }
         let champion = self.load_model(cycle.champion_model_version_id).await?;
         Self::verify_champion(cycle, &champion)?;
         let candidates = self
-            .build_candidates(cycle, &champion, &cpcv.artifact)
+            .build_candidates(cycle, &champion, &cpcv.artifact, &validation.artifact)
             .await?;
 
         // No Evaluation object bytes may be opened before this durable,
@@ -123,7 +133,7 @@ impl FeedbackComparisonStageAdapter {
             feedback_cycle_id: cycle.feedback_cycle_id,
             cycle_idempotency_hash: cycle.idempotency_hash,
             candidate_family_hash: cycle.candidate_family_hash,
-            previous: cpcv.reference,
+            validation: validation.reference,
             evaluation_use: FeedbackEvaluationUseRef::from(&evaluation),
             comparison_contract: family.comparison_contract().clone(),
             decision_policy_snapshot_id: family
@@ -251,30 +261,73 @@ impl FeedbackComparisonStageAdapter {
         cycle: &FeedbackCycleInfo,
         champion: &ModelVersionInfo,
         artifact: &FeedbackLearningStageArtifact,
+        validation: &FeedbackValidationArtifact,
     ) -> QuantResult<Vec<FeedbackComparisonCandidateRef>> {
         let FeedbackLearningStageResults::Cpcv(results) = &artifact.results else {
             return Err(Self::invalid(
                 "Comparison predecessor is not a CPCV result artifact",
             ));
         };
+        if results.len() != validation.candidates.len() {
+            return Err(Self::invalid(
+                "Validation does not cover the complete CPCV trial universe",
+            ));
+        }
         let mut candidates = Vec::with_capacity(results.len());
         let artifact_id = FeedbackComparisonArtifactId::from_cycle_id(cycle.feedback_cycle_id);
-        for result in results {
+        for (result, validation) in results.iter().zip(&validation.candidates) {
+            if result.candidate_recipe_hash() != validation.candidate_recipe_hash
+                || result.model_version_id() != validation.model_version_id
+            {
+                return Err(Self::invalid(
+                    "Validation candidate identity differs from its CPCV trial",
+                ));
+            }
+            if !validation.is_comparison_eligible() {
+                continue;
+            }
+            let (
+                candidate_recipe_hash,
+                model_version_id,
+                training_dataset_id,
+                path_set_id,
+                model_run_id,
+                path_set_hash,
+            ) = match result {
+                FeedbackCpcvStageResult::Evaluated {
+                    candidate_recipe_hash,
+                    model_version_id,
+                    training_dataset_id,
+                    path_set_id,
+                    model_run_id,
+                    path_set_hash,
+                } => (
+                    *candidate_recipe_hash,
+                    *model_version_id,
+                    *training_dataset_id,
+                    *path_set_id,
+                    *model_run_id,
+                    *path_set_hash,
+                ),
+                FeedbackCpcvStageResult::CalibrationInsufficient { .. } => {
+                    return Err(Self::invalid(
+                        "calibration-ineligible recipe passed aggregate Validation",
+                    ));
+                }
+            };
             let recipe = cycle
                 .candidate_family
-                .candidate(result.candidate_recipe_hash)
+                .candidate(candidate_recipe_hash)
                 .ok_or_else(|| {
                     Self::invalid("CPCV result is outside the frozen candidate family")
                 })?;
-            let model = self.load_model(result.model_version_id).await?;
+            let model = self.load_model(model_version_id).await?;
             Self::verify_candidate(cycle, champion, recipe, result, &model)?;
             let path_set = self
                 .path_sets
-                .find_by_id(&result.path_set_id)
+                .find_by_id(&path_set_id)
                 .await?
-                .ok_or_else(|| {
-                    StorageError::not_found("quant_backtest_path_set", result.path_set_id)
-                })?;
+                .ok_or_else(|| StorageError::not_found("quant_backtest_path_set", path_set_id))?;
             path_set.verify_hash().map_err(|error| {
                 Self::invalid(format!("candidate CPCV path-set hash is invalid: {error}"))
             })?;
@@ -283,11 +336,11 @@ impl FeedbackComparisonStageAdapter {
                 .shared_evaluation()
                 .source_lineage
                 .decision_policy_snapshot_id;
-            if path_set.path_set_id != result.path_set_id
-                || path_set.path_set_hash != result.path_set_hash
-                || path_set.model_version_id != result.model_version_id
-                || path_set.model_run_id != result.model_run_id
-                || path_set.training_dataset_id != result.training_dataset_id
+            if path_set.path_set_id != path_set_id
+                || path_set.path_set_hash != path_set_hash
+                || path_set.model_version_id != model_version_id
+                || path_set.model_run_id != model_run_id
+                || path_set.training_dataset_id != training_dataset_id
                 || path_set.decision_policy_snapshot_id != policy_id
                 || path_set.subject.model_artifact_hash != model.artifact_hash
                 || path_set.subject.serving_contract_hash != model.serving_contract_hash
@@ -297,18 +350,15 @@ impl FeedbackComparisonStageAdapter {
                 ));
             }
             candidates.push(FeedbackComparisonCandidateRef {
-                candidate_recipe_hash: result.candidate_recipe_hash,
-                model_version_id: result.model_version_id,
+                candidate_recipe_hash,
+                model_version_id,
                 serving_contract_hash: model.serving_contract_hash,
-                path_set_id: result.path_set_id,
-                path_set_hash: result.path_set_hash,
-                model_run_id: ModelRunId::from_feedback_comparison(
-                    artifact_id,
-                    result.model_version_id,
-                ),
+                path_set_id,
+                path_set_hash,
+                model_run_id: ModelRunId::from_feedback_comparison(artifact_id, model_version_id),
                 backtest_report_id: BacktestReportId::from_feedback_comparison(
                     artifact_id,
-                    result.model_version_id,
+                    model_version_id,
                 ),
             });
         }
@@ -332,7 +382,6 @@ impl FeedbackComparisonStageAdapter {
         let bindings = champion.serving_contract.bindings();
         if champion.model_version_id != cycle.champion_model_version_id
             || champion.serving_contract_hash != cycle.champion_serving_contract_hash
-            || champion.publication_status != PublicationStatus::Published
             || champion.model_spec_id != evaluation.model_spec_id
             || champion.model_spec_definition_hash != evaluation.model_spec_definition_hash
             || champion.profile_ref != cycle.profile_ref
@@ -353,16 +402,25 @@ impl FeedbackComparisonStageAdapter {
         result: &FeedbackCpcvStageResult,
         model: &ModelVersionInfo,
     ) -> QuantResult<()> {
+        let FeedbackCpcvStageResult::Evaluated {
+            model_version_id,
+            training_dataset_id,
+            ..
+        } = result
+        else {
+            return Err(Self::invalid(
+                "calibration-ineligible recipe cannot enter Comparison",
+            ));
+        };
         let bindings = model.serving_contract.bindings();
-        if model.model_version_id != result.model_version_id
+        if model.model_version_id != *model_version_id
             || model.model_version_id == champion.model_version_id
-            || model.publication_status != PublicationStatus::Candidate
             || model.model_spec_id != recipe.training().model_spec_id
             || model.model_spec_definition_hash != recipe.training().model_spec_definition_hash
             || model.profile_ref != cycle.profile_ref
             || model.category_scope != champion.category_scope
-            || model.training_dataset_id != Some(result.training_dataset_id)
-            || result.training_dataset_id != recipe.training().training_dataset_id
+            || model.training_dataset_id != Some(*training_dataset_id)
+            || *training_dataset_id != recipe.training().training_dataset_id
             || bindings.policy_snapshot.decision_policy_snapshot_id
                 != recipe.decision_policy_snapshot_id()
         {

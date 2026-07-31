@@ -3,13 +3,16 @@
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-use super::{decision_policy_snapshot, quant_model_version, research_profile_artifact, user};
+use super::{
+    decision_policy_snapshot, quant_feedback_cycle, quant_model_candidate_manifest,
+    quant_model_version, research_profile_artifact, user,
+};
 use crate::{
     enums::{common::MarketCategory, quant::QuantRuntimeMode},
     types::{
-        ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration,
-        PolicyIdempotencyKey, PromotionPermitId, ResearchProfileArtifactId, ResearchProfileRef,
-        RoleCode, UserId,
+        ContentHash, DecisionPolicySnapshotId, FeedbackCycleId, ModelCandidateManifestId,
+        ModelVersionId, PolicyBundleGeneration, PolicyIdempotencyKey, PromotionPermitId,
+        ResearchProfileArtifactId, ResearchProfileRef, RoleCode, UserId,
     },
 };
 
@@ -22,6 +25,7 @@ pub struct Model {
     pub idempotency_key: PolicyIdempotencyKey,
     pub scope_hash: ContentHash,
     pub issuance_hash: ContentHash,
+    pub feedback_cycle_id: FeedbackCycleId,
     #[sea_orm(column_type = "JsonBinary")]
     pub profile_ref: ResearchProfileRef,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
@@ -29,10 +33,15 @@ pub struct Model {
     #[sea_orm(column_type = r#"custom("qp_market_category")"#)]
     pub category: MarketCategory,
     pub expected_policy_generation: PolicyBundleGeneration,
+    pub expected_runtime_control_revision: i64,
     pub expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub expected_snapshot_hash: ContentHash,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
+    pub candidate_model_version_id: ModelVersionId,
+    pub candidate_manifest_id: ModelCandidateManifestId,
+    pub candidate_manifest_hash: ContentHash,
+    pub promotion_gate_hash: ContentHash,
     #[sea_orm(column_type = r#"custom("qp_quant_runtime_mode[]")"#)]
     pub allowed_runtime_modes: Vec<QuantRuntimeMode>,
     pub non_route_policy_hash: ContentHash,
@@ -65,6 +74,13 @@ pub struct Model {
     pub research_profile_artifact: BelongsTo<research_profile_artifact::Entity>,
     #[sea_orm(
         belongs_to,
+        relation_enum = "FeedbackCycle",
+        from = "feedback_cycle_id",
+        to = "feedback_cycle_id"
+    )]
+    pub feedback_cycle: BelongsTo<quant_feedback_cycle::Entity>,
+    #[sea_orm(
+        belongs_to,
         relation_enum = "ExpectedPolicySnapshot",
         from = "expected_decision_policy_snapshot_id",
         to = "decision_policy_snapshot_id"
@@ -77,6 +93,20 @@ pub struct Model {
         to = "model_version_id"
     )]
     pub champion_model_version: BelongsTo<quant_model_version::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "CandidateModelVersion",
+        from = "candidate_model_version_id",
+        to = "model_version_id"
+    )]
+    pub candidate_model_version: BelongsTo<quant_model_version::Entity>,
+    #[sea_orm(
+        belongs_to,
+        relation_enum = "CandidateManifest",
+        from = "candidate_manifest_id",
+        to = "manifest_id"
+    )]
+    pub candidate_manifest: BelongsTo<quant_model_candidate_manifest::Entity>,
     #[sea_orm(
         belongs_to,
         relation_enum = "IssuedByUser",

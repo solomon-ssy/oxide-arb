@@ -1,7 +1,7 @@
 //! F06/F09/F10-to-F11 contracts against real `PostgreSQL` and object storage.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     slice,
     sync::{
         Arc, Mutex,
@@ -13,6 +13,7 @@ use std::{
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::{
     governance::{PromotionPermitService, RuntimeControlsHandle},
+    observability::metrics_hub::MetricsHub,
     runtime_config::{CommittedPolicyApplicator, DecisionPolicyStore},
     service::{
         feedback_coordinator::{FeedbackStageDirective, FeedbackStageSuccess},
@@ -20,7 +21,9 @@ use quant_pivot_core::{
         feedback_decision_stage::{FeedbackDecisionStageAdapter, FeedbackDecisionStageDeps},
         feedback_shadow::{FeedbackShadowExecutionDeps, FeedbackShadowExecutionService},
         feedback_shadow_stage::{FeedbackShadowStageAdapter, FeedbackShadowStageDeps},
-        model_route_promotion::{ModelRoutePromotionService, ModelRoutePromotionServiceDeps},
+        model_route_bootstrap::{ModelRouteBootstrapService, ModelRouteBootstrapServiceDeps},
+        model_route_evidence::{ModelRouteEvidenceDeps, ModelRouteEvidenceService},
+        model_route_governance::{ModelRouteGovernanceService, ModelRouteGovernanceServiceDeps},
         model_serving_generation::{ModelServingGenerationStore, PublishedShadowRouteIdentity},
         promotion_preflight::{
             PromotionPreflightDraft, PromotionPreflightPlan, PromotionPreflightService,
@@ -36,19 +39,29 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        api::FeedbackDriftJobParams,
+        api::{FeedbackDriftJobParams, GatePreviewIntent, QualityGateReportView},
         governance::{RuntimeControlSnapshot, RuntimeControlUpdate},
         ports::{
-            CommittedPolicyApplyPort, FeedbackDecisionExecutionPort, FeedbackShadowExecutionPort,
+            BootstrapQualityGateEvidence, BootstrapQualityGateInput, CalibratedModelSealCommand,
+            CandidateQualityGateEvidence, CommittedPolicyApplyPort,
+            FeedbackAttributionPlanArtifact, FeedbackAttributionPlanJobParams,
+            FeedbackCandidateValidation, FeedbackDecisionExecutionPort,
+            FeedbackLearningStageArtifactRef, FeedbackShadowExecutionPort,
+            FeedbackTruthFreezeArtifact, FeedbackTruthFreezeJobParams, FeedbackValidationArtifact,
+            FeedbackValidationArtifactRef, FeedbackValidationJobParams,
+            FeedbackValidationTrialOutcome, GovernanceActor, ModelGovernancePort,
             PolicySnapshotPort, PreparedPolicySnapshot,
         },
         quant::{
-            CommitModelRoutePromotion, FeedbackCohortWindow, FeedbackCycleInfo,
-            FeedbackStageEventInfo, FeedbackStageEventInput, FeedbackStageJobIdentity,
-            IssuePromotionPermit, NewFeedbackStageEvent, NewResearchJob, NoopProgressSink,
-            PromoteModelRoute, PromotionPermitActor, PromotionPermitInfo, PromotionPermitStatus,
-            PromotionPolicyProjection, PromotionPreflight, ResearchJobArtifactRef,
-            ResearchJobFinalization, ResearchJobInfo, ResearchJobResultRef, RevokePromotionPermit,
+            CommitModelRoutePromotion, ExecutionAttemptBarrier, ExecutionRollupBarrier,
+            FeedbackCohortWindow, FeedbackCycleInfo, FeedbackStageEventInfo,
+            FeedbackStageEventInput, FeedbackStageJobIdentity, IssuePromotionPermit,
+            ModelVersionInfo, NewFeedbackStageEvent, NewResearchJob, NoopProgressSink,
+            PromoteModelRoute, PromotionPermitActor, PromotionPermitInfo, PromotionPermitScope,
+            PromotionPermitScopeInput, PromotionPermitStatus, PromotionPolicyProjection,
+            PromotionPreflight, PromotionPreflightInput, ResearchJobArtifactRef,
+            ResearchJobFinalization, ResearchJobInfo, ResearchJobResultRef,
+            ResolutionProjectionBarrier, RevokePromotionPermit,
         },
     },
     entities::{
@@ -80,8 +93,8 @@ use quant_pivot_models::{
         common::MarketCategory,
         quant::{
             DatasetPurpose, FeedbackCycleStatus, FeedbackDecision, FeedbackStage,
-            FeedbackStageEventKind, PublicationStatus, QuantRuntimeMode, ResearchJobKind,
-            ResearchJobResultKind, ResearchJobStatus,
+            FeedbackStageEventKind, QuantRuntimeMode, ResearchJobKind, ResearchJobResultKind,
+            ResearchJobStatus,
         },
         runtime_config::PolicyActivationKind,
     },
@@ -91,26 +104,35 @@ use quant_pivot_models::{
         PolicyApplyReadiness, PolicyBundleIdentity,
     },
     types::{
-        ArtifactUri, ContentHash, FeatureValue, FeedbackCoverageArtifactId, FeedbackCycleId,
-        FeedbackDecisionArtifactId, FeedbackDriftArtifactId, ModelVersionId, PolicyIdempotencyKey,
-        PromotionPermitId, ResearchJobId, ResearchJobParams, RoleCode, TrainingDatasetId, WorkerId,
+        ArtifactUri, BacktestPathSetId, BacktestReportId, ContentHash, FeatureValue,
+        FeedbackCoverageArtifactId, FeedbackCycleId, FeedbackDecisionArtifactId,
+        FeedbackDriftArtifactId, FeedbackLearningStageArtifactId, ModelRunId, ModelVersionId,
+        PolicyIdempotencyKey, PromotionPermitId, ResearchJobId, ResearchJobParams, RoleCode,
+        TrainingDatasetId, WorkerId,
+        model_quality::{
+            GateClass, GateId, GateIntent, GateOutcome, GateStatus, GateSubject, QualityGateReport,
+            QualityGateReportInput,
+        },
         stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgFeatureParityRepository, PgFeedbackCycleRepository, PgModelGovernanceAuditRepository,
-        PgModelRegistryRepository, PgModelRoutePromotionRepository, PgPolicyRepository,
+        PgBacktestPathSetRepository, PgBacktestReportRepository, PgFeatureParityRepository,
+        PgFeedbackCycleRepository, PgModelCandidateManifestRepository,
+        PgModelGovernanceAuditRepository, PgModelRegistryRepository,
+        PgModelRouteBootstrapRepository, PgModelRoutePromotionRepository, PgPolicyRepository,
         PgPromotionPermitRepository, PgResearchJobRepository, PgRuntimeControlRepository,
         PgShadowComparisonRepository,
     },
     traits::{
+        BacktestPathSetRepository, BacktestReportRepository, FeatureParityLatchActor,
         FeatureParityRepository, FeedbackCycleClaim, FeedbackCycleLeaseGuard,
-        FeedbackCycleRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
-        ModelRoutePromotionCommit, ModelRoutePromotionOutcome, ModelRoutePromotionRepository,
-        PolicyRepository, PromotionPermitIssueOutcome, PromotionPermitRepository,
-        PromotionPermitRevokeOutcome, ResearchJobEnqueueOutcome, ResearchJobRepository,
-        RuntimeControlRepository,
+        FeedbackCycleRepository, ModelCandidateManifestRepository, ModelGovernanceAuditRepository,
+        ModelRegistryRepository, ModelRouteBootstrapRepository, ModelRoutePromotionCommit,
+        ModelRoutePromotionOutcome, ModelRoutePromotionRepository, PolicyRepository,
+        PromotionPermitIssueOutcome, PromotionPermitRepository, PromotionPermitRevokeOutcome,
+        ResearchJobEnqueueOutcome, ResearchJobRepository, RuntimeControlRepository,
     },
 };
 use quant_pivot_research::{
@@ -121,6 +143,11 @@ use quant_pivot_research::{
         FeedbackDriftCodec, LabelDriftDetail, drift_gate, drift_observations,
     },
     feedback_decision::FeedbackDecisionCodec,
+    feedback_governance::FeedbackGovernanceCodec,
+    feedback_learning::{
+        FeedbackCpcvStageResult, FeedbackLearningStageArtifact, FeedbackLearningStageCodec,
+        FeedbackLearningStageResults,
+    },
 };
 use quant_pivot_system_tests::{
     postgres::setup_pg,
@@ -149,8 +176,8 @@ use super::{
     feedback_shadow_stage::{
         ActivatedServing, ArtifactRoot, ShadowModels, activate_crypto_generation,
         activate_generation, build_crypto_models, build_models, comparison_params,
-        insert_observation, insert_stable_observations, record_comparison, record_crypto_cycle,
-        record_cycle,
+        comparison_params_with_validation, insert_observation, insert_stable_observations,
+        record_comparison, record_crypto_cycle, record_cycle,
     },
 };
 
@@ -162,7 +189,7 @@ const PROMOTION_REPOSITORY_SOURCE: &str = include_str!(concat!(
 ));
 const PROMOTION_SERVICE_SOURCE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../quant-pivot-core/src/service/model_route_promotion.rs"
+    "/../quant-pivot-core/src/service/model_route_governance.rs"
 ));
 
 fn wire_value<T: Serialize>(value: &T) -> Value {
@@ -182,6 +209,51 @@ const fn route_name(route: BuyModelRoute) -> &'static str {
         BuyModelRoute::Crypto => "crypto",
         BuyModelRoute::Weather => "weather",
     }
+}
+
+fn expiring_preflight(
+    preflight: &PromotionPreflight,
+    expires_at: DateTime<Utc>,
+) -> PromotionPreflight {
+    let original = preflight.scope();
+    let scope = PromotionPermitScope::try_new(PromotionPermitScopeInput {
+        feedback_cycle_id: original.feedback_cycle_id(),
+        profile_ref: original.profile_ref().clone(),
+        category: original.category(),
+        expected_policy_generation: original.expected_policy_generation(),
+        expected_runtime_control_revision: original.expected_runtime_control_revision(),
+        expected_decision_policy_snapshot_id: original.expected_snapshot_id(),
+        expected_snapshot_hash: original.expected_snapshot_hash(),
+        champion_model_version_id: original.champion_model_version_id(),
+        champion_serving_contract_hash: original.champion_serving_contract_hash(),
+        candidate_model_version_id: original.candidate_model_version_id(),
+        candidate_manifest_id: original.candidate_manifest_id(),
+        candidate_manifest_hash: original.candidate_manifest_hash(),
+        promotion_gate_hash: original.promotion_gate_hash(),
+        allowed_runtime_modes: original.allowed_runtime_modes().to_vec(),
+        non_route_policy_hash: original.non_route_policy_hash(),
+        serving_constraints_hash: original.serving_constraints_hash(),
+        expires_at,
+    })
+    .expect("build short-lived P06 permit scope");
+    PromotionPreflight::try_seal(PromotionPreflightInput {
+        scope,
+        feedback_cycle_id: preflight.feedback_cycle_id(),
+        cycle_idempotency_hash: preflight.cycle_idempotency_hash(),
+        decision_artifact_id: preflight.decision_artifact_id(),
+        decision_artifact_hash: preflight.decision_artifact_hash(),
+        decision_object_hash: preflight.decision_object_hash(),
+        decision_job_input_hash: preflight.decision_job_input_hash(),
+        shadow_artifact_id: preflight.shadow_artifact_id(),
+        shadow_artifact_hash: preflight.shadow_artifact_hash(),
+        shadow_object_hash: preflight.shadow_object_hash(),
+        shadow_contract_hash: preflight.shadow_contract_hash(),
+        candidate_recipe_hash: preflight.candidate_recipe_hash(),
+        serving_constraints: preflight.serving_constraints().clone(),
+        current_runtime_mode: preflight.current_runtime_mode(),
+        runtime_control_revision: preflight.runtime_control_revision(),
+    })
+    .expect("seal short-lived P06 promotion preflight")
 }
 
 fn policy_identity_value(identity: PolicyBundleIdentity) -> Value {
@@ -609,12 +681,395 @@ async fn persist_drift(
     ResearchJobArtifactRef { uri, content_hash }
 }
 
+async fn persist_stage_artifact(
+    store: &Arc<dyn ArtifactStore>,
+    namespace: ArtifactNamespace,
+    bytes: &[u8],
+) -> ResearchJobArtifactRef {
+    let content_hash = CanonicalDigest::content_hash_bytes(bytes);
+    let uri = store
+        .put(
+            ArtifactKey::new(namespace, content_hash.hex(), "json")
+                .expect("governance stage artifact key"),
+            bytes,
+        )
+        .await
+        .expect("persist governance stage artifact");
+    assert_eq!(
+        store
+            .get(&uri)
+            .await
+            .expect("read governance stage artifact"),
+        bytes
+    );
+    ResearchJobArtifactRef { uri, content_hash }
+}
+
+struct StageFixtureInput {
+    stage: FeedbackStage,
+    params: ResearchJobParams,
+    result: ResearchJobResultRef,
+    artifact: ResearchJobArtifactRef,
+    event_sequence: i64,
+}
+
+impl StageFixtureInput {
+    async fn record(
+        self,
+        cycles: &PgFeedbackCycleRepository,
+        jobs: &PgResearchJobRepository,
+        claim: &FeedbackCycleClaim,
+    ) -> ResearchJobInfo {
+        let identity =
+            FeedbackStageJobIdentity::try_root(claim.cycle.feedback_cycle_id, self.stage)
+                .expect("governance stage identity");
+        let kind = self.params.kind();
+        let job = NewResearchJob {
+            job_id: identity.job_id(),
+            feedback_cycle_id: None,
+            feedback_stage: None,
+            kind,
+            status: ResearchJobStatus::Queued,
+            model_spec_id: None,
+            decision_policy_snapshot_id: None,
+            params_json: self.params,
+            requested_by: None,
+            acting_role: RoleCode::new("system"),
+            parent_job_id: None,
+            recovery_attempt: 0,
+            max_recovery_attempts: 3,
+        }
+        .try_bind_feedback(identity)
+        .expect("bind governance stage job");
+        match jobs
+            .enqueue(job)
+            .await
+            .expect("enqueue governance stage job")
+        {
+            ResearchJobEnqueueOutcome::Inserted(_)
+            | ResearchJobEnqueueOutcome::AlreadyPresent(_) => {}
+        }
+        let worker = WorkerId::from_v7();
+        jobs.lease_next(
+            &[kind],
+            &worker,
+            Utc::now() + Duration::seconds(JOB_LEASE_SECS),
+        )
+        .await
+        .expect("lease governance stage job")
+        .expect("queued governance stage job");
+        let info = jobs
+            .finalize(
+                &identity.job_id(),
+                &worker,
+                ResearchJobFinalization::succeeded(
+                    Some(self.result),
+                    Some(self.artifact.clone()),
+                    None,
+                ),
+            )
+            .await
+            .expect("finalize governance stage job");
+        cycles
+            .append_stage(
+                claim.lease,
+                NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+                    feedback_cycle_id: claim.cycle.feedback_cycle_id,
+                    event_sequence: self.event_sequence,
+                    stage: self.stage,
+                    event_kind: FeedbackStageEventKind::Succeeded,
+                    trigger_family: None,
+                    research_job_id: Some(identity.job_id()),
+                    actor: None,
+                    reason_code: None,
+                    evidence_uri: Some(self.artifact.uri),
+                    evidence_hash: Some(self.artifact.content_hash),
+                    occurred_at: info.finished_at.expect("governance stage terminal time"),
+                })
+                .expect("seal governance stage event"),
+            )
+            .await
+            .expect("append governance stage event");
+        info
+    }
+}
+
+async fn record_truth_attribution(
+    store: &Arc<dyn ArtifactStore>,
+    cycles: &PgFeedbackCycleRepository,
+    jobs: &PgResearchJobRepository,
+    claim: &FeedbackCycleClaim,
+) {
+    let cycle = &claim.cycle;
+    let cutoff = cycle.label_cutoff;
+    let truth_params = FeedbackTruthFreezeJobParams::try_new(
+        cycle.feedback_cycle_id,
+        cycle.idempotency_hash,
+        cutoff,
+    )
+    .expect("freeze TruthFreeze params");
+    let truth = FeedbackTruthFreezeArtifact::try_new(
+        &truth_params,
+        ResolutionProjectionBarrier {
+            cutoff,
+            unresolved_count: 0,
+            quarantined_count: 0,
+            oldest_unresolved_at: None,
+            verified_through: cutoff,
+        },
+        ExecutionAttemptBarrier {
+            cutoff,
+            eligible_unsealed_count: 0,
+            sealed_through: cutoff,
+        },
+        ExecutionRollupBarrier {
+            cutoff,
+            eligible_unsealed_count: 0,
+            sealed_through: cutoff,
+        },
+    )
+    .expect("seal complete TruthFreeze artifact");
+    let truth_bytes = FeedbackGovernanceCodec::encode_truth(&truth)
+        .expect("encode complete TruthFreeze artifact");
+    let truth_ref =
+        persist_stage_artifact(store, ArtifactNamespace::FeedbackTruth, &truth_bytes).await;
+    StageFixtureInput {
+        stage: FeedbackStage::TruthFreeze,
+        params: ResearchJobParams::FeedbackTruthFreeze(truth_params.clone()),
+        result: ResearchJobResultRef {
+            kind: ResearchJobResultKind::FeedbackTruthFreezeArtifact,
+            id: truth_params.artifact_id.as_uuid(),
+        },
+        artifact: truth_ref.clone(),
+        event_sequence: 2,
+    }
+    .record(cycles, jobs, claim)
+    .await;
+
+    let attribution_params = FeedbackAttributionPlanJobParams::try_new(
+        cycle.feedback_cycle_id,
+        cycle.idempotency_hash,
+        cutoff,
+        cycles
+            .database_time()
+            .await
+            .expect("load attribution-plan database time"),
+        cycle.candidate_family.shared_evaluation().window.clone(),
+        truth_ref,
+    )
+    .expect("freeze AttributionPlan params");
+    let attribution =
+        FeedbackAttributionPlanArtifact::try_new(&attribution_params, Vec::new(), Vec::new())
+            .expect("seal PIT-safe AttributionPlan artifact");
+    let attribution_bytes = FeedbackGovernanceCodec::encode_attribution(&attribution)
+        .expect("encode AttributionPlan artifact");
+    let attribution_ref = persist_stage_artifact(
+        store,
+        ArtifactNamespace::FeedbackAttribution,
+        &attribution_bytes,
+    )
+    .await;
+    StageFixtureInput {
+        stage: FeedbackStage::AttributionPlan,
+        params: ResearchJobParams::FeedbackAttributionPlan(attribution_params.clone()),
+        result: ResearchJobResultRef {
+            kind: ResearchJobResultKind::FeedbackAttributionPlanArtifact,
+            id: attribution_params.artifact_id.as_uuid(),
+        },
+        artifact: attribution_ref,
+        event_sequence: 3,
+    }
+    .record(cycles, jobs, claim)
+    .await;
+}
+
+fn candidate_gate_report(
+    candidate_model_version_id: ModelVersionId,
+    evaluated_at: DateTime<Utc>,
+) -> QualityGateReport {
+    let pass = |gate, class| GateOutcome {
+        gate,
+        class,
+        status: GateStatus::Pass,
+        observed: "fixture_pass".to_owned(),
+        threshold: "governed".to_owned(),
+        detail: "promotion fixture carries a complete passing scorecard".to_owned(),
+    };
+    let not_applicable = |gate, class| GateOutcome {
+        gate,
+        class,
+        status: GateStatus::NotApplicable,
+        observed: "n/a".to_owned(),
+        threshold: "n/a".to_owned(),
+        detail: "gate does not apply to Candidate intent".to_owned(),
+    };
+    QualityGateReport::try_new(QualityGateReportInput {
+        subject: GateSubject::ModelVersion(candidate_model_version_id),
+        intent: GateIntent::Candidate,
+        evaluated_at,
+        gates: vec![
+            pass(GateId::SampleCount, GateClass::Hard),
+            pass(GateId::LabelCoverage, GateClass::Hard),
+            pass(GateId::MaterializationCoverage, GateClass::Hard),
+            pass(GateId::NoPitLeakage, GateClass::Hard),
+            pass(GateId::BacktestRequired, GateClass::Hard),
+            pass(GateId::MaxDrawdown, GateClass::Hard),
+            pass(GateId::TurnoverBudget, GateClass::Hard),
+            pass(GateId::TailLossBudget, GateClass::Hard),
+            pass(GateId::HitRate, GateClass::Soft),
+            pass(GateId::CategoryConcentration, GateClass::Soft),
+            pass(GateId::CpcvRequired, GateClass::Hard),
+            pass(GateId::RankIc, GateClass::Hard),
+            pass(GateId::DeflatedSharpe, GateClass::Hard),
+            pass(GateId::Pbo, GateClass::Hard),
+            pass(GateId::MinTrackRecordLength, GateClass::Soft),
+            not_applicable(GateId::LiquidityExitFeasible, GateClass::Hard),
+            not_applicable(GateId::ShadowOverlapStability, GateClass::Hard),
+            not_applicable(GateId::CalibrationRequired, GateClass::Hard),
+            pass(GateId::ExplainabilityRequired, GateClass::Hard),
+        ],
+    })
+    .expect("seal complete Candidate quality-gate report")
+}
+
+struct ValidationGateFixture {
+    reference: FeedbackValidationArtifactRef,
+    path_set_id: BacktestPathSetId,
+    path_set_hash: ContentHash,
+}
+
+async fn record_validation_gate(
+    store: &Arc<dyn ArtifactStore>,
+    cycles: &PgFeedbackCycleRepository,
+    jobs: &PgResearchJobRepository,
+    claim: &FeedbackCycleClaim,
+    models: &ShadowModels,
+) -> ValidationGateFixture {
+    let cycle = &claim.cycle;
+    let recipe_hash = cycle.candidate_family.candidates()[0].candidate_recipe_hash();
+    let calibration_stage = FeedbackStage::Calibration;
+    let calibration_artifact_id = FeedbackLearningStageArtifactId::from_cycle_stage(
+        cycle.feedback_cycle_id,
+        calibration_stage,
+    )
+    .expect("Calibration artifact identity");
+    let calibration_ref = FeedbackLearningStageArtifactRef {
+        feedback_cycle_id: cycle.feedback_cycle_id,
+        stage: calibration_stage,
+        job_id: FeedbackStageJobIdentity::try_root(cycle.feedback_cycle_id, calibration_stage)
+            .expect("Calibration job identity")
+            .job_id(),
+        artifact_id: calibration_artifact_id,
+        input_hash: content_hash('8'),
+        artifact: ResearchJobArtifactRef {
+            uri: ArtifactUri::parse("s3://f11-decision/calibration.json")
+                .expect("Calibration artifact URI"),
+            content_hash: content_hash('9'),
+        },
+    };
+    let path_set_id = BacktestPathSetId::from_v7();
+    let path_set_hash = content_hash('a');
+    let cpcv_input_hash = content_hash('b');
+    let cpcv = FeedbackLearningStageArtifact::try_new(
+        cycle.feedback_cycle_id,
+        cycle.idempotency_hash,
+        cycle.candidate_family_hash,
+        cpcv_input_hash,
+        Some(calibration_ref),
+        FeedbackLearningStageResults::Cpcv(vec![FeedbackCpcvStageResult::Evaluated {
+            candidate_recipe_hash: recipe_hash,
+            model_version_id: models.candidate.model_version_id,
+            training_dataset_id: models
+                .candidate
+                .training_dataset_id
+                .expect("promotion candidate Training Dataset"),
+            path_set_id,
+            model_run_id: ModelRunId::from_feedback_stage(
+                cycle.feedback_cycle_id,
+                FeedbackStage::Cpcv,
+                recipe_hash,
+            ),
+            path_set_hash,
+        }]),
+    )
+    .expect("seal promotion CPCV artifact");
+    let cpcv_bytes =
+        FeedbackLearningStageCodec::encode(&cpcv).expect("encode promotion CPCV artifact");
+    let cpcv_artifact =
+        persist_stage_artifact(store, ArtifactNamespace::FeedbackLearning, &cpcv_bytes).await;
+    let cpcv_ref = cpcv
+        .reference(
+            FeedbackStageJobIdentity::try_root(cycle.feedback_cycle_id, FeedbackStage::Cpcv)
+                .expect("CPCV job identity")
+                .job_id(),
+            cpcv_artifact,
+        )
+        .expect("freeze promotion CPCV reference");
+    let evaluated_at = cycles
+        .database_time()
+        .await
+        .expect("load Validation database time");
+    let params = FeedbackValidationJobParams::try_new(
+        cycle.feedback_cycle_id,
+        cycle.idempotency_hash,
+        evaluated_at,
+        cpcv_ref.clone(),
+    )
+    .expect("freeze Validation params");
+    let validation = FeedbackValidationArtifact::try_new(
+        &params,
+        vec![FeedbackCandidateValidation {
+            candidate_recipe_hash: recipe_hash,
+            model_version_id: models.candidate.model_version_id,
+            trial_outcome: FeedbackValidationTrialOutcome::CpcvEvaluated,
+            quality_gate_report: candidate_gate_report(
+                models.candidate.model_version_id,
+                evaluated_at,
+            ),
+        }],
+    )
+    .expect("seal promotion Validation artifact");
+    let validation_bytes = FeedbackGovernanceCodec::encode_validation(&validation)
+        .expect("encode promotion Validation artifact");
+    let validation_ref = persist_stage_artifact(
+        store,
+        ArtifactNamespace::FeedbackValidation,
+        &validation_bytes,
+    )
+    .await;
+    let info = StageFixtureInput {
+        stage: FeedbackStage::Validation,
+        params: ResearchJobParams::FeedbackValidation(params.clone()),
+        result: ResearchJobResultRef {
+            kind: ResearchJobResultKind::FeedbackValidationArtifact,
+            id: params.artifact_id.as_uuid(),
+        },
+        artifact: validation_ref.clone(),
+        event_sequence: 5,
+    }
+    .record(cycles, jobs, claim)
+    .await;
+    ValidationGateFixture {
+        reference: FeedbackValidationArtifactRef {
+            feedback_cycle_id: cycle.feedback_cycle_id,
+            job_id: info.job_id,
+            artifact_id: params.artifact_id,
+            input_hash: params.input_hash().expect("Validation input hash"),
+            cpcv: cpcv_ref,
+            artifact: validation_ref,
+        },
+        path_set_id,
+        path_set_hash,
+    }
+}
+
 async fn record_drift(
     cycles: &PgFeedbackCycleRepository,
     jobs: &PgResearchJobRepository,
     store: &Arc<dyn ArtifactStore>,
     cycle: &FeedbackCycleInfo,
     lease: FeedbackCycleLeaseGuard,
+    event_sequence: i64,
 ) {
     let artifact = AdvancingDriftSeed { cycle }.seal();
     let artifact_ref = persist_drift(store, &artifact).await;
@@ -687,9 +1142,10 @@ async fn record_drift(
             lease,
             NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
                 feedback_cycle_id: cycle.feedback_cycle_id,
-                event_sequence: 2,
+                event_sequence,
                 stage: FeedbackStage::Drift,
                 event_kind: FeedbackStageEventKind::Succeeded,
+                trigger_family: None,
                 research_job_id: Some(identity.job_id()),
                 actor: None,
                 reason_code: None,
@@ -710,6 +1166,7 @@ async fn record_shadow(
     cycles: &Arc<PgFeedbackCycleRepository>,
     jobs: &Arc<PgResearchJobRepository>,
     claim: &FeedbackCycleClaim,
+    event_sequence: i64,
 ) {
     let shadow_stage = FeedbackShadowStageAdapter::try_new(FeedbackShadowStageDeps {
         cycles: Arc::clone(cycles) as Arc<dyn FeedbackCycleRepository>,
@@ -719,17 +1176,15 @@ async fn record_shadow(
         max_recovery_attempts: 3,
     })
     .expect("build F11 shadow stage");
-    let shadow_identity = FeedbackStageJobIdentity::try_root(
-        claim.cycle.feedback_cycle_id,
-        FeedbackStage::ShadowReplay,
-    )
-    .expect("F11 shadow identity");
+    let shadow_identity =
+        FeedbackStageJobIdentity::try_root(claim.cycle.feedback_cycle_id, FeedbackStage::Shadow)
+            .expect("F11 shadow identity");
     let shadow_job = shadow_stage
         .prepare_shadow(&claim.cycle, claim.lease, shadow_identity)
         .await
         .expect("prepare F11 shadow");
     let shadow_params = match &shadow_job.params_json {
-        ResearchJobParams::FeedbackShadowReplay(params) => params.as_ref().clone(),
+        ResearchJobParams::FeedbackShadow(params) => params.as_ref().clone(),
         _ => panic!("F11 shadow stage emitted another kind"),
     };
     match jobs.enqueue(shadow_job).await.expect("enqueue F11 shadow") {
@@ -737,7 +1192,7 @@ async fn record_shadow(
     }
     let shadow_worker = WorkerId::from_v7();
     jobs.lease_next(
-        &[ResearchJobKind::FeedbackShadowReplay],
+        &[ResearchJobKind::FeedbackShadow],
         &shadow_worker,
         Utc::now() + Duration::seconds(JOB_LEASE_SECS),
     )
@@ -761,7 +1216,7 @@ async fn record_shadow(
             &shadow_worker,
             ResearchJobFinalization::succeeded(
                 Some(ResearchJobResultRef {
-                    kind: ResearchJobResultKind::FeedbackShadowReplayArtifact,
+                    kind: ResearchJobResultKind::FeedbackShadowArtifact,
                     id: shadow_result.artifact_id.as_uuid(),
                 }),
                 Some(shadow_result.artifact.clone()),
@@ -779,9 +1234,10 @@ async fn record_shadow(
             claim.lease,
             NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
                 feedback_cycle_id: claim.cycle.feedback_cycle_id,
-                event_sequence: 4,
-                stage: FeedbackStage::ShadowReplay,
+                event_sequence,
+                stage: FeedbackStage::Shadow,
                 event_kind: FeedbackStageEventKind::Succeeded,
+                trigger_family: None,
                 research_job_id: Some(shadow_identity.job_id()),
                 actor: None,
                 reason_code: None,
@@ -949,15 +1405,17 @@ async fn finalize_decision(
     cycles: &PgFeedbackCycleRepository,
     claim: &FeedbackCycleClaim,
     completion: &DecisionCompletion,
+    event_sequence: i64,
 ) {
     cycles
         .append_stage(
             claim.lease,
             NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
                 feedback_cycle_id: claim.cycle.feedback_cycle_id,
-                event_sequence: 5,
+                event_sequence,
                 stage: FeedbackStage::Decision,
                 event_kind: FeedbackStageEventKind::Succeeded,
+                trigger_family: None,
                 research_job_id: Some(completion.identity.job_id()),
                 actor: None,
                 reason_code: None,
@@ -1295,6 +1753,7 @@ impl TerminalDecisionCase {
             &store,
             &claim.cycle,
             claim.lease,
+            2,
         )
         .await;
         let comparison = comparison_params(&db, &schema, &claim, &models).await;
@@ -1313,6 +1772,7 @@ impl TerminalDecisionCase {
             &cycles,
             &jobs,
             &claim,
+            4,
         ))
         .await;
         let policy_repository = PgPolicyRepository::new(db.clone());
@@ -1343,7 +1803,7 @@ impl TerminalDecisionCase {
         ))
         .await;
         assert_tamper(&store, &cycles, &jobs, &claim.cycle, &completion).await;
-        finalize_decision(cycles.as_ref(), &claim, &completion).await;
+        finalize_decision(cycles.as_ref(), &claim, &completion, 5).await;
         let policy_after = policy_repository
             .load_current_bundle()
             .await
@@ -1365,14 +1825,18 @@ impl TerminalDecisionCase {
                 .expect("F11 published identity after"),
             route_before
         );
+        let candidate_after = PgModelRegistryRepository::new(db.clone())
+            .find_model_version(&models.candidate.model_version_id)
+            .await
+            .expect("read F11 candidate")
+            .expect("F11 candidate exists");
         assert_eq!(
-            PgModelRegistryRepository::new(db.clone())
-                .find_model_version(&models.candidate.model_version_id)
-                .await
-                .expect("read F11 candidate")
-                .expect("F11 candidate exists")
-                .publication_status,
-            PublicationStatus::Candidate
+            candidate_after.artifact_hash,
+            models.candidate.artifact_hash
+        );
+        assert_eq!(
+            candidate_after.serving_contract_hash,
+            models.candidate.serving_contract_hash
         );
         let restart_read_back = Box::pin(
             RestartProbe {
@@ -1429,19 +1893,22 @@ struct PromotionPreflightCase {
 
 impl PromotionPreflightCase {
     async fn prepare(db: DatabaseConnection, store: Arc<dyn ArtifactStore>) -> Self {
-        let mut models = Box::pin(build_crypto_models(&db, &store)).await;
+        let models = Box::pin(build_crypto_models(&db, &store)).await;
         let model_repository = Arc::new(PgModelRegistryRepository::new(db.clone()));
-        models.candidate = model_repository
-            .promote_model_to_shadow(&models.candidate.model_version_id)
-            .await
-            .expect("promote P03 candidate into durable Shadow");
-        assert_eq!(
-            models.candidate.publication_status,
-            PublicationStatus::Shadow
-        );
-        ModelVersionFixture::persist_parity_proof(&db, &models.candidate)
+        let parity_run_id = ModelVersionFixture::persist_parity_proof(&db, &models.candidate)
             .await
             .expect("persist P03 candidate full-parity proof");
+        PgFeatureParityRepository::new(db.clone())
+            .acknowledge_latch(
+                &parity_run_id,
+                FeatureParityLatchActor {
+                    actor: Some("promotion-preflight-fixture".to_owned()),
+                    acting_role: "risk_owner".to_owned(),
+                    reason: "acknowledge exact candidate-bound full parity proof".to_owned(),
+                },
+            )
+            .await
+            .expect("initialize P03 feature-parity latch from exact proof");
         let serving = activate_crypto_generation(&db, &store, &models).await;
         let route_before = serving
             .generations
@@ -1452,16 +1919,29 @@ impl PromotionPreflightCase {
         let (schema, claim) = record_crypto_cycle(&db, &models).await;
         let cycles = Arc::new(PgFeedbackCycleRepository::new(db.clone()));
         let jobs = Arc::new(PgResearchJobRepository::new(db.clone()));
+        record_truth_attribution(&store, cycles.as_ref(), jobs.as_ref(), &claim).await;
         record_drift(
             cycles.as_ref(),
             jobs.as_ref(),
             &store,
             &claim.cycle,
             claim.lease,
+            4,
         )
         .await;
-        let comparison = comparison_params(&db, &schema, &claim, &models).await;
-        record_comparison(&db, &store, &claim, comparison, dec!(100), 3).await;
+        let validation =
+            record_validation_gate(&store, cycles.as_ref(), jobs.as_ref(), &claim, &models).await;
+        let comparison = comparison_params_with_validation(
+            &db,
+            &schema,
+            &claim,
+            &models,
+            validation.reference,
+            validation.path_set_id,
+            validation.path_set_hash,
+        )
+        .await;
+        record_comparison(&db, &store, &claim, comparison, dec!(100), 6).await;
         insert_stable_observations(&db, &serving.generations, claim.cycle.created_at).await;
         Box::pin(record_shadow(
             &db,
@@ -1470,6 +1950,7 @@ impl PromotionPreflightCase {
             &cycles,
             &jobs,
             &claim,
+            7,
         ))
         .await;
         let decision_probe = InvariantProbe {
@@ -1492,7 +1973,7 @@ impl PromotionPreflightCase {
             "feedback_candidate_ready_governance_required",
         ))
         .await;
-        finalize_decision(cycles.as_ref(), &claim, &completion).await;
+        finalize_decision(cycles.as_ref(), &claim, &completion, 8).await;
         Self {
             db,
             store,
@@ -1633,6 +2114,7 @@ struct PromotionPermitFixture {
     policies: Arc<PgPolicyRepository>,
     runtime_repository: Arc<PgRuntimeControlRepository>,
     runtime_controls: RuntimeControlsHandle,
+    route_evidence: Arc<ModelRouteEvidenceService>,
     preflight: Arc<PromotionPreflightService>,
     permit_service: Arc<PromotionPermitService>,
     actor: PromotionPermitActor,
@@ -1662,33 +2144,32 @@ impl PromotionPermitFixture {
         let runtime_controls =
             RuntimeControlsHandle::new(RuntimeControlSnapshot::from(runtime.clone()));
         let permits = Arc::new(PgPromotionPermitRepository::new(case.db.clone()));
+        let route_evidence = Arc::new(ModelRouteEvidenceService::new(ModelRouteEvidenceDeps {
+            policies: Arc::clone(&policies) as Arc<dyn PolicyRepository>,
+            durable_runtime: Arc::clone(&runtime_repository) as Arc<dyn RuntimeControlRepository>,
+            runtime_controls: runtime_controls.clone(),
+            policy_store: Arc::new(DecisionPolicyStore::new_active(policy_before.clone())),
+            models: Arc::clone(&case.model_repository) as Arc<dyn ModelRegistryRepository>,
+            feature_parity: Arc::new(PgFeatureParityRepository::new(case.db.clone()))
+                as Arc<dyn FeatureParityRepository>,
+            runtime_registry: Arc::clone(&case.serving.runtime_registry),
+            serving_generations: Arc::clone(&case.serving.generations),
+        }));
         let preflight = Arc::new(PromotionPreflightService::new(
             PromotionPreflightServiceDeps {
                 permits: Arc::clone(&permits) as Arc<dyn PromotionPermitRepository>,
                 cycles: Arc::clone(&case.cycles) as Arc<dyn FeedbackCycleRepository>,
                 decisions,
-                policies: Arc::clone(&policies) as Arc<dyn PolicyRepository>,
-                durable_runtime: Arc::clone(&runtime_repository)
-                    as Arc<dyn RuntimeControlRepository>,
-                runtime_controls: runtime_controls.clone(),
-                policy_store: Arc::new(DecisionPolicyStore::new_active(policy_before.clone())),
-                models: Arc::clone(&case.model_repository) as Arc<dyn ModelRegistryRepository>,
-                feature_parity: Arc::new(PgFeatureParityRepository::new(case.db.clone()))
-                    as Arc<dyn FeatureParityRepository>,
-                runtime_registry: Arc::clone(&case.serving.runtime_registry),
-                serving_generations: Arc::clone(&case.serving.generations),
+                manifests: Arc::new(PgModelCandidateManifestRepository::new(case.db.clone()))
+                    as Arc<dyn ModelCandidateManifestRepository>,
+                route_evidence: Arc::clone(&route_evidence),
+                metrics: Arc::new(MetricsHub::new()),
             },
         ));
-        let database_now = case
-            .cycles
-            .database_time()
-            .await
-            .expect("read promotion fixture database clock");
         let plan = preflight
             .prepare_issue(PromotionPreflightDraft {
                 feedback_cycle_id: case.claim.cycle.feedback_cycle_id,
-                allowed_runtime_modes: vec![QuantRuntimeMode::ReportOnly],
-                expires_at: database_now + Duration::minutes(10),
+                ttl_secs: 600,
             })
             .await
             .expect("derive server-owned promotion preflight");
@@ -1747,6 +2228,7 @@ impl PromotionPermitFixture {
             policies,
             runtime_repository,
             runtime_controls,
+            route_evidence,
             preflight,
             permit_service,
             actor: permit_actor,
@@ -1823,24 +2305,20 @@ impl PromotionPreflightCase {
             .expect("CandidateReady published shadow remains complete");
         assert_eq!(policy_after, permit_fixture.policy_before);
         assert_eq!(route_after, self.route_before);
-        assert_eq!(
-            self.model_repository
-                .find_model_version(&self.models.champion.model_version_id)
-                .await
-                .expect("read CandidateReady champion")
-                .expect("CandidateReady champion exists")
-                .publication_status,
-            PublicationStatus::Published
-        );
-        assert_eq!(
-            self.model_repository
-                .find_model_version(&self.models.candidate.model_version_id)
-                .await
-                .expect("read CandidateReady candidate")
-                .expect("CandidateReady candidate exists")
-                .publication_status,
-            PublicationStatus::Shadow
-        );
+        let champion = self
+            .model_repository
+            .find_model_version(&self.models.champion.model_version_id)
+            .await
+            .expect("read CandidateReady champion")
+            .expect("CandidateReady champion exists");
+        let candidate = self
+            .model_repository
+            .find_model_version(&self.models.candidate.model_version_id)
+            .await
+            .expect("read CandidateReady candidate")
+            .expect("CandidateReady candidate exists");
+        assert_eq!(champion.artifact_hash, self.models.champion.artifact_hash);
+        assert_eq!(candidate.artifact_hash, self.models.candidate.artifact_hash);
         let after = self.invariant_probe(None).load().await;
         let invariant_diff = InvariantDiff::between(&self.decision_before, &after);
         assert_protected_unchanged(
@@ -2028,13 +2506,66 @@ struct PromotionHarness {
     runtime_controls: RuntimeControlsHandle,
     preflight: Arc<PromotionPreflightService>,
     permit_service: Arc<PromotionPermitService>,
-    service: Arc<ModelRoutePromotionService>,
+    service: Arc<ModelRouteGovernanceService>,
     raw_apply: Arc<PromotionPolicyPort>,
     policy_apply: Arc<CommittedPolicyApplicator>,
     actor: PromotionPermitActor,
     permit: PromotionPermitInfo,
     initial_preflight: PromotionPreflight,
     policy_before: ActivePolicyBundle,
+}
+
+struct PromotionOnlyModelGovernance;
+
+#[async_trait::async_trait]
+impl ModelGovernancePort for PromotionOnlyModelGovernance {
+    async fn preview_gate(
+        &self,
+        _model_version_id: &ModelVersionId,
+        _intent: GatePreviewIntent,
+        _backtest_report_id: Option<&BacktestReportId>,
+    ) -> Result<QualityGateReportView, QuantError> {
+        Err(FeedbackError::InvalidBootstrapPreflight {
+            detail: "promotion fixture does not execute the bootstrap quality gate".to_owned(),
+        }
+        .into())
+    }
+
+    async fn evaluate_candidate(
+        &self,
+        _model_version_id: &ModelVersionId,
+        _evidence: CandidateQualityGateEvidence,
+        _evaluated_at: DateTime<Utc>,
+    ) -> Result<QualityGateReport, QuantError> {
+        Err(FeedbackError::InvalidBootstrapPreflight {
+            detail: "promotion fixture does not execute the candidate quality gate".to_owned(),
+        }
+        .into())
+    }
+
+    async fn evaluate_bootstrap(
+        &self,
+        _model_version_id: &ModelVersionId,
+        _input: BootstrapQualityGateInput,
+        _evaluated_at: DateTime<Utc>,
+    ) -> Result<BootstrapQualityGateEvidence, QuantError> {
+        Err(FeedbackError::InvalidBootstrapPreflight {
+            detail: "promotion fixture does not execute the bootstrap quality gate".to_owned(),
+        }
+        .into())
+    }
+
+    async fn seal_calibrated_model(
+        &self,
+        _model_version_id: &ModelVersionId,
+        _command: CalibratedModelSealCommand,
+        _actor: GovernanceActor,
+    ) -> Result<ModelVersionInfo, QuantError> {
+        Err(FeedbackError::InvalidBootstrapPreflight {
+            detail: "promotion fixture does not seal calibrated models".to_owned(),
+        }
+        .into())
+    }
 }
 
 impl PromotionHarness {
@@ -2056,8 +2587,24 @@ impl PromotionHarness {
             Arc::clone(&raw_apply) as Arc<dyn PolicySnapshotPort>,
             PolicyBundleIdentity::from(&permit_fixture.policy_before),
         ));
-        let service = Arc::new(ModelRoutePromotionService::new(
-            ModelRoutePromotionServiceDeps {
+        let bootstrap_preflight = Arc::new(ModelRouteBootstrapService::new(
+            ModelRouteBootstrapServiceDeps {
+                route_evidence: Arc::clone(&permit_fixture.route_evidence),
+                path_sets: Arc::new(PgBacktestPathSetRepository::new(case.db.clone()))
+                    as Arc<dyn BacktestPathSetRepository>,
+                backtests: Arc::new(PgBacktestReportRepository::new(case.db.clone()))
+                    as Arc<dyn BacktestReportRepository>,
+                cycles: Arc::clone(&case.cycles) as Arc<dyn FeedbackCycleRepository>,
+                model_governance: Arc::new(PromotionOnlyModelGovernance)
+                    as Arc<dyn ModelGovernancePort>,
+            },
+        ));
+        let service = Arc::new(ModelRouteGovernanceService::new(
+            ModelRouteGovernanceServiceDeps {
+                bootstrap_preflight,
+                bootstrap_repository: Arc::new(PgModelRouteBootstrapRepository::new(
+                    case.db.clone(),
+                )) as Arc<dyn ModelRouteBootstrapRepository>,
                 preflight: Arc::clone(&permit_fixture.preflight),
                 repository: Arc::clone(&promotions) as Arc<dyn ModelRoutePromotionRepository>,
                 policies: Arc::clone(&permit_fixture.policies) as Arc<dyn PolicyRepository>,
@@ -2068,6 +2615,7 @@ impl PromotionHarness {
             policies,
             runtime_repository,
             runtime_controls,
+            route_evidence: _,
             preflight,
             permit_service,
             actor,
@@ -2096,14 +2644,12 @@ impl PromotionHarness {
     async fn prepare_plan(
         &self,
         cycle_id: FeedbackCycleId,
-        allowed_runtime_modes: Vec<QuantRuntimeMode>,
-        expires_at: DateTime<Utc>,
+        ttl_secs: u32,
     ) -> PromotionPreflightPlan {
         self.preflight
             .prepare_issue(PromotionPreflightDraft {
                 feedback_cycle_id: cycle_id,
-                allowed_runtime_modes,
-                expires_at,
+                ttl_secs,
             })
             .await
             .expect("derive P06 promotion preflight")
@@ -2116,6 +2662,17 @@ impl PromotionHarness {
         preflight_hash: ContentHash,
         reason: &str,
     ) -> PromotionPermitInfo {
+        self.issue_preflight(plan.preflight(), idempotency_key, preflight_hash, reason)
+            .await
+    }
+
+    async fn issue_preflight(
+        &self,
+        preflight: &PromotionPreflight,
+        idempotency_key: &str,
+        preflight_hash: ContentHash,
+        reason: &str,
+    ) -> PromotionPermitInfo {
         match self
             .permit_service
             .issue(IssuePromotionPermit {
@@ -2123,7 +2680,7 @@ impl PromotionHarness {
                 idempotency_key: idempotency_key
                     .parse::<PolicyIdempotencyKey>()
                     .expect("valid P06 permit idempotency key"),
-                scope: plan.preflight().scope().clone(),
+                scope: preflight.scope().clone(),
                 preflight_hash,
                 reason: reason.to_owned(),
             })
@@ -2138,11 +2695,38 @@ impl PromotionHarness {
     }
 
     fn initial_command(&self) -> CommitModelRoutePromotion {
-        CommitModelRoutePromotion::try_new(
+        CommitModelRoutePromotion::try_new(self.initial_request(), self.initial_preflight.clone())
+            .expect("build exact P06 initial promotion command")
+    }
+
+    fn initial_request(&self) -> PromoteModelRoute {
+        self.activation_request(
             self.permit.promotion_permit_id,
-            self.initial_preflight.clone(),
+            self.initial_preflight.feedback_cycle_id(),
+            &self.initial_preflight,
+            "p04-route-activation-0001",
         )
-        .expect("build exact P06 initial promotion command")
+    }
+
+    fn activation_request(
+        &self,
+        permit_id: PromotionPermitId,
+        cycle_id: FeedbackCycleId,
+        preflight: &PromotionPreflight,
+        idempotency_key: &str,
+    ) -> PromoteModelRoute {
+        PromoteModelRoute {
+            promotion_permit_id: permit_id,
+            feedback_cycle_id: cycle_id,
+            expected_policy_generation: preflight.scope().expected_policy_generation(),
+            expected_runtime_control_revision: preflight.runtime_control_revision(),
+            idempotency_key: idempotency_key
+                .parse::<PolicyIdempotencyKey>()
+                .expect("valid route-activation idempotency key"),
+            actor: self.actor.clone(),
+            reason_code: "candidate_approved".to_owned(),
+            note: "activate exact permit-bound model route".to_owned(),
+        }
     }
 
     async fn change_mode(&self, mode: QuantRuntimeMode, reason: &str) {
@@ -2286,10 +2870,7 @@ impl AtomicPromotionCase {
     async fn prepare(db: DatabaseConnection, store: Arc<dyn ArtifactStore>) -> Self {
         let case = Box::pin(PromotionPreflightCase::prepare(db.clone(), store)).await;
         let harness = Box::pin(PromotionHarness::wire(&case)).await;
-        let request = PromoteModelRoute {
-            promotion_permit_id: harness.permit.promotion_permit_id,
-            feedback_cycle_id: case.claim.cycle.feedback_cycle_id,
-        };
+        let request = harness.initial_request();
         let counts_before = PromotionRowCounts::load(&db).await;
         let champion_before = ModelVersionEntity::find_by_id(case.models.champion.model_version_id)
             .one(&db)
@@ -2343,6 +2924,7 @@ impl AtomicPromotionCase {
                 "$.runtime_control",
                 "$.capital_allocations",
                 "$.champion_model",
+                "$.candidate_model",
                 "$.parity_latch",
                 "$.in_memory_serving_route",
                 "$.deployment_authority",
@@ -2351,7 +2933,6 @@ impl AtomicPromotionCase {
         for changed in [
             "$.policy_bundle",
             "$.model_routes",
-            "$.candidate_model",
             "$.cycle",
             "$.policy_apply_readiness",
         ] {
@@ -2360,20 +2941,6 @@ impl AtomicPromotionCase {
                 "Promoted path failed to change required invariant {changed}"
             );
         }
-        let candidate_changes = invariant_diff
-            .changes
-            .iter()
-            .filter(|change| change.path.starts_with("$.candidate_model."))
-            .map(|change| change.path.as_str())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            candidate_changes,
-            BTreeSet::from([
-                "$.candidate_model.publication_status",
-                "$.candidate_model.published_at",
-            ]),
-            "candidate promotion changed fields beyond Shadow-to-Published"
-        );
         let policy_before = &self.harness.policy_before;
         assert_eq!(
             policy_after.snapshot.recommendation,
@@ -2522,7 +3089,7 @@ impl AtomicPromotionCase {
 
     async fn assert_rollback(&self) {
         install_rollback_fault(&self.db).await;
-        Box::pin(self.harness.service.promote(self.request))
+        Box::pin(self.harness.service.activate(self.request.clone()))
             .await
             .expect_err("injected activation failure must roll back the whole promotion");
         remove_rollback_fault(&self.db).await;
@@ -2556,35 +3123,34 @@ impl AtomicPromotionCase {
     }
 
     async fn assert_expiry_race(&self) {
+        let plan = self
+            .harness
+            .prepare_plan(self.case.claim.cycle.feedback_cycle_id, 300)
+            .await;
         let database_now = self
             .case
             .cycles
             .database_time()
             .await
             .expect("read P06 expiry-race start clock");
-        let expires_at = database_now + Duration::seconds(3);
-        let plan = self
-            .harness
-            .prepare_plan(
-                self.case.claim.cycle.feedback_cycle_id,
-                vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto],
-                expires_at,
-            )
-            .await;
+        let preflight = expiring_preflight(plan.preflight(), database_now + Duration::seconds(3));
         let permit = self
             .harness
-            .issue_plan(
-                &plan,
+            .issue_preflight(
+                &preflight,
                 "p06-expiry-lock-race-0001",
-                plan.preflight().preflight_hash(),
+                preflight.preflight_hash(),
                 "prove expiry after permit row lock wait",
             )
             .await;
-        let command = CommitModelRoutePromotion::try_new(
+        let request = self.harness.activation_request(
             permit.promotion_permit_id,
-            plan.preflight().clone(),
-        )
-        .expect("build P06 expiry-race command");
+            self.case.claim.cycle.feedback_cycle_id,
+            &preflight,
+            "p06-expiry-route-activation-0001",
+        );
+        let command = CommitModelRoutePromotion::try_new(request, preflight)
+            .expect("build P06 expiry-race command");
 
         let blocker = self.db.begin().await.expect("begin P06 permit blocker");
         PermitEntity::find_by_id(permit.promotion_permit_id)
@@ -2596,7 +3162,7 @@ impl AtomicPromotionCase {
         let promotions = Arc::clone(&self.harness.promotions);
         let commit = tokio::spawn(async move { Box::pin(promotions.commit(command)).await });
         tokio::time::sleep(StdDuration::from_millis(250)).await;
-        self.wait_for_expiry(expires_at).await;
+        self.wait_for_expiry(permit.expires_at).await;
         blocker
             .commit()
             .await
@@ -2637,12 +3203,15 @@ impl AtomicPromotionCase {
 
     async fn assert_absent(&self) {
         let permit_id = PromotionPermitId::from_v7();
-        let error = Box::pin(self.harness.service.promote(PromoteModelRoute {
-            promotion_permit_id: permit_id,
-            feedback_cycle_id: self.case.claim.cycle.feedback_cycle_id,
-        }))
-        .await
-        .expect_err("absent P06 permit must fail closed");
+        let request = self.harness.activation_request(
+            permit_id,
+            self.case.claim.cycle.feedback_cycle_id,
+            &self.harness.initial_preflight,
+            "p06-absent-route-activation-0001",
+        );
+        let error = Box::pin(self.harness.service.activate(request))
+            .await
+            .expect_err("absent P06 permit must fail closed");
         assert!(matches!(
             error,
             QuantError::Storage(StorageError::NotFound {
@@ -2655,37 +3224,36 @@ impl AtomicPromotionCase {
     }
 
     async fn assert_expired(&self) {
+        let plan = self
+            .harness
+            .prepare_plan(self.case.claim.cycle.feedback_cycle_id, 300)
+            .await;
         let database_now = self
             .case
             .cycles
             .database_time()
             .await
             .expect("read P06 expiry fault clock");
-        let expires_at = database_now + Duration::seconds(3);
-        let plan = self
-            .harness
-            .prepare_plan(
-                self.case.claim.cycle.feedback_cycle_id,
-                vec![QuantRuntimeMode::ReportOnly],
-                expires_at,
-            )
-            .await;
+        let preflight = expiring_preflight(plan.preflight(), database_now + Duration::seconds(3));
         let permit = self
             .harness
-            .issue_plan(
-                &plan,
+            .issue_preflight(
+                &preflight,
                 "p06-expired-permit-0001",
-                plan.preflight().preflight_hash(),
+                preflight.preflight_hash(),
                 "prove expired authority cannot promote",
             )
             .await;
-        self.wait_for_expiry(expires_at).await;
-        let error = Box::pin(self.harness.service.promote(PromoteModelRoute {
-            promotion_permit_id: permit.promotion_permit_id,
-            feedback_cycle_id: self.case.claim.cycle.feedback_cycle_id,
-        }))
-        .await
-        .expect_err("expired P06 permit must fail closed");
+        self.wait_for_expiry(permit.expires_at).await;
+        let request = self.harness.activation_request(
+            permit.promotion_permit_id,
+            self.case.claim.cycle.feedback_cycle_id,
+            &preflight,
+            "p06-expired-route-activation-0001",
+        );
+        let error = Box::pin(self.harness.service.activate(request))
+            .await
+            .expect_err("expired P06 permit must fail closed");
         assert!(matches!(
             error,
             QuantError::Feedback(FeedbackError::InvalidPromotionPreflight { .. })
@@ -2695,19 +3263,9 @@ impl AtomicPromotionCase {
     }
 
     async fn assert_revoked(&self) {
-        let database_now = self
-            .case
-            .cycles
-            .database_time()
-            .await
-            .expect("read P06 revoke fault clock");
         let plan = self
             .harness
-            .prepare_plan(
-                self.case.claim.cycle.feedback_cycle_id,
-                vec![QuantRuntimeMode::ReportOnly],
-                database_now + Duration::minutes(10),
-            )
+            .prepare_plan(self.case.claim.cycle.feedback_cycle_id, 600)
             .await;
         let permit = self
             .harness
@@ -2734,12 +3292,15 @@ impl AtomicPromotionCase {
             PromotionPermitRevokeOutcome::Revoked(ref stored)
                 if stored.revision == 1 && stored.revoked_at.is_some()
         ));
-        let error = Box::pin(self.harness.service.promote(PromoteModelRoute {
-            promotion_permit_id: permit.promotion_permit_id,
-            feedback_cycle_id: self.case.claim.cycle.feedback_cycle_id,
-        }))
-        .await
-        .expect_err("revoked P06 permit must fail closed");
+        let request = self.harness.activation_request(
+            permit.promotion_permit_id,
+            self.case.claim.cycle.feedback_cycle_id,
+            plan.preflight(),
+            "p06-revoked-route-activation-0001",
+        );
+        let error = Box::pin(self.harness.service.activate(request))
+            .await
+            .expect_err("revoked P06 permit must fail closed");
         assert!(matches!(
             error,
             QuantError::Feedback(FeedbackError::InvalidPromotionPreflight { .. })
@@ -2749,19 +3310,9 @@ impl AtomicPromotionCase {
     }
 
     async fn assert_hash_drift(&self) {
-        let database_now = self
-            .case
-            .cycles
-            .database_time()
-            .await
-            .expect("read P06 hash fault clock");
         let plan = self
             .harness
-            .prepare_plan(
-                self.case.claim.cycle.feedback_cycle_id,
-                vec![QuantRuntimeMode::ReportOnly],
-                database_now + Duration::minutes(10),
-            )
+            .prepare_plan(self.case.claim.cycle.feedback_cycle_id, 600)
             .await;
         let drifted_hash = ContentHash::from_bytes([0xa5; 32]);
         assert_ne!(drifted_hash, plan.preflight().preflight_hash());
@@ -2774,12 +3325,15 @@ impl AtomicPromotionCase {
                 "prove preflight hash drift cannot promote",
             )
             .await;
-        let error = Box::pin(self.harness.service.promote(PromoteModelRoute {
-            promotion_permit_id: permit.promotion_permit_id,
-            feedback_cycle_id: self.case.claim.cycle.feedback_cycle_id,
-        }))
-        .await
-        .expect_err("drifted P06 preflight hash must fail closed");
+        let request = self.harness.activation_request(
+            permit.promotion_permit_id,
+            self.case.claim.cycle.feedback_cycle_id,
+            plan.preflight(),
+            "p06-hash-route-activation-0001",
+        );
+        let error = Box::pin(self.harness.service.activate(request))
+            .await
+            .expect_err("drifted P06 preflight hash must fail closed");
         assert!(matches!(
             error,
             QuantError::Feedback(FeedbackError::InvalidPromotionPreflight { .. })
@@ -2799,7 +3353,7 @@ impl AtomicPromotionCase {
             self.harness.runtime_controls.quant_runtime_mode(),
             QuantRuntimeMode::SemiAuto
         );
-        let error = Box::pin(self.harness.service.promote(self.request))
+        let error = Box::pin(self.harness.service.activate(self.request.clone()))
             .await
             .expect_err("runtime mode outside P06 permit scope must fail closed");
         assert!(matches!(
@@ -2886,7 +3440,7 @@ impl AtomicPromotionCase {
                 if stored.revision == 1 && stored.revoked_at.is_some()
         ));
 
-        let replay = Box::pin(self.harness.service.promote(self.request))
+        let replay = Box::pin(self.harness.service.activate(self.request.clone()))
             .await
             .expect("revoked permit retains exact committed replay");
         assert_eq!(replay.outcome, ModelRoutePromotionOutcome::ExactReplay);
@@ -2948,10 +3502,11 @@ impl AtomicPromotionCase {
     async fn commit_race(&self) -> ModelRoutePromotionCommit {
         let left_service = Arc::clone(&self.harness.service);
         let right_service = Arc::clone(&self.harness.service);
-        let request = self.request;
+        let left_request = self.request.clone();
+        let right_request = self.request.clone();
         let (left, right) = tokio::join!(
-            async move { Box::pin(left_service.promote(request)).await },
-            async move { Box::pin(right_service.promote(request)).await },
+            async move { Box::pin(left_service.activate(left_request)).await },
+            async move { Box::pin(right_service.activate(right_request)).await },
         );
         let left = left.expect("left concurrent P04 promotion");
         let right = right.expect("right concurrent P04 promotion");
@@ -3020,20 +3575,12 @@ impl AtomicPromotionCase {
                 .expect("read P04 champion after commit")
                 .expect("P04 champion exists after commit");
         assert_eq!(champion_after, self.champion_before);
-        let mut candidate_after =
+        let candidate_after =
             ModelVersionEntity::find_by_id(self.case.models.candidate.model_version_id)
                 .one(&self.db)
                 .await
                 .expect("read P04 candidate after commit")
                 .expect("P04 candidate exists after commit");
-        assert_eq!(
-            candidate_after.publication_status,
-            PublicationStatus::Published
-        );
-        assert!(candidate_after.published_at.is_some());
-        assert!(candidate_after.retired_at.is_none());
-        candidate_after.publication_status = PublicationStatus::Shadow;
-        candidate_after.published_at = None;
         assert_eq!(candidate_after, self.candidate_before);
 
         let cycle_after = CycleEntity::find_by_id(self.case.claim.cycle.feedback_cycle_id)
@@ -3059,7 +3606,7 @@ impl AtomicPromotionCase {
 
     async fn assert_apply_recovery(&self) {
         self.harness.raw_apply.reject_prepare(true);
-        let error = Box::pin(self.harness.service.promote(self.request))
+        let error = Box::pin(self.harness.service.activate(self.request.clone()))
             .await
             .expect_err("P05 injected runtime prepare failure");
         assert!(matches!(
@@ -3115,7 +3662,7 @@ impl AtomicPromotionCase {
         );
 
         self.harness.raw_apply.reject_prepare(false);
-        let replay = Box::pin(self.harness.service.promote(self.request))
+        let replay = Box::pin(self.harness.service.activate(self.request.clone()))
             .await
             .expect("P05 exact retry converges committed generation");
         assert_eq!(replay.outcome, ModelRoutePromotionOutcome::ExactReplay);
@@ -3204,7 +3751,7 @@ impl AtomicPromotionCase {
 
     async fn assert_replay(&self, committed: &ModelRoutePromotionCommit) {
         let replay_counts = PromotionRowCounts::load(&self.db).await;
-        let replay = Box::pin(self.harness.service.promote(self.request))
+        let replay = Box::pin(self.harness.service.activate(self.request.clone()))
             .await
             .expect("replay exact P04 promotion");
         assert_eq!(replay.outcome, ModelRoutePromotionOutcome::ExactReplay);
@@ -3214,12 +3761,11 @@ impl AtomicPromotionCase {
             committed.activation.policy_activation_id
         );
         assert_eq!(PromotionRowCounts::load(&self.db).await, replay_counts);
-        let drift = Box::pin(self.harness.service.promote(PromoteModelRoute {
-            promotion_permit_id: self.harness.permit.promotion_permit_id,
-            feedback_cycle_id: FeedbackCycleId::from_v7(),
-        }))
-        .await
-        .expect_err("P04 replay with a different cycle must conflict");
+        let mut drift_request = self.request.clone();
+        drift_request.feedback_cycle_id = FeedbackCycleId::from_v7();
+        let drift = Box::pin(self.harness.service.activate(drift_request))
+            .await
+            .expect_err("P04 replay with a different cycle must conflict");
         assert!(matches!(
             drift,
             QuantError::Feedback(FeedbackError::PromotionTransactionConflict { .. })

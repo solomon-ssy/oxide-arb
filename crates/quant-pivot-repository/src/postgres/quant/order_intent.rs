@@ -54,6 +54,7 @@ use sea_orm::{
 use crate::{
     postgres::{
         governance::PgRuntimeControlRepository,
+        primitives,
         quant::{
             capital_allocation::{
                 PgCapitalAllocationRepository, capital_invariant_ok, validate_non_negative,
@@ -156,6 +157,8 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         if rec_row.status == RecommendationStatus::Published {
             let mut rec_active = rec_row.into_active_model();
             rec_active.status = ActiveValue::Set(RecommendationStatus::IntentCreated);
+            rec_active.status_changed_at =
+                ActiveValue::Set(primitives::statement_timestamp(&txn).await?);
             rec_active.update(&txn).await.map_err(StorageError::from)?;
         }
         let mut intent_active = intent.into_active_model();

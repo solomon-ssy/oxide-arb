@@ -90,7 +90,7 @@ pub struct NewShadowComparison {
 }
 
 /// Aggregate stability of a shadow version over a recent comparison window, used
-/// by the publish gate (`min_shadow_overlap_stability` + no `hard_divergence`).
+/// by the route-promotion gate (`min_shadow_overlap_stability` + no `hard_divergence`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShadowStabilitySummary {
     /// Shadow version the summary describes.

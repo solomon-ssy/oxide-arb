@@ -309,11 +309,15 @@ Selection 不是交易白名单，而是报告输入集合。执行侧还会有�
 
 硬规则：
 
-- 只有 Published model 可进入 auto execution。
+- 只有当前精确 route generation 的 `Champion` model 可进入 auto execution；该角色从
+  `ModelRouting` 派生，不是 `quant_model_version` 上的可变发布状态。admission 必须重验
+  intent 冻结的 model/version 与当前 active route 仍一致。
 - quality gate stale 时禁止自动执行。
 - kill switch open 时禁止自动执行。
 - risk envelope 失效时禁止自动执行。
 - data quality 不达标时禁止自动执行。
+- route activation 只改变 serving pointer；不得扩大 runtime mode、execution policy、
+  capital、funder 或 signing authority。
 
 ## 5. 业务闭环
 

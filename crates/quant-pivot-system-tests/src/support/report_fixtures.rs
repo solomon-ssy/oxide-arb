@@ -262,6 +262,7 @@ pub fn recommendation(
         valid_from: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
         valid_until: Utc.timestamp_opt(1_700_086_400, 0).unwrap(),
         status: RecommendationStatus::Published,
+        status_changed_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
         created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
     }
 }

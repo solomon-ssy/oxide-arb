@@ -72,7 +72,12 @@ Rust struct 与 PostgreSQL 列布局是两个不同层次的决策：
 
 `quant_model_version.training_objective` 同样是原子 provenance document，但其形态不是一个“可选字段大全”。canonical 类型是 format v1 的 `ModelTrainingObjective`，内部使用 `learning_to_rank`、`classical_pointwise`、`hand_authored` 判别联合；LTR 的固定参数由 `TrainingObjectiveSpec` 表达。SeaORM entity 直接持有该类型，API/TypeScript 使用同构 union，数据库 CHECK 约束 format/tag。不得恢复 `_json` 字段名、`Record<String, Value>` 或前端 key 探测。
 
-`quant_model_version.quality_gate_report` 使用 `Option<QualityGateReport>`：`NULL` 精确表达“尚未评估”，完整 typed document 表达“已评估”。禁止用 `{}` 伪造未评估状态。DB CHECK 必须验证 format v1、数组/boolean/hash 形态，并保证 document subject ID 等于行的 `model_version_id`。
+`QualityGateReport` 不回写 `quant_model_version`。每次评估都是 content-addressed
+immutable evidence，并由 `ModelCandidateManifest` / `PromotionGateArtifact` 绑定 exact
+subject、intent、timestamp、gate outcomes 与 report hash。未评估由“该候选不存在相应
+evidence relation”表达，禁止用 nullable model-row cache、`{}` 或 last-write-wins 列伪造。
+DB CHECK 必须验证 document format、数组/boolean/hash 形态以及 manifest subject ID 与
+`model_version_id` 一致。
 
 `quant_model_version.metrics` 使用 format v1 的 `ModelVersionMetrics`，其闭合 tag 只有 `learning_to_rank`、`classical_pointwise`、`not_measured`。训练/验证指标作为一个模型版本的不可变结果整体产生、读取和校验，因此适合 typed JSONB；训练目标、metrics tag 必须由 DB CHECK 保持一致。`artifact_lineage` 仅复制跨边界核验所需的内容 hash、serialization format 和 factor input names，不得复制 artifact 中完整 input contract、fitted transform、URI 或任意 diagnostics map。完整模型结构的唯一事实源仍是内容寻址 artifact；UI/API 不提供 `Record<String, Value>` fallback。
 

@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     result::Result as StdResult,
     sync::Arc,
+    time::Duration as StdDuration,
 };
 
 use anyhow::{Context, Error as AnyhowError, Result, ensure};
@@ -55,9 +56,9 @@ use quant_pivot_models::{
         feature::EvidenceSourceKind,
         market::MarketStatus,
         quant::{
-            CalibrationMethod, CohortExclusionReason, DataQualityStatus, DatasetPurpose,
-            DownsideSource, FeedbackStage, FeedbackStageEventKind, FeedbackTriggerFamily,
-            QuantRuntimeMode,
+            CalibrationMethod, CohortCensorReason, CohortExclusionReason, DataQualityStatus,
+            DatasetPurpose, DownsideSource, FeedbackStage, FeedbackStageEventKind,
+            FeedbackTriggerFamily, QuantRuntimeMode,
         },
     },
     hashing::CanonicalDigest,
@@ -75,13 +76,13 @@ use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChQuantFactReadRepository},
     postgres::{
         PgCalibrationArtifactRepository, PgCatalogLedgerRepository, PgClobMarketInfoRepository,
-        PgDomainSourceCursorRepository, PgFactorRepository, PgFeatureParityRepository,
-        PgFeatureRepository, PgFeedbackCohortRepository, PgFeedbackCycleRepository,
-        PgMarketLinkageRepository, PgMarketRepository, PgModelRegistryRepository,
-        PgPolicyRepository, PgPositionRepository, PgRecommendationExecutionOutcomeRepository,
-        PgRecommendationReportRepository, PgRecommendationRepository,
-        PgRecommendationResolutionOutcomeRepository, PgTradePolicyRepository,
-        PgTrainingDatasetRepository,
+        PgDomainSourceCursorRepository, PgExecutionAttemptOutcomeRepository, PgFactorRepository,
+        PgFeatureParityRepository, PgFeatureRepository, PgFeedbackCohortRepository,
+        PgFeedbackCycleRepository, PgMarketLinkageRepository, PgMarketRepository,
+        PgModelRegistryRepository, PgPolicyRepository, PgPositionRepository,
+        PgRecommendationExecutionRollupRepository, PgRecommendationReportRepository,
+        PgRecommendationRepository, PgRecommendationResolutionOutcomeRepository,
+        PgResolutionObservationRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
         DomainSourceCursorRepository, FactWriter, FactorRepository, FeatureParityRepository,
@@ -348,11 +349,17 @@ async fn assert_signal_coverage(
         .iter()
         .find(|entry| entry.reason == CohortExclusionReason::ExecutionNotAttempted)
         .map_or(0, |entry| entry.count);
+    let execution_censors = artifact.cohorts.execution_learning.censor_counts();
+    let unsealed_count = execution_censors
+        .iter()
+        .find(|entry| entry.reason == CohortCensorReason::ExecutionOutcomeUnavailableAtCutoff)
+        .map_or(0, |entry| entry.count);
     ensure!(
         artifact.cohorts.execution_learning.eligible_count() == 0
             && report_only_count == FEEDBACK_SCALE_PER_REPORT as u64
-            && not_attempted_count == (FEEDBACK_SCALE_TOTAL - FEEDBACK_SCALE_PER_REPORT) as u64,
-        "ReportOnly recommendations entered ExecutionLearning or lost their exact exclusion reason"
+            && not_attempted_count == 0
+            && unsealed_count == (FEEDBACK_SCALE_TOTAL - FEEDBACK_SCALE_PER_REPORT) as u64,
+        "ExecutionLearning did not preserve ReportOnly exclusion and open-authority censoring"
     );
     let after = parity
         .current_state()
@@ -386,7 +393,6 @@ async fn record_signal_cycle(
     let feedback_policy_hash = profile.spec.feedback_policy.content_hash()?;
     let candidate_family = signal_candidate_family(&dataset, &model.profile_ref, label_cutoff)?;
     let cycle = NewFeedbackCycle::try_seal(FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
-        trigger_family: FeedbackTriggerFamily::Scheduled,
         profile_ref: model.profile_ref,
         feedback_policy_hash,
         label_cutoff,
@@ -401,6 +407,7 @@ async fn record_signal_cycle(
         event_sequence: 1,
         stage: FeedbackStage::Trigger,
         event_kind: FeedbackStageEventKind::Triggered,
+        trigger_family: Some(FeedbackTriggerFamily::Scheduled),
         research_job_id: None,
         actor: Some("feedback-dataset-e2e".to_owned()),
         reason_code: Some("w2_f06_real_coverage".to_owned()),
@@ -536,17 +543,28 @@ async fn reconcile_outcomes(
         .await?;
     let first_resolved_at = first.decision_at + Duration::milliseconds(1);
     seed_resolution_cursor(db, 100, first.decision_at - Duration::seconds(1)).await?;
-    let first_summary = reconciliation_service(
+    let first_reconciliation = reconciliation_service(
         db,
         Arc::clone(&ch),
         Arc::clone(&facts),
         resolution_source(first, 101, first_resolved_at, '1'),
-    )
-    .run_resolution_pass(pass_config(db.statement_time().await, 1))
-    .await?;
+    );
+    let first_summary = first_reconciliation
+        .run_resolution_pass(pass_config(db.statement_time().await, 1))
+        .await?;
     ensure!(
-        first_summary.source_facts_written == 1 && first_summary.resolution_inserted == 1,
-        "first production reconciliation did not commit one CH fact and one PG outcome"
+        first_summary.source_facts_written == 1
+            && first_summary.resolution_inserted == 0
+            && first_summary.resolution_deferred == 1,
+        "first production reconciliation did not preserve its PIT boundary"
+    );
+    release_resolution_retries(db).await?;
+    let first_outcome = first_reconciliation
+        .run_resolution_pass(pass_config(db.statement_time().await, 1))
+        .await?;
+    ensure!(
+        first_outcome.resolution_inserted == 1 && first_outcome.resolution_deferred == 0,
+        "next frozen window did not seal the first PG outcome"
     );
 
     let report_cutoff = db.statement_time().await;
@@ -562,17 +580,28 @@ async fn reconcile_outcomes(
         )
         .await?;
     let second_resolved_at = second.decision_at + Duration::milliseconds(1);
-    let second_summary = reconciliation_service(
+    let second_reconciliation = reconciliation_service(
         db,
         ch,
         facts,
         resolution_source(second, 102, second_resolved_at, '2'),
-    )
-    .run_resolution_pass(pass_config(db.statement_time().await, 1))
-    .await?;
+    );
+    let second_summary = second_reconciliation
+        .run_resolution_pass(pass_config(db.statement_time().await, 1))
+        .await?;
     ensure!(
-        second_summary.source_facts_written == 1 && second_summary.resolution_inserted == 1,
-        "late production reconciliation did not commit one CH fact and one PG outcome"
+        second_summary.source_facts_written == 1
+            && second_summary.resolution_inserted == 0
+            && second_summary.resolution_deferred == 1,
+        "late production reconciliation crossed its PIT boundary"
+    );
+    release_resolution_retries(db).await?;
+    let second_outcome = second_reconciliation
+        .run_resolution_pass(pass_config(db.statement_time().await, 1))
+        .await?;
+    ensure!(
+        second_outcome.resolution_inserted == 1 && second_outcome.resolution_deferred == 0,
+        "next frozen window did not seal the late PG outcome"
     );
     Ok(ReconciledOutcomes {
         window_start,
@@ -893,9 +922,11 @@ fn reconciliation_service(
         resolution_fact_writer: writer,
         resolution_facts: facts,
         cursors: Arc::new(PgDomainSourceCursorRepository::new(db.clone())),
+        resolution_observations: Arc::new(PgResolutionObservationRepository::new(db.clone())),
         markets: Arc::new(PgMarketRepository::new(db.clone())),
         resolution_outcomes: Arc::new(PgRecommendationResolutionOutcomeRepository::new(db.clone())),
-        execution_outcomes: Arc::new(PgRecommendationExecutionOutcomeRepository::new(db.clone())),
+        execution_outcomes: Arc::new(PgExecutionAttemptOutcomeRepository::new(db.clone())),
+        execution_rollups: Arc::new(PgRecommendationExecutionRollupRepository::new(db.clone())),
     })
 }
 
@@ -1012,6 +1043,18 @@ const fn pass_config(
         candidate_batch_size,
         source_block_span: 32,
     }
+}
+
+async fn release_resolution_retries(db: &DatabaseConnection) -> Result<()> {
+    db.execute_raw(Statement::from_string(
+        DbBackend::Postgres,
+        "UPDATE quant_resolution_outcome_reconciliation_task \
+         SET next_attempt_at = statement_timestamp() + INTERVAL '1 millisecond' \
+         WHERE status = 'retrying'",
+    ))
+    .await?;
+    tokio::time::sleep(StdDuration::from_millis(5)).await;
+    Ok(())
 }
 
 fn feedback_window(

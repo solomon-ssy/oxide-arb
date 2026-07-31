@@ -507,6 +507,7 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
             model_run_id,
             request,
             decision_policy_snapshot_id,
+            ..
         } = params;
         let policy = self.frozen_policy(&decision_policy_snapshot_id).await?;
         self.validate_split(&request.model_version_id, &request, &policy)

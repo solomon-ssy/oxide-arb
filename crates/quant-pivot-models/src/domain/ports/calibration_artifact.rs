@@ -18,8 +18,10 @@ use crate::{
             ModelCalibrationFitPreflightView,
         },
         pagination::Paginated,
+        ports::GovernanceActor,
         quant::{CalibrationArtifactInfo, JobProgressSink},
     },
+    enums::quant::DownsideSource,
     types::{
         CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, ModelRunId, ModelVersionId,
         TrainingDatasetId,
@@ -105,6 +107,10 @@ pub struct ModelCalibrationFitJobParams {
     /// (feature/factor recomputation + portfolio caps) — deterministic on
     /// replay, mirrors `BiasTableFitJobParams`.
     pub decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    /// Immutable downside semantics for the derived calibrated model.
+    pub downside_source: DownsideSource,
+    /// Exact initiating actor frozen into the durable job and derivation audit.
+    pub actor: GovernanceActor,
 }
 
 /// Terminal outcome of a model-score calibrator fit.

@@ -19,9 +19,7 @@ use quant_pivot_models::{
         ResearchJobStatus,
     },
     runtime_config::BuyModelRoute,
-    types::{
-        DecisionPolicySnapshotId, FeedbackShadowReplayArtifactId, ResearchJobParams, RoleCode,
-    },
+    types::{DecisionPolicySnapshotId, FeedbackShadowArtifactId, ResearchJobParams, RoleCode},
 };
 use quant_pivot_repository::traits::{
     FeedbackCycleLeaseGuard, FeedbackCycleRepository, ResearchJobRepository,
@@ -29,7 +27,7 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     artifact::ArtifactStore,
     feedback_comparison::{FeedbackComparisonArtifact, FeedbackComparisonCodec, RomanoWolfOutcome},
-    feedback_shadow::FeedbackShadowReplayCodec,
+    feedback_shadow::FeedbackShadowCodec,
 };
 
 use crate::service::{
@@ -97,7 +95,7 @@ impl FeedbackShadowStageAdapter {
         let params = FeedbackShadowJobParams {
             feedback_cycle_id: cycle.feedback_cycle_id,
             cycle_idempotency_hash: cycle.idempotency_hash,
-            artifact_id: FeedbackShadowReplayArtifactId::from_cycle_id(cycle.feedback_cycle_id),
+            artifact_id: FeedbackShadowArtifactId::from_cycle_id(cycle.feedback_cycle_id),
             previous: comparison.reference,
             profile_ref: cycle.profile_ref.clone(),
             feedback_policy_hash: cycle.feedback_policy_hash,
@@ -113,34 +111,34 @@ impl FeedbackShadowStageAdapter {
         cycle: &FeedbackCycleInfo,
         job: &ResearchJobInfo,
     ) -> QuantResult<FeedbackStageSuccess> {
-        let ResearchJobParams::FeedbackShadowReplay(params) = &job.params_json else {
-            return Err(Self::invalid("ShadowReplay job lost its typed parameters"));
+        let ResearchJobParams::FeedbackShadow(params) = &job.params_json else {
+            return Err(Self::invalid("Shadow job lost its typed parameters"));
         };
         params.validate()?;
         let expected = ResearchJobResultRef {
-            kind: ResearchJobResultKind::FeedbackShadowReplayArtifact,
+            kind: ResearchJobResultKind::FeedbackShadowArtifact,
             id: params.artifact_id.as_uuid(),
         };
         let artifact_ref = job
             .result_artifact()
-            .ok_or_else(|| Self::invalid("ShadowReplay job lost its terminal artifact"))?;
+            .ok_or_else(|| Self::invalid("Shadow job lost its terminal artifact"))?;
         if job.feedback_cycle_id != Some(cycle.feedback_cycle_id)
-            || job.feedback_stage != Some(FeedbackStage::ShadowReplay)
-            || job.kind != ResearchJobKind::FeedbackShadowReplay
+            || job.feedback_stage != Some(FeedbackStage::Shadow)
+            || job.kind != ResearchJobKind::FeedbackShadow
             || job.status != ResearchJobStatus::Succeeded
             || job.result() != Some(expected)
         {
             return Err(Self::invalid(
-                "ShadowReplay job has invalid cycle, kind, status, or result lineage",
+                "Shadow job has invalid cycle, kind, status, or result lineage",
             ));
         }
         let bytes = self.artifacts.get(&artifact_ref.uri).await?;
-        if FeedbackShadowReplayCodec::bytes_hash(&bytes) != artifact_ref.content_hash {
+        if FeedbackShadowCodec::bytes_hash(&bytes) != artifact_ref.content_hash {
             return Err(Self::invalid(
-                "ShadowReplay object bytes differ from their terminal hash",
+                "Shadow object bytes differ from their terminal hash",
             ));
         }
-        let artifact = FeedbackShadowReplayCodec::decode(&bytes)?;
+        let artifact = FeedbackShadowCodec::decode(&bytes)?;
         artifact.validate_for(params)?;
         Ok(FeedbackStageSuccess::advance(
             artifact_ref.uri,
@@ -160,7 +158,7 @@ impl FeedbackShadowStageAdapter {
                 event.stage == FeedbackStage::Comparison
                     && event.event_kind == FeedbackStageEventKind::Succeeded
             })
-            .ok_or_else(|| Self::invalid("ShadowReplay has no succeeded Comparison predecessor"))?;
+            .ok_or_else(|| Self::invalid("Shadow has no succeeded Comparison predecessor"))?;
         event.validate()?;
         let job_id = event
             .research_job_id
@@ -327,11 +325,11 @@ impl FeedbackShadowStageAdapter {
             job_id: identity.job_id(),
             feedback_cycle_id: None,
             feedback_stage: None,
-            kind: ResearchJobKind::FeedbackShadowReplay,
+            kind: ResearchJobKind::FeedbackShadow,
             status: ResearchJobStatus::Queued,
             model_spec_id: Some(cycle.candidate_family.shared_evaluation().model_spec_id),
             decision_policy_snapshot_id: Some(params.previous.decision_policy_snapshot_id),
-            params_json: ResearchJobParams::FeedbackShadowReplay(Box::new(params)),
+            params_json: ResearchJobParams::FeedbackShadow(Box::new(params)),
             requested_by: None,
             acting_role: RoleCode::new("system"),
             parent_job_id: identity.parent_job_id(),
@@ -352,10 +350,10 @@ impl FeedbackShadowStageAdapter {
         let lease_generation_matches = lease.expected_generation == cycle.generation;
         let lease_matches_cycle = lease_cycle_matches && lease_generation_matches;
         let identity_matches_cycle = identity.feedback_cycle_id() == cycle.feedback_cycle_id
-            && identity.feedback_stage() == FeedbackStage::ShadowReplay;
+            && identity.feedback_stage() == FeedbackStage::Shadow;
         if !lease_matches_cycle || !identity_matches_cycle {
             return Err(Self::invalid(
-                "ShadowReplay lease, generation, cycle, or job identity is invalid",
+                "Shadow lease, generation, cycle, or job identity is invalid",
             ));
         }
         Ok(())

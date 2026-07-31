@@ -74,7 +74,7 @@ pub struct SellScore {
 /// [`SellScorerRuntime`] trait so a future ONNX / classical exit scorer can be
 /// swapped in without touching the exit monitor.
 pub trait SellScorerRuntime: Send + Sync {
-    /// The published model version this runtime serves.
+    /// The immutable model version this runtime serves.
     fn model_version_id(&self) -> ModelVersionId;
     /// Feature-schema hash the artifact was built against (mismatch ⇒ abort).
     fn feature_schema_hash(&self) -> ContentHash;

@@ -45,6 +45,7 @@ pub struct Model {
     pub valid_from: DateTimeWithTimeZone,
     pub valid_until: DateTimeWithTimeZone,
     pub status: QpRecommendationStatus,
+    pub status_changed_at: DateTimeWithTimeZone,
     pub created_at: DateTimeWithTimeZone,
     #[sea_orm(
         belongs_to,

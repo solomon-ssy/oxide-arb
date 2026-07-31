@@ -9,14 +9,14 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        api::{BindCalibrationRequest, BindPublishPathSetRequest},
         ports::{
-            CalibrationArtifactFitPort, CpcvBacktestPort, FeedbackCalibrationCommand,
-            FeedbackCalibrationJobParams, FeedbackCpcvJobParams, FeedbackDatasetBuildCommand,
-            FeedbackDatasetRole, FeedbackDatasetSealJobParams, FeedbackLearningExecutionPort,
-            FeedbackLearningExecutionResult, FeedbackLearningStageArtifactRef,
-            FeedbackTrainingJobParams, GovernanceActor, ModelCalibrationFitOutcome,
-            ModelCalibrationFitPort, ModelGovernancePort, ModelTrainingPort, TrainingDatasetPort,
+            CalibratedModelSealCommand, CalibrationArtifactFitPort, CpcvBacktestPort,
+            FeedbackCalibrationCommand, FeedbackCalibrationJobParams, FeedbackCpcvJobParams,
+            FeedbackDatasetBuildCommand, FeedbackDatasetRole, FeedbackDatasetSealJobParams,
+            FeedbackLearningExecutionPort, FeedbackLearningExecutionResult,
+            FeedbackLearningStageArtifactRef, FeedbackTrainingJobParams,
+            ModelCalibrationFitOutcome, ModelCalibrationFitPort, ModelGovernancePort,
+            ModelTrainingPort, TrainingDatasetPort,
         },
         quant::{JobProgressSink, ModelVersionInfo, ResearchJobArtifactRef, TrainingDatasetInfo},
     },
@@ -546,14 +546,14 @@ impl FeedbackLearningExecutionService {
         }
         let calibrated = self
             .governance
-            .bind_calibration(
+            .seal_calibrated_model(
                 &source_model.model_version_id,
-                BindCalibrationRequest {
+                CalibratedModelSealCommand {
                     calibrator_ref: calibration_artifact_id,
-                    downside_source: command.downside_source,
-                    reason: command.bind_reason,
+                    downside_source: command.params.downside_source,
+                    reason: command.params.request.reason.clone(),
                 },
-                GovernanceActor::system(),
+                command.params.actor.clone(),
             )
             .await?;
         let derivation = calibrated.verified_derivation().map_err(|error| {
@@ -632,8 +632,51 @@ impl FeedbackLearningExecutionService {
                 FeedbackCalibrationStageResult::Insufficient { .. } => None,
             })
             .collect::<BTreeMap<_, _>>();
-        let total = Self::batch_total(params.commands.len())?;
-        let mut results = Vec::with_capacity(params.commands.len());
+        if params.commands.len() != calibrated.len()
+            || params.commands.iter().zip(&calibrated).any(
+                |(command, (recipe_hash, model_version_id))| {
+                    command.candidate_recipe_hash != *recipe_hash
+                        || command.params.model_version_id != *model_version_id
+                },
+            )
+        {
+            return Err(Self::contract(
+                "CPCV commands differ from the complete calibrated candidate set",
+            ));
+        }
+        let total = if params.commands.is_empty() {
+            None
+        } else {
+            Some(Self::batch_total(params.commands.len())?)
+        };
+        let mut results = calibration_results
+            .iter()
+            .filter_map(|result| match result {
+                FeedbackCalibrationStageResult::Calibrated { .. } => None,
+                FeedbackCalibrationStageResult::Insufficient {
+                    candidate_recipe_hash,
+                    source_model_version_id,
+                    model_run_id,
+                    calibration_dataset_id,
+                    method,
+                    sample_count,
+                    total_sample_count,
+                    minimum_sample_count,
+                    outcome_hash,
+                } => Some(FeedbackCpcvStageResult::CalibrationInsufficient {
+                    candidate_recipe_hash: *candidate_recipe_hash,
+                    source_model_version_id: *source_model_version_id,
+                    model_run_id: *model_run_id,
+                    calibration_dataset_id: *calibration_dataset_id,
+                    method: *method,
+                    sample_count: *sample_count,
+                    total_sample_count: *total_sample_count,
+                    minimum_sample_count: *minimum_sample_count,
+                    outcome_hash: *outcome_hash,
+                }),
+            })
+            .collect::<Vec<_>>();
+        results.reserve(params.commands.len());
         for (index, command) in params.commands.iter().cloned().enumerate() {
             Self::require_active(&cancel, FeedbackStage::Cpcv)?;
             let expected_model = calibrated
@@ -677,23 +720,7 @@ impl FeedbackLearningExecutionService {
                     "CPCV path-set read-back differs from its frozen command",
                 ));
             }
-            let bound = self
-                .governance
-                .bind_publish_path_set(
-                    &command.params.model_version_id,
-                    BindPublishPathSetRequest {
-                        path_set_id,
-                        reason: command.bind_reason,
-                    },
-                    GovernanceActor::system(),
-                )
-                .await?;
-            if bound.publish_path_set_id != Some(path_set_id) {
-                return Err(Self::contract(
-                    "governance did not bind the exact CPCV path set",
-                ));
-            }
-            results.push(FeedbackCpcvStageResult {
+            results.push(FeedbackCpcvStageResult::Evaluated {
                 candidate_recipe_hash: command.candidate_recipe_hash,
                 model_version_id: stored.model_version_id,
                 training_dataset_id: stored.training_dataset_id,
@@ -701,12 +728,15 @@ impl FeedbackLearningExecutionService {
                 model_run_id: stored.model_run_id,
                 path_set_hash: stored.path_set_hash,
             });
-            progress.report(ResearchJobProgress::with_total(
-                "feedback-cpcv",
-                Self::batch_progress(index)?,
-                total,
-            ));
+            if let Some(total) = total {
+                progress.report(ResearchJobProgress::with_total(
+                    "feedback-cpcv",
+                    Self::batch_progress(index)?,
+                    total,
+                ));
+            }
         }
+        results.sort_unstable_by_key(FeedbackCpcvStageResult::candidate_recipe_hash);
         let artifact = FeedbackLearningStageArtifact::try_new(
             params.feedback_cycle_id,
             params.cycle_idempotency_hash,

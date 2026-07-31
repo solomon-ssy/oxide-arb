@@ -31,7 +31,7 @@ use quant_pivot_models::{
         model::ModelFamily,
         quant::{
             CalibrationKind, DataQualityStatus, DatasetPurpose, FeatureParityRunKind,
-            FeatureParityRunStatus, PublicationStatus, TradePolicyStatus, TrainingDatasetStatus,
+            FeatureParityRunStatus, TradePolicyStatus, TrainingDatasetStatus,
         },
     },
     hashing::CanonicalDigest,
@@ -65,8 +65,7 @@ use quant_pivot_repository::{
     },
     traits::{
         CalibrationArtifactRepository, FeatureParityRepository, ModelRegistryRepository,
-        PolicyRepository, PublishFeatureParityPermit, PublishModelVersionCommit,
-        TradePolicyRepository, TrainingDatasetRepository,
+        PolicyRepository, TradePolicyRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -1371,14 +1370,9 @@ impl ModelVersionFixture {
                 training_dataset_id: Some(bound_training_dataset_id),
                 trade_policy_artifact_id: trade_policy.map(|binding| binding.0),
                 trade_policy_hash: trade_policy.map(|binding| binding.1),
-                publish_path_set_id: None,
                 derivation: NewModelVersion::training_derivation(),
                 metrics: ModelVersionMetrics::not_measured("test fixture"),
                 training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-                quality_gate_report: None,
-                publication_status: PublicationStatus::Candidate,
-                published_at: None,
-                retired_at: None,
             })
         })
     }
@@ -1493,35 +1487,17 @@ impl ModelVersionFixture {
         })
     }
 
-    /// Persist and publish a prepared Candidate through the exact frozen
-    /// model/dataset parity proof and atomic global-latch transaction.
-    pub fn persist_published<'a>(
+    /// Persist one immutable route candidate and its exact frozen
+    /// model/dataset parity proof. Serving role is assigned only by a route.
+    pub fn persist_route_candidate<'a>(
         db: &'a DatabaseConnection,
         version: NewModelVersion,
     ) -> Pin<Box<dyn Future<Output = QuantResult<ModelVersionInfo>> + Send + 'a>> {
         Box::pin(async move {
             let registry = PgModelRegistryRepository::new(db.clone());
             let candidate = registry.create_model_version(version).await?;
-            let run_id = Self::persist_parity_proof(db, &candidate).await?;
-            let parity = PgFeatureParityRepository::new(db.clone());
-            let feature_parity_permit = match parity.current_state().await? {
-                Some(state) => PublishFeatureParityPermit::ExistingGeneration(state.state_id),
-                None => PublishFeatureParityPermit::InitializeFromProof {
-                    actor: "model-serving-fixture".to_owned(),
-                    acting_role: Some(RoleCode::new("system")),
-                    reason: "bootstrap exact model publication parity generation".to_owned(),
-                },
-            };
-            registry
-                .publish_model_version(PublishModelVersionCommit {
-                    model_spec_id: &candidate.model_spec_id,
-                    model_version_id: &candidate.model_version_id,
-                    feature_parity_permit,
-                    feature_parity_run_id: &run_id,
-                })
-                .await
-                .map(|result| result.published)
-                .map_err(Into::into)
+            Self::persist_parity_proof(db, &candidate).await?;
+            Ok(candidate)
         })
     }
 

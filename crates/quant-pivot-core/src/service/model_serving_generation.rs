@@ -10,7 +10,6 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
 use parking_lot::Mutex;
 use quant_pivot_error::{QuantError, QuantResult, control::ControlError, research::ResearchError};
@@ -57,14 +56,13 @@ struct ModelInferencePolicy {
     min_model_confidence: Decimal,
     candidate_score_floor: Decimal,
     shadow_diff_threshold: Decimal,
-    min_quality_gate_age_secs: u64,
     minimum_shadow_overlap: Probability,
     required_shadow_window_secs: u64,
 }
 
 #[derive(Clone, Copy)]
 enum ModelServingGenerationAuthority {
-    Published(PolicyBundleGeneration),
+    Activated(PolicyBundleGeneration),
     HistoricalSnapshot,
 }
 
@@ -171,7 +169,7 @@ impl ModelServingRouteSnapshot {
     /// Require this route to contain two distinct contracts from the current
     /// atomically published policy generation.
     pub fn published_shadow_identity(&self) -> Result<PublishedShadowRouteIdentity, ControlError> {
-        let ModelServingGenerationAuthority::Published(policy_bundle_generation) =
+        let ModelServingGenerationAuthority::Activated(policy_bundle_generation) =
             self.generation.authority
         else {
             return Err(ControlError::Precondition(
@@ -252,14 +250,9 @@ impl ModelServingRouteSnapshot {
             .map(|model| (&model.version, model.loaded.as_ref()))
     }
 
-    pub(crate) fn validate_active(&self, decision_at: DateTime<Utc>) -> QuantResult<()> {
+    pub(crate) fn validate_active(&self) -> QuantResult<()> {
         let version = self.active_version();
-        active_load_ok(
-            version,
-            self.generation.inference_policy.min_quality_gate_age_secs,
-            decision_at,
-        )
-        .map_err(|reason| {
+        active_load_ok(version).map_err(|reason| {
             QuantError::config(format!(
                 "active model {} load denied: {reason}",
                 version.model_version_id
@@ -267,17 +260,8 @@ impl ModelServingRouteSnapshot {
         })
     }
 
-    pub(crate) fn validate_shadow(
-        &self,
-        version: &ModelVersionInfo,
-        decision_at: DateTime<Utc>,
-    ) -> QuantResult<()> {
-        shadow_load_ok(
-            version,
-            self.generation.inference_policy.min_quality_gate_age_secs,
-            decision_at,
-        )
-        .map_err(|reason| {
+    pub(crate) fn validate_shadow(version: &ModelVersionInfo) -> QuantResult<()> {
+        shadow_load_ok(version).map_err(|reason| {
             QuantError::config(format!(
                 "shadow model {} load denied: {reason}",
                 version.model_version_id
@@ -358,8 +342,6 @@ trait ModelServingPointerResolver: Send + Sync {
     async fn load_pointer(
         &self,
         pointer: ServingPointer,
-        min_quality_gate_age_secs: u64,
-        prepared_at: DateTime<Utc>,
     ) -> Result<LoadedServingPointer, ControlError>;
 }
 
@@ -373,8 +355,6 @@ impl ModelServingPointerResolver for RepositoryServingPointerResolver {
     async fn load_pointer(
         &self,
         pointer: ServingPointer,
-        min_quality_gate_age_secs: u64,
-        prepared_at: DateTime<Utc>,
     ) -> Result<LoadedServingPointer, ControlError> {
         let path = pointer.role.path();
         let version = self
@@ -389,10 +369,8 @@ impl ModelServingPointerResolver for RepositoryServingPointerResolver {
                 ))
             })?;
         let load_result = match pointer.role {
-            ServingRole::Active(_) => {
-                active_load_ok(&version, min_quality_gate_age_secs, prepared_at)
-            }
-            ServingRole::Shadow => shadow_load_ok(&version, min_quality_gate_age_secs, prepared_at),
+            ServingRole::Active(_) => active_load_ok(&version),
+            ServingRole::Shadow => shadow_load_ok(&version),
         };
         if let Err(reason) = load_result {
             return Err(ControlError::Precondition(format!(
@@ -516,7 +494,7 @@ impl ModelServingGenerationStore {
             .finalize(
                 published.decision_policy_snapshot_id,
                 published.snapshot_hash,
-                ModelServingGenerationAuthority::Published(published.generation),
+                ModelServingGenerationAuthority::Activated(published.generation),
             )
             .map_err(QuantError::from)?;
         Ok(Self {
@@ -661,10 +639,11 @@ impl ModelServingGenerationStore {
             });
         }
 
-        let prepared_at = Utc::now();
-        let loaded = join_all(pointers.into_iter().map(|pointer| {
-            pointer_resolver.load_pointer(pointer, model.min_quality_gate_age_secs, prepared_at)
-        }))
+        let loaded = join_all(
+            pointers
+                .into_iter()
+                .map(|pointer| pointer_resolver.load_pointer(pointer)),
+        )
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
@@ -747,7 +726,7 @@ impl ModelServingGenerationStore {
         let generation = prepared.finalize(
             bundle.decision_policy_snapshot_id,
             bundle.snapshot_hash,
-            ModelServingGenerationAuthority::Published(bundle.generation),
+            ModelServingGenerationAuthority::Activated(bundle.generation),
         )?;
         self.current.store(Arc::new(generation));
         *current = *bundle;
@@ -762,7 +741,6 @@ const fn inference_policy(snapshot: &DecisionPolicySnapshot) -> ModelInferencePo
         min_model_confidence: model.min_model_confidence.value(),
         candidate_score_floor: model.candidate_score_floor.value(),
         shadow_diff_threshold: model.shadow_diff_threshold.value(),
-        min_quality_gate_age_secs: model.min_quality_gate_age_secs,
         minimum_shadow_overlap: Probability::new(
             snapshot
                 .profile_artifacts
@@ -838,7 +816,6 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use chrono::{DateTime, Utc};
     use parking_lot::Mutex;
     use quant_pivot_error::{
         QuantResult,
@@ -849,11 +826,7 @@ mod tests {
             ports::{CommittedPolicyApplyPort, PolicySnapshotPort, PreparedPolicySnapshot},
             quant::ModelVersionInfo,
         },
-        enums::{
-            common::MarketCategory,
-            model::ModelFamily,
-            quant::{ModelWeightSource, PublicationStatus},
-        },
+        enums::{common::MarketCategory, model::ModelFamily, quant::ModelWeightSource},
         runtime_config::{
             ActivePolicyBundle, BuyModelRoute, DecisionPolicySnapshot, FactorCrossSectionConfig,
             ModelVersionRef, PolicyApplyDegradedCause, PolicyApplyReadiness, PolicyBundleIdentity,
@@ -980,8 +953,6 @@ mod tests {
         async fn load_pointer(
             &self,
             pointer: ServingPointer,
-            _min_quality_gate_age_secs: u64,
-            _prepared_at: DateTime<Utc>,
         ) -> Result<LoadedServingPointer, ControlError> {
             let active = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_in_flight.fetch_max(active, Ordering::SeqCst);
@@ -1039,23 +1010,11 @@ mod tests {
     impl VersionInventory {
         fn fixture() -> Self {
             Self {
-                pooled: model_version(&model_artifact(None), PublicationStatus::Published, None),
-                crypto: model_version(
-                    &model_artifact(Some(MarketCategory::Crypto)),
-                    PublicationStatus::Published,
-                    None,
-                ),
-                weather: model_version(
-                    &model_artifact(Some(MarketCategory::Weather)),
-                    PublicationStatus::Published,
-                    None,
-                ),
-                shadow: model_version(&model_artifact(None), PublicationStatus::Candidate, None),
-                weather_shadow: model_version(
-                    &model_artifact(Some(MarketCategory::Weather)),
-                    PublicationStatus::Candidate,
-                    None,
-                ),
+                pooled: model_version(&model_artifact(None)),
+                crypto: model_version(&model_artifact(Some(MarketCategory::Crypto))),
+                weather: model_version(&model_artifact(Some(MarketCategory::Weather))),
+                shadow: model_version(&model_artifact(None)),
+                weather_shadow: model_version(&model_artifact(Some(MarketCategory::Weather))),
             }
         }
 

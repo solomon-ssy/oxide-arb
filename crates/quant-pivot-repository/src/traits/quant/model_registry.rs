@@ -3,53 +3,11 @@ use quant_pivot_models::{
     domain::{
         api::{ModelPickerSide, ModelSpecListQuery, ModelVersionListQuery},
         pagination::{PageRequest, Paginated},
-        quant::{
-            ModelSpecInfo, ModelVersionInfo, NewModelGovernanceAudit, NewModelSpec,
-            NewModelVersion, PublishedModelCatalogInfo,
-        },
+        quant::{ModelCatalogInfo, ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion},
     },
     enums::common::MarketCategory,
-    types::{
-        BacktestPathSetId, FactorDefinitionId, FeatureParityRunId, FeatureParityStateId,
-        ModelRunId, ModelSpecId, ModelVersionId, RoleCode, model_quality::QualityGateReport,
-    },
+    types::{FactorDefinitionId, ModelRunId, ModelSpecId, ModelVersionId},
 };
-
-/// Durable latch permit consumed by the atomic model-publish transaction.
-#[derive(Debug, Clone)]
-pub enum PublishFeatureParityPermit {
-    /// Compare-and-swap against an already governed clear generation.
-    ExistingGeneration(FeatureParityStateId),
-    /// Mint the first clear generation from the exact pre-publication proof.
-    InitializeFromProof {
-        actor: String,
-        acting_role: Option<RoleCode>,
-        reason: String,
-    },
-}
-
-/// Atomic model publication command. Runtime routing is governed separately by
-/// the `ModelRouting` configuration resource.
-pub struct PublishModelVersionCommit<'a> {
-    pub model_spec_id: &'a ModelSpecId,
-    pub model_version_id: &'a ModelVersionId,
-    pub feature_parity_permit: PublishFeatureParityPermit,
-    pub feature_parity_run_id: &'a FeatureParityRunId,
-}
-
-/// Result of the model publication transaction.
-pub struct PublishModelVersionResult {
-    pub published: ModelVersionInfo,
-    pub feature_parity_state_id: FeatureParityStateId,
-}
-
-/// Atomic CPCV publish-path binding plus its WORM governance audit.
-pub struct BindPublishPathSetCommit {
-    pub model_version_id: ModelVersionId,
-    pub expected_path_set_id: Option<BacktestPathSetId>,
-    pub path_set_id: BacktestPathSetId,
-    pub audit: NewModelGovernanceAudit,
-}
 
 #[async_trait::async_trait]
 pub trait ModelRegistryRepository: Send + Sync {
@@ -115,64 +73,12 @@ pub trait ModelRegistryRepository: Send + Sync {
         page: PageRequest,
     ) -> Result<Paginated<ModelVersionInfo>, StorageError>;
 
-    /// Return the complete published picker catalog using one typed joined
+    /// Return the complete immutable model picker catalog using one typed joined
     /// query. A supplied category is an exact route filter; pooled (`NULL`)
     /// artifacts are never returned as vertical fallbacks.
-    async fn list_published_catalog(
+    async fn list_model_catalog(
         &self,
         side: ModelPickerSide,
         category: Option<MarketCategory>,
-    ) -> Result<Vec<PublishedModelCatalogInfo>, StorageError>;
-
-    /// All currently `Published` versions of a spec, most recent first. Used by
-    /// governance inspection and invariant tests; rollback resolves only the
-    /// predecessor recorded in the publish audit and never guesses from here.
-    async fn list_published_for_spec(
-        &self,
-        model_spec_id: &ModelSpecId,
-    ) -> Result<Vec<ModelVersionInfo>, StorageError>;
-
-    async fn retire_model_version(
-        &self,
-        model_version_id: &ModelVersionId,
-    ) -> Result<ModelVersionInfo, StorageError>;
-
-    /// Publish one immutable, gate-approved artifact without changing routing
-    /// or the lifecycle of any other published artifact.
-    async fn publish_model_version(
-        &self,
-        commit: PublishModelVersionCommit<'_>,
-    ) -> Result<PublishModelVersionResult, StorageError>;
-
-    /// Promote a backtested candidate into shadow evaluation (`Candidate → Shadow`).
-    ///
-    /// Idempotent when the version is already `Shadow` or `Published`.
-    async fn promote_model_to_shadow(
-        &self,
-        model_version_id: &ModelVersionId,
-    ) -> Result<ModelVersionInfo, StorageError>;
-
-    /// Persist a model version's typed quality-gate report (the governance layer
-    /// writes the gate decision into `quant_model_version.quality_gate_report`
-    /// before publishing). Does not change the publication status.
-    async fn set_quality_gate_report(
-        &self,
-        model_version_id: &ModelVersionId,
-        quality_gate_report: QualityGateReport,
-    ) -> Result<ModelVersionInfo, StorageError>;
-
-    /// Bind (or clear) the CPCV path set that publish/promote quality gates
-    /// must evaluate. Does not change publication status. Ownership of the
-    /// path set is enforced by the governance layer before calling this.
-    async fn set_publish_path(
-        &self,
-        model_version_id: &ModelVersionId,
-        publish_path_set_id: Option<BacktestPathSetId>,
-    ) -> Result<ModelVersionInfo, StorageError>;
-
-    /// Atomically compare-and-set a governed publish path and append its audit.
-    async fn commit_publish_path_binding(
-        &self,
-        commit: BindPublishPathSetCommit,
-    ) -> Result<ModelVersionInfo, StorageError>;
+    ) -> Result<Vec<ModelCatalogInfo>, StorageError>;
 }

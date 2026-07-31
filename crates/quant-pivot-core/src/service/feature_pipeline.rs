@@ -25,7 +25,7 @@ use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
     domain::{
-        data_plane::{DecisionBoundary, TradeTapeSourceKind},
+        data_plane::{DecisionBoundary, DecisionSource, TradeTapeSourceKind},
         quant::{
             FeatureVectorInfo, MarketLinkage, MarketLinkageInfo, MarketSubject, NewFeatureVector,
             NewReportDataQualitySnapshot, WeatherSubject,
@@ -34,8 +34,8 @@ use quant_pivot_models::{
     enums::{domain::DomainFamily, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig},
     types::{
-        DecisionPolicySnapshotId, DomainInstrumentKey, IcaoStation, MarketId, NullReason, TokenId,
-        Usd, stable_name::FeatureName,
+        DecisionPolicySnapshotId, DomainInstrumentKey, MarketId, NullReason, TokenId, Usd,
+        stable_name::FeatureName,
     },
 };
 use quant_pivot_repository::traits::{
@@ -45,6 +45,7 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     domain::{
         DomainFactWindows, build_domain_slice_inputs, crypto_lookback_secs, oracle_instrument,
+        weather_history_start,
     },
     features::{
         ConfiguredFeatureBuilder, DomainSliceInputs, FeatureSchema, FeatureSourceWindows,
@@ -529,24 +530,34 @@ impl FeaturePipelineService {
                 .checked_mul(86_400)
                 .ok_or_else(|| QuantError::config("Weather calibration lookback overflowed"))?,
         );
+        let weather_lookback = ChronoDuration::from_std(weather_lookback).map_err(|error| {
+            QuantError::config(format!("Weather calibration lookback is invalid: {error}"))
+        })?;
+        let weather_cutoff = request.boundary.cutoff_for(DecisionSource::DomainWeather);
+        let calibration_from = weather_cutoff
+            .checked_sub_signed(weather_lookback)
+            .ok_or_else(|| QuantError::config("Weather calibration lookback underflowed"))?;
+        let weather_from = calibration_from.min(linkages.weather_history_from);
         let weather_observations = self
             .window_provider
             .load_weather_observations(
-                linkages.weather_stations.iter().cloned().collect(),
+                linkages.weather_subject_keys.iter().cloned().collect(),
                 &request.boundary,
-                weather_lookback,
+                weather_from,
             )
             .await?;
         let weather_forecasts = self
             .window_provider
             .load_weather_forecasts(
-                linkages.weather_stations.iter().cloned().collect(),
+                linkages.weather_subject_keys.iter().cloned().collect(),
                 &request.boundary,
-                weather_lookback,
+                weather_lookback.to_std().map_err(|error| {
+                    QuantError::config(format!("Weather forecast lookback is invalid: {error}"))
+                })?,
                 linkages.weather_valid_to,
             )
             .await?;
-        let weather_calibrations = if linkages.weather_stations.is_empty() {
+        let weather_calibrations = if linkages.weather_subject_keys.is_empty() {
             Vec::new()
         } else {
             self.calibration_repo
@@ -624,7 +635,8 @@ struct LiveDomainLinkages {
     by_market: HashMap<MarketId, Vec<MarketLinkage>>,
     instruments: HashSet<DomainInstrumentKey>,
     oracle_instruments: HashSet<DomainInstrumentKey>,
-    weather_stations: HashSet<IcaoStation>,
+    weather_subject_keys: HashSet<String>,
+    weather_history_from: DateTime<Utc>,
     weather_valid_to: DateTime<Utc>,
 }
 
@@ -636,7 +648,8 @@ fn collect_live_domain_linkages(
         by_market: HashMap::new(),
         instruments: HashSet::new(),
         oracle_instruments: HashSet::new(),
-        weather_stations: HashSet::new(),
+        weather_subject_keys: HashSet::new(),
+        weather_history_from: decision_at,
         weather_valid_to: decision_at,
     };
     for info in rows {
@@ -653,13 +666,14 @@ fn collect_live_domain_linkages(
                 collected.instruments.insert(oracle_key.clone());
                 collected.oracle_instruments.insert(oracle_key);
             }
-            if let MarketSubject::Weather(subject) = &binding.subject {
-                collected
-                    .weather_stations
-                    .insert(subject.decision_group.station.clone());
+            if let Some(subject_key) = binding.subject.weather_subject_key() {
+                collected.weather_subject_keys.insert(subject_key);
+                collected.weather_history_from = collected
+                    .weather_history_from
+                    .min(weather_history_start(&binding.subject)?);
                 collected.weather_valid_to = collected
                     .weather_valid_to
-                    .max(weather_local_day_end(subject)?);
+                    .max(weather_subject_end(&binding.subject)?);
             }
         }
         collected
@@ -669,6 +683,25 @@ fn collect_live_domain_linkages(
             .push(linkage);
     }
     Ok(collected)
+}
+
+fn weather_subject_end(subject: &MarketSubject) -> QuantResult<DateTime<Utc>> {
+    match subject {
+        MarketSubject::Weather(subject) => weather_local_day_end(subject),
+        MarketSubject::WeatherPrecipitation(_)
+        | MarketSubject::WeatherAqi(_)
+        | MarketSubject::WeatherTornado(_)
+        | MarketSubject::WeatherTropicalCyclone(_)
+        | MarketSubject::WeatherGlobalTemperature(_)
+        | MarketSubject::WeatherSeaIce(_)
+        | MarketSubject::WeatherWindExtreme(_) => subject
+            .weather_window()
+            .map(|window| window.end_at)
+            .ok_or_else(|| QuantError::config("Weather subject is missing its contract window")),
+        MarketSubject::Crypto(_) => Err(QuantError::config(
+            "Crypto subject has no Weather contract end",
+        )),
+    }
 }
 
 fn weather_local_day_end(subject: &WeatherSubject) -> QuantResult<DateTime<Utc>> {

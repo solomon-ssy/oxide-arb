@@ -1,30 +1,31 @@
-//! [`DefaultModelQualityGate`]: the concrete, deterministic model-publication gate.
+//! [`DefaultModelQualityGate`]: the concrete, deterministic candidate-validation gate.
 //!
 //! A quality gate is a **pure function** of a frozen backtest report, the
-//! dataset coverage accounting, the point-in-time leakage scan, and (for
-//! publish / auto intents) the shadow overlap stability — evaluated against a
+//! dataset coverage accounting, the point-in-time leakage scan, and (for route
+//! activation / auto intents) shadow overlap stability — evaluated against a
 //! governed [`QualityGateThresholds`] snapshot. It never touches a database or
 //! the network.
 //!
 //! Gates split into **hard** (any failure ⇒ the model may not advance) and
 //! **soft** (recorded as warnings, never blocking). The intent
-//! ([`GateIntent`]) selects which hard gates apply: a `Publish` adds
+//! ([`GateIntent`]) selects which hard gates apply: a `RouteActivation` adds
 //! shadow-stability, and an `AutoExecution`
 //! evaluation additionally requires liquidity-exit feasibility.
 //!
-//! The resulting [`QualityGateReport`] is content-addressed and serializes into
-//! `quant_model_version.quality_gate_report`; its `evaluated_at` drives the
-//! load-time staleness deny (`min_quality_gate_age_secs`).
+//! The resulting [`QualityGateReport`] is content-addressed and sealed into the
+//! candidate manifest and final promotion gate. Model rows remain immutable
+//! artifacts; route activation revalidates the manifest-bound aggregate hash.
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
+    domain::quant::CandidateExplanationValidation,
     enums::model::ModelFamily,
     types::{
         Probability,
         model_quality::{
-            GateClass, GateId, GateIntent, GateOutcome, GateStatus, GateSubject,
-            QUALITY_GATE_REPORT_FORMAT_VERSION, QualityGateFailure, QualityGateReport,
+            GateClass, GateId, GateIntent, GateOutcome, GateStatus, GateSubject, QualityGateReport,
+            QualityGateReportInput,
         },
     },
 };
@@ -34,7 +35,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     backtest::BacktestReport,
     gates::{ModelQualityGate, QualityGateDecision},
-    hashing::ResearchHasher,
     precision::RESEARCH_DECIMAL_SCALE,
     training::{DatasetCoverage, LeakageFindings},
 };
@@ -253,6 +253,8 @@ impl Default for QualityGateThresholds {
 /// Inputs to a quality-gate evaluation (all frozen, no IO).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualityGateInput {
+    /// Database-authoritative evaluation timestamp frozen by the caller.
+    pub evaluated_at: DateTime<Utc>,
     /// What the evaluation gates (model version or training dataset).
     pub subject: GateSubject,
     /// What the evaluation gates (selects the applicable hard gates).
@@ -275,23 +277,16 @@ pub struct QualityGateInput {
     pub sell_thresholds: SellQualityGateThresholds,
     /// Model family under evaluation (`None` ⇒ buy-oriented defaults).
     pub model_family: Option<ModelFamily>,
+    /// Content-addressed proof of an exact supported local explanation method
+    /// and its efficiency invariant.
+    pub explanation_validation: Option<CandidateExplanationValidation>,
     /// Whether the evaluated artifact's `ReturnModelSpec` is `Calibrated`,
     /// resolved through the **same deep check**
     /// (`resolve_return_model_calibration`) the report builder, admission,
     /// and intent creation share — never a shallow enum-tag read. Buy-family
-    /// `Publish`/`AutoExecution` intents hard-gate on this; exit scorers and
+    /// `RouteActivation`/`AutoExecution` intents hard-gate on this; exit scorers and
     /// other intents ignore it (they have no `ReturnModelSpec` concept).
     pub return_model_calibrated: bool,
-}
-
-/// Canonical, time-free projection of a report for content addressing.
-#[derive(Serialize)]
-struct ReportHashInput<'a> {
-    subject: &'a GateSubject,
-    intent: GateIntent,
-    hard_failures: &'a [QualityGateFailure],
-    soft_warnings: &'a [QualityGateFailure],
-    passed: bool,
 }
 
 /// The default, deterministic model-publication gate.
@@ -334,46 +329,23 @@ impl ModelQualityGate for DefaultModelQualityGate {
         // explicit `NotApplicable` row (not an absent one) so the gate report
         // is auditable end to end regardless of family.
         evaluate_calibration_gate(&input, is_exit, &mut ledger);
+        evaluate_explanation_gate(&input, &mut ledger);
 
         let gates = ledger.outcomes;
-        let hard_failures: Vec<QualityGateFailure> = gates
-            .iter()
-            .filter(|outcome| {
-                outcome.class == GateClass::Hard && outcome.status == GateStatus::Fail
-            })
-            .map(GateOutcome::as_failure)
-            .collect();
-        let soft_warnings: Vec<QualityGateFailure> = gates
-            .iter()
-            .filter(|outcome| {
-                outcome.class == GateClass::Soft && outcome.status == GateStatus::Warn
-            })
-            .map(GateOutcome::as_failure)
-            .collect();
-
-        let passed = hard_failures.is_empty();
-        let report_hash = ResearchHasher::canonical(&ReportHashInput {
-            subject: &input.subject,
-            intent: input.intent,
-            hard_failures: &hard_failures,
-            soft_warnings: &soft_warnings,
-            passed,
-        })?;
-        let report = QualityGateReport {
-            format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
+        let report = QualityGateReport::try_new(QualityGateReportInput {
             subject: input.subject,
             intent: input.intent,
-            evaluated_at: Utc::now(),
+            evaluated_at: input.evaluated_at,
             gates,
-            hard_failures: hard_failures.clone(),
-            soft_warnings,
-            passed,
-            report_hash,
-        };
+        })
+        .map_err(|error| ResearchError::InvalidModelArtifact {
+            detail: error.to_string(),
+        })?;
 
-        if passed {
+        if report.passed {
             Ok(QualityGateDecision::Pass { report })
         } else {
+            let hard_failures = report.hard_failures.clone();
             Ok(QualityGateDecision::Fail {
                 report,
                 hard_failures,
@@ -666,7 +638,7 @@ fn evaluate_cpcv_alpha_gates(input: &QualityGateInput, ledger: &mut GateLedger) 
 /// (soft) — shared by the Buy (`evaluate_cpcv_alpha_gates`) and Sell
 /// (`evaluate_sell_gates`) branches.
 ///
-/// Both families' publish readiness is judged by the identical persisted
+/// Both families' route-activation readiness is judged by the identical persisted
 /// [`BacktestPathSet`](crate::validation::BacktestPathSet) methodology
 /// (`CpcvRequired`/`RankIc`/`DeflatedSharpe`/`Pbo`/`MinTrackRecordLength`
 /// reuse the exact same [`GateId`] variants for both families — mirroring how
@@ -809,7 +781,40 @@ fn evaluate_intent_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
     evaluate_shadow_stability_gate(input, ledger);
 }
 
-/// Hard gate: `Publish` / `AutoExecution` intents on a Buy
+/// Exact local explanation evidence is mandatory for every lifecycle intent.
+fn evaluate_explanation_gate(input: &QualityGateInput, ledger: &mut GateLedger) {
+    let Some(validation) = &input.explanation_validation else {
+        ledger.hard(
+            GateId::ExplainabilityRequired,
+            false,
+            "none",
+            "valid exact explanation proof",
+            "candidate has no sealed exact local explanation evidence",
+        );
+        return;
+    };
+    match validation.validate() {
+        Ok(()) => ledger.hard(
+            GateId::ExplainabilityRequired,
+            true,
+            validation.report_hash.to_string(),
+            "valid exact explanation proof",
+            format!(
+                "{} explanation efficiency proof is valid",
+                validation.method.wire_name()
+            ),
+        ),
+        Err(error) => ledger.hard(
+            GateId::ExplainabilityRequired,
+            false,
+            validation.report_hash.to_string(),
+            "valid exact explanation proof",
+            format!("candidate explanation evidence is invalid: {error}"),
+        ),
+    }
+}
+
+/// Hard gate: `RouteActivation` / `AutoExecution` intents on a Buy
 /// model require a `Calibrated` return model. `uncalibrated` (`Heuristic`)
 /// artifacts are bootstrap-only and must never reach publish or
 /// auto-execution — fail-closed, never a silent downgrade to the heuristic
@@ -819,7 +824,7 @@ fn evaluate_calibration_gate(input: &QualityGateInput, is_exit: bool, ledger: &m
     let applies = !is_exit
         && matches!(
             input.intent,
-            GateIntent::Publish | GateIntent::AutoExecution
+            GateIntent::RouteActivation | GateIntent::AutoExecution
         );
     if !applies {
         let detail = if is_exit {
@@ -905,6 +910,7 @@ impl BacktestReport {
 mod tests {
     use chrono::{Duration, Utc};
     use quant_pivot_models::{
+        domain::quant::CandidateExplanationValidation,
         enums::model::ModelFamily,
         types::{
             BacktestReportId, ContentHash, DecisionPolicySnapshotId, MarketId, ModelVersionId,
@@ -1001,6 +1007,7 @@ mod tests {
 
     fn passing_input(intent: GateIntent) -> QualityGateInput {
         QualityGateInput {
+            evaluated_at: Utc::now(),
             subject: GateSubject::ModelVersion(ModelVersionId::from_v7()),
             intent,
             backtest: Some(BacktestReport::healthy_fixture()),
@@ -1012,13 +1019,17 @@ mod tests {
             path_set: Some(CpcvPathSetGateInput::passing_fixture()),
             sell_thresholds: SellQualityGateThresholds::default(),
             model_family: None,
+            explanation_validation: Some(
+                CandidateExplanationValidation::weighted(hash(), 3)
+                    .expect("weighted explanation proof"),
+            ),
             return_model_calibrated: true,
         }
     }
 
     #[test]
-    fn publish_requires_calibrated_model() {
-        let mut input = passing_input(GateIntent::Publish);
+    fn activation_requires_calibration() {
+        let mut input = passing_input(GateIntent::RouteActivation);
         input.return_model_calibrated = false;
         let decision = DefaultModelQualityGate::new()
             .evaluate(input)
@@ -1049,6 +1060,23 @@ mod tests {
     }
 
     #[test]
+    fn candidate_requires_explanation() {
+        let mut input = passing_input(GateIntent::Candidate);
+        input.explanation_validation = None;
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+        assert!(!decision.is_pass());
+        assert!(
+            decision
+                .report()
+                .hard_failures
+                .iter()
+                .any(|failure| failure.gate == GateId::ExplainabilityRequired)
+        );
+    }
+
+    #[test]
     fn sell_required_not_applicable() {
         // Sell / hold-vs-exit scorers never carry a return model, so the
         // gate report must record an explicit `NotApplicable` row for
@@ -1056,7 +1084,7 @@ mod tests {
         // it entirely, regardless of the overall pass/fail outcome.
         let input = QualityGateInput {
             model_family: Some(ModelFamily::HoldVsExitWeighted),
-            ..passing_input(GateIntent::Publish)
+            ..passing_input(GateIntent::RouteActivation)
         };
         let decision = DefaultModelQualityGate::new()
             .evaluate(input)
@@ -1071,10 +1099,10 @@ mod tests {
     }
 
     #[test]
-    fn sell_publish_requires_uplift() {
+    fn sell_activation_requires_uplift() {
         let mut input = QualityGateInput {
             model_family: Some(ModelFamily::HoldVsExitWeighted),
-            ..passing_input(GateIntent::Publish)
+            ..passing_input(GateIntent::RouteActivation)
         };
         input.path_set.as_mut().unwrap().baseline_uplift = None;
 
@@ -1093,10 +1121,10 @@ mod tests {
     }
 
     #[test]
-    fn sell_publish_blocks_drawdown() {
+    fn sell_activation_blocks_drawdown() {
         let mut input = QualityGateInput {
             model_family: Some(ModelFamily::HoldVsExitWeighted),
-            ..passing_input(GateIntent::Publish)
+            ..passing_input(GateIntent::RouteActivation)
         };
         input.path_set.as_mut().unwrap().median_max_drawdown = Some(dec!(0.90));
 
@@ -1115,10 +1143,10 @@ mod tests {
     }
 
     #[test]
-    fn sell_publish_blocks_loss() {
+    fn sell_activation_blocks_loss() {
         let mut input = QualityGateInput {
             model_family: Some(ModelFamily::HoldVsExitWeighted),
-            ..passing_input(GateIntent::Publish)
+            ..passing_input(GateIntent::RouteActivation)
         };
         // Calendarized fractional tail loss → bps far below default min_tail_loss_bps (-500).
         input.path_set.as_mut().unwrap().median_tail_loss = Some(dec!(-0.20));
@@ -1140,7 +1168,7 @@ mod tests {
     #[test]
     fn passes_hard_gate_clear() {
         let decision = DefaultModelQualityGate::new()
-            .evaluate(passing_input(GateIntent::Publish))
+            .evaluate(passing_input(GateIntent::RouteActivation))
             .expect("evaluate");
         assert!(
             decision.is_pass(),
@@ -1151,7 +1179,7 @@ mod tests {
 
     #[test]
     fn quality_gate_blocks_model() {
-        let mut input = passing_input(GateIntent::Publish);
+        let mut input = passing_input(GateIntent::RouteActivation);
         // Mostly immature / unavailable labels → low label coverage.
         input.dataset.labels_available = 100;
         input.dataset.labels_not_mature = 900;
@@ -1172,7 +1200,7 @@ mod tests {
 
     #[test]
     fn quality_gate_failure_failures() {
-        let mut input = passing_input(GateIntent::Publish);
+        let mut input = passing_input(GateIntent::RouteActivation);
         input.backtest.as_mut().unwrap().sample_count = 10; // below 500
         input.backtest.as_mut().unwrap().max_drawdown = dec!(0.90); // above budget
         let decision = DefaultModelQualityGate::new()
@@ -1191,7 +1219,7 @@ mod tests {
 
     #[test]
     fn quality_gate_blocks_leakage() {
-        let mut input = passing_input(GateIntent::Publish);
+        let mut input = passing_input(GateIntent::RouteActivation);
         input.leakage = LeakageFindings {
             scanned: 100,
             violations: vec![LeakageViolation {
@@ -1217,8 +1245,8 @@ mod tests {
     }
 
     #[test]
-    fn publish_requires_shadow_stability() {
-        let mut input = passing_input(GateIntent::Publish);
+    fn activation_requires_shadow() {
+        let mut input = passing_input(GateIntent::RouteActivation);
         input.shadow_stability = None; // not established
         let decision = DefaultModelQualityGate::new()
             .evaluate(input)
@@ -1263,8 +1291,8 @@ mod tests {
     }
 
     #[test]
-    fn publish_requires_backtest_report() {
-        let mut input = passing_input(GateIntent::Publish);
+    fn activation_requires_backtest() {
+        let mut input = passing_input(GateIntent::RouteActivation);
         input.backtest = None;
         let decision = DefaultModelQualityGate::new()
             .evaluate(input)
@@ -1280,8 +1308,8 @@ mod tests {
     }
 
     #[test]
-    fn publish_requires_cpcv_set() {
-        let mut input = passing_input(GateIntent::Publish);
+    fn activation_requires_cpcv() {
+        let mut input = passing_input(GateIntent::RouteActivation);
         input.path_set = None;
         let decision = DefaultModelQualityGate::new()
             .evaluate(input)
@@ -1298,7 +1326,7 @@ mod tests {
 
     #[test]
     fn rank_ic_reads_median() {
-        let mut input = passing_input(GateIntent::Publish);
+        let mut input = passing_input(GateIntent::RouteActivation);
         input.path_set.as_mut().unwrap().median_rank_ic = dec!(0.001);
         let decision = DefaultModelQualityGate::new()
             .evaluate(input)
@@ -1315,7 +1343,7 @@ mod tests {
 
     #[test]
     fn pbo_gate_blocks_strategy() {
-        let mut input = passing_input(GateIntent::Publish);
+        let mut input = passing_input(GateIntent::RouteActivation);
         input.path_set.as_mut().unwrap().pbo = dec!(0.95);
         let decision = DefaultModelQualityGate::new()
             .evaluate(input)
@@ -1332,7 +1360,7 @@ mod tests {
 
     #[test]
     fn deflated_sharpe_blocks_set() {
-        let mut input = passing_input(GateIntent::Publish);
+        let mut input = passing_input(GateIntent::RouteActivation);
         // Floor is 1 - dsr_significance (default 0.05) ⇒ 0.95.
         input.path_set.as_mut().unwrap().deflated_sharpe = dec!(0.50);
         let decision = DefaultModelQualityGate::new()

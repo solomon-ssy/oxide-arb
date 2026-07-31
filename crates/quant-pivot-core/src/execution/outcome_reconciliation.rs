@@ -20,24 +20,24 @@ use quant_pivot_models::{
         },
         market::MarketInfo,
         quant::{
-            ExecutionOutcomeReconciliationResult, InsertResolutionOutcomeResult,
-            RecommendationResolutionReconciliationCandidate, ResolutionOutcomeDeferredReason,
-            ResolutionOutcomeReconciliationResult,
+            ExecutionAttemptReconciliationResult, ExecutionRollupReconciliationResult,
+            InsertResolutionOutcomeResult, NewResolutionObservationInbox, OutcomeTaskSettlement,
+            RecommendationResolutionReconciliationCandidate, ResolutionObservationInboxInfo,
+            ResolutionOutcomeDeferredReason, ResolutionOutcomeReconciliationResult,
+            ResolutionProjectionClaim, ResolutionProjectionSettlement, ResolutionScanCommitOutcome,
         },
     },
     hashing::CanonicalDigest,
     runtime_config::OutcomeReconciliationPolicy,
     types::{
-        ContentHash, DomainInstrumentKey, DomainSourceId, EvmBlockHash, MarketId, OrderIntentId,
-        RecommendationId,
+        ArtifactUri, ContentHash, DomainInstrumentKey, DomainSourceId, EvmBlockHash, WorkerId,
     },
 };
 use quant_pivot_repository::traits::{
-    DomainSourceCursorRepository, FactWriter, MarketRepository, QuantFactReadRepository,
-    RecommendationExecutionOutcomeRepository, RecommendationResolutionOutcomeRepository,
+    DomainSourceCursorRepository, ExecutionAttemptOutcomeRepository, FactWriter, MarketRepository,
+    QuantFactReadRepository, RecommendationExecutionRollupRepository,
+    RecommendationResolutionOutcomeRepository, ResolutionObservationRepository,
 };
-use tokio::sync::Mutex;
-
 /// Immutable inputs for one bounded reconciliation pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutcomeReconciliationPassConfig {
@@ -79,9 +79,12 @@ pub struct OutcomeReconciliationPassSummary {
     pub source_cursor_initialized: bool,
     pub source_scans: u64,
     pub source_observations: u64,
+    pub source_observations_inserted: u64,
+    pub source_observations_recovered: u64,
     pub source_unknown_markets: u64,
     pub source_facts_written: u64,
     pub source_facts_recovered: u64,
+    pub source_projection_retries: u64,
     pub cursor_advanced: bool,
     pub cursor_conflicted: bool,
     pub resolution_candidates: u64,
@@ -92,6 +95,10 @@ pub struct OutcomeReconciliationPassSummary {
     pub execution_inserted: u64,
     pub execution_existing: u64,
     pub execution_deferred: u64,
+    pub rollup_candidates: u64,
+    pub rollup_inserted: u64,
+    pub rollup_existing: u64,
+    pub rollup_deferred: u64,
 }
 
 /// Frozen frontier and aggregate proof for a complete resolution backfill.
@@ -112,6 +119,7 @@ pub struct ResolutionOutcomeBackfillSummary {
 pub struct ExecutionOutcomeBackfillSummary {
     pub frozen_at: DateTime<Utc>,
     pub outcome_pages: u64,
+    pub rollup_pages: u64,
     pub totals: OutcomeReconciliationPassSummary,
 }
 
@@ -121,9 +129,11 @@ pub struct OutcomeReconciliationServiceDeps {
     pub resolution_fact_writer: Arc<dyn FactWriter<MarketResolutionRow>>,
     pub resolution_facts: Arc<dyn QuantFactReadRepository>,
     pub cursors: Arc<dyn DomainSourceCursorRepository>,
+    pub resolution_observations: Arc<dyn ResolutionObservationRepository>,
     pub markets: Arc<dyn MarketRepository>,
     pub resolution_outcomes: Arc<dyn RecommendationResolutionOutcomeRepository>,
-    pub execution_outcomes: Arc<dyn RecommendationExecutionOutcomeRepository>,
+    pub execution_outcomes: Arc<dyn ExecutionAttemptOutcomeRepository>,
+    pub execution_rollups: Arc<dyn RecommendationExecutionRollupRepository>,
 }
 
 /// Single owner for durable source frontier and both orthogonal outcome backlogs.
@@ -132,13 +142,12 @@ pub struct OutcomeReconciliationService {
     resolution_fact_writer: Arc<dyn FactWriter<MarketResolutionRow>>,
     resolution_facts: Arc<dyn QuantFactReadRepository>,
     cursors: Arc<dyn DomainSourceCursorRepository>,
+    resolution_observations: Arc<dyn ResolutionObservationRepository>,
     markets: Arc<dyn MarketRepository>,
     resolution_outcomes: Arc<dyn RecommendationResolutionOutcomeRepository>,
-    execution_outcomes: Arc<dyn RecommendationExecutionOutcomeRepository>,
-    // Process-local cursors provide bounded round-robin fairness. Durable
-    // outcomes remain the only progress truth, so restart safely repeats pages.
-    resolution_runtime_after: Mutex<Option<RecommendationId>>,
-    execution_runtime_after: Mutex<Option<OrderIntentId>>,
+    execution_outcomes: Arc<dyn ExecutionAttemptOutcomeRepository>,
+    execution_rollups: Arc<dyn RecommendationExecutionRollupRepository>,
+    projection_worker_id: WorkerId,
 }
 
 impl OutcomeReconciliationService {
@@ -149,11 +158,12 @@ impl OutcomeReconciliationService {
             resolution_fact_writer: deps.resolution_fact_writer,
             resolution_facts: deps.resolution_facts,
             cursors: deps.cursors,
+            resolution_observations: deps.resolution_observations,
             markets: deps.markets,
             resolution_outcomes: deps.resolution_outcomes,
             execution_outcomes: deps.execution_outcomes,
-            resolution_runtime_after: Mutex::new(None),
-            execution_runtime_after: Mutex::new(None),
+            execution_rollups: deps.execution_rollups,
+            projection_worker_id: WorkerId::from_v7(),
         }
     }
 
@@ -174,11 +184,8 @@ impl OutcomeReconciliationService {
             .await?;
         self.reconcile_source_page(config, cursor, &target, &mut summary)
             .await?;
-        let mut runtime_after = self.resolution_runtime_after.lock().await;
-        *runtime_after = self
-            .reconcile_resolution_page(config, *runtime_after, &mut summary)
-            .await?;
-        drop(runtime_after);
+        self.project_resolution_batch(config, &mut summary).await?;
+        self.reconcile_resolution_page(config, &mut summary).await?;
         Ok(summary)
     }
 
@@ -190,11 +197,8 @@ impl OutcomeReconciliationService {
     ) -> QuantResult<OutcomeReconciliationPassSummary> {
         let config = config.validate()?;
         let mut summary = OutcomeReconciliationPassSummary::default();
-        let mut runtime_after = self.execution_runtime_after.lock().await;
-        *runtime_after = self
-            .reconcile_execution_page(config, *runtime_after, &mut summary)
-            .await?;
-        drop(runtime_after);
+        self.reconcile_execution_page(config, &mut summary).await?;
+        self.reconcile_rollup_page(config, &mut summary).await?;
         Ok(summary)
     }
 
@@ -217,15 +221,16 @@ impl OutcomeReconciliationService {
                 .reconcile_source_page(config, cursor, &target, &mut totals)
                 .await?;
             source_pages += 1;
+            self.project_resolution_batch(config, &mut totals).await?;
         }
+        while self
+            .project_resolution_batch(config, &mut totals)
+            .await?
+            .is_some()
+        {}
 
         let mut outcome_pages = 0;
-        let mut after = None;
-        while let Some(cursor) = self
-            .reconcile_resolution_page(config, after, &mut totals)
-            .await?
-        {
-            after = Some(cursor);
+        while self.reconcile_resolution_page(config, &mut totals).await? {
             outcome_pages += 1;
         }
         Ok(ResolutionOutcomeBackfillSummary {
@@ -249,17 +254,17 @@ impl OutcomeReconciliationService {
         let config = config.validate()?;
         let mut totals = OutcomeReconciliationPassSummary::default();
         let mut outcome_pages = 0;
-        let mut after = None;
-        while let Some(cursor) = self
-            .reconcile_execution_page(config, after, &mut totals)
-            .await?
-        {
-            after = Some(cursor);
+        while self.reconcile_execution_page(config, &mut totals).await? {
             outcome_pages += 1;
+        }
+        let mut rollup_pages = 0;
+        while self.reconcile_rollup_page(config, &mut totals).await? {
+            rollup_pages += 1;
         }
         Ok(ExecutionOutcomeBackfillSummary {
             frozen_at: config.pass_started_at,
             outcome_pages,
+            rollup_pages,
             totals,
         })
     }
@@ -322,27 +327,7 @@ impl OutcomeReconciliationService {
         validate_scan(&scan, &current, requested_to_block, target)?;
         summary.source_scans += 1;
         summary.source_observations += usize_to_u64(scan.observations.len())?;
-
-        let market_ids: Vec<MarketId> = scan
-            .observations
-            .iter()
-            .map(|observation| observation.market_id.clone())
-            .collect();
-        let markets = self.markets.find_by_ids(&market_ids).await?;
-        let markets_by_id: HashMap<MarketId, Arc<MarketInfo>> = markets
-            .into_iter()
-            .map(|market| (market.market_id.clone(), market))
-            .collect();
-        for observation in &scan.observations {
-            let Some(market) = markets_by_id.get(&observation.market_id) else {
-                summary.source_unknown_markets += 1;
-                continue;
-            };
-            self.persist_resolution_fact(observation, market, config.pass_started_at, summary)
-                .await?;
-        }
-        self.advance_resolution_cursor(&current, &scan, summary)
-            .await
+        self.commit_resolution_scan(&current, &scan, summary).await
     }
 
     async fn load_or_initialize_cursor(
@@ -402,33 +387,188 @@ impl OutcomeReconciliationService {
         }
     }
 
-    async fn persist_resolution_fact(
+    async fn commit_resolution_scan(
         &self,
-        observation: &FinalizedResolutionObservation,
-        market: &MarketInfo,
-        pass_started_at: DateTime<Utc>,
+        current: &ResolutionCursorState,
+        scan: &FinalizedResolutionScan,
         summary: &mut OutcomeReconciliationPassSummary,
-    ) -> QuantResult<()> {
+    ) -> QuantResult<DomainSourceCursorInfo> {
+        let observations = scan
+            .observations
+            .iter()
+            .map(inbox_from_observation)
+            .collect::<Result<Vec<_>, _>>()?;
+        let target = FinalizedResolutionBlock {
+            block_number: scan.to_block,
+            block_hash: scan.to_block_hash.clone(),
+            block_time: scan.to_block_time,
+        };
+        match self
+            .resolution_observations
+            .commit_scan(
+                current.checkpoint_hash,
+                cursor_update(&target)?,
+                observations,
+            )
+            .await?
+        {
+            ResolutionScanCommitOutcome::Committed {
+                cursor,
+                inserted,
+                existing,
+            } => {
+                let advanced = resolution_cursor_state(&cursor)?;
+                if advanced.block_number != scan.to_block
+                    || advanced.block_hash != scan.to_block_hash
+                    || advanced.block_time != scan.to_block_time
+                {
+                    return Err(invariant_error(
+                        "committed resolution cursor differs from its immutable inbox page",
+                    )
+                    .into());
+                }
+                summary.source_observations_inserted += inserted;
+                summary.source_observations_recovered += existing;
+                summary.cursor_advanced = true;
+                Ok(cursor)
+            }
+            ResolutionScanCommitOutcome::Conflict(cursor) => {
+                let winner = resolution_cursor_state(&cursor)?;
+                if winner.block_number < scan.to_block
+                    || (winner.block_number == scan.to_block
+                        && (winner.block_hash != scan.to_block_hash
+                            || winner.block_time != scan.to_block_time))
+                    || winner.block_time < scan.to_block_time
+                {
+                    return Err(invariant_error(
+                        "competing resolution cursor is behind or conflicts with the inbox page",
+                    )
+                    .into());
+                }
+                summary.cursor_conflicted = true;
+                Ok(cursor)
+            }
+        }
+    }
+
+    async fn project_resolution_batch(
+        &self,
+        config: OutcomeReconciliationPassConfig,
+        summary: &mut OutcomeReconciliationPassSummary,
+    ) -> QuantResult<Option<()>> {
+        let claims = self
+            .resolution_observations
+            .claim_pending(self.projection_worker_id, 60, config.candidate_batch_size)
+            .await?;
+        if claims.is_empty() {
+            return Ok(None);
+        }
+        let market_ids = claims
+            .iter()
+            .map(|claim| claim.observation.market_id.clone())
+            .collect::<Vec<_>>();
+        let markets = self.markets.find_by_ids(&market_ids).await?;
+        let markets_by_id = markets
+            .into_iter()
+            .map(|market| (market.market_id.clone(), market))
+            .collect::<HashMap<_, _>>();
+        for claim in claims {
+            let Some(market) = markets_by_id.get(&claim.observation.market_id) else {
+                let retry_at = claim.projection.updated_at + Duration::minutes(5);
+                self.resolution_observations
+                    .settle(
+                        claim.observation.resolution_observation_id,
+                        self.projection_worker_id,
+                        ResolutionProjectionSettlement::Quarantined {
+                            retry_at,
+                            error: format!(
+                                "catalog mapping unavailable for market {}",
+                                claim.observation.market_id
+                            ),
+                        },
+                    )
+                    .await?;
+                summary.source_unknown_markets += 1;
+                continue;
+            };
+            match self.persist_inbox_fact(&claim, market, summary).await {
+                Ok(canonical_fact_hash) => {
+                    self.resolution_observations
+                        .settle(
+                            claim.observation.resolution_observation_id,
+                            self.projection_worker_id,
+                            ResolutionProjectionSettlement::Verified {
+                                canonical_fact_hash,
+                            },
+                        )
+                        .await?;
+                }
+                Err(QuantError::Execution(ExecutionError::OutcomeReconciliationInvariant {
+                    reason,
+                })) => {
+                    self.resolution_observations
+                        .settle(
+                            claim.observation.resolution_observation_id,
+                            self.projection_worker_id,
+                            ResolutionProjectionSettlement::Failed {
+                                error: reason.clone(),
+                            },
+                        )
+                        .await?;
+                    return Err(ExecutionError::OutcomeReconciliationInvariant { reason }.into());
+                }
+                Err(error) => {
+                    let retry_at = claim.projection.updated_at + Duration::minutes(1);
+                    self.resolution_observations
+                        .settle(
+                            claim.observation.resolution_observation_id,
+                            self.projection_worker_id,
+                            ResolutionProjectionSettlement::Retry {
+                                retry_at,
+                                error: error.to_string(),
+                            },
+                        )
+                        .await?;
+                    summary.source_projection_retries += 1;
+                    tracing::warn!(
+                        checkpoint_hash = %claim.observation.source_checkpoint_hash,
+                        market_id = %claim.observation.market_id,
+                        %error,
+                        "canonical resolution projection deferred",
+                    );
+                }
+            }
+        }
+        Ok(Some(()))
+    }
+
+    async fn persist_inbox_fact(
+        &self,
+        claim: &ResolutionProjectionClaim,
+        market: &MarketInfo,
+        summary: &mut OutcomeReconciliationPassSummary,
+    ) -> QuantResult<ContentHash> {
+        let observation = &claim.observation;
         if let Some(existing) = self
             .resolution_facts
             .resolution_by_checkpoint(&observation.source_checkpoint_hash)
             .await?
         {
-            validate_fact_matches(&existing, observation, market)?;
+            validate_inbox_fact(&existing, observation, market)?;
             summary.source_facts_recovered += 1;
-            return Ok(());
+            return Ok(existing.resolution_fact_hash);
         }
         if let Some(existing) = self
             .resolution_facts
             .resolution_by_market(&observation.market_id)
             .await?
         {
-            validate_fact_matches(&existing, observation, market)?;
+            validate_inbox_fact(&existing, observation, market)?;
             summary.source_facts_recovered += 1;
-            return Ok(());
+            return Ok(existing.resolution_fact_hash);
         }
 
-        let fact = fact_from_observation(observation, market, pass_started_at.timestamp_millis())?;
+        let fact = fact_from_inbox(observation, market)?;
         self.resolution_fact_writer
             .write_batch_idempotent(&observation.source_checkpoint_hash, vec![fact])
             .await?;
@@ -442,91 +582,65 @@ impl OutcomeReconciliationService {
                     observation.source_checkpoint_hash
                 ))
             })?;
-        validate_fact_matches(&persisted, observation, market)?;
+        validate_inbox_fact(&persisted, observation, market)?;
         summary.source_facts_written += 1;
-        Ok(())
-    }
-
-    async fn advance_resolution_cursor(
-        &self,
-        current: &ResolutionCursorState,
-        scan: &FinalizedResolutionScan,
-        summary: &mut OutcomeReconciliationPassSummary,
-    ) -> QuantResult<DomainSourceCursorInfo> {
-        let target = FinalizedResolutionBlock {
-            block_number: scan.to_block,
-            block_hash: scan.to_block_hash.clone(),
-            block_time: scan.to_block_time,
-        };
-        match self
-            .cursors
-            .compare_and_set(Some(current.checkpoint_hash), cursor_update(&target)?)
-            .await?
-        {
-            DomainSourceCursorCasOutcome::Advanced(cursor) => {
-                let advanced = resolution_cursor_state(&cursor)?;
-                if advanced.block_number != scan.to_block
-                    || advanced.block_hash != scan.to_block_hash
-                    || advanced.block_time != scan.to_block_time
-                {
-                    return Err(invariant_error(
-                        "advanced resolution cursor differs from the finalized scan",
-                    )
-                    .into());
-                }
-                summary.cursor_advanced = true;
-                Ok(cursor)
-            }
-            DomainSourceCursorCasOutcome::Conflict(cursor) => {
-                let winner = resolution_cursor_state(&cursor)?;
-                if winner.block_number < scan.to_block
-                    || (winner.block_number == scan.to_block
-                        && (winner.block_hash != scan.to_block_hash
-                            || winner.block_time != scan.to_block_time))
-                    || winner.block_time < scan.to_block_time
-                {
-                    return Err(invariant_error(
-                        "competing resolution cursor is behind or conflicts with the finalized scan",
-                    )
-                    .into());
-                }
-                summary.cursor_conflicted = true;
-                Ok(cursor)
-            }
-        }
+        Ok(persisted.resolution_fact_hash)
     }
 
     async fn reconcile_resolution_page(
         &self,
         config: OutcomeReconciliationPassConfig,
-        after: Option<RecommendationId>,
         summary: &mut OutcomeReconciliationPassSummary,
-    ) -> QuantResult<Option<RecommendationId>> {
-        let candidates = self
+    ) -> QuantResult<bool> {
+        let claims = self
             .resolution_outcomes
-            .list_reconciliation_candidates(
+            .claim_reconciliation(
                 config.pass_started_at,
-                after,
+                self.projection_worker_id,
+                60,
                 config.candidate_batch_size,
             )
             .await?;
-        let next = candidates
-            .last()
-            .map(|candidate| candidate.recommendation_id);
-        summary.resolution_candidates += usize_to_u64(candidates.len())?;
-        for candidate in candidates {
-            match self
+        let had_claims = !claims.is_empty();
+        summary.resolution_candidates += usize_to_u64(claims.len())?;
+        for claim in claims {
+            let candidate = claim.candidate;
+            let result = self
                 .reconcile_resolution_candidate(config, &candidate)
-                .await?
-            {
-                ResolutionOutcomeReconciliationResult::Inserted(_) => {
+                .await;
+            match result {
+                Ok(ResolutionOutcomeReconciliationResult::Inserted(_)) => {
                     summary.resolution_inserted += 1;
+                    self.resolution_outcomes
+                        .settle_reconciliation(
+                            candidate.recommendation_id,
+                            self.projection_worker_id,
+                            OutcomeTaskSettlement::Completed,
+                        )
+                        .await?;
                 }
-                ResolutionOutcomeReconciliationResult::AlreadyPresent(_) => {
+                Ok(ResolutionOutcomeReconciliationResult::AlreadyPresent(_)) => {
                     summary.resolution_existing += 1;
+                    self.resolution_outcomes
+                        .settle_reconciliation(
+                            candidate.recommendation_id,
+                            self.projection_worker_id,
+                            OutcomeTaskSettlement::Completed,
+                        )
+                        .await?;
                 }
-                ResolutionOutcomeReconciliationResult::Deferred(reason) => {
+                Ok(ResolutionOutcomeReconciliationResult::Deferred(reason)) => {
                     summary.resolution_deferred += 1;
+                    self.resolution_outcomes
+                        .settle_reconciliation(
+                            candidate.recommendation_id,
+                            self.projection_worker_id,
+                            OutcomeTaskSettlement::RetryAfter {
+                                delay_secs: retry_delay_secs(claim.attempt_count),
+                                error: format!("{reason:?}"),
+                            },
+                        )
+                        .await?;
                     tracing::debug!(
                         recommendation_id = %candidate.recommendation_id,
                         market_id = %candidate.market_id,
@@ -534,9 +648,30 @@ impl OutcomeReconciliationService {
                         "resolution outcome source is unavailable at the frozen cutoff",
                     );
                 }
+                Err(error) => {
+                    let settlement = self
+                        .resolution_outcomes
+                        .settle_reconciliation(
+                            candidate.recommendation_id,
+                            self.projection_worker_id,
+                            OutcomeTaskSettlement::RetryAfter {
+                                delay_secs: retry_delay_secs(claim.attempt_count),
+                                error: error.to_string(),
+                            },
+                        )
+                        .await;
+                    if let Err(settlement_error) = settlement {
+                        tracing::error!(
+                            recommendation_id = %candidate.recommendation_id,
+                            %settlement_error,
+                            "failed to release resolution reconciliation lease",
+                        );
+                    }
+                    return Err(error);
+                }
             }
         }
-        Ok(next)
+        Ok(had_claims)
     }
 
     async fn reconcile_resolution_candidate(
@@ -574,33 +709,58 @@ impl OutcomeReconciliationService {
     async fn reconcile_execution_page(
         &self,
         config: OutcomeReconciliationPassConfig,
-        after: Option<OrderIntentId>,
         summary: &mut OutcomeReconciliationPassSummary,
-    ) -> QuantResult<Option<OrderIntentId>> {
-        let candidates = self
+    ) -> QuantResult<bool> {
+        let claims = self
             .execution_outcomes
-            .list_reconciliation_candidates(
+            .claim_reconciliation(
                 config.pass_started_at,
-                after,
+                self.projection_worker_id,
+                60,
                 config.candidate_batch_size,
             )
             .await?;
-        let next = candidates.last().map(|candidate| candidate.order_intent_id);
-        summary.execution_candidates += usize_to_u64(candidates.len())?;
-        for candidate in candidates {
-            match self
+        let had_claims = !claims.is_empty();
+        summary.execution_candidates += usize_to_u64(claims.len())?;
+        for claim in claims {
+            let candidate = claim.candidate;
+            let result = self
                 .execution_outcomes
                 .reconcile_intent(&candidate.order_intent_id, config.pass_started_at)
-                .await?
-            {
-                ExecutionOutcomeReconciliationResult::Inserted(_) => {
+                .await;
+            match result {
+                Ok(ExecutionAttemptReconciliationResult::Inserted(_)) => {
                     summary.execution_inserted += 1;
+                    self.execution_outcomes
+                        .settle_reconciliation(
+                            candidate.order_intent_id,
+                            self.projection_worker_id,
+                            OutcomeTaskSettlement::Completed,
+                        )
+                        .await?;
                 }
-                ExecutionOutcomeReconciliationResult::AlreadyPresent(_) => {
+                Ok(ExecutionAttemptReconciliationResult::AlreadyPresent(_)) => {
                     summary.execution_existing += 1;
+                    self.execution_outcomes
+                        .settle_reconciliation(
+                            candidate.order_intent_id,
+                            self.projection_worker_id,
+                            OutcomeTaskSettlement::Completed,
+                        )
+                        .await?;
                 }
-                ExecutionOutcomeReconciliationResult::Deferred(reason) => {
+                Ok(ExecutionAttemptReconciliationResult::Deferred(reason)) => {
                     summary.execution_deferred += 1;
+                    self.execution_outcomes
+                        .settle_reconciliation(
+                            candidate.order_intent_id,
+                            self.projection_worker_id,
+                            OutcomeTaskSettlement::RetryAfter {
+                                delay_secs: retry_delay_secs(claim.attempt_count),
+                                error: format!("{reason:?}"),
+                            },
+                        )
+                        .await?;
                     tracing::debug!(
                         order_intent_id = %candidate.order_intent_id,
                         recommendation_id = %candidate.recommendation_id,
@@ -608,10 +768,125 @@ impl OutcomeReconciliationService {
                         "execution outcome source remains incomplete",
                     );
                 }
+                Err(error) => {
+                    let settlement = self
+                        .execution_outcomes
+                        .settle_reconciliation(
+                            candidate.order_intent_id,
+                            self.projection_worker_id,
+                            OutcomeTaskSettlement::RetryAfter {
+                                delay_secs: retry_delay_secs(claim.attempt_count),
+                                error: error.to_string(),
+                            },
+                        )
+                        .await;
+                    if let Err(settlement_error) = settlement {
+                        tracing::error!(
+                            order_intent_id = %candidate.order_intent_id,
+                            %settlement_error,
+                            "failed to release execution reconciliation lease",
+                        );
+                    }
+                    return Err(error.into());
+                }
             }
         }
-        Ok(next)
+        Ok(had_claims)
     }
+
+    async fn reconcile_rollup_page(
+        &self,
+        config: OutcomeReconciliationPassConfig,
+        summary: &mut OutcomeReconciliationPassSummary,
+    ) -> QuantResult<bool> {
+        let claims = self
+            .execution_rollups
+            .claim_reconciliation(
+                config.pass_started_at,
+                self.projection_worker_id,
+                60,
+                config.candidate_batch_size,
+            )
+            .await?;
+        let had_claims = !claims.is_empty();
+        summary.rollup_candidates += usize_to_u64(claims.len())?;
+        for claim in claims {
+            let recommendation_id = claim.recommendation_id;
+            let result = self
+                .execution_rollups
+                .reconcile_recommendation(recommendation_id, config.pass_started_at)
+                .await;
+            match result {
+                Ok(ExecutionRollupReconciliationResult::Inserted(_)) => {
+                    summary.rollup_inserted += 1;
+                    self.execution_rollups
+                        .settle_reconciliation(
+                            recommendation_id,
+                            self.projection_worker_id,
+                            OutcomeTaskSettlement::Completed,
+                        )
+                        .await?;
+                }
+                Ok(ExecutionRollupReconciliationResult::AlreadyPresent(_)) => {
+                    summary.rollup_existing += 1;
+                    self.execution_rollups
+                        .settle_reconciliation(
+                            recommendation_id,
+                            self.projection_worker_id,
+                            OutcomeTaskSettlement::Completed,
+                        )
+                        .await?;
+                }
+                Ok(ExecutionRollupReconciliationResult::Deferred(reason)) => {
+                    summary.rollup_deferred += 1;
+                    self.execution_rollups
+                        .settle_reconciliation(
+                            recommendation_id,
+                            self.projection_worker_id,
+                            OutcomeTaskSettlement::RetryAfter {
+                                delay_secs: retry_delay_secs(claim.attempt_count),
+                                error: format!("{reason:?}"),
+                            },
+                        )
+                        .await?;
+                    tracing::debug!(
+                        %recommendation_id,
+                        ?reason,
+                        "recommendation execution graph remains incomplete",
+                    );
+                }
+                Err(error) => {
+                    let settlement = self
+                        .execution_rollups
+                        .settle_reconciliation(
+                            recommendation_id,
+                            self.projection_worker_id,
+                            OutcomeTaskSettlement::RetryAfter {
+                                delay_secs: retry_delay_secs(claim.attempt_count),
+                                error: error.to_string(),
+                            },
+                        )
+                        .await;
+                    if let Err(settlement_error) = settlement {
+                        tracing::error!(
+                            %recommendation_id,
+                            %settlement_error,
+                            "failed to release execution rollup reconciliation lease",
+                        );
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+        Ok(had_claims)
+    }
+}
+
+fn retry_delay_secs(attempt_count: i32) -> u64 {
+    let exponent = u32::try_from(attempt_count.saturating_sub(1))
+        .unwrap_or_default()
+        .min(8);
+    30_u64.saturating_mul(2_u64.saturating_pow(exponent))
 }
 
 #[derive(Debug)]
@@ -747,10 +1022,48 @@ fn validate_scan(
     Ok(())
 }
 
-fn fact_from_observation(
+fn inbox_from_observation(
     observation: &FinalizedResolutionObservation,
+) -> Result<NewResolutionObservationInbox, ExecutionError> {
+    let payout_ratios = observation.vector.payout_ratios();
+    let raw_uri = ArtifactUri::parse(format!(
+        "polygon://resolution/{}/{}/{}",
+        observation.block_number, observation.transaction_hash, observation.log_index
+    ))
+    .map_err(|error| invariant_error(error.to_string()))?;
+    let mut inbox = NewResolutionObservationInbox {
+        source_checkpoint_hash: observation.source_checkpoint_hash,
+        source_id: resolution_source_id(),
+        instrument_key: resolution_instrument_key(),
+        market_id: observation.market_id.clone(),
+        denominator: observation.vector.denominator().clone(),
+        yes_numerator: observation.vector.numerators()[0].clone(),
+        no_numerator: observation.vector.numerators()[1].clone(),
+        yes_payout_ratio: payout_ratios[0],
+        no_payout_ratio: payout_ratios[1],
+        oracle: observation.oracle.clone(),
+        question_id: observation.question_id.clone(),
+        transaction_hash: observation.transaction_hash.clone(),
+        block_number: observation.block_number,
+        block_hash: observation.block_hash.clone(),
+        log_index: observation.log_index,
+        resolved_at: observation.resolved_at,
+        raw_payload_hash: ContentHash::from_bytes([0; 32]),
+        raw_uri,
+        provider_revision: observation.block_hash.clone(),
+    };
+    inbox.raw_payload_hash = inbox
+        .expected_raw_payload_hash()
+        .map_err(|error| invariant_error(error.to_string()))?;
+    inbox
+        .validate()
+        .map_err(|error| invariant_error(error.to_string()))?;
+    Ok(inbox)
+}
+
+fn fact_from_inbox(
+    observation: &ResolutionObservationInboxInfo,
     market: &MarketInfo,
-    observed_at: i64,
 ) -> Result<MarketResolutionRow, ExecutionError> {
     if observation.market_id != market.market_id {
         return Err(invariant_error(
@@ -760,26 +1073,28 @@ fn fact_from_observation(
     MarketResolutionRow::seal(MarketResolutionFactInput {
         market_id: observation.market_id.clone(),
         token_ids: [market.yes_token_id.clone(), market.no_token_id.clone()],
-        payout_ratios: observation.vector.payout_ratios(),
+        payout_ratios: [observation.yes_payout_ratio, observation.no_payout_ratio],
         resolved_at: observation.resolved_at.timestamp_millis(),
-        observed_at,
-        source_block_number: observation.block_number,
+        observed_at: observation.available_at.timestamp_millis(),
+        source_block_number: u64::try_from(observation.block_number)
+            .map_err(|error| invariant_error(format!("source block is negative: {error}")))?,
         source_block_hash: observation.block_hash.clone(),
         source_transaction_hash: observation.transaction_hash.clone(),
-        source_log_index: observation.log_index,
+        source_log_index: u64::try_from(observation.log_index)
+            .map_err(|error| invariant_error(format!("source log index is negative: {error}")))?,
         source_checkpoint_hash: observation.source_checkpoint_hash,
     })
     .map_err(|error| invariant_error(error.to_string()))
 }
 
-fn validate_fact_matches(
+fn validate_inbox_fact(
     fact: &MarketResolutionRow,
-    observation: &FinalizedResolutionObservation,
+    observation: &ResolutionObservationInboxInfo,
     market: &MarketInfo,
 ) -> Result<(), ExecutionError> {
     fact.validate()
         .map_err(|error| invariant_error(error.to_string()))?;
-    let expected = fact_from_observation(observation, market, fact.observed_at)?;
+    let expected = fact_from_inbox(observation, market)?;
     if &expected != fact {
         return Err(invariant_error(
             "persisted resolution fact differs from finalized source and catalog tokens",

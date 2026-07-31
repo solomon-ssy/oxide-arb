@@ -1931,6 +1931,7 @@ impl FoldModelSource for ClassicalFoldSource<'_> {
             serialized_model_hash: output.model_bytes_hash,
             serialization_format: output.serialization_format,
             input_transform: output.input_transform.clone(),
+            tree_shap: output.tree_shap.clone(),
             metrics: output.metrics.clone(),
         };
         let artifact = FoldArtifactInput {

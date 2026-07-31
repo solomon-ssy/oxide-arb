@@ -7,36 +7,39 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{MarketResolutionFactInput, MarketResolutionRow},
     domain::quant::{
-        ExecutionOutcomeReconciliationResult, FeedbackCohortCandidate, FeedbackCohortCursor,
-        FeedbackCohortPage, FeedbackCohortPageQuery, FeedbackCohortWindow,
-        FeedbackExecutionAttempt, InsertResolutionOutcomeResult, NewReconciliation,
-        RecommendationExecutionOutcomeInfo,
+        ExecutionAttemptReconciliationResult, ExecutionRollupReconciliationResult,
+        FeedbackCohortCandidate, FeedbackCohortCursor, FeedbackCohortPage, FeedbackCohortPageQuery,
+        FeedbackCohortSnapshot, FeedbackCohortWindow, InsertResolutionOutcomeResult,
+        NewReconciliation, RecommendationExecutionRollupInfo,
     },
     entities::{
         quant_execution_order::Entity as QuantExecutionOrderEntity,
         quant_order_intent::{
             ActiveModel as QuantOrderIntentActiveModel, Entity as QuantOrderIntentEntity,
         },
+        quant_recommendation::{
+            ActiveModel as QuantRecommendationActiveModel, Entity as QuantRecommendationEntity,
+        },
         quant_reconciliation::Entity as QuantReconciliationEntity,
     },
     enums::{
         execution::{ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus},
-        quant::{ExecutionOrderState, FeedbackCohort, OrderIntentStatus},
+        quant::{ExecutionOrderState, FeedbackCohort, OrderIntentStatus, RecommendationStatus},
     },
     types::{
-        ContentHash, EvmBlockHash, EvmTransactionHash, ExecutionOrderId, OrderIntentId,
-        PayoutRatio, RecommendationId, ReconciliationEvidence, ReconciliationEvidenceChain,
-        ReconciliationId, Shares, TokenId, Usd,
+        ContentHash, EvmBlockHash, EvmTransactionHash, PayoutRatio, RecommendationId,
+        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId, Shares, TokenId,
+        Usd,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgFeedbackCohortRepository, PgRecommendationExecutionOutcomeRepository,
-        PgRecommendationResolutionOutcomeRepository,
+        PgExecutionAttemptOutcomeRepository, PgFeedbackCohortRepository,
+        PgRecommendationExecutionRollupRepository, PgRecommendationResolutionOutcomeRepository,
     },
     traits::{
-        FeedbackCohortRepository, RecommendationExecutionOutcomeRepository,
-        RecommendationResolutionOutcomeRepository,
+        ExecutionAttemptOutcomeRepository, FeedbackCohortRepository,
+        RecommendationExecutionRollupRepository, RecommendationResolutionOutcomeRepository,
     },
 };
 use quant_pivot_system_tests::{
@@ -96,7 +99,7 @@ pub async fn cohort_truth_planes_exact() {
         )
         .await
         .expect("seal visible resolution outcome");
-    let execution = seed_unfilled_execution_outcome(&db, &ids).await;
+    let execution = seed_unfilled_execution_rollup(&db, &ids).await;
     let cutoff = db.statement_time().await;
     let window_start = ids.decision_at - Duration::minutes(1);
     let repository = PgFeedbackCohortRepository::new(db.clone());
@@ -112,9 +115,8 @@ pub async fn cohort_truth_planes_exact() {
             .await
             .expect("read model-learning plane"),
     );
-    assert!(model.execution_attempt().is_none());
     assert!(model.resolution_outcome().is_some());
-    assert!(model.execution_outcome().is_none());
+    assert!(model.execution_rollup().is_none());
 
     let execution_candidate = only_candidate(
         &repository
@@ -127,21 +129,13 @@ pub async fn cohort_truth_planes_exact() {
             .await
             .expect("read execution-learning plane"),
     );
-    assert_eq!(
-        execution_candidate.execution_attempt(),
-        Some(FeedbackExecutionAttempt::Submitted {
-            order_intent_id: execution.order_intent_id,
-            entry_execution_order_id: execution.entry_execution_order_id,
-            submitted_at: execution.submitted_at,
-        })
-    );
     assert!(execution_candidate.resolution_outcome().is_none());
     assert_eq!(
         execution_candidate
-            .execution_outcome()
-            .expect("visible execution outcome")
-            .outcome_hash,
-        execution.outcome.outcome_hash
+            .execution_rollup()
+            .expect("visible execution rollup")
+            .rollup_hash,
+        execution.rollup_hash
     );
 
     let policy = only_candidate(
@@ -155,11 +149,10 @@ pub async fn cohort_truth_planes_exact() {
             .await
             .expect("read policy-evaluation plane"),
     );
-    assert!(policy.execution_attempt().is_some());
     assert!(policy.resolution_outcome().is_some());
-    assert!(policy.execution_outcome().is_some());
+    assert!(policy.execution_rollup().is_some());
 
-    corrupt_execution_outcome_hash(&db, ids.recommendation).await;
+    corrupt_execution_rollup_hash(&db, ids.recommendation).await;
     assert!(
         repository
             .list_page(page_query(
@@ -249,6 +242,36 @@ pub async fn cutoff_excludes_late_pages() {
     assert_eq!(old_page.next_cursor(), None);
 
     let new_cutoff = db.statement_time().await;
+    let mature_same_window = repository
+        .list_page(page_query_with_truth(
+            FeedbackCohort::ModelLearning,
+            feedback_window(window_start, cutoff),
+            new_cutoff,
+            Some(first_cursor),
+            2,
+        ))
+        .await
+        .expect("re-read fixed decision window at later truth cutoff");
+    assert_eq!(mature_same_window.candidates().len(), 1);
+    assert_eq!(
+        mature_same_window.candidates()[0]
+            .context()
+            .recommendation_id(),
+        late_target.recommendation
+    );
+    assert!(
+        mature_same_window.candidates()[0]
+            .resolution_outcome()
+            .is_some()
+    );
+    assert!(
+        mature_same_window
+            .candidates()
+            .iter()
+            .all(|candidate| candidate.context().recommendation_id() != third.recommendation),
+        "later truth visibility must not widen the frozen decision cohort"
+    );
+
     let new_page = repository
         .list_page(page_query(
             FeedbackCohort::ModelLearning,
@@ -344,7 +367,20 @@ fn page_query(
     after: Option<FeedbackCohortCursor>,
     limit: u32,
 ) -> FeedbackCohortPageQuery {
-    FeedbackCohortPageQuery::try_new(cohort, window, after, limit)
+    let truth_cutoff = window.cutoff();
+    page_query_with_truth(cohort, window, truth_cutoff, after, limit)
+}
+
+fn page_query_with_truth(
+    cohort: FeedbackCohort,
+    window: FeedbackCohortWindow,
+    truth_cutoff: DateTime<Utc>,
+    after: Option<FeedbackCohortCursor>,
+    limit: u32,
+) -> FeedbackCohortPageQuery {
+    let snapshot =
+        FeedbackCohortSnapshot::try_new(window, truth_cutoff).expect("valid feedback snapshot");
+    FeedbackCohortPageQuery::try_new(cohort, snapshot, after, limit)
         .expect("valid feedback page query")
 }
 
@@ -385,17 +421,10 @@ fn resolution_fact(
     .expect("sealed resolution fact")
 }
 
-struct UnfilledExecution {
-    order_intent_id: OrderIntentId,
-    entry_execution_order_id: ExecutionOrderId,
-    submitted_at: DateTime<Utc>,
-    outcome: RecommendationExecutionOutcomeInfo,
-}
-
-async fn seed_unfilled_execution_outcome(
+async fn seed_unfilled_execution_rollup(
     db: &DatabaseConnection,
     ids: &ExecutionTxnIds,
-) -> UnfilledExecution {
+) -> RecommendationExecutionRollupInfo {
     let order_intent_id = seed_approved_intent(db, ids).await;
     let terminal_at = Utc::now() - Duration::seconds(1);
     let submitted_at = terminal_at - Duration::seconds(1);
@@ -450,46 +479,64 @@ async fn seed_unfilled_execution_outcome(
     active.updated_at = ActiveValue::Set(terminal_at);
     active.update(db).await.expect("mark intent rejected");
 
-    let outcome = match PgRecommendationExecutionOutcomeRepository::new(db.clone())
+    match PgExecutionAttemptOutcomeRepository::new(db.clone())
         .reconcile_intent(&order_intent_id, db.statement_time().await)
         .await
         .expect("seal unfilled execution outcome")
     {
-        ExecutionOutcomeReconciliationResult::Inserted(outcome) => outcome,
-        ExecutionOutcomeReconciliationResult::AlreadyPresent(_)
-        | ExecutionOutcomeReconciliationResult::Deferred(_) => {
+        ExecutionAttemptReconciliationResult::Inserted(_) => {}
+        ExecutionAttemptReconciliationResult::AlreadyPresent(_)
+        | ExecutionAttemptReconciliationResult::Deferred(_) => {
             panic!("complete isolated execution source must insert")
         }
-    };
-    UnfilledExecution {
-        order_intent_id,
-        entry_execution_order_id,
-        submitted_at,
-        outcome,
+    }
+    let recommendation = QuantRecommendationEntity::find_by_id(ids.recommendation)
+        .one(db)
+        .await
+        .expect("read recommendation")
+        .expect("recommendation");
+    let closed_at = db.statement_time().await;
+    let mut active: QuantRecommendationActiveModel = recommendation.into_active_model();
+    active.status = ActiveValue::Set(RecommendationStatus::Expired);
+    active.status_changed_at = ActiveValue::Set(closed_at);
+    active
+        .update(db)
+        .await
+        .expect("close recommendation authority");
+    match PgRecommendationExecutionRollupRepository::new(db.clone())
+        .reconcile_recommendation(ids.recommendation, db.statement_time().await)
+        .await
+        .expect("seal final recommendation execution rollup")
+    {
+        ExecutionRollupReconciliationResult::Inserted(rollup) => rollup,
+        ExecutionRollupReconciliationResult::AlreadyPresent(_)
+        | ExecutionRollupReconciliationResult::Deferred(_) => {
+            panic!("complete isolated recommendation graph must insert")
+        }
     }
 }
 
-async fn corrupt_execution_outcome_hash(
+async fn corrupt_execution_rollup_hash(
     db: &DatabaseConnection,
     recommendation_id: RecommendationId,
 ) {
     db.execute_unprepared(
-        "ALTER TABLE quant_recommendation_execution_outcome \
-         DISABLE TRIGGER trg_quant_recommendation_execution_outcome_append_only",
+        "ALTER TABLE quant_recommendation_execution_rollup \
+         DISABLE TRIGGER trg_quant_execution_rollup_append_only",
     )
     .await
     .expect("disable WORM trigger for corruption fixture");
     db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE quant_recommendation_execution_outcome \
-         SET outcome_hash = $1 WHERE recommendation_id = $2",
+        "UPDATE quant_recommendation_execution_rollup \
+         SET rollup_hash = $1 WHERE recommendation_id = $2",
         [hash('f').into(), recommendation_id.into()],
     ))
     .await
     .expect("corrupt execution outcome hash");
     db.execute_unprepared(
-        "ALTER TABLE quant_recommendation_execution_outcome \
-         ENABLE TRIGGER trg_quant_recommendation_execution_outcome_append_only",
+        "ALTER TABLE quant_recommendation_execution_rollup \
+         ENABLE TRIGGER trg_quant_execution_rollup_append_only",
     )
     .await
     .expect("restore WORM trigger");

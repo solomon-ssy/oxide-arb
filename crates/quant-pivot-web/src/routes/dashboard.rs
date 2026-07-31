@@ -31,8 +31,7 @@ use quant_pivot_models::{
     enums::{
         execution::KillSwitchState,
         quant::{
-            ExecutionOrderState, OrderIntentStatus, PublicationStatus, RecommendationReportStatus,
-            ReportRunStatus,
+            ExecutionOrderState, OrderIntentStatus, RecommendationReportStatus, ReportRunStatus,
         },
         rbac::{Operation, ResourceType},
     },
@@ -263,7 +262,6 @@ async fn load_research_readiness(
                     ..FactorDefinitionListQuery::default()
                 }),
             state.research_catalog.list_models(ModelVersionListQuery {
-                publication_status: Some(PublicationStatus::Published),
                 page: PageRequest::new(1, 1),
                 ..ModelVersionListQuery::default()
             }),

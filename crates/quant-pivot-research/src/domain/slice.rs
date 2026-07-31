@@ -17,17 +17,18 @@
 
 use std::{collections::HashMap, hash::BuildHasher};
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
+use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
         data_plane::{
             CryptoPriceReport, DecisionBoundary, DecisionSource, DomainObservation,
-            WeatherForecastPoint, WeatherObservationFact, WeatherObservationReportKind,
+            WeatherForecastPoint, WeatherObservationFact,
         },
         quant::{
-            DomainAvailability, MarketLinkage, MarketSubject, ResolvedBinding,
-            ResolvedSourceBinding,
+            DomainAvailability, GlobalTemperatureOutcome, MarketLinkage, MarketSubject,
+            ResolvedBinding, ResolvedSourceBinding,
         },
     },
     enums::{
@@ -35,15 +36,13 @@ use quant_pivot_models::{
         domain::{DomainFamily, DomainMetric, LinkageSourceRole},
     },
     runtime_config::DomainConfig,
-    types::{
-        DomainInstrumentKey, DomainSourceId, IcaoStation,
-        calibration::PublishedWeatherStationLeadBias,
-    },
+    types::{DomainInstrumentKey, DomainSourceId, calibration::PublishedWeatherStationLeadBias},
 };
 
 use crate::{
     domain::{CryptoPriceReportWindow, DomainObservationWindow, WeatherFactWindow},
     features::{DomainSliceData, DomainSliceInputs, EvidenceSourceKind, EvidenceSourceRef},
+    linkage::source_bindings_for_subject,
 };
 
 /// The trailing observation lookback (seconds) the crypto domain slice needs:
@@ -119,7 +118,8 @@ fn linkage_evidence(linkage: &MarketLinkage) -> EvidenceSourceRef {
 #[derive(Clone, Copy)]
 pub struct DomainAvailabilityFacts<'a> {
     pub observations: &'a HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
-    pub weather_observations: &'a HashMap<IcaoStation, Vec<WeatherObservationFact>>,
+    pub weather_observations: &'a HashMap<String, Vec<WeatherObservationFact>>,
+    pub weather_forecasts: &'a HashMap<String, Vec<WeatherForecastPoint>>,
 }
 
 #[must_use]
@@ -161,23 +161,46 @@ pub fn domain_availability_at(
                     })
                 })
         }
-        MarketSubject::Weather(subject) => {
-            if !valid_weather_sources(binding, &subject.decision_group.station) {
+        subject @ (MarketSubject::Weather(_)
+        | MarketSubject::WeatherPrecipitation(_)
+        | MarketSubject::WeatherAqi(_)
+        | MarketSubject::WeatherTornado(_)
+        | MarketSubject::WeatherTropicalCyclone(_)
+        | MarketSubject::WeatherGlobalTemperature(_)
+        | MarketSubject::WeatherSeaIce(_)
+        | MarketSubject::WeatherWindExtreme(_)) => {
+            if !valid_weather_sources(binding, subject) {
                 return DomainAvailability::Unresolved;
             }
+            let Some(subject_key) = subject.weather_subject_key() else {
+                return DomainAvailability::Unresolved;
+            };
+            let Ok((from, to)) = weather_contract_bounds(subject) else {
+                return DomainAvailability::Unresolved;
+            };
             let cutoff = boundary.cutoff_for(DecisionSource::DomainWeather);
-            facts
-                .weather_observations
-                .get(&subject.decision_group.station)
+            let has_observation =
+                facts
+                    .weather_observations
+                    .get(&subject_key)
+                    .is_some_and(|series| {
+                        series.iter().any(|observation| {
+                            weather_observation_in_window(observation, from, to)
+                                && observation.published_at <= cutoff
+                                && observation.available_at <= boundary.decision_at()
+                        })
+                    });
+            let has_forecast = facts
+                .weather_forecasts
+                .get(&subject_key)
                 .is_some_and(|series| {
-                    series.iter().any(|observation| {
-                        observation.local_date == subject.decision_group.local_date
-                            && observation.report_kind
-                                != WeatherObservationReportKind::HistoricalGhcnh
-                            && observation.published_at <= cutoff
-                            && observation.available_at <= boundary.decision_at()
+                    series.iter().any(|forecast| {
+                        weather_forecast_in_window(forecast, from, to)
+                            && forecast.reference_time <= cutoff
+                            && forecast.available_at <= boundary.decision_at()
                     })
-                })
+                });
+            has_observation || has_forecast
         }
     };
     if available {
@@ -196,8 +219,8 @@ pub fn domain_availability_at(
 pub struct DomainFactWindows<'a> {
     pub observations: &'a HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
     pub crypto_reports: &'a HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>>,
-    pub weather_observations: &'a HashMap<IcaoStation, Vec<WeatherObservationFact>>,
-    pub weather_forecasts: &'a HashMap<IcaoStation, Vec<WeatherForecastPoint>>,
+    pub weather_observations: &'a HashMap<String, Vec<WeatherObservationFact>>,
+    pub weather_forecasts: &'a HashMap<String, Vec<WeatherForecastPoint>>,
     pub weather_calibrations: &'a [PublishedWeatherStationLeadBias],
 }
 
@@ -254,14 +277,27 @@ pub fn build_domain_slice_inputs(
             });
             DomainSliceData::Crypto { primary, oracle }
         }
-        (MarketSubject::Weather(subject), DomainFamily::Weather) => {
-            if !valid_weather_sources(&binding, &subject.decision_group.station) {
+        (
+            subject @ (MarketSubject::Weather(_)
+            | MarketSubject::WeatherPrecipitation(_)
+            | MarketSubject::WeatherAqi(_)
+            | MarketSubject::WeatherTornado(_)
+            | MarketSubject::WeatherTropicalCyclone(_)
+            | MarketSubject::WeatherGlobalTemperature(_)
+            | MarketSubject::WeatherSeaIce(_)
+            | MarketSubject::WeatherWindExtreme(_)),
+            DomainFamily::Weather,
+        ) => {
+            if !valid_weather_sources(&binding, subject) {
                 return Ok(None);
             }
+            let Some(subject_key) = subject.weather_subject_key() else {
+                return Ok(None);
+            };
             let cutoff = boundary.cutoff_for(DecisionSource::DomainWeather);
             let observations = facts
                 .weather_observations
-                .get(&subject.decision_group.station)
+                .get(&subject_key)
                 .into_iter()
                 .flatten()
                 .filter(|fact| {
@@ -271,7 +307,7 @@ pub fn build_domain_slice_inputs(
                 .collect();
             let forecasts = facts
                 .weather_forecasts
-                .get(&subject.decision_group.station)
+                .get(&subject_key)
                 .into_iter()
                 .flatten()
                 .filter(|fact| {
@@ -305,35 +341,114 @@ pub fn build_domain_slice_inputs(
     }))
 }
 
-fn valid_weather_sources(binding: &ResolvedBinding, station: &IcaoStation) -> bool {
-    [
-        (
-            LinkageSourceRole::LiveEvent,
-            DomainSourceId::aviation_weather(),
-        ),
-        (
-            LinkageSourceRole::HistoricalCalibration,
-            DomainSourceId::ghcnh(),
-        ),
-        (LinkageSourceRole::Forecast, DomainSourceId::gefs()),
-    ]
-    .into_iter()
-    .all(|(role, source_id)| {
-        source_binding(binding, role).is_some_and(|source| {
-            source.source_id == source_id
-                && source.instrument_key
-                    == match role {
-                        LinkageSourceRole::LiveEvent => {
-                            DomainInstrumentKey::aviation_weather(station)
-                        }
-                        LinkageSourceRole::HistoricalCalibration => {
-                            DomainInstrumentKey::ghcnh(station)
-                        }
-                        LinkageSourceRole::Forecast => DomainInstrumentKey::gefs(station),
-                        LinkageSourceRole::Feature | LinkageSourceRole::Resolution => return false,
-                    }
+/// Verify an exact, complete role/source/instrument set for a Weather subject.
+#[must_use]
+pub fn valid_weather_sources(binding: &ResolvedBinding, subject: &MarketSubject) -> bool {
+    let Some(available_at) = binding
+        .source_bindings
+        .iter()
+        .map(|source| source.available_at)
+        .min()
+    else {
+        return false;
+    };
+    let Ok(expected) = source_bindings_for_subject(subject, available_at) else {
+        return false;
+    };
+    expected.len() == binding.source_bindings.len()
+        && expected.iter().all(|expected| {
+            binding.source_bindings.iter().any(|actual| {
+                actual.role == expected.role
+                    && actual.source_id == expected.source_id
+                    && actual.instrument_key == expected.instrument_key
+            })
         })
-    })
+}
+
+/// Resolve the contract's exact UTC aggregation interval.
+pub fn weather_contract_bounds(
+    subject: &MarketSubject,
+) -> QuantResult<(DateTime<Utc>, DateTime<Utc>)> {
+    if let MarketSubject::Weather(subject) = subject {
+        let timezone = subject
+            .decision_group
+            .timezone
+            .parse::<Tz>()
+            .map_err(|error| {
+                QuantError::config(format!("invalid Weather linkage timezone: {error}"))
+            })?;
+        let next_date = subject
+            .decision_group
+            .local_date
+            .succ_opt()
+            .ok_or_else(|| QuantError::config("Weather local date overflow"))?;
+        let local_start = subject
+            .decision_group
+            .local_date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| QuantError::config("invalid Weather local day start"))?;
+        let local_end = next_date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| QuantError::config("invalid Weather local day end"))?;
+        let resolve = |local| {
+            timezone
+                .from_local_datetime(&local)
+                .single()
+                .map(|value| value.with_timezone(&Utc))
+                .ok_or_else(|| QuantError::config("Weather local midnight is ambiguous or missing"))
+        };
+        return Ok((resolve(local_start)?, resolve(local_end)?));
+    }
+    subject
+        .weather_window()
+        .map(|window| (window.start_at, window.end_at))
+        .ok_or_else(|| QuantError::config("subject has no Weather contract window"))
+}
+
+/// Earliest source-effective instant required to evaluate a Weather subject.
+///
+/// A GISTEMP record-rank contract needs the complete v4 monthly history; all
+/// other subjects need only their explicit contract interval (calibration
+/// lookback is added independently by the caller).
+pub fn weather_history_start(subject: &MarketSubject) -> QuantResult<DateTime<Utc>> {
+    if matches!(
+        subject,
+        MarketSubject::WeatherGlobalTemperature(global)
+            if matches!(
+                global.outcome,
+                GlobalTemperatureOutcome::MonthlyRecordRank { .. }
+                    | GlobalTemperatureOutcome::AnnualRecordRank { .. }
+            )
+    ) {
+        return Utc
+            .with_ymd_and_hms(1880, 1, 1, 0, 0, 0)
+            .single()
+            .ok_or_else(|| QuantError::config("invalid GISTEMP history epoch"));
+    }
+    weather_contract_bounds(subject).map(|(from, _)| from)
+}
+
+/// Whether an observation's source-effective interval intersects a contract.
+#[must_use]
+pub fn weather_observation_in_window(
+    observation: &WeatherObservationFact,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> bool {
+    let effective_from = observation.valid_from.unwrap_or(observation.observed_at);
+    let effective_to = observation.valid_to.unwrap_or(observation.observed_at);
+    (effective_from < to && effective_to > from)
+        || (observation.observed_at > from && observation.observed_at <= to)
+}
+
+/// Whether a forecast targets an instant inside a contract interval.
+#[must_use]
+pub fn weather_forecast_in_window(
+    forecast: &WeatherForecastPoint,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> bool {
+    forecast.valid_time >= from && forecast.valid_time < to
 }
 
 /// The settlement-oracle instrument to cross-check against.
@@ -465,6 +580,7 @@ mod tests {
             DomainAvailabilityFacts {
                 observations: $observations,
                 weather_observations: $weather,
+                weather_forecasts: &HashMap::new(),
             }
         };
     }

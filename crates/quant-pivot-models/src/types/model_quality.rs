@@ -6,14 +6,22 @@
 //! while `FromJsonQueryResult` keeps deserialization failures at the `SeaORM`
 //! persistence boundary.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
+use quant_pivot_error::hashing::CanonicalDigestError;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-use crate::types::{ContentHash, ModelVersionId};
+use crate::{
+    hashing::CanonicalDigest,
+    types::{ContentHash, ModelVersionId},
+};
 
 /// System-owned schema version for [`QualityGateReport`].
-pub const QUALITY_GATE_REPORT_FORMAT_VERSION: u16 = 1;
+pub const QUALITY_GATE_REPORT_FORMAT_VERSION: u16 = 2;
+const QUALITY_GATE_REPORT_HASH_DOMAIN: &str = "quant-pivot/model-quality-gate-report";
 
 /// What a gate evaluation is gating.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,14 +54,14 @@ impl GateSubject {
 #[serde(rename_all = "snake_case")]
 pub enum GateIntent {
     Candidate,
-    Publish,
+    RouteActivation,
     AutoExecution,
 }
 
 impl GateIntent {
     #[must_use]
     pub const fn requires_shadow_stability(self) -> bool {
-        matches!(self, Self::Publish | Self::AutoExecution)
+        matches!(self, Self::RouteActivation | Self::AutoExecution)
     }
 
     #[must_use]
@@ -63,21 +71,24 @@ impl GateIntent {
 
     #[must_use]
     pub const fn requires_backtest(self) -> bool {
-        matches!(self, Self::Candidate | Self::Publish | Self::AutoExecution)
+        matches!(
+            self,
+            Self::Candidate | Self::RouteActivation | Self::AutoExecution
+        )
     }
 
     #[must_use]
     pub const fn wire_name(self) -> &'static str {
         match self {
             Self::Candidate => "candidate",
-            Self::Publish => "publish",
+            Self::RouteActivation => "route_activation",
             Self::AutoExecution => "auto_execution",
         }
     }
 }
 
 /// Stable identity of one governed gate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateId {
     SampleCount,
@@ -101,6 +112,7 @@ pub enum GateId {
     SellL2BookFidelity,
     SellFallbackRatio,
     CalibrationRequired,
+    ExplainabilityRequired,
 }
 
 impl GateId {
@@ -128,6 +140,7 @@ impl GateId {
             Self::SellL2BookFidelity => "sell_l2_book_fidelity",
             Self::SellFallbackRatio => "sell_fallback_ratio",
             Self::CalibrationRequired => "calibration_required",
+            Self::ExplainabilityRequired => "explainability_required",
         }
     }
 }
@@ -207,7 +220,7 @@ impl GateOutcome {
     }
 }
 
-/// Content-addressed quality-gate evaluation persisted on a model version.
+/// Content-addressed quality-gate evaluation bound into immutable governance evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct QualityGateReport {
@@ -222,28 +235,153 @@ pub struct QualityGateReport {
     pub report_hash: ContentHash,
 }
 
+/// Complete inputs used to seal a [`QualityGateReport`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualityGateReportInput {
+    pub subject: GateSubject,
+    pub intent: GateIntent,
+    pub evaluated_at: DateTime<Utc>,
+    pub gates: Vec<GateOutcome>,
+}
+
+#[derive(Serialize)]
+struct QualityGateReportPreimage<'a> {
+    format_version: u16,
+    subject: &'a GateSubject,
+    intent: GateIntent,
+    evaluated_at: DateTime<Utc>,
+    gates: &'a [GateOutcome],
+    hard_failures: &'a [QualityGateFailure],
+    soft_warnings: &'a [QualityGateFailure],
+    passed: bool,
+}
+
+impl QualityGateReport {
+    pub fn try_new(input: QualityGateReportInput) -> Result<Self, QualityGateReportError> {
+        let mut identities = BTreeSet::new();
+        for outcome in &input.gates {
+            if !identities.insert(outcome.gate) {
+                return Err(QualityGateReportError::Invalid(format!(
+                    "duplicate quality gate `{}`",
+                    outcome.gate.wire_name()
+                )));
+            }
+            if (outcome.class == GateClass::Hard && outcome.status == GateStatus::Warn)
+                || (outcome.class == GateClass::Soft && outcome.status == GateStatus::Fail)
+            {
+                return Err(QualityGateReportError::Invalid(format!(
+                    "quality gate `{}` has an invalid class/status combination",
+                    outcome.gate.wire_name()
+                )));
+            }
+        }
+        if input.gates.is_empty() {
+            return Err(QualityGateReportError::Invalid(
+                "quality gate report must contain a complete scorecard".to_owned(),
+            ));
+        }
+        let hard_failures = input
+            .gates
+            .iter()
+            .filter(|outcome| {
+                outcome.class == GateClass::Hard && outcome.status == GateStatus::Fail
+            })
+            .map(GateOutcome::as_failure)
+            .collect::<Vec<_>>();
+        let soft_warnings = input
+            .gates
+            .iter()
+            .filter(|outcome| {
+                outcome.class == GateClass::Soft && outcome.status == GateStatus::Warn
+            })
+            .map(GateOutcome::as_failure)
+            .collect::<Vec<_>>();
+        let passed = hard_failures.is_empty();
+        let report_hash = CanonicalDigest::content_hash_typed(
+            QUALITY_GATE_REPORT_HASH_DOMAIN,
+            u32::from(QUALITY_GATE_REPORT_FORMAT_VERSION),
+            &QualityGateReportPreimage {
+                format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
+                subject: &input.subject,
+                intent: input.intent,
+                evaluated_at: input.evaluated_at,
+                gates: &input.gates,
+                hard_failures: &hard_failures,
+                soft_warnings: &soft_warnings,
+                passed,
+            },
+        )?;
+        Ok(Self {
+            format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
+            subject: input.subject,
+            intent: input.intent,
+            evaluated_at: input.evaluated_at,
+            gates: input.gates,
+            hard_failures,
+            soft_warnings,
+            passed,
+            report_hash,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), QualityGateReportError> {
+        if self.format_version != QUALITY_GATE_REPORT_FORMAT_VERSION {
+            return Err(QualityGateReportError::Invalid(format!(
+                "unsupported quality gate report format {}",
+                self.format_version
+            )));
+        }
+        let rebuilt = Self::try_new(QualityGateReportInput {
+            subject: self.subject.clone(),
+            intent: self.intent,
+            evaluated_at: self.evaluated_at,
+            gates: self.gates.clone(),
+        })?;
+        if *self != rebuilt {
+            return Err(QualityGateReportError::Invalid(
+                "quality gate report projections or content hash differ from its scorecard"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum QualityGateReportError {
+    #[error("invalid quality gate report: {0}")]
+    Invalid(String),
+    #[error(transparent)]
+    Hash(#[from] CanonicalDigestError),
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
     use serde_json::json;
 
-    use super::{GateIntent, GateSubject, QUALITY_GATE_REPORT_FORMAT_VERSION, QualityGateReport};
-    use crate::types::{ContentHash, ModelVersionId};
+    use super::{
+        GateClass, GateId, GateIntent, GateOutcome, GateStatus, GateSubject, QualityGateReport,
+        QualityGateReportInput,
+    };
+    use crate::types::ModelVersionId;
 
     impl QualityGateReport {
         fn test_fixture() -> Self {
-            Self {
-                format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
+            Self::try_new(QualityGateReportInput {
                 subject: GateSubject::ModelVersion(ModelVersionId::from_v7()),
                 intent: GateIntent::Candidate,
                 evaluated_at: Utc::now(),
-                gates: Vec::new(),
-                hard_failures: Vec::new(),
-                soft_warnings: Vec::new(),
-                passed: true,
-                report_hash: ContentHash::parse(&format!("blake3:{}", "0".repeat(64)))
-                    .expect("valid hash"),
-            }
+                gates: vec![GateOutcome {
+                    gate: GateId::NoPitLeakage,
+                    class: GateClass::Hard,
+                    status: GateStatus::Pass,
+                    observed: "0".to_owned(),
+                    threshold: "0".to_owned(),
+                    detail: "point-in-time scan is clean".to_owned(),
+                }],
+            })
+            .expect("valid report")
         }
     }
 
@@ -264,5 +402,15 @@ mod tests {
         let mut wrong_type = valid;
         wrong_type["format_version"] = json!("1");
         assert!(serde_json::from_value::<QualityGateReport>(wrong_type).is_err());
+    }
+
+    #[test]
+    fn report_hash_binds_evidence() {
+        let report = QualityGateReport::test_fixture();
+        assert!(report.validate().is_ok());
+
+        let mut tampered = report;
+        tampered.gates[0].observed = "1".to_owned();
+        assert!(tampered.validate().is_err());
     }
 }

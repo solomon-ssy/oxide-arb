@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
@@ -56,7 +56,6 @@ use crate::{
     },
 };
 
-const SECONDS_PER_DAY: u64 = 86_400;
 const PAYOUT_HISTOGRAM_BIN_COUNT: usize = 11;
 const DRIFT_RUN_NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_f208);
 
@@ -155,29 +154,18 @@ impl FeedbackSignalService {
         Ok(preimage)
     }
 
-    fn evaluation_window(
-        cycle: &FeedbackCycleInfo,
-        preimage: &VerifiedModelServingPreimage,
-    ) -> QuantResult<FeedbackCohortWindow> {
-        let seconds = u64::from(
-            preimage
-                .profile()
-                .spec
-                .feedback_policy
-                .evaluation_window_days,
-        )
-        .checked_mul(SECONDS_PER_DAY)
-        .ok_or_else(|| contract("feedback evaluation duration overflowed"))?;
-        let seconds = i64::try_from(seconds)
-            .map_err(|error| contract(format!("feedback duration exceeds i64: {error}")))?;
-        let duration = TimeDelta::try_seconds(seconds)
-            .ok_or_else(|| contract("feedback evaluation duration exceeds chrono bounds"))?;
-        let window_start = cycle
-            .label_cutoff
-            .checked_sub_signed(duration)
-            .ok_or_else(|| contract("feedback evaluation start exceeds chrono bounds"))?;
-        FeedbackCohortWindow::try_new(cycle.profile_ref.clone(), window_start, cycle.label_cutoff)
-            .map_err(|error| contract(format!("feedback evaluation window is invalid: {error}")))
+    fn evaluation_window(cycle: &FeedbackCycleInfo) -> QuantResult<FeedbackCohortWindow> {
+        let evaluation = cycle.candidate_family.shared_evaluation();
+        let window = evaluation.window.clone();
+        if window.profile_ref() != &cycle.profile_ref
+            || evaluation.source_lineage.pit_cutoff != cycle.label_cutoff
+            || window.cutoff() > cycle.label_cutoff
+        {
+            return Err(contract(
+                "feedback candidate-family decision window differs from the cycle truth cutoff",
+            ));
+        }
+        Ok(window)
     }
 
     fn baseline_ref(preimage: &VerifiedModelServingPreimage) -> QuantResult<ChampionBaselineRef> {
@@ -344,7 +332,7 @@ impl FeedbackCoverageExecutionPort for FeedbackSignalService {
             ));
         }
         let preimage = self.load_champion(&cycle).await?;
-        let evaluation_window = Self::evaluation_window(&cycle, &preimage)?;
+        let evaluation_window = Self::evaluation_window(&cycle)?;
         let champion_baseline = Self::baseline_ref(&preimage)?;
         progress.report(ResearchJobProgress::indeterminate(
             "feedback-coverage-freeze",
@@ -355,6 +343,7 @@ impl FeedbackCoverageExecutionPort for FeedbackSignalService {
             .freeze_coverage(
                 &evaluation_window,
                 cycle.champion_model_version_id,
+                cycle.label_cutoff,
                 champion_baseline.pit_cutoff,
                 &progress,
                 &cancel,
@@ -605,7 +594,7 @@ fn drift_artifact(
         concept_detail,
         label_detail,
         observations,
-        observed_at: coverage.evaluation_window.cutoff(),
+        observed_at: coverage.cycle_key.label_cutoff(),
     };
     artifact.validate()?;
     Ok(artifact)

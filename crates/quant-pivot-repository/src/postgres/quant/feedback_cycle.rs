@@ -9,7 +9,8 @@ use quant_pivot_error::{
         StorageError,
         entity::{
             QUANT_DRIFT_REPORT, QUANT_FEEDBACK_CYCLE, QUANT_FEEDBACK_EVALUATION_USE,
-            QUANT_FEEDBACK_EVENT_OUTBOX, QUANT_FEEDBACK_STAGE_EVENT,
+            QUANT_FEEDBACK_EVENT_OUTBOX, QUANT_FEEDBACK_SCHEDULER_STATE,
+            QUANT_FEEDBACK_STAGE_EVENT, QUANT_FEEDBACK_TRIGGER_EVENT,
         },
     },
 };
@@ -19,9 +20,11 @@ use quant_pivot_models::{
         pagination::{PageRequest, PageWindow, Paginated},
         quant::{
             DriftReportInfo, FeedbackCycleInfo, FeedbackCycleTerminal, FeedbackEvaluationUseInfo,
-            FeedbackOutboxEntry, FeedbackQueueSnapshot, FeedbackStageEventInfo,
-            FeedbackStageEventInput, GovernedFeedbackCancellation, GovernedFeedbackTrigger,
+            FeedbackOutboxEntry, FeedbackOutboxSource, FeedbackQueueSnapshot,
+            FeedbackSchedulerStateInfo, FeedbackStageEventInfo, FeedbackStageEventInput,
+            FeedbackTriggerEventInfo, GovernedFeedbackCancellation, GovernedFeedbackTrigger,
             NewDriftReport, NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent,
+            NewFeedbackTriggerEvent, cadence_cutoff,
         },
     },
     entities::{
@@ -40,23 +43,32 @@ use quant_pivot_models::{
             ActiveModel as OutboxActiveModel, Column as OutboxColumn, Entity as OutboxEntity,
             Model as OutboxModel,
         },
+        quant_feedback_scheduler_state::{Entity as SchedulerEntity, Model as SchedulerModel},
         quant_feedback_stage_event::{
             Column as StageColumn, Entity as StageEntity, Model as StageModel,
+        },
+        quant_feedback_trigger_event::{
+            Column as TriggerColumn, Entity as TriggerEntity, Model as TriggerModel,
         },
         research_profile_artifact::Column as ProfileColumn,
     },
     enums::{
-        quant::{FeedbackCycleStatus, FeedbackStage, FeedbackStageEventKind},
+        quant::{
+            FeedbackCycleStatus, FeedbackStage, FeedbackStageEventKind, FeedbackTriggerFamily,
+        },
         rbac::{Operation, ResourceType},
     },
-    types::{FeedbackCycleId, FeedbackStageEventId, ModelVersionId, ResearchProfileId, WorkerId},
+    types::{
+        FeedbackCycleId, FeedbackStageEventId, FeedbackTriggerEventId, ModelVersionId,
+        ResearchProfileId, WorkerId,
+    },
 };
 use sea_orm::{
-    ActiveModelTrait,
+    AccessMode, ActiveModelTrait,
     ActiveValue::{NotSet, Set},
     ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    ExprTrait, IntoActiveModel, JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
-    RelationTrait, TransactionTrait, TryInsertResult,
+    ExprTrait, IntoActiveModel, IsolationLevel, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, QueryTrait, RelationTrait, TransactionTrait, TryInsertResult,
     sea_query::{Expr, LockBehavior, LockType, OnConflict},
 };
 
@@ -66,13 +78,20 @@ use crate::{
         DriftReportWriteOutcome, FeedbackCycleCasOutcome, FeedbackCycleClaim,
         FeedbackCycleClaimMode, FeedbackCycleGeneration, FeedbackCycleLeaseGuard,
         FeedbackCycleRepository, FeedbackCycleWriteOutcome, FeedbackEvaluationWriteOutcome,
-        FeedbackOutboxRepository, FeedbackStageWriteOutcome,
+        FeedbackOutboxRepository, FeedbackStageWriteOutcome, FeedbackTriggerCommit,
+        FeedbackTriggerWriteOutcome,
     },
 };
 
 /// `PostgreSQL`-backed feedback-cycle repository.
 pub struct PgFeedbackCycleRepository {
     db: DatabaseConnection,
+}
+
+#[derive(Clone, Copy)]
+enum OutboxSourceId {
+    Stage(FeedbackStageEventId),
+    Trigger(FeedbackTriggerEventId),
 }
 
 impl PgFeedbackCycleRepository {
@@ -148,6 +167,28 @@ impl PgFeedbackCycleRepository {
         Ok(event)
     }
 
+    fn trigger_info(row: TriggerModel) -> Result<FeedbackTriggerEventInfo, StorageError> {
+        let event: FeedbackTriggerEventInfo = row.into();
+        event.validate().map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_FEEDBACK_TRIGGER_EVENT),
+                format!("stored trigger event failed integrity validation: {error}"),
+            )
+        })?;
+        Ok(event)
+    }
+
+    fn scheduler_info(row: SchedulerModel) -> Result<FeedbackSchedulerStateInfo, StorageError> {
+        let state: FeedbackSchedulerStateInfo = row.into();
+        state.validate().map_err(|error| {
+            StorageError::invariant_violation(
+                Some(QUANT_FEEDBACK_SCHEDULER_STATE),
+                format!("stored feedback scheduler state failed integrity validation: {error}"),
+            )
+        })?;
+        Ok(state)
+    }
+
     fn drift_info(row: DriftModel) -> Result<DriftReportInfo, StorageError> {
         let report: DriftReportInfo = row.into();
         report.validate().map_err(|error| {
@@ -191,25 +232,48 @@ impl PgFeedbackCycleRepository {
         if rows.is_empty() {
             return Ok(Vec::new());
         }
-        let event_ids = rows
+        let stage_ids = rows
             .iter()
-            .map(|row| row.feedback_stage_event_id)
+            .filter_map(|row| row.feedback_stage_event_id)
             .collect::<Vec<_>>();
-        let events = StageEntity::find()
-            .filter(StageColumn::FeedbackStageEventId.is_in(event_ids))
-            .all(connection)
-            .await
-            .map_err(StorageError::from)?;
-        let mut events = events
-            .into_iter()
-            .map(|row| {
-                let event = Self::stage_info(row)?;
-                Ok((event.feedback_stage_event_id, event))
-            })
-            .collect::<Result<HashMap<_, _>, StorageError>>()?;
-        let cycle_ids = events
+        let trigger_ids = rows
+            .iter()
+            .filter_map(|row| row.feedback_trigger_event_id)
+            .collect::<Vec<_>>();
+        let mut stages = if stage_ids.is_empty() {
+            HashMap::new()
+        } else {
+            StageEntity::find()
+                .filter(StageColumn::FeedbackStageEventId.is_in(stage_ids))
+                .all(connection)
+                .await
+                .map_err(StorageError::from)?
+                .into_iter()
+                .map(|row| {
+                    let event = Self::stage_info(row)?;
+                    Ok((event.feedback_stage_event_id, event))
+                })
+                .collect::<Result<HashMap<_, _>, StorageError>>()?
+        };
+        let mut triggers = if trigger_ids.is_empty() {
+            HashMap::new()
+        } else {
+            TriggerEntity::find()
+                .filter(TriggerColumn::FeedbackTriggerEventId.is_in(trigger_ids))
+                .all(connection)
+                .await
+                .map_err(StorageError::from)?
+                .into_iter()
+                .map(|row| {
+                    let event = Self::trigger_info(row)?;
+                    Ok((event.feedback_trigger_event_id, event))
+                })
+                .collect::<Result<HashMap<_, _>, StorageError>>()?
+        };
+        let cycle_ids = stages
             .values()
             .map(|event| event.feedback_cycle_id)
+            .chain(triggers.values().map(|event| event.feedback_cycle_id))
             .collect::<Vec<_>>();
         let cycles = CycleEntity::find()
             .filter(CycleColumn::FeedbackCycleId.is_in(cycle_ids))
@@ -225,32 +289,56 @@ impl PgFeedbackCycleRepository {
             .collect::<Result<HashMap<FeedbackCycleId, ResearchProfileId>, StorageError>>()?;
         let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
-            let event = events.remove(&row.feedback_stage_event_id).ok_or_else(|| {
+            let source = match (row.feedback_stage_event_id, row.feedback_trigger_event_id) {
+                (Some(event_id), None) => {
+                    let event = stages.remove(&event_id).ok_or_else(|| {
+                        StorageError::invariant_violation(
+                            Some(QUANT_FEEDBACK_EVENT_OUTBOX),
+                            format!(
+                                "outbox revision {} references a missing stage event",
+                                row.revision
+                            ),
+                        )
+                    })?;
+                    FeedbackOutboxSource::Stage(event)
+                }
+                (None, Some(event_id)) => {
+                    let event = triggers.remove(&event_id).ok_or_else(|| {
+                        StorageError::invariant_violation(
+                            Some(QUANT_FEEDBACK_EVENT_OUTBOX),
+                            format!(
+                                "outbox revision {} references a missing trigger event",
+                                row.revision
+                            ),
+                        )
+                    })?;
+                    FeedbackOutboxSource::Trigger(event)
+                }
+                _ => {
+                    return Err(StorageError::invariant_violation(
+                        Some(QUANT_FEEDBACK_EVENT_OUTBOX),
+                        format!(
+                            "outbox revision {} must reference exactly one source event",
+                            row.revision
+                        ),
+                    ));
+                }
+            };
+            let cycle_id = source.feedback_cycle_id();
+            let profile_id = profiles.get(&cycle_id).cloned().ok_or_else(|| {
                 StorageError::invariant_violation(
                     Some(QUANT_FEEDBACK_EVENT_OUTBOX),
                     format!(
-                        "outbox revision {} references a missing stage event",
+                        "outbox revision {} references a missing feedback cycle",
                         row.revision
                     ),
                 )
             })?;
-            let profile_id = profiles
-                .get(&event.feedback_cycle_id)
-                .cloned()
-                .ok_or_else(|| {
-                    StorageError::invariant_violation(
-                        Some(QUANT_FEEDBACK_EVENT_OUTBOX),
-                        format!(
-                            "outbox revision {} references a missing feedback cycle",
-                            row.revision
-                        ),
-                    )
-                })?;
             let entry = FeedbackOutboxEntry {
                 revision: row.revision,
                 publish_attempts: row.publish_attempts,
                 profile_id,
-                event,
+                source,
             };
             entry.validate().map_err(|error| {
                 StorageError::invariant_violation(
@@ -273,7 +361,15 @@ impl PgFeedbackCycleRepository {
             .filter(
                 Condition::any()
                     .add(CycleColumn::FeedbackCycleId.eq(cycle.feedback_cycle_id()))
-                    .add(CycleColumn::IdempotencyHash.eq(cycle.idempotency_hash())),
+                    .add(CycleColumn::IdempotencyHash.eq(cycle.idempotency_hash()))
+                    .add(
+                        Condition::all()
+                            .add(
+                                CycleColumn::ResearchProfileArtifactId
+                                    .eq(cycle.research_profile_artifact_id().clone()),
+                            )
+                            .add(CycleColumn::LabelCutoff.eq(cycle.label_cutoff())),
+                    ),
             )
             .one(transaction)
             .await
@@ -353,13 +449,12 @@ impl PgFeedbackCycleRepository {
         }
     }
 
-    async fn persist_stage(
+    async fn persist_stage_row(
         transaction: &DatabaseTransaction,
         event: &NewFeedbackStageEvent,
     ) -> Result<FeedbackStageWriteOutcome, StorageError> {
         if let Some(stored) = Self::stage_candidate(transaction, event).await? {
             let stored = Self::exact_stage(stored, event)?;
-            Self::persist_outbox(transaction, stored.feedback_stage_event_id).await?;
             return Ok(FeedbackStageWriteOutcome::AlreadyPresent(stored));
         }
         let insert = StageEntity::insert(event.clone().into_active_model())
@@ -378,7 +473,6 @@ impl PgFeedbackCycleRepository {
                 )
             })?;
         let stored = Self::exact_stage(stored, event)?;
-        Self::persist_outbox(transaction, stored.feedback_stage_event_id).await?;
         if inserted {
             Ok(FeedbackStageWriteOutcome::Inserted(stored))
         } else {
@@ -386,23 +480,151 @@ impl PgFeedbackCycleRepository {
         }
     }
 
-    async fn persist_outbox(
+    async fn persist_stage(
         transaction: &DatabaseTransaction,
-        event_id: FeedbackStageEventId,
-    ) -> Result<(), StorageError> {
-        if OutboxEntity::find()
-            .filter(OutboxColumn::FeedbackStageEventId.eq(event_id))
+        event: &NewFeedbackStageEvent,
+    ) -> Result<FeedbackStageWriteOutcome, StorageError> {
+        let outcome = Self::persist_stage_row(transaction, event).await?;
+        let event_id = match &outcome {
+            FeedbackStageWriteOutcome::Inserted(event)
+            | FeedbackStageWriteOutcome::AlreadyPresent(event) => event.feedback_stage_event_id,
+        };
+        Self::persist_stage_outbox(transaction, event_id).await?;
+        Ok(outcome)
+    }
+
+    async fn persist_initial_stage(
+        transaction: &DatabaseTransaction,
+        event: &NewFeedbackStageEvent,
+    ) -> Result<FeedbackStageWriteOutcome, StorageError> {
+        let stored = StageEntity::find()
+            .filter(StageColumn::FeedbackCycleId.eq(event.feedback_cycle_id()))
+            .filter(StageColumn::EventSequence.eq(1))
+            .lock_exclusive()
             .one(transaction)
             .await
             .map_err(StorageError::from)?
-            .is_some()
-        {
+            .map(Self::stage_info)
+            .transpose()?;
+        if let Some(stored) = stored {
+            if stored.stage != FeedbackStage::Trigger
+                || stored.event_kind != FeedbackStageEventKind::Triggered
+                || stored.event_sequence != 1
+            {
+                return Err(StorageError::state_conflict(
+                    QUANT_FEEDBACK_STAGE_EVENT,
+                    Some(stored.feedback_stage_event_id),
+                    "cycle sequence one is not a valid lifecycle trigger",
+                ));
+            }
+            return Ok(FeedbackStageWriteOutcome::AlreadyPresent(stored));
+        }
+        Self::persist_stage_row(transaction, event).await
+    }
+
+    async fn persist_trigger_event(
+        transaction: &DatabaseTransaction,
+        event: &NewFeedbackTriggerEvent,
+    ) -> Result<FeedbackTriggerWriteOutcome, StorageError> {
+        let candidate = || {
+            TriggerEntity::find()
+                .filter(
+                    Condition::any()
+                        .add(
+                            TriggerColumn::FeedbackTriggerEventId
+                                .eq(event.feedback_trigger_event_id),
+                        )
+                        .add(TriggerColumn::EventHash.eq(event.event_hash)),
+                )
+                .lock_exclusive()
+                .into_partial_model::<FeedbackTriggerEventInfo>()
+                .one(transaction)
+        };
+        if let Some(stored) = candidate().await.map_err(StorageError::from)? {
+            stored.validate().map_err(|error| {
+                StorageError::invariant_violation(
+                    Some(QUANT_FEEDBACK_TRIGGER_EVENT),
+                    error.to_string(),
+                )
+            })?;
+            if stored.matches_new(event) {
+                return Ok(FeedbackTriggerWriteOutcome::AlreadyPresent(stored));
+            }
+            return Err(StorageError::state_conflict(
+                QUANT_FEEDBACK_TRIGGER_EVENT,
+                Some(event.feedback_trigger_event_id),
+                "trigger event id or hash is bound to different immutable content",
+            ));
+        }
+        let insert = TriggerEntity::insert(event.clone().into_active_model())
+            .on_conflict(OnConflict::new().do_nothing().to_owned())
+            .try_insert()
+            .exec_without_returning(transaction)
+            .await
+            .map_err(StorageError::from)?;
+        let inserted = Self::insert_applied(&insert, QUANT_FEEDBACK_TRIGGER_EVENT)?;
+        let stored = candidate()
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some(QUANT_FEEDBACK_TRIGGER_EVENT),
+                    "trigger event insert completed without an observable row",
+                )
+            })?;
+        stored.validate().map_err(|error| {
+            StorageError::invariant_violation(Some(QUANT_FEEDBACK_TRIGGER_EVENT), error.to_string())
+        })?;
+        if stored.matches_new(event) {
+            if inserted {
+                Ok(FeedbackTriggerWriteOutcome::Inserted(stored))
+            } else {
+                Ok(FeedbackTriggerWriteOutcome::AlreadyPresent(stored))
+            }
+        } else {
+            Err(StorageError::state_conflict(
+                QUANT_FEEDBACK_TRIGGER_EVENT,
+                Some(event.feedback_trigger_event_id),
+                "concurrent trigger event insert has immutable drift",
+            ))
+        }
+    }
+
+    async fn persist_outbox(
+        transaction: &DatabaseTransaction,
+        source: OutboxSourceId,
+    ) -> Result<(), StorageError> {
+        let existing = match source {
+            OutboxSourceId::Stage(event_id) => {
+                OutboxEntity::find()
+                    .filter(OutboxColumn::FeedbackStageEventId.eq(event_id))
+                    .one(transaction)
+                    .await
+            }
+            OutboxSourceId::Trigger(event_id) => {
+                OutboxEntity::find()
+                    .filter(OutboxColumn::FeedbackTriggerEventId.eq(event_id))
+                    .one(transaction)
+                    .await
+            }
+        }
+        .map_err(StorageError::from)?;
+        if existing.is_some() {
             return Ok(());
         }
         let now = primitives::statement_timestamp(transaction).await?;
+        let (stage_event_id, trigger_event_id, conflict_column) = match source {
+            OutboxSourceId::Stage(event_id) => {
+                (Some(event_id), None, OutboxColumn::FeedbackStageEventId)
+            }
+            OutboxSourceId::Trigger(event_id) => {
+                (None, Some(event_id), OutboxColumn::FeedbackTriggerEventId)
+            }
+        };
         let row = OutboxActiveModel {
             revision: NotSet,
-            feedback_stage_event_id: Set(event_id),
+            feedback_stage_event_id: Set(stage_event_id),
+            feedback_trigger_event_id: Set(trigger_event_id),
             published_at: Set(None),
             publish_attempts: Set(0),
             claim_owner: Set(None),
@@ -412,26 +634,46 @@ impl PgFeedbackCycleRepository {
             updated_at: Set(now),
         };
         OutboxEntity::insert(row)
-            .on_conflict(
-                OnConflict::column(OutboxColumn::FeedbackStageEventId)
-                    .do_nothing()
-                    .to_owned(),
-            )
+            .on_conflict(OnConflict::column(conflict_column).do_nothing().to_owned())
             .exec_without_returning(transaction)
             .await
             .map_err(StorageError::from)?;
-        let stored = OutboxEntity::find()
-            .filter(OutboxColumn::FeedbackStageEventId.eq(event_id))
-            .one(transaction)
-            .await
-            .map_err(StorageError::from)?;
+        let stored = match source {
+            OutboxSourceId::Stage(event_id) => {
+                OutboxEntity::find()
+                    .filter(OutboxColumn::FeedbackStageEventId.eq(event_id))
+                    .one(transaction)
+                    .await
+            }
+            OutboxSourceId::Trigger(event_id) => {
+                OutboxEntity::find()
+                    .filter(OutboxColumn::FeedbackTriggerEventId.eq(event_id))
+                    .one(transaction)
+                    .await
+            }
+        }
+        .map_err(StorageError::from)?;
         if stored.is_none() {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_FEEDBACK_EVENT_OUTBOX),
-                "stage event committed without an observable outbox revision",
+                "feedback source event committed without an observable outbox revision",
             ));
         }
         Ok(())
+    }
+
+    async fn persist_stage_outbox(
+        transaction: &DatabaseTransaction,
+        event_id: FeedbackStageEventId,
+    ) -> Result<(), StorageError> {
+        Self::persist_outbox(transaction, OutboxSourceId::Stage(event_id)).await
+    }
+
+    async fn persist_trigger_outbox(
+        transaction: &DatabaseTransaction,
+        event_id: FeedbackTriggerEventId,
+    ) -> Result<(), StorageError> {
+        Self::persist_outbox(transaction, OutboxSourceId::Trigger(event_id)).await
     }
 }
 
@@ -639,6 +881,67 @@ impl PgFeedbackCycleRepository {
             ))
         }
     }
+
+    async fn advance_scheduler(
+        transaction: &DatabaseTransaction,
+        cycle: &NewFeedbackCycle,
+        scheduler_row: SchedulerModel,
+        scheduler: &FeedbackSchedulerStateInfo,
+        now: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        if scheduler
+            .lease_expires_at
+            .is_some_and(|expires_at| expires_at > now)
+            || scheduler
+                .cooldown_until
+                .is_some_and(|cooldown_until| cooldown_until > now)
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_FEEDBACK_SCHEDULER_STATE,
+                Some(&cycle.profile_ref().id),
+                "manual feedback trigger is blocked by a live scheduler lease or cooldown",
+            ));
+        }
+        let revision = scheduler.revision.checked_add(1).ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(QUANT_FEEDBACK_SCHEDULER_STATE),
+                "feedback scheduler revision overflowed",
+            )
+        })?;
+        let next_due_at = cycle
+            .label_cutoff()
+            .checked_add_signed(Duration::seconds(scheduler.cadence_secs))
+            .ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some(QUANT_FEEDBACK_SCHEDULER_STATE),
+                    "feedback scheduler next due time overflowed",
+                )
+            })?;
+        let cooldown_until = now
+            .checked_add_signed(Duration::seconds(scheduler.cooldown_secs))
+            .ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some(QUANT_FEEDBACK_SCHEDULER_STATE),
+                    "feedback scheduler cooldown time overflowed",
+                )
+            })?;
+        let mut active = scheduler_row.into_active_model();
+        active.last_cycle_id = Set(Some(cycle.feedback_cycle_id()));
+        active.last_cutoff = Set(Some(cycle.label_cutoff()));
+        active.next_due_at = Set(next_due_at);
+        active.cooldown_until = Set(Some(cooldown_until));
+        active.attempt = Set(0);
+        active.retry_at = Set(None);
+        active.last_error = Set(None);
+        active.revision = Set(revision);
+        active.updated_at = Set(now);
+        let updated = active
+            .update(transaction)
+            .await
+            .map_err(StorageError::from)?;
+        Self::scheduler_info(updated)?;
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -651,7 +954,13 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
         &self,
         cycle: NewFeedbackCycle,
         trigger: NewFeedbackStageEvent,
-    ) -> Result<(FeedbackCycleWriteOutcome, FeedbackStageWriteOutcome), StorageError> {
+    ) -> Result<FeedbackTriggerCommit, StorageError> {
+        let trigger_family = trigger.trigger_family().ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(QUANT_FEEDBACK_STAGE_EVENT),
+                "record_trigger requires typed trigger provenance",
+            )
+        })?;
         if trigger.feedback_cycle_id() != cycle.feedback_cycle_id()
             || trigger.event_kind() != FeedbackStageEventKind::Triggered
         {
@@ -669,16 +978,52 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             ));
         }
         let cycle_outcome = Self::persist_cycle(&transaction, &cycle).await?;
-        let event_outcome = Self::persist_stage(&transaction, &trigger).await?;
+        let provenance = NewFeedbackTriggerEvent::try_seal(
+            cycle.feedback_cycle_id(),
+            trigger_family,
+            None,
+            trigger
+                .actor()
+                .ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some(QUANT_FEEDBACK_TRIGGER_EVENT),
+                        "scheduled trigger has no actor label",
+                    )
+                })?
+                .to_owned(),
+            None,
+            trigger
+                .reason_code()
+                .ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some(QUANT_FEEDBACK_TRIGGER_EVENT),
+                        "scheduled trigger has no reason code",
+                    )
+                })?
+                .to_owned(),
+        )
+        .map_err(|error| {
+            StorageError::invariant_violation(Some(QUANT_FEEDBACK_TRIGGER_EVENT), error.to_string())
+        })?;
+        let trigger_outcome = Self::persist_trigger_event(&transaction, &provenance).await?;
+        let trigger_event_id = match &trigger_outcome {
+            FeedbackTriggerWriteOutcome::Inserted(event)
+            | FeedbackTriggerWriteOutcome::AlreadyPresent(event) => event.feedback_trigger_event_id,
+        };
+        let event_outcome = Self::persist_initial_stage(&transaction, &trigger).await?;
+        Self::persist_trigger_outbox(&transaction, trigger_event_id).await?;
         transaction.commit().await.map_err(StorageError::from)?;
-        Ok((cycle_outcome, event_outcome))
+        Ok(FeedbackTriggerCommit {
+            cycle: cycle_outcome,
+            stage: event_outcome,
+            trigger: trigger_outcome,
+        })
     }
 
     async fn record_governed_trigger(
         &self,
         command: GovernedFeedbackTrigger,
-    ) -> Result<(FeedbackCycleWriteOutcome, FeedbackStageWriteOutcome), FeedbackCycleCommandError>
-    {
+    ) -> Result<FeedbackTriggerCommit, FeedbackCycleCommandError> {
         command.validate()?;
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
         let authorized = authorization::authorize_actor::<FeedbackCycleCommandError>(
@@ -693,14 +1038,57 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
         if command.cycle.label_cutoff() > now {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_FEEDBACK_CYCLE),
-                "governed cycle cutoff cannot be in the database future",
+                "governed trigger requires a non-future cycle cutoff",
+            )
+            .into());
+        }
+        let scheduler_row = SchedulerEntity::find_by_id(command.cycle.profile_ref().id.clone())
+            .lock_exclusive()
+            .one(&transaction)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::not_found(
+                    QUANT_FEEDBACK_SCHEDULER_STATE,
+                    &command.cycle.profile_ref().id,
+                )
+            })?;
+        let scheduler = Self::scheduler_info(scheduler_row.clone())?;
+        if scheduler.research_profile_artifact_id != *command.cycle.research_profile_artifact_id()
+            || scheduler.profile_hash != command.cycle.profile_ref().content_hash
+            || scheduler.feedback_policy_hash != command.cycle.feedback_policy_hash()
+            || cadence_cutoff(command.cycle.label_cutoff(), scheduler.cadence_secs)?
+                != command.cycle.label_cutoff()
+            || now - command.cycle.label_cutoff() >= Duration::seconds(scheduler.cadence_secs)
+        {
+            return Err(StorageError::state_conflict(
+                QUANT_FEEDBACK_SCHEDULER_STATE,
+                Some(&command.cycle.profile_ref().id),
+                "manual cycle differs from the current scheduler profile or cadence window",
             )
             .into());
         }
         let cycle_outcome = Self::persist_cycle(&transaction, &command.cycle).await?;
+        if matches!(&cycle_outcome, FeedbackCycleWriteOutcome::Inserted(_)) {
+            Self::advance_scheduler(&transaction, &command.cycle, scheduler_row, &scheduler, now)
+                .await?;
+        }
         let cycle_id = command.cycle.feedback_cycle_id();
         let _cycle_lock = Self::lock_cycle(&transaction, &cycle_id).await?;
         let actor = format!("{}@{}", authorized.username, authorized.role);
+        let provenance = NewFeedbackTriggerEvent::try_seal(
+            cycle_id,
+            FeedbackTriggerFamily::Manual,
+            Some(authorized.user_id),
+            authorized.username.clone(),
+            Some(authorized.role.clone()),
+            command.reason_code.clone(),
+        )?;
+        let trigger_outcome = Self::persist_trigger_event(&transaction, &provenance).await?;
+        let trigger_event_id = match &trigger_outcome {
+            FeedbackTriggerWriteOutcome::Inserted(event)
+            | FeedbackTriggerWriteOutcome::AlreadyPresent(event) => event.feedback_trigger_event_id,
+        };
         let stored = StageEntity::find()
             .filter(StageColumn::FeedbackCycleId.eq(cycle_id))
             .filter(StageColumn::EventSequence.eq(1))
@@ -713,28 +1101,29 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
         if let Some(stored) = stored {
             if stored.stage != FeedbackStage::Trigger
                 || stored.event_kind != FeedbackStageEventKind::Triggered
-                || stored.actor.as_deref() != Some(actor.as_str())
-                || stored.reason_code.as_deref() != Some(command.reason_code.as_str())
+                || stored.event_sequence != 1
             {
                 return Err(StorageError::state_conflict(
                     QUANT_FEEDBACK_STAGE_EVENT,
                     Some(stored.feedback_stage_event_id),
-                    "governed trigger retry differs in actor, reason, or trigger semantics",
+                    "cycle sequence one is not a valid lifecycle trigger",
                 )
                 .into());
             }
-            Self::persist_outbox(&transaction, stored.feedback_stage_event_id).await?;
+            Self::persist_trigger_outbox(&transaction, trigger_event_id).await?;
             transaction.commit().await.map_err(StorageError::from)?;
-            return Ok((
-                cycle_outcome,
-                FeedbackStageWriteOutcome::AlreadyPresent(stored),
-            ));
+            return Ok(FeedbackTriggerCommit {
+                cycle: cycle_outcome,
+                stage: FeedbackStageWriteOutcome::AlreadyPresent(stored),
+                trigger: trigger_outcome,
+            });
         }
         let trigger = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
             feedback_cycle_id: cycle_id,
             event_sequence: 1,
             stage: FeedbackStage::Trigger,
             event_kind: FeedbackStageEventKind::Triggered,
+            trigger_family: Some(FeedbackTriggerFamily::Manual),
             research_job_id: None,
             actor: Some(actor),
             reason_code: Some(command.reason_code),
@@ -742,9 +1131,14 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             evidence_hash: None,
             occurred_at: now,
         })?;
-        let event_outcome = Self::persist_stage(&transaction, &trigger).await?;
+        let event_outcome = Self::persist_stage_row(&transaction, &trigger).await?;
+        Self::persist_trigger_outbox(&transaction, trigger_event_id).await?;
         transaction.commit().await.map_err(StorageError::from)?;
-        Ok((cycle_outcome, event_outcome))
+        Ok(FeedbackTriggerCommit {
+            cycle: cycle_outcome,
+            stage: event_outcome,
+            trigger: trigger_outcome,
+        })
     }
 
     async fn find_cycle(
@@ -759,19 +1153,41 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             .transpose()
     }
 
+    async fn list_trigger_events(
+        &self,
+        cycle_id: &FeedbackCycleId,
+    ) -> Result<Vec<FeedbackTriggerEventInfo>, StorageError> {
+        TriggerEntity::find()
+            .filter(TriggerColumn::FeedbackCycleId.eq(*cycle_id))
+            .order_by_asc(TriggerColumn::OccurredAt)
+            .order_by_asc(TriggerColumn::FeedbackTriggerEventId)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .into_iter()
+            .map(Self::trigger_info)
+            .collect()
+    }
+
     async fn page_cycles(
         &self,
         query: FeedbackCycleListQuery,
     ) -> Result<Paginated<FeedbackCycleInfo>, StorageError> {
         let window = PageWindow::from_query(&query);
-        let condition = Condition::all()
-            .add_option(query.status.map(|status| CycleColumn::Status.eq(status)))
-            .add_option(
-                query
-                    .trigger_family
-                    .map(|family| CycleColumn::TriggerFamily.eq(family)),
-            );
+        let condition =
+            Condition::all().add_option(query.status.map(|status| CycleColumn::Status.eq(status)));
         let mut select = CycleEntity::find().filter(condition);
+        if let Some(trigger_family) = query.trigger_family {
+            select = select.filter(
+                CycleColumn::FeedbackCycleId.in_subquery(
+                    TriggerEntity::find()
+                        .select_only()
+                        .column(TriggerColumn::FeedbackCycleId)
+                        .filter(TriggerColumn::TriggerFamily.eq(trigger_family))
+                        .into_query(),
+                ),
+            );
+        }
         if let Some(profile_id) = query.profile_id {
             select = select
                 .join(
@@ -974,7 +1390,7 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
                 )
                 .into());
             }
-            Self::persist_outbox(&transaction, stored.feedback_stage_event_id).await?;
+            Self::persist_stage_outbox(&transaction, stored.feedback_stage_event_id).await?;
             transaction.commit().await.map_err(StorageError::from)?;
             return Ok((
                 FeedbackCycleCasOutcome::AlreadyApplied(current),
@@ -1020,6 +1436,7 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
             event_sequence: command.expected_event_sequence,
             stage: command.stage,
             event_kind: FeedbackStageEventKind::CancellationRequested,
+            trigger_family: None,
             research_job_id: None,
             actor: Some(actor),
             reason_code: Some(command.reason_code.clone()),
@@ -1202,35 +1619,44 @@ impl FeedbackCycleRepository for PgFeedbackCycleRepository {
     }
 
     async fn queue_snapshot(&self) -> Result<FeedbackQueueSnapshot, StorageError> {
+        let transaction = self
+            .db
+            .begin_with_config(
+                Some(IsolationLevel::RepeatableRead),
+                Some(AccessMode::ReadOnly),
+            )
+            .await
+            .map_err(StorageError::from)?;
         let queued = CycleEntity::find()
             .filter(CycleColumn::Status.eq(FeedbackCycleStatus::Queued))
-            .count(&self.db)
+            .count(&transaction)
             .await
             .map_err(StorageError::from)?;
         let running = CycleEntity::find()
             .filter(CycleColumn::Status.eq(FeedbackCycleStatus::Running))
-            .count(&self.db)
+            .count(&transaction)
             .await
             .map_err(StorageError::from)?;
         let pending_outbox = OutboxEntity::find()
             .filter(OutboxColumn::PublishedAt.is_null())
-            .count(&self.db)
+            .count(&transaction)
             .await
             .map_err(StorageError::from)?;
         let oldest_queued_at = CycleEntity::find()
             .filter(CycleColumn::Status.eq(FeedbackCycleStatus::Queued))
             .order_by_asc(CycleColumn::CreatedAt)
-            .one(&self.db)
+            .one(&transaction)
             .await
             .map_err(StorageError::from)?
             .map(|row| row.created_at);
         let oldest_running_at = CycleEntity::find()
             .filter(CycleColumn::Status.eq(FeedbackCycleStatus::Running))
             .order_by_asc(CycleColumn::StartedAt)
-            .one(&self.db)
+            .one(&transaction)
             .await
             .map_err(StorageError::from)?
             .and_then(|row| row.started_at);
+        transaction.commit().await.map_err(StorageError::from)?;
         Ok(FeedbackQueueSnapshot {
             queued,
             running,

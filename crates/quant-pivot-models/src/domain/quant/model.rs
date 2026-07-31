@@ -12,19 +12,15 @@ use crate::{
     enums::{
         common::MarketCategory,
         model::ModelFamily,
-        quant::{
-            ModelRunErrorCode, ModelRunKind, ModelRunStatus, ModelVersionDerivationKind,
-            PublicationStatus,
-        },
+        quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus, ModelVersionDerivationKind},
     },
     types::{
-        BacktestPathSetId, CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId,
-        MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
-        ModelVersionId, ResearchProfileRef, RoleCode, SchemaVersion, TradePolicyArtifactId,
-        TrainingDatasetId, UserId,
+        CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId, MarketSelectionId,
+        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
+        ResearchProfileRef, RoleCode, SchemaVersion, TradePolicyArtifactId, TrainingDatasetId,
+        UserId,
         model_lineage::{ModelVersionDerivation, ModelVersionDerivationError},
         model_metrics::ModelVersionMetrics,
-        model_quality::QualityGateReport,
         model_serving::{ModelServingContract, ModelServingContractError},
         model_spec::{ModelSpecDefinition, ModelSpecThesis},
         model_training::ModelTrainingObjective,
@@ -96,7 +92,7 @@ pub struct NewModelSpec {
     pub reason: String,
 }
 
-/// Published or candidate model version row, enriched with the owning spec's
+/// Immutable model artifact row, enriched with the owning spec's
 /// immutable N:1 identity and research-definition fields from the owning spec.
 ///
 /// `model_family` is **not** a `quant_model_version` column — repository reads
@@ -125,17 +121,12 @@ pub struct ModelVersionInfo {
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
     pub trade_policy_hash: Option<ContentHash>,
-    pub publish_path_set_id: Option<BacktestPathSetId>,
     pub derivation_kind: ModelVersionDerivationKind,
     pub parent_model_version_id: Option<ModelVersionId>,
     pub calibration_artifact_id: Option<CalibrationArtifactId>,
     pub derivation_evidence_hash: Option<ContentHash>,
     pub metrics: ModelVersionMetrics,
     pub training_objective: ModelTrainingObjective,
-    pub quality_gate_report: Option<QualityGateReport>,
-    pub publication_status: PublicationStatus,
-    pub published_at: Option<DateTime<Utc>>,
-    pub retired_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -248,14 +239,9 @@ pub struct NewModelVersion {
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
     pub trade_policy_hash: Option<ContentHash>,
-    pub publish_path_set_id: Option<BacktestPathSetId>,
     pub derivation: ModelVersionDerivation,
     pub metrics: ModelVersionMetrics,
     pub training_objective: ModelTrainingObjective,
-    pub quality_gate_report: Option<QualityGateReport>,
-    pub publication_status: PublicationStatus,
-    pub published_at: Option<DateTime<Utc>>,
-    pub retired_at: Option<DateTime<Utc>>,
 }
 
 impl NewModelVersion {
@@ -334,17 +320,12 @@ impl TryFrom<NewModelVersion> for ActiveModel {
             training_dataset_id: Set(version.training_dataset_id),
             trade_policy_artifact_id: Set(version.trade_policy_artifact_id),
             trade_policy_hash: Set(version.trade_policy_hash),
-            publish_path_set_id: Set(version.publish_path_set_id),
             derivation_kind: Set(derivation_kind),
             parent_model_version_id: Set(parent_model_version_id),
             calibration_artifact_id: Set(calibration_artifact_id),
             derivation_evidence_hash: Set(derivation_evidence_hash),
             metrics: Set(version.metrics),
             training_objective: Set(version.training_objective),
-            quality_gate_report: Set(version.quality_gate_report),
-            publication_status: Set(version.publication_status),
-            published_at: Set(version.published_at),
-            retired_at: Set(version.retired_at),
             created_at: ActiveValue::NotSet,
         })
     }
@@ -355,7 +336,7 @@ impl TryFrom<NewModelVersion> for ActiveModel {
 /// This is intentionally produced by one joined `SeaORM` query: the picker does
 /// not page model versions and then issue one model-spec lookup per row.
 #[derive(Debug, Clone, FromQueryResult)]
-pub struct PublishedModelCatalogInfo {
+pub struct ModelCatalogInfo {
     pub model_version_id: ModelVersionId,
     pub model_spec_id: ModelSpecId,
     pub spec_name: String,
@@ -363,7 +344,6 @@ pub struct PublishedModelCatalogInfo {
     pub artifact_hash: ContentHash,
     pub model_family: ModelFamily,
     pub category_scope: Option<MarketCategory>,
-    pub published_at: Option<DateTime<Utc>>,
 }
 
 /// Training, backtest, shadow, or inference run row.

@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    ExecutionOrderInfo, NewRecommendationExecutionOutcome, OrderIntentInfo, PositionInfo,
-    RecommendationExecutionOutcomeInfo, RecommendationResolutionOutcomeInfo, ReconciliationInfo,
+    ExecutionAttemptOutcomeInfo, ExecutionOrderInfo, NewExecutionAttemptOutcome, OrderIntentInfo,
+    PositionInfo, RecommendationResolutionOutcomeInfo, ReconciliationInfo,
     settlement::SettlementRedeemLotInfo,
 };
 use crate::{
@@ -17,14 +17,11 @@ use crate::{
         execution::{
             ExecutionOrderPhase, PositionLedgerState, ReconciliationResult, VenueOrderStatus,
         },
-        quant::{
-            ExecutionOrderState, RecommendationExecutionNoFillReason,
-            RecommendationExecutionTerminalState,
-        },
+        quant::{ExecutionAttemptNoFillReason, ExecutionAttemptTerminalState, ExecutionOrderState},
     },
     hashing::CanonicalDigest,
     types::{
-        Bps, ContentHash, ExecutionOrderId, MarketId, OrderIntentId, PositionId, Price,
+        ContentHash, ExecutionOrderId, MarketId, OrderIntentId, PositionId, Price,
         RecommendationId, ReconciliationId, SchemaVersion, SettlementRedeemLotId, Shares, TokenId,
         Usd,
     },
@@ -36,7 +33,7 @@ use crate::{
 /// derivation is intentionally pure so input ordering, retry timing, and worker
 /// interleaving cannot alter the sealed outcome.
 #[derive(Debug, Clone)]
-pub struct ExecutionOutcomeSourceGraph {
+pub struct ExecutionAttemptSourceGraph {
     pub recommendation_id: RecommendationId,
     pub market_id: MarketId,
     pub token_id: TokenId,
@@ -50,7 +47,7 @@ pub struct ExecutionOutcomeSourceGraph {
 /// A source may be valid but not yet complete enough to seal a WORM outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionOutcomeDeferredReason {
+pub enum ExecutionAttemptDeferredReason {
     SourceAvailableAfterCutoff,
     EntryOrderMissing,
     EntryOrderNotSubmitted,
@@ -69,17 +66,17 @@ pub enum ExecutionOutcomeDeferredReason {
 
 /// Pure derivation result before database availability is assigned.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExecutionOutcomeDerivation {
-    Ready(Box<NewRecommendationExecutionOutcome>),
-    Deferred(ExecutionOutcomeDeferredReason),
+pub enum ExecutionAttemptDerivation {
+    Ready(Box<NewExecutionAttemptOutcome>),
+    Deferred(ExecutionAttemptDeferredReason),
 }
 
 /// Result of one repository-owned reconciliation attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExecutionOutcomeReconciliationResult {
-    Inserted(RecommendationExecutionOutcomeInfo),
-    AlreadyPresent(RecommendationExecutionOutcomeInfo),
-    Deferred(ExecutionOutcomeDeferredReason),
+pub enum ExecutionAttemptReconciliationResult {
+    Inserted(ExecutionAttemptOutcomeInfo),
+    AlreadyPresent(ExecutionAttemptOutcomeInfo),
+    Deferred(ExecutionAttemptDeferredReason),
 }
 
 /// A canonical resolution fact may legitimately arrive after a frozen pass.
@@ -104,16 +101,59 @@ pub struct RecommendationResolutionReconciliationCandidate {
     pub market_id: MarketId,
 }
 
+/// One leased recommendation-resolution task from the durable `PostgreSQL` queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionOutcomeTaskClaim {
+    pub candidate: RecommendationResolutionReconciliationCandidate,
+    pub attempt_count: i32,
+}
+
 /// One actually submitted terminal intent missing its immutable execution outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecommendationExecutionReconciliationCandidate {
+pub struct ExecutionAttemptReconciliationCandidate {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
 }
 
+/// One leased execution-attempt task from the durable `PostgreSQL` queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionAttemptTaskClaim {
+    pub candidate: ExecutionAttemptReconciliationCandidate,
+    pub attempt_count: i32,
+}
+
+/// Point-in-time attempt-outcome coverage for feedback truth freeze.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionAttemptBarrier {
+    pub cutoff: DateTime<Utc>,
+    pub eligible_unsealed_count: u64,
+    pub sealed_through: DateTime<Utc>,
+}
+
+impl ExecutionAttemptBarrier {
+    #[must_use]
+    pub fn is_complete(self) -> bool {
+        self.eligible_unsealed_count == 0 && self.sealed_through >= self.cutoff
+    }
+}
+
+/// One leased recommendation-rollup task from the durable `PostgreSQL` queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionRollupTaskClaim {
+    pub recommendation_id: RecommendationId,
+    pub attempt_count: i32,
+}
+
+/// Lease-owner settlement for durable reconciliation work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutcomeTaskSettlement {
+    Completed,
+    RetryAfter { delay_secs: u64, error: String },
+}
+
 /// A malformed or contradictory source graph must fail closed.
 #[derive(Debug, Error)]
-pub enum ExecutionOutcomeReconciliationError {
+pub enum ExecutionAttemptReconciliationError {
     #[error("execution source identity mismatch: {detail}")]
     IdentityMismatch { detail: &'static str },
     #[error("execution source graph contains multiple entry orders")]
@@ -146,50 +186,50 @@ pub enum ExecutionOutcomeReconciliationError {
     CanonicalDigest(#[from] CanonicalDigestError),
 }
 
-impl ExecutionOutcomeSourceGraph {
+impl ExecutionAttemptSourceGraph {
     /// Derive a canonical outcome or a stable late-source reason.
     pub fn derive(
         mut self,
-    ) -> Result<ExecutionOutcomeDerivation, ExecutionOutcomeReconciliationError> {
+    ) -> Result<ExecutionAttemptDerivation, ExecutionAttemptReconciliationError> {
         self.normalize_and_validate_graph()?;
         let Some(entry) = self.entry_order()? else {
-            return Ok(ExecutionOutcomeDerivation::Deferred(
-                ExecutionOutcomeDeferredReason::EntryOrderMissing,
+            return Ok(ExecutionAttemptDerivation::Deferred(
+                ExecutionAttemptDeferredReason::EntryOrderMissing,
             ));
         };
         if entry.submitted_at.is_none() {
-            return Ok(ExecutionOutcomeDerivation::Deferred(
-                ExecutionOutcomeDeferredReason::EntryOrderNotSubmitted,
+            return Ok(ExecutionAttemptDerivation::Deferred(
+                ExecutionAttemptDeferredReason::EntryOrderNotSubmitted,
             ));
         }
         if !entry.state.is_terminal() {
-            return Ok(ExecutionOutcomeDerivation::Deferred(
-                ExecutionOutcomeDeferredReason::EntryOrderNotTerminal,
+            return Ok(ExecutionAttemptDerivation::Deferred(
+                ExecutionAttemptDeferredReason::EntryOrderNotTerminal,
             ));
         }
         let Some(entry_reconciliation) = self.reconciliation_for(entry.execution_order_id) else {
-            return Ok(ExecutionOutcomeDerivation::Deferred(
-                ExecutionOutcomeDeferredReason::EntryReconciliationMissing,
+            return Ok(ExecutionAttemptDerivation::Deferred(
+                ExecutionAttemptDeferredReason::EntryReconciliationMissing,
             ));
         };
         if let Some(reason) = deferred_reconciliation_reason(entry_reconciliation.result, true) {
-            return Ok(ExecutionOutcomeDerivation::Deferred(reason));
+            return Ok(ExecutionAttemptDerivation::Deferred(reason));
         }
         if entry_reconciliation.resolved_at.is_none() {
             return Err(
-                ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+                ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                     detail: "terminal entry reconciliation has no resolved_at",
                 },
             );
         }
 
         let filled_shares = entry_reconciliation.venue_filled_shares.ok_or(
-            ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+            ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                 detail: "terminal entry reconciliation has no filled-share fact",
             },
         )?;
         let terminal_state = terminal_state(entry, entry_reconciliation.result, filled_shares)?;
-        if terminal_state == RecommendationExecutionTerminalState::Unfilled {
+        if terminal_state == ExecutionAttemptTerminalState::Unfilled {
             return self.derive_unfilled(entry, entry_reconciliation, filled_shares);
         }
         self.derive_filled(entry, entry_reconciliation, terminal_state, filled_shares)
@@ -214,16 +254,16 @@ impl ExecutionOutcomeSourceGraph {
         observed_at
     }
 
-    fn normalize_and_validate_graph(&mut self) -> Result<(), ExecutionOutcomeReconciliationError> {
+    fn normalize_and_validate_graph(&mut self) -> Result<(), ExecutionAttemptReconciliationError> {
         if self.intent.recommendation_id != self.recommendation_id {
-            return Err(ExecutionOutcomeReconciliationError::IdentityMismatch {
+            return Err(ExecutionAttemptReconciliationError::IdentityMismatch {
                 detail: "intent recommendation differs from requested recommendation",
             });
         }
         if self.intent.entry_order_json.token_id != self.token_id
             || self.intent.entry_order_json.side != Side::Buy
         {
-            return Err(ExecutionOutcomeReconciliationError::IdentityMismatch {
+            return Err(ExecutionAttemptReconciliationError::IdentityMismatch {
                 detail: "intent entry order differs from the recommendation token",
             });
         }
@@ -241,7 +281,7 @@ impl ExecutionOutcomeSourceGraph {
         });
         for orders in self.orders.windows(2) {
             if orders[0].execution_order_id == orders[1].execution_order_id {
-                return Err(ExecutionOutcomeReconciliationError::DuplicateOrder {
+                return Err(ExecutionAttemptReconciliationError::DuplicateOrder {
                     execution_order_id: orders[0].execution_order_id,
                 });
             }
@@ -249,7 +289,7 @@ impl ExecutionOutcomeSourceGraph {
         for reconciliations in self.reconciliations.windows(2) {
             if reconciliations[0].execution_order_id == reconciliations[1].execution_order_id {
                 return Err(
-                    ExecutionOutcomeReconciliationError::DuplicateReconciliation {
+                    ExecutionAttemptReconciliationError::DuplicateReconciliation {
                         execution_order_id: reconciliations[0].execution_order_id,
                     },
                 );
@@ -260,7 +300,7 @@ impl ExecutionOutcomeSourceGraph {
                 order.execution_order_id == reconciliation.execution_order_id
                     && order.order_intent_id == reconciliation.order_intent_id
             }) {
-                return Err(ExecutionOutcomeReconciliationError::OrphanReconciliation {
+                return Err(ExecutionAttemptReconciliationError::OrphanReconciliation {
                     reconciliation_id: reconciliation.reconciliation_id,
                 });
             }
@@ -270,14 +310,14 @@ impl ExecutionOutcomeSourceGraph {
 
     fn entry_order(
         &self,
-    ) -> Result<Option<&ExecutionOrderInfo>, ExecutionOutcomeReconciliationError> {
+    ) -> Result<Option<&ExecutionOrderInfo>, ExecutionAttemptReconciliationError> {
         let mut entries = self
             .orders
             .iter()
             .filter(|order| order.order_phase == ExecutionOrderPhase::Entry);
         let entry = entries.next();
         if entries.next().is_some() {
-            return Err(ExecutionOutcomeReconciliationError::MultipleEntryOrders);
+            return Err(ExecutionAttemptReconciliationError::MultipleEntryOrders);
         }
         Ok(entry)
     }
@@ -296,7 +336,7 @@ impl ExecutionOutcomeSourceGraph {
         entry: &ExecutionOrderInfo,
         reconciliation: &ReconciliationInfo,
         filled_shares: Shares,
-    ) -> Result<ExecutionOutcomeDerivation, ExecutionOutcomeReconciliationError> {
+    ) -> Result<ExecutionAttemptDerivation, ExecutionAttemptReconciliationError> {
         if !filled_shares.is_zero()
             || self.position.is_some()
             || self
@@ -305,20 +345,20 @@ impl ExecutionOutcomeSourceGraph {
                 .any(|order| order.order_phase == ExecutionOrderPhase::Exit)
         {
             return Err(
-                ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+                ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                     detail: "unfilled entry contains position or exit economics",
                 },
             );
         }
         let terminal_at = reconciliation.resolved_at.ok_or(
-            ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+            ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                 detail: "unfilled reconciliation has no terminal time",
             },
         )?;
         let no_fill_reason = no_fill_reason(entry, reconciliation.result)?;
         let (source_checkpoint_hash, execution_fact_hash) = self.source_hashes()?;
-        Ok(ExecutionOutcomeDerivation::Ready(Box::new(
-            NewRecommendationExecutionOutcome {
+        Ok(ExecutionAttemptDerivation::Ready(Box::new(
+            NewExecutionAttemptOutcome {
                 recommendation_id: self.recommendation_id,
                 order_intent_id: self.intent.order_intent_id,
                 entry_execution_order_id: entry.execution_order_id,
@@ -328,7 +368,7 @@ impl ExecutionOutcomeSourceGraph {
                 market_id: self.market_id.clone(),
                 token_id: self.token_id.clone(),
                 runtime_mode: self.intent.runtime_mode,
-                terminal_state: RecommendationExecutionTerminalState::Unfilled,
+                terminal_state: ExecutionAttemptTerminalState::Unfilled,
                 no_fill_reason: Some(no_fill_reason),
                 entry_order_state: entry.state,
                 requested_shares: entry.shares,
@@ -344,8 +384,6 @@ impl ExecutionOutcomeSourceGraph {
                 exit_at: None,
                 settlement_payout_usd: None,
                 realized_pnl_usd: None,
-                max_adverse_excursion_bps: None,
-                max_favorable_excursion_bps: None,
                 terminal_at,
                 source_checkpoint_hash,
                 execution_fact_hash,
@@ -358,49 +396,49 @@ impl ExecutionOutcomeSourceGraph {
         &self,
         entry: &ExecutionOrderInfo,
         entry_reconciliation: &ReconciliationInfo,
-        terminal_state: RecommendationExecutionTerminalState,
+        terminal_state: ExecutionAttemptTerminalState,
         filled_shares: Shares,
-    ) -> Result<ExecutionOutcomeDerivation, ExecutionOutcomeReconciliationError> {
+    ) -> Result<ExecutionAttemptDerivation, ExecutionAttemptReconciliationError> {
         let Some(position) = &self.position else {
-            return Ok(ExecutionOutcomeDerivation::Deferred(
-                ExecutionOutcomeDeferredReason::FilledPositionMissing,
+            return Ok(ExecutionAttemptDerivation::Deferred(
+                ExecutionAttemptDeferredReason::FilledPositionMissing,
             ));
         };
         if !matches!(
             position.state,
             PositionLedgerState::Closed | PositionLedgerState::Settled
         ) {
-            return Ok(ExecutionOutcomeDerivation::Deferred(
-                ExecutionOutcomeDeferredReason::PositionNotTerminal,
+            return Ok(ExecutionAttemptDerivation::Deferred(
+                ExecutionAttemptDeferredReason::PositionNotTerminal,
             ));
         }
         validate_position_identity(self, position)?;
         let terminal_at = position.closed_at.ok_or(
-            ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+            ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                 detail: "terminal position has no closed_at",
             },
         )?;
         let entry_avg_price = entry_reconciliation.venue_avg_price.ok_or(
-            ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+            ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                 detail: "filled entry reconciliation has no average price",
             },
         )?;
         let exit_aggregate = match self.derive_exit_aggregate()? {
             ExitAggregateDerivation::Ready(aggregate) => aggregate,
             ExitAggregateDerivation::Deferred(reason) => {
-                return Ok(ExecutionOutcomeDerivation::Deferred(reason));
+                return Ok(ExecutionAttemptDerivation::Deferred(reason));
             }
         };
         if position.state == PositionLedgerState::Settled && self.settlement_lot.is_none() {
-            return Ok(ExecutionOutcomeDerivation::Deferred(
-                ExecutionOutcomeDeferredReason::SettlementLotMissing,
+            return Ok(ExecutionAttemptDerivation::Deferred(
+                ExecutionAttemptDeferredReason::SettlementLotMissing,
             ));
         }
         let settlement_shares = self.settlement_shares(position)?;
         let total_terminal_shares = exit_aggregate.shares + settlement_shares;
         if total_terminal_shares != filled_shares {
             return Err(
-                ExecutionOutcomeReconciliationError::UnbalancedTerminalShares {
+                ExecutionAttemptReconciliationError::UnbalancedTerminalShares {
                     entry: filled_shares,
                     exchange_exit: exit_aggregate.shares,
                     settlement: settlement_shares,
@@ -410,14 +448,9 @@ impl ExecutionOutcomeSourceGraph {
         validate_terminal_route(position.state, &exit_aggregate, settlement_shares)?;
 
         let (source_checkpoint_hash, execution_fact_hash) = self.source_hashes()?;
-        let max_favorable_excursion_bps = self
-            .intent
-            .peak_mark_price
-            .and_then(|peak| Bps::spread(peak, entry_avg_price))
-            .map(|spread| spread.max(Bps::ZERO));
         let has_exchange_exit = exit_aggregate.shares.is_positive();
-        Ok(ExecutionOutcomeDerivation::Ready(Box::new(
-            NewRecommendationExecutionOutcome {
+        Ok(ExecutionAttemptDerivation::Ready(Box::new(
+            NewExecutionAttemptOutcome {
                 recommendation_id: self.recommendation_id,
                 order_intent_id: self.intent.order_intent_id,
                 entry_execution_order_id: entry.execution_order_id,
@@ -447,8 +480,6 @@ impl ExecutionOutcomeSourceGraph {
                 exit_at: has_exchange_exit.then_some(exit_aggregate.last_fill_at),
                 settlement_payout_usd: self.settlement_lot.as_ref().map(|lot| lot.payout_usd),
                 realized_pnl_usd: Some(position.realized_pnl_usd),
-                max_adverse_excursion_bps: None,
-                max_favorable_excursion_bps,
                 terminal_at,
                 source_checkpoint_hash,
                 execution_fact_hash,
@@ -459,7 +490,7 @@ impl ExecutionOutcomeSourceGraph {
 
     fn derive_exit_aggregate(
         &self,
-    ) -> Result<ExitAggregateDerivation, ExecutionOutcomeReconciliationError> {
+    ) -> Result<ExitAggregateDerivation, ExecutionAttemptReconciliationError> {
         let mut shares = Shares::ZERO;
         let mut weighted_price = Decimal::ZERO;
         let mut fee = Some(Usd::ZERO);
@@ -471,37 +502,37 @@ impl ExecutionOutcomeSourceGraph {
         {
             if !order.state.is_terminal() {
                 return Ok(ExitAggregateDerivation::Deferred(
-                    ExecutionOutcomeDeferredReason::ExitOrderNotTerminal,
+                    ExecutionAttemptDeferredReason::ExitOrderNotTerminal,
                 ));
             }
             let Some(reconciliation) = self.reconciliation_for(order.execution_order_id) else {
                 return Ok(ExitAggregateDerivation::Deferred(
-                    ExecutionOutcomeDeferredReason::ExitReconciliationMissing,
+                    ExecutionAttemptDeferredReason::ExitReconciliationMissing,
                 ));
             };
             if let Some(reason) = deferred_reconciliation_reason(reconciliation.result, false) {
                 return Ok(ExitAggregateDerivation::Deferred(reason));
             }
             let resolved_at = reconciliation.resolved_at.ok_or(
-                ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+                ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                     detail: "terminal exit reconciliation has no resolved_at",
                 },
             )?;
             match reconciliation.result {
                 ReconciliationResult::Filled | ReconciliationResult::PartiallyFilled => {
                     let filled = reconciliation.venue_filled_shares.ok_or(
-                        ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+                        ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                             detail: "filled exit reconciliation has no share fact",
                         },
                     )?;
                     let avg_price = reconciliation.venue_avg_price.ok_or(
-                        ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+                        ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                             detail: "filled exit reconciliation has no average price",
                         },
                     )?;
                     if !filled.is_positive() {
                         return Err(
-                            ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+                            ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                                 detail: "filled exit reconciliation has non-positive shares",
                             },
                         );
@@ -539,11 +570,11 @@ impl ExecutionOutcomeSourceGraph {
     fn settlement_shares(
         &self,
         position: &PositionInfo,
-    ) -> Result<Shares, ExecutionOutcomeReconciliationError> {
+    ) -> Result<Shares, ExecutionAttemptReconciliationError> {
         match position.state {
             PositionLedgerState::Settled => {
                 let lot = self.settlement_lot.as_ref().ok_or(
-                    ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+                    ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                         detail: "settled position has no settlement lot",
                     },
                 )?;
@@ -551,7 +582,7 @@ impl ExecutionOutcomeSourceGraph {
                     || lot.order_intent_id != self.intent.order_intent_id
                     || lot.token_id != self.token_id
                 {
-                    return Err(ExecutionOutcomeReconciliationError::IdentityMismatch {
+                    return Err(ExecutionAttemptReconciliationError::IdentityMismatch {
                         detail: "settlement lot differs from the terminal position",
                     });
                 }
@@ -560,7 +591,7 @@ impl ExecutionOutcomeSourceGraph {
             PositionLedgerState::Closed => {
                 if self.settlement_lot.is_some() {
                     return Err(
-                        ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+                        ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                             detail: "closed position unexpectedly has a settlement lot",
                         },
                     );
@@ -573,7 +604,7 @@ impl ExecutionOutcomeSourceGraph {
 
     fn source_hashes(
         &self,
-    ) -> Result<(ContentHash, ContentHash), ExecutionOutcomeReconciliationError> {
+    ) -> Result<(ContentHash, ContentHash), ExecutionAttemptReconciliationError> {
         let checkpoints = SourceCheckpointView::from_graph(self);
         let source_checkpoint_hash = CanonicalDigest::content_hash_json(&checkpoints)?;
         let execution_fact_hash =
@@ -583,14 +614,14 @@ impl ExecutionOutcomeSourceGraph {
 }
 
 fn validate_order_identity(
-    graph: &ExecutionOutcomeSourceGraph,
+    graph: &ExecutionAttemptSourceGraph,
     order: &ExecutionOrderInfo,
-) -> Result<(), ExecutionOutcomeReconciliationError> {
+) -> Result<(), ExecutionAttemptReconciliationError> {
     if order.order_intent_id != graph.intent.order_intent_id
         || order.market_id != graph.market_id
         || order.token_id != graph.token_id
     {
-        return Err(ExecutionOutcomeReconciliationError::IdentityMismatch {
+        return Err(ExecutionAttemptReconciliationError::IdentityMismatch {
             detail: "execution order differs from the submitted intent",
         });
     }
@@ -604,7 +635,7 @@ fn validate_order_identity(
         || order.prepared_order_json.expected_filled_shares != order.shares
         || order.prepared_order_json.worst_price != order.price
     {
-        return Err(ExecutionOutcomeReconciliationError::IdentityMismatch {
+        return Err(ExecutionAttemptReconciliationError::IdentityMismatch {
             detail: "execution order differs from its prepared venue order",
         });
     }
@@ -615,24 +646,24 @@ fn terminal_state(
     entry: &ExecutionOrderInfo,
     result: ReconciliationResult,
     filled_shares: Shares,
-) -> Result<RecommendationExecutionTerminalState, ExecutionOutcomeReconciliationError> {
+) -> Result<ExecutionAttemptTerminalState, ExecutionAttemptReconciliationError> {
     match (entry.state, result) {
         (
             ExecutionOrderState::Failed | ExecutionOrderState::Cancelled,
             ReconciliationResult::NotFilled | ReconciliationResult::Cancelled,
-        ) if filled_shares.is_zero() => Ok(RecommendationExecutionTerminalState::Unfilled),
+        ) if filled_shares.is_zero() => Ok(ExecutionAttemptTerminalState::Unfilled),
         (ExecutionOrderState::PartiallyFilled, ReconciliationResult::PartiallyFilled)
             if filled_shares.is_positive() && filled_shares < entry.shares =>
         {
-            Ok(RecommendationExecutionTerminalState::PartiallyFilled)
+            Ok(ExecutionAttemptTerminalState::PartiallyFilled)
         }
         (ExecutionOrderState::Filled, ReconciliationResult::Filled)
             if filled_shares == entry.shares =>
         {
-            Ok(RecommendationExecutionTerminalState::FullyFilled)
+            Ok(ExecutionAttemptTerminalState::FullyFilled)
         }
         _ => Err(
-            ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+            ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                 detail: "entry order, reconciliation result, and filled shares disagree",
             },
         ),
@@ -642,18 +673,16 @@ fn terminal_state(
 fn no_fill_reason(
     entry: &ExecutionOrderInfo,
     result: ReconciliationResult,
-) -> Result<RecommendationExecutionNoFillReason, ExecutionOutcomeReconciliationError> {
+) -> Result<ExecutionAttemptNoFillReason, ExecutionAttemptReconciliationError> {
     match entry.venue_status {
-        Some(VenueOrderStatus::Rejected) => Ok(RecommendationExecutionNoFillReason::VenueRejected),
-        Some(VenueOrderStatus::Cancelled) => {
-            Ok(RecommendationExecutionNoFillReason::VenueCancelled)
-        }
-        Some(VenueOrderStatus::Expired) => Ok(RecommendationExecutionNoFillReason::VenueExpired),
+        Some(VenueOrderStatus::Rejected) => Ok(ExecutionAttemptNoFillReason::VenueRejected),
+        Some(VenueOrderStatus::Cancelled) => Ok(ExecutionAttemptNoFillReason::VenueCancelled),
+        Some(VenueOrderStatus::Expired) => Ok(ExecutionAttemptNoFillReason::VenueExpired),
         None if result == ReconciliationResult::NotFilled => {
-            Ok(RecommendationExecutionNoFillReason::ReconciledNotFilled)
+            Ok(ExecutionAttemptNoFillReason::ReconciledNotFilled)
         }
         _ => Err(
-            ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+            ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                 detail: "unfilled entry has no supported terminal venue reason",
             },
         ),
@@ -663,19 +692,19 @@ fn no_fill_reason(
 const fn deferred_reconciliation_reason(
     result: ReconciliationResult,
     entry: bool,
-) -> Option<ExecutionOutcomeDeferredReason> {
+) -> Option<ExecutionAttemptDeferredReason> {
     match (entry, result) {
         (true, ReconciliationResult::Pending) => {
-            Some(ExecutionOutcomeDeferredReason::EntryReconciliationPending)
+            Some(ExecutionAttemptDeferredReason::EntryReconciliationPending)
         }
         (true, ReconciliationResult::Unresolvable) => {
-            Some(ExecutionOutcomeDeferredReason::EntryReconciliationUnresolvable)
+            Some(ExecutionAttemptDeferredReason::EntryReconciliationUnresolvable)
         }
         (false, ReconciliationResult::Pending) => {
-            Some(ExecutionOutcomeDeferredReason::ExitReconciliationPending)
+            Some(ExecutionAttemptDeferredReason::ExitReconciliationPending)
         }
         (false, ReconciliationResult::Unresolvable) => {
-            Some(ExecutionOutcomeDeferredReason::ExitReconciliationUnresolvable)
+            Some(ExecutionAttemptDeferredReason::ExitReconciliationUnresolvable)
         }
         (
             _,
@@ -688,15 +717,15 @@ const fn deferred_reconciliation_reason(
 }
 
 fn validate_position_identity(
-    graph: &ExecutionOutcomeSourceGraph,
+    graph: &ExecutionAttemptSourceGraph,
     position: &PositionInfo,
-) -> Result<(), ExecutionOutcomeReconciliationError> {
+) -> Result<(), ExecutionAttemptReconciliationError> {
     if position.order_intent_id != graph.intent.order_intent_id
         || position.execution_account_id != graph.intent.execution_account_id
         || position.market_id != graph.market_id
         || position.token_id != graph.token_id
     {
-        return Err(ExecutionOutcomeReconciliationError::IdentityMismatch {
+        return Err(ExecutionAttemptReconciliationError::IdentityMismatch {
             detail: "position identity differs from the submitted intent",
         });
     }
@@ -707,7 +736,7 @@ fn validate_terminal_route(
     state: PositionLedgerState,
     exchange_exit: &ExitAggregate,
     settlement_shares: Shares,
-) -> Result<(), ExecutionOutcomeReconciliationError> {
+) -> Result<(), ExecutionAttemptReconciliationError> {
     match state {
         PositionLedgerState::Closed
             if exchange_exit.shares.is_positive() && settlement_shares.is_zero() =>
@@ -719,7 +748,7 @@ fn validate_terminal_route(
         | PositionLedgerState::Closing
         | PositionLedgerState::Closed
         | PositionLedgerState::Settled => Err(
-            ExecutionOutcomeReconciliationError::ContradictoryTerminalSource {
+            ExecutionAttemptReconciliationError::ContradictoryTerminalSource {
                 detail: "position terminal state does not match exchange/settlement sources",
             },
         ),
@@ -735,7 +764,7 @@ struct ExitAggregate {
 
 enum ExitAggregateDerivation {
     Ready(ExitAggregate),
-    Deferred(ExecutionOutcomeDeferredReason),
+    Deferred(ExecutionAttemptDeferredReason),
 }
 
 #[derive(Serialize)]
@@ -751,7 +780,7 @@ struct SourceCheckpointView {
 }
 
 impl SourceCheckpointView {
-    fn from_graph(graph: &ExecutionOutcomeSourceGraph) -> Self {
+    fn from_graph(graph: &ExecutionAttemptSourceGraph) -> Self {
         Self {
             contract: "recommendation_execution_source_checkpoint_v1",
             recommendation_id: graph.recommendation_id,
@@ -799,7 +828,7 @@ struct ExecutionFactGraphView<'a> {
 }
 
 impl<'a> ExecutionFactGraphView<'a> {
-    const fn from_graph(graph: &'a ExecutionOutcomeSourceGraph) -> Self {
+    const fn from_graph(graph: &'a ExecutionAttemptSourceGraph) -> Self {
         Self {
             contract: "recommendation_execution_fact_graph_v1",
             recommendation_id: graph.recommendation_id,

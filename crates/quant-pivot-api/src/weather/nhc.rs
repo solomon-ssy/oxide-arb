@@ -306,12 +306,16 @@ fn parse_hurdat2(
         if fields[0] != target {
             continue;
         }
-        let mut reports = rows
-            .into_iter()
-            .filter_map(|row| {
-                map_hurdat_row(row, basin, &target, published_at, available_at).transpose()
-            })
-            .collect::<QuantResult<Vec<_>>>()?;
+        let mut reports = Vec::with_capacity(rows.len());
+        for row in rows {
+            reports.extend(map_hurdat_row(
+                row,
+                basin,
+                &target,
+                published_at,
+                available_at,
+            )?);
+        }
         reports.sort_by_key(|report| report.observed_at);
         return Ok(Some(reports));
     }
@@ -324,7 +328,7 @@ fn map_hurdat_row(
     storm_id: &str,
     published_at: DateTime<Utc>,
     available_at: DateTime<Utc>,
-) -> QuantResult<Option<WeatherObservationReport>> {
+) -> QuantResult<Vec<WeatherObservationReport>> {
     let fields = split_csv_line(row);
     if fields.len() < 8 {
         return Err(parse_error("NHC HURDAT2", "best-track row has fewer than 8 fields").into());
@@ -336,7 +340,7 @@ fn map_hurdat_row(
         .parse::<i16>()
         .map_err(|error| parse_error("NHC HURDAT2", error.to_string()))?;
     if intensity < 0 {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     if intensity > 250 {
         return Err(parse_error("NHC HURDAT2", "intensity exceeds 250 knots").into());
@@ -345,8 +349,8 @@ fn map_hurdat_row(
         NaiveDateTime::parse_from_str(&format!("{} {}", fields[0], fields[1]), "%Y%m%d %H%M")
             .map(|value| value.and_utc())
             .map_err(|error| parse_error("NHC HURDAT2", error.to_string()))?;
-    let report_hash = CanonicalDigest::content_hash_bytes(row.as_bytes());
-    Ok(Some(WeatherObservationReport {
+    let report_hash = CanonicalDigest::content_hash_json(&("nhc_best_track_v2", row))?;
+    let intensity_report = WeatherObservationReport {
         source_id: DomainSourceId::nhc_hurdat2(),
         instrument_key: DomainInstrumentKey::nhc_hurdat2(basin.as_str(), storm_id),
         subject_key: storm_id.to_owned(),
@@ -362,7 +366,17 @@ fn map_hurdat_row(
         available_at,
         report_hash,
         raw_report: row.to_owned(),
-    }))
+    };
+    if fields[2] != "L" {
+        return Ok(vec![intensity_report]);
+    }
+    let landfall_hash = CanonicalDigest::content_hash_json(&("nhc_best_track_landfall_v1", row))?;
+    let landfall_report = WeatherObservationReport {
+        variable: WeatherVariable::CycloneLandfallIntensity,
+        report_hash: landfall_hash,
+        ..intensity_report.clone()
+    };
+    Ok(vec![intensity_report, landfall_report])
 }
 
 fn split_csv_line(line: &str) -> Vec<&str> {
@@ -426,6 +440,7 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
         config::NhcSourceConfig, domain::data_plane::WeatherObservationReportKind,
+        types::WeatherVariable,
     };
     use rust_decimal_macros::dec;
     use wiremock::{
@@ -515,15 +530,27 @@ mod tests {
         })
         .expect("source");
         let track = source
-            .hurdat2_storm(NhcBasin::Atlantic, "AL092021", Utc::now())
+            .hurdat2_storm(
+                NhcBasin::Atlantic,
+                "AL092021",
+                Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0)
+                    .single()
+                    .expect("fixture availability"),
+            )
             .await
             .expect("HURDAT2")
             .expect("storm");
-        assert_eq!(track.reports.len(), 2);
+        assert_eq!(track.reports.len(), 3);
         assert_eq!(track.reports[1].value, dec!(130));
         assert_eq!(
             track.reports[1].report_kind,
             WeatherObservationReportKind::NhcBestTrack
         );
+        assert_eq!(
+            track.reports[2].variable,
+            WeatherVariable::CycloneLandfallIntensity
+        );
+        assert_eq!(track.reports[2].value, dec!(130));
+        assert_ne!(track.reports[1].report_hash, track.reports[2].report_hash);
     }
 }

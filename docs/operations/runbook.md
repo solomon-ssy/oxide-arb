@@ -473,7 +473,7 @@ Postgres、ClickHouse、Redis 探针应为 `healthy`。
 **需要处理的 WARN/ERROR**：
 
 - `failed to persist markets` — Postgres upsert 失败，目录不完整。
-- `report generation failed … active_model_version_id is not configured` — 尚无已发布模型（冷启动预期；见 §8.0 关 schedule）。
+- `report generation failed … active_model_version_id is not configured` — 目标 route 尚无 Champion（冷启动预期；见 §8.0 关 schedule）。
 
 #### 6.4.4 用 Prometheus 指标确认（可选）
 
@@ -516,7 +516,7 @@ LIMIT 10;
 | 参数 | 默认值 | 影响 |
 |------|--------|------|
 | `ModelSpec.prediction_horizon_secs` / `training_contract.target_label_horizon_secs` | 示例 `86400`（24h） | 冻结进 ModelSpec；训练标签需样本 `decision_at` 之后 24h 内有 forward truth |
-| `ModelEvaluationSpec.min_sample_count` | `500` | publish 门禁：回测/数据集样本数 |
+| `ModelEvaluationSpec.min_sample_count` | `500` | Candidate/route-governance 门禁：回测与数据集样本数 |
 | `ModelEvaluationSpec.min_label_coverage` | `0.70` | 标签覆盖率 |
 | `report_schedule.schedules[default_interval].cadence` | 每 `300`s | 与训练无关；冷启动无模型时会 ERROR |
 
@@ -526,7 +526,7 @@ LIMIT 10;
 2. **L2 可用于短窗 plan**：连续 ingest **≥ 几小时** 后可对最近 1–4 小时窗口做 plan，看 `planned_samples`。
 3. **标签成熟**：窗口内每个样本的标签要求 `decision_at + horizon` 之前的 forward truth 已 ingest。
    因此 **`window_end` 应 ≤ `now - max(horizons_secs)`**（通常 ≤ now − 24h），否则大量 `labels_not_mature`。
-4. **首次 publish**：在 label 成熟的前提下，往往还需要 **≥ 7–14 天** 连续 ingest + 足够跨市场样本，才能通过默认 `min_sample_count=500`；Quant 可在授权下临时调低 gate 做 bootstrap。
+4. **首次 Champion bootstrap**：在 label 成熟的前提下，往往还需要 **≥ 7–14 天** 连续 ingest + 足够跨市场样本，才能通过默认 `min_sample_count=500`。不得临时调低统计门来绕过 bootstrap gate。
 
 先用 **plan 干跑** 看数量，再决定 build（§8.2）：
 
@@ -752,7 +752,7 @@ kill switch、`SettlementWritePolicy` 与 money-path admission 控制。
 **出报告 ≠ 只要进程跑起来。** 当前实现中，每次报告构建（定时或 ad-hoc）在选市之前会 **fail-closed** 检查：
 
 1. **feature parity latch 已 clear** — 未初始化也是 open，新报告在任何模型/选市逻辑前就会被拒绝。
-2. **`model_routing.model.active_model_version_id` 已配置** — 指向 registry 中 **`PublicationStatus::Published`** 的 boot v1 模型 artifact，且 artifact 可加载。
+2. **目标 Buy route 已有 Champion** — `model_routing` 的 Pooled/Crypto/Weather 指针由唯一 route-governance transaction 建立，指向可加载的 immutable `ModelVersion`；模型行本身没有全局 `Published` serving 状态。
 3. **启用因子已注册且 Published** — 因子平面 fail-closed 要求每个启用因子在 `quant_factor_definition` 中 **存在且为 `Published`**；**未注册**（从未 register）或仍为 `Draft` 都会阻断（报错 `enabled definitions must be Published … must first be registered via POST /research/factors/register`）。因子定义**不再由报告热路径隐式注册**，必须显式走 register。
 4. **数据 ingest 就绪** — `operational_phase` 为 `operational`（或仅收紧型 degrade 仍允许报告）；实时 book 满足 data-quality 阈值。
 5. **账户可读** — 所有 mode 下 CLOB collateral + Data API positions 可用（ReportOnly 不是 dry-run）。
@@ -769,18 +769,18 @@ kill switch、`SettlementWritePolicy` 与 money-path admission 控制。
 3. **创建 model_spec**（`POST /api/research/model-specs`）—— 离线研究生命周期的根，dataset/train 都要引用它。
 4. **注册并发布启用因子**（`POST /api/research/factors/register` → `POST /api/research/factors/publish-batch`）—— 满足报告因子平面的 fail-closed 门。
 5. 连续 ingest 直至 training-dataset **plan** 的 `planned_samples` 足够。
-6. 走 **train → backtest/calibration → CPCV → bind path set → subject-bound parity → governed latch acknowledge → publish** 治理链。
-7. 保持 schedule 关闭，先做 ad-hoc canary + sampled/full parity；全部通过后才开启 schedule 和新入场（§7.5）。
+6. 走 **train → calibration derivation → backtest + CPCV → subject-bound frozen parity → governed latch acknowledge → first-Champion bootstrap** 治理链。
+7. 保持 schedule 关闭，先做 ad-hoc canary + sampled/full parity；全部通过后才开启 schedule 和新入场（§8.1–§8.4）。
 
 **训练集与报告的关系**：
 
 | 问题 | 答案 |
 |------|------|
-| 出报告是否必须有训练集？ | **不直接需要**；报告读的是 **已发布模型 artifact**，不是训练集 Parquet。 |
-| 那模型从哪来？ | 标准路径是 **model_spec → 训练集 build → train → backtest → publish**。没有 publish 就没有 active model。 |
+| 出报告是否必须有训练集？ | **不直接读取训练集**；报告读 route Champion 的 immutable model artifact，但 artifact 的 serving contract 必须内容寻址绑定训练集。 |
+| 那模型从哪来？ | 标准路径是 **model_spec → 训练集 build → train → calibration/CPCV/backtest → route bootstrap 或 feedback activation**。没有 Champion route 就没有 active model。 |
 | model_spec 从哪来？ | **`POST /api/research/model-specs`**（`materialization:create`，UI: 研究 → 模型 → 新建模型规格）。这是唯一的生产创建入口——**没有 seed、没有 DBA 预置**。 |
 | 因子定义从哪来？ | **`POST /api/research/factors/register`** 幂等把启用因子集登记为 `Draft`，再 `publish-batch` 发布。dataset build 只要求因子**启用**（不要求 Published），但**报告**要求 Published。 |
-| 能否跳过训练手动指模型？ | 只能在 `model_routing` picker 中选择当前 boot 契约下从 frozen v1 dataset 训练、并已通过 artifact/full-parity/质量门的 **Published** artifact；空库首次激活不存在可复用旧版本。 |
+| 能否跳过训练手动指模型？ | 不能。服务端只接受当前 boot 契约下从 frozen v1 dataset 训练、通过 immutable calibration/CPCV/backtest/full-parity/质量门的 candidate；客户端不能直接编辑 route pointer。 |
 
 ### 8.0.1 ClickHouse boot schema 门禁
 
@@ -810,12 +810,12 @@ flowchart TD
     ingest --> plan[training-datasets/plan]
     plan --> build[training-datasets/build]
     build --> train[models/train]
-    train --> validate[backtest + calibration + CPCV]
-    validate --> bind[bind publish path set]
-    bind --> proof[subject-bound full parity]
+    train --> calibrate[fit calibrator + derive calibrated ModelVersion]
+    calibrate --> validate[backtest + CPCV]
+    validate --> proof[subject-bound frozen full parity]
     proof --> ack[governed latch acknowledge]
-    ack --> publish[models/publish]
-    publish --> canary[ad-hoc canary + sampled/full parity]
+    ack --> bootstrap[first-Champion route bootstrap]
+    bootstrap --> canary[ad-hoc canary + sampled/full parity]
     canary --> enable[开启 schedule 和新入场]
     enable --> report[RecommendationReport 发布]
 ```
@@ -858,7 +858,7 @@ SPEC_ID=$(
 )
 ```
 
-> `model_family` 取 `qp_model_family` 的 wire 值：`weighted_factor`（买方排序器，冷启动首选）、`hold_vs_exit_weighted`（卖方/退出，需先有平仓样本才可训练）、`classical_*`（需成熟 settlement label）。ModelSpec 创建后即为 append-only、内容寻址的研究定义；发布状态仅属于训练后的 ModelVersion。UI 入口：研究 → 模型 → **新建模型规格**。要建几个 spec、同一 WeightedFactor 何时拆线，见 [model-spec-catalog-guide.md](./model-spec-catalog-guide.md)。
+> `model_family` 取 `qp_model_family` 的 wire 值：`weighted_factor`（买方排序器，冷启动首选）、`hold_vs_exit_weighted`（卖方/退出，需先有平仓样本才可训练）、`classical_*`（需成熟 settlement label）。ModelSpec 创建后即为 append-only、内容寻址的研究定义；训练后的 ModelVersion 也是 immutable artifact，是否为 `Inactive`/`Champion` 只按具体 route generation 派生。UI 入口：研究 → 模型 → **新建模型规格**。要建几个 spec、同一 WeightedFactor 何时拆线，见 [model-spec-catalog-guide.md](./model-spec-catalog-guide.md)。
 
 **Step 0.6 — 注册并发布启用因子**
 
@@ -911,7 +911,7 @@ DECISION_POLICY_SNAPSHOT_ID=$(
 2. **Build**（同 plan body，加上 plan 返回的 `training_dataset_id`）— 见 §6.4.6 build 示例。
 3. **Poll** `GET /api/research/training-datasets/{id}` 直到 `status` 为终端态。Trainer 只吃 **`ready`** 状态。
 
-**Step 2 — Train → Backtest/Calibration → CPCV → Bind → Parity → Publish**
+**Step 2 — Train → Calibration derivation → Backtest/CPCV → Parity → Bootstrap**
 
 Train 只接受 frozen dataset ID + reason；model family、target、horizon、decision policy snapshot 和 input contract 全部从 dataset/model spec 冻结推导。返回是 `202 Accepted` 的 research job，不是已训练模型：
 
@@ -929,27 +929,66 @@ TRAIN_JOB_ID=$(
   | jq -r '.data.job_id'
 )
 
-# Poll 到 succeeded | failed | cancelled；succeeded 的 result_ref 是 model_version_id。
-curl -sS "$BASE/api/research/jobs/$TRAIN_JOB_ID" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" | jq '.data | {status, result_ref, error}'
+# Poll 到 succeeded | failed | cancelled；succeeded 的 result 是 source model_version_id。
+TRAIN_JOB=$(
+  curl -sS "$BASE/api/research/jobs/$TRAIN_JOB_ID" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept-Api-Version: v1"
+)
+test "$(jq -r '.data.status' <<<"$TRAIN_JOB")" = "succeeded"
+test "$(jq -r '.data.result.kind' <<<"$TRAIN_JOB")" = "model_version"
+SOURCE_MODEL_VERSION_ID=$(jq -r '.data.result.id' <<<"$TRAIN_JOB")
 ```
 
-作业成功后，用新 `MODEL_VERSION_ID` 运行回测与 CPCV；两者也返回 `202` job，必须 poll 终态。如模型族需要 probability→return/downside calibration，先用独立、purged/embargoed calibration dataset fit 并 bind，不得把同一训练分区的 `calibrate=true` 当成生产校准。
+`WeightedFactor` 与当前可 bootstrap 的 GBDT Buy family 必须绑定 immutable probability→return/downside
+calibration。使用独立、purged/embargoed 且 `purpose=calibration` 的 Ready dataset；不得复用训练分区。
+standalone fit job 成功后会在同一 job executor 中经唯一 `ModelGovernanceService` 封存新的 calibrated
+`ModelVersion`，并把 job `result.kind` 写为 `model_version`。源模型和校准 artifact 均不修改：
+
+```bash
+CALIBRATION_JOB_ID=$(
+  curl -sS -X POST "$BASE/api/research/calibration-artifacts/fit-model-calibrator" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept-Api-Version: v1" \
+    -H "X-Acting-Role: risk_owner" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"model_version_id\": \"$SOURCE_MODEL_VERSION_ID\",
+      \"calibration_dataset_id\": \"$CALIBRATION_DATASET_ID\",
+      \"method\": \"platt\",
+      \"reason\": \"derive first governed calibrated Buy model\"
+    }" \
+  | jq -r '.data.job_id'
+)
+
+CALIBRATION_JOB=$(
+  curl -sS "$BASE/api/research/jobs/$CALIBRATION_JOB_ID" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept-Api-Version: v1"
+)
+test "$(jq -r '.data.status' <<<"$CALIBRATION_JOB")" = "succeeded"
+test "$(jq -r '.data.result.kind' <<<"$CALIBRATION_JOB")" = "model_version"
+MODEL_VERSION_ID=$(jq -r '.data.result.id' <<<"$CALIBRATION_JOB")
+```
+
+对这个 calibrated `MODEL_VERSION_ID` 运行 frozen backtest 与 CPCV；两者均返回 `202` job，必须 poll
+终态。CPCV path set 与 `ModelRun` 原子提交，由 bootstrap 服务按 model/current policy snapshot
+解析和重验，客户端不再执行任何 bind：
 
 ```bash
 # Basic frozen-dataset backtest.
-curl -sS -X POST "$BASE/api/research/models/$MODEL_VERSION_ID/backtest" \
+BACKTEST_JOB_ID=$(
+  curl -sS -X POST "$BASE/api/research/models/$MODEL_VERSION_ID/backtest" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept-Api-Version: v1" \
   -H "X-Acting-Role: risk_owner" \
   -H "Content-Type: application/json" \
   -d "{
-    \"training_dataset_id\": \"$TRAINING_DATASET_ID\",
+    \"evaluation_dataset_id\": \"$EVALUATION_DATASET_ID\",
     \"decision_policy_snapshot_id\": \"$DECISION_POLICY_SNAPSHOT_ID\",
-    \"calibrate\": false,
-    \"reason\": \"cold-start frozen backtest before publish\"
-  }" | jq '{job_id: .data.job_id, status: .data.status}'
+    \"reason\": \"cold-start frozen backtest before route bootstrap\"
+  }" | jq -r '.data.job_id'
+)
 
 # CPCV/DSR/PBO. Family, input contract, target and horizons are resolved from
 # MODEL_VERSION_ID -> TRAINING_DATASET_ID -> immutable ModelSpec; clients cannot
@@ -963,43 +1002,87 @@ CPCV_JOB_ID=$(
     -d "{
       \"training_dataset_id\": \"$TRAINING_DATASET_ID\",
       \"decision_policy_snapshot_id\": \"$DECISION_POLICY_SNAPSHOT_ID\",
-      \"reason\": \"cold-start CPCV publish evidence\"
+      \"reason\": \"cold-start CPCV route-governance evidence\"
     }" \
   | jq -r '.data.job_id'
 )
 
-# succeeded 的 result_ref 是 path_set_id。
+# 两个 job 都必须 succeeded；记录 exact backtest_report_id 与 path_set_id。
+curl -sS "$BASE/api/research/jobs/$BACKTEST_JOB_ID" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" | jq '.data | {status, result, error}'
 curl -sS "$BASE/api/research/jobs/$CPCV_JOB_ID" \
   -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" | jq '.data | {status, result_ref, error}'
+  -H "Accept-Api-Version: v1" | jq '.data | {status, result, error}'
+```
 
-curl -sS -X POST "$BASE/api/research/models/$MODEL_VERSION_ID/bind-publish-path-set" \
+训练与 calibration derivation 都会运行 offline frozen model/dataset full parity；对 calibrated version
+查出最新精确 `Passed` run，并用它完成初始 latch acknowledge。此流程不依赖已有 serving report：
+
+```bash
+PARITY_RUN_ID=$(
+  curl -sS \
+    "$BASE/api/research/feature-integrity/runs?kind=full&status=passed&model_version_id=$MODEL_VERSION_ID&size=20" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept-Api-Version: v1" \
+  | jq -r '.data.items[0].parity_run_id'
+)
+test -n "$PARITY_RUN_ID"
+
+curl -sS -X POST "$BASE/api/research/feature-integrity/latch/acknowledge" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept-Api-Version: v1" \
   -H "X-Acting-Role: risk_owner" \
   -H "Content-Type: application/json" \
   -d "{
-    \"path_set_id\": \"$PATH_SET_ID\",
-    \"reason\": \"bind exact CPCV evidence for first boot publish\"
+    \"parity_run_id\": \"$PARITY_RUN_ID\",
+    \"reason\": \"acknowledge exact frozen parity for first route bootstrap\"
   }" | jq .
 ```
 
 旧 `model_family`、`label_name`、`label_horizon_secs`、`prediction_horizon_secs` 字段不会被忽略，而会因
 `deny_unknown_fields` 明确返回 4xx；应修正调用方，不能复制 ModelSpec 值来“兼容”。
 
-最后按 §7.5.4 执行首次 publish → 查询 subject-bound Passed full run → governed latch acknowledge → 重试 publish。该顺序不可跳过。
+先只读检查唯一 Candidate quality gate，再提交 first-Champion bootstrap。请求不能携带 route、path set、
+backtest、gate hash 或 parity hash；它们全部由服务端从 candidate、当前 policy/runtime 与 WORM evidence
+推导并在事务中重新校验：
 
-确认指针已写入：
+```bash
+curl -sS \
+  "$BASE/api/research/models/$MODEL_VERSION_ID/quality-gate?intent=candidate&backtest_report_id=$BACKTEST_REPORT_ID" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" | jq '.data | {passed, gates}'
+
+curl -sS -X POST "$BASE/api/research/model-route-bootstraps" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" \
+  -H "X-Acting-Role: risk_owner" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model_version_id\": \"$MODEL_VERSION_ID\",
+    \"expected_policy_generation\": $EXPECTED_POLICY_GENERATION,
+    \"expected_runtime_control_revision\": $EXPECTED_RUNTIME_CONTROL_REVISION,
+    \"idempotency_key\": \"$(uuidgen)\",
+    \"reason_code\": \"first_champion_bootstrap\",
+    \"note\": \"Establish first governed Champion for this empty Buy route\"
+  }" | jq '.data'
+```
+
+成功 receipt 必须包含 route、before/after generation、activation/audit/outbox IDs、transaction hash、
+server timestamp、actor lineage 以及 `execution_authority_unchanged=true`。确认相应 Pooled/Crypto/Weather
+指针已写入，而不是假定一定是 pooled route：
 
 ```bash
 curl -sS "$BASE/api/config/model_routing/current" \
   -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" | jq '.data.revision.document.document.model.active_model_version_id'
+  -H "Accept-Api-Version: v1" | jq '.data.revision.document.document.model'
 ```
 
 **Step 3 — Canary 后开启报告**
 
-严格执行 §7.5.5：先启用 ad-hoc 并手动触发（§8.4），验证 sampled + runtime full parity；之后才能开启 schedule，最后恢复新入场。
+保持 `ReportOnly`，先启用 ad-hoc 并手动触发（§8.4），验证 sampled + runtime full parity；至少完成
+profile 的一个完整 `retraining_cooldown` ReportOnly shadow 后，才允许把该 route 视为 operationally
+activated。之后才能开启 schedule；本阶段不扩大 execution、capital、signing 或 funder authority。
 
 ### 8.2 定时报告 vs Ad-hoc 报告
 
@@ -1024,7 +1107,7 @@ curl -sS "$BASE/api/config/model_routing/current" \
 1. 在 claim 边界冻结 `DecisionPolicySnapshot` 与参与决策的 revision IDs；
 2. 构造唯一 `DecisionBoundary`：`decision_at = trigger_time`，`knowledge_cutoff = decision_at - knowledge_lag_secs`；每个 source cutoff 只在这里推导一次；
 3. 从 catalog ledger + facts 在 boundary 上解析 immutable snapshot；selection/feature/capture 共用它；
-4. **`active_requirements`** — 加载 Published active model；
+4. **`active_requirements`** — 从当前 route generation 加载 Champion model；
 5. selection 选出候选市场，account provider 读取真实 venue 账户；
 6. FeatureCell / factor / family-specific model transform 输出信号；category route 任一加载/scope/inference 故障整轮失败；
 7. feature 与 model-input writer 全部 ACK 后写 serving evidence completion barrier；
@@ -1046,7 +1129,7 @@ Schedule 被 **disabled** 时，worker 不会触发；若误配为 enabled 且�
 
 **何时使用**：
 
-- 冷启动完成 publish 后，**第一次验证**报告流水线；
+- 冷启动完成 first-Champion bootstrap 后，**第一次验证**报告流水线；
 - 数据质量事故恢复后（§16.1），确认新 report 正常再恢复交易；
 - `semi_auto` 审批窗口前需要 **最新** Top-N（runbook §11 场景）；
 - governed policy 变更后，不想等到下一个 300s tick。
@@ -1064,7 +1147,7 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
   -H "Content-Type: application/json" \
   -d '{
     "request_id": "manual-20260702-001",
-    "reason": "first report after model publish",
+    "reason": "first report after governed route bootstrap",
     "top_n": 20,
     "knowledge_lag_secs": 10
   }' | jq .
@@ -1100,8 +1183,8 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
 
 | 错误 / empty_reason | 处理 |
 |---------------------|------|
-| `active_model_version_id is not configured` | 完成 §8.1 publish 流程 |
-| `active model … must be published` | 指向 Candidate 版本；需 publish |
+| `active_model_version_id is not configured` | 完成 §8.1 route bootstrap |
+| route candidate / evidence conflict | 重新读取 current policy/runtime 与 evidence；不得直接改 pointer |
 | `insufficient data quality` | §6.4 数据质量 / WS |
 | `no positive signal` | 正常空报告，非 ingest 故障 |
 
@@ -1340,7 +1423,7 @@ curl -sS "$BASE/api/quant/positions?order_intent_id=$INTENT_ID" \
 - `execution_authorization.auto_execution.enabled=true`；
 - `execution_authorization.auto_execution.max_orders_per_report`、`max_total_usd_per_report`、`min_score`、`min_confidence` 保守；
 - `execution_risk_policy.portfolio.budget.total_budget_usd > 0` 且 account live snapshot 可用；
-- 已有 published model，且 shadow period / quality gate 通过；
+- 已有 route Champion，且 ReportOnly shadow period / quality gate 通过；
 - data quality healthy；
 - no pending/unresolvable reconciliation；
 - no impaired capital allocation；
@@ -1581,7 +1664,7 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 - `GET /api/research/feature-integrity/summary` 的 `latch.open=false`；
 - `catalog_coverage_start` 已建立、`catalog_watermark` 持续前进，`parity_age_secs` 在运维时效内；
 - latest sampled/full parity 为 `passed`，无 mismatch，无超过 materialization deadline 的 pending；
-- latest published model 的 exact serving contract 与 immutable factor revisions 是预期版本；
+- current route Champion 的 exact serving contract 与 immutable factor revisions 是预期版本；
 - 六类 active policy revision、bundle hash 与 decision snapshot 是预期值；
 - allowance 足够；
 - Polymarket status / RPC / bridge 无已知事故。
@@ -1695,9 +1778,9 @@ curl -sS -X POST "$BASE/api/quant/reconciliations/$RECON_ID/resolve" \
 2. 读 `GET /api/research/feature-integrity/summary`，记录 `blocking_run_id`、`opened_at`、cause window 和 subject；用 `events?parity_run_id=...` 对比 online/replay 证据定位根因。
 3. 保持 ingest/exit/reconciliation/settlement，完成前向修复。PendingMaterialization 未超 deadline 时等 writer watermark，不立即定性为 mismatch。
 4. 运行一个在 latch 打开之后完成、覆盖 causal window 且 subject scope 一致的新 full parity；只有非空 `passed` 才能继续。
-5. `risk_owner` 用该 recovery run 调用 `POST /api/research/feature-integrity/latch/acknowledge`，然后按 §7.5.5 重做 ad-hoc canary → sampled/full parity → schedule → 新入场。
+5. `risk_owner` 用该 recovery run 调用 `POST /api/research/feature-integrity/latch/acknowledge`，然后按 §8.1–§8.4 重做 ad-hoc canary → sampled/full parity → schedule → 新入场。
 
-详细因果、窗口、计数与回退要求见 §7.5.4–§7.5.6。
+详细冷启动与 canary 合同见 §8.1–§8.4。
 
 ## 17. 常用 API 速查
 

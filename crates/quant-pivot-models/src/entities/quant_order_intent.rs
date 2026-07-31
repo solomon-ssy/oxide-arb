@@ -5,8 +5,9 @@ use sea_orm::entity::prelude::*;
 
 use super::{
     decision_policy_snapshot, quant_capital_allocation, quant_entry_condition_instance,
-    quant_execution_account, quant_execution_order, quant_model_version, quant_position,
-    quant_recommendation, quant_recommendation_execution_outcome, quant_settlement_inventory_lot,
+    quant_execution_account, quant_execution_attempt_outcome,
+    quant_execution_attempt_reconciliation_task, quant_execution_order, quant_model_version,
+    quant_position, quant_recommendation, quant_settlement_inventory_lot,
     research_profile_artifact,
 };
 use crate::{
@@ -119,7 +120,9 @@ pub struct Model {
     #[sea_orm(has_many, relation_enum = "SettlementInventoryLot")]
     pub settlement_inventory_lot: HasMany<quant_settlement_inventory_lot::Entity>,
     #[sea_orm(has_one, relation_enum = "ExecutionOutcome")]
-    pub execution_outcome: HasOne<quant_recommendation_execution_outcome::Entity>,
+    pub execution_outcome: HasOne<quant_execution_attempt_outcome::Entity>,
+    #[sea_orm(has_one, relation_enum = "ExecutionReconciliationTask")]
+    pub execution_reconciliation_task: HasOne<quant_execution_attempt_reconciliation_task::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

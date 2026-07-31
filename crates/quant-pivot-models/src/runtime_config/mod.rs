@@ -142,7 +142,8 @@ impl Default for ModelRouting {
 /// `Pooled` may contain only non-vertical market categories. `Crypto` and
 /// `Weather` are isolated category routes because their `ResearchProfile`,
 /// domain-source, factor-plane, and serving-contract preimages are distinct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BuyModelRoute {
     Pooled,
     Crypto,

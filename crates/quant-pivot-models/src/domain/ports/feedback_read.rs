@@ -7,7 +7,7 @@ use crate::{
     domain::{
         api::{
             DriftReportListQuery, DriftReportView, FeedbackCycleDetailView, FeedbackCycleListQuery,
-            FeedbackCycleView, FeedbackOverviewView,
+            FeedbackCycleView, FeedbackOverviewView, FeedbackSchedulerListView,
         },
         pagination::Paginated,
     },
@@ -19,6 +19,9 @@ use crate::{
 pub trait FeedbackReadPort: Send + Sync {
     /// Build one authoritative dashboard snapshot.
     async fn overview(&self) -> QuantResult<FeedbackOverviewView>;
+
+    /// List database-authoritative scheduler, cooldown, lease, and retry state.
+    async fn list_schedulers(&self) -> QuantResult<FeedbackSchedulerListView>;
 
     /// Page feedback cycles newest first.
     async fn list_cycles(

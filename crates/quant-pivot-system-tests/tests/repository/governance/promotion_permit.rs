@@ -10,9 +10,12 @@ use quant_pivot_models::{
         api::PromotionPermitListQuery,
         pagination::PageRequest,
         quant::{
-            IssuePromotionPermit, NewPromotionPermit, PromotionPermitActor, PromotionPermitInfo,
-            PromotionPermitIssueInput, PromotionPermitScope, PromotionPermitScopeInput,
-            PromotionPermitStatus, RevokePromotionPermit,
+            CandidateExplanationValidation, IssuePromotionPermit, ModelCandidateManifestDocument,
+            ModelCandidateManifestInfo, ModelCandidateManifestInput, NewModelCandidateManifest,
+            NewPromotionPermit, PromotionGateArtifact, PromotionGateArtifactInput,
+            PromotionPermitActor, PromotionPermitInfo, PromotionPermitIssueInput,
+            PromotionPermitScope, PromotionPermitScopeInput, PromotionPermitStatus,
+            RevokePromotionPermit,
         },
         rbac::{AssignPermissions, AssignRoles, NewRole, NewUser, Permission},
     },
@@ -30,24 +33,30 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType, RoleKind, RoleStatus, UserStatus},
     },
     types::{
-        ContentHash, DecisionPolicySnapshotId, ModelVersionId, PolicyBundleGeneration,
-        PolicyIdempotencyKey, PromotionPermitId, ResearchProfileId, ResearchProfileRef, RoleCode,
-        RoleId, UserId,
+        BacktestPathSetId, ContentHash, DecisionPolicySnapshotId, FeatureParityRunId,
+        FeatureParityStateId, FeedbackCycleId, ModelCandidateManifestId, ModelVersionId,
+        PolicyBundleGeneration, PolicyIdempotencyKey, PromotionPermitId, ResearchProfileId,
+        ResearchProfileRef, RoleCode, RoleId, UserId,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgPromotionPermitRepository, PgRolePermissionRepository, PgRoleRepository,
-        PgUserRepository, PgUserRoleRepository,
+        PgModelCandidateManifestRepository, PgModelRegistryRepository, PgPromotionPermitRepository,
+        PgRolePermissionRepository, PgRoleRepository, PgUserRepository, PgUserRoleRepository,
     },
     traits::{
-        PromotionPermitIssueOutcome, PromotionPermitRepository, PromotionPermitRevokeOutcome,
-        RolePermissionRepository, RoleRepository, UserRepository, UserRoleRepository,
+        ModelCandidateManifestRepository, ModelCandidateManifestWriteOutcome,
+        ModelRegistryRepository, PromotionPermitIssueOutcome, PromotionPermitRepository,
+        PromotionPermitRevokeOutcome, RolePermissionRepository, RoleRepository, UserRepository,
+        UserRoleRepository,
     },
 };
 use quant_pivot_system_tests::{
     postgres::{PostgresClock, setup_pg},
-    support::model_spec_fixtures,
+    support::{
+        model_serving_fixtures::{ModelVersionFixture, ModelVersionFixtureSeed},
+        model_spec_fixtures,
+    },
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr,
@@ -55,13 +64,18 @@ use sea_orm::{
 };
 use tokio::task::JoinSet;
 
-use super::feedback_boot_schema::{content_hash, prepare_fixture};
+use super::feedback_boot_schema::{content_hash, prepare_profile_fixture};
 
 #[derive(Clone)]
 struct PermitContext {
+    feedback_cycle_id: FeedbackCycleId,
     profile_ref: ResearchProfileRef,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
+    candidate_model_version_id: ModelVersionId,
+    candidate_manifest_id: ModelCandidateManifestId,
+    candidate_manifest_hash: ContentHash,
+    promotion_gate_hash: ContentHash,
     expected_policy_generation: PolicyBundleGeneration,
     expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     expected_snapshot_hash: ContentHash,
@@ -70,7 +84,48 @@ struct PermitContext {
 
 impl PermitContext {
     async fn prepare(db: &DatabaseConnection) -> Self {
-        let feedback = Box::pin(prepare_fixture(db)).await;
+        let feedback = Box::pin(prepare_profile_fixture(
+            db,
+            model_spec_fixtures::crypto_profile_ref(),
+            model_spec_fixtures::crypto_horizon_secs(),
+        ))
+        .await;
+        feedback
+            .cycle
+            .clone()
+            .into_active_model()
+            .insert(db)
+            .await
+            .expect("insert permit feedback cycle");
+        let registry = PgModelRegistryRepository::new(db.clone());
+        let champion = registry
+            .find_model_version(&feedback.champion_model_version_id)
+            .await
+            .expect("load permit champion model")
+            .expect("permit champion model exists");
+        let candidate_model_version_id = ModelVersionId::from_v7();
+        let candidate = ModelVersionFixture::prepare(
+            db,
+            ModelVersionFixtureSeed::training(
+                format!("promotion-permit:{candidate_model_version_id}"),
+                candidate_model_version_id,
+                champion.model_spec_id,
+                content_hash('e'),
+            ),
+        )
+        .await
+        .expect("prepare permit candidate model");
+        registry
+            .create_model_version(candidate)
+            .await
+            .expect("persist permit candidate model");
+        let manifest = Self::candidate_manifest(
+            db,
+            feedback.cycle_id,
+            feedback.cycle.feedback_policy_hash(),
+            candidate_model_version_id,
+        )
+        .await;
         let guard = PolicyGuardEntity::find_by_id(1_i16)
             .one(db)
             .await
@@ -91,9 +146,14 @@ impl PermitContext {
             .expect("load bootstrap admin")
             .expect("bootstrap admin exists");
         Self {
+            feedback_cycle_id: feedback.cycle_id,
             profile_ref: model_spec_fixtures::crypto_profile_ref(),
             champion_model_version_id: feedback.champion_model_version_id,
             champion_serving_contract_hash: feedback.champion_serving_contract_hash,
+            candidate_model_version_id,
+            candidate_manifest_id: manifest.manifest_id,
+            candidate_manifest_hash: manifest.manifest_hash,
+            promotion_gate_hash: manifest.promotion_gate_hash,
             expected_policy_generation: guard.generation,
             expected_decision_policy_snapshot_id: snapshot.decision_policy_snapshot_id,
             expected_snapshot_hash: snapshot.snapshot_hash,
@@ -101,15 +161,111 @@ impl PermitContext {
         }
     }
 
+    async fn candidate_manifest(
+        db: &DatabaseConnection,
+        feedback_cycle_id: FeedbackCycleId,
+        feedback_policy_hash: ContentHash,
+        candidate_model_version_id: ModelVersionId,
+    ) -> ModelCandidateManifestInfo {
+        let candidate = PgModelRegistryRepository::new(db.clone())
+            .find_model_version(&candidate_model_version_id)
+            .await
+            .expect("load permit candidate model")
+            .expect("permit candidate model exists");
+        let contract = candidate
+            .verified_serving_contract()
+            .expect("verify permit candidate serving contract");
+        let bindings = contract.bindings();
+        let explanation = CandidateExplanationValidation::try_from(bindings)
+            .expect("derive permit candidate explanation validation");
+        let cpcv_path_set_id = BacktestPathSetId::from_v7();
+        let cpcv_path_set_hash = content_hash('c');
+        let feature_parity_run_id = FeatureParityRunId::from_v7();
+        let feature_parity_state_id = FeatureParityStateId::from_v7();
+        let feature_parity_evidence_hash = content_hash('d');
+        let promotion_gate = PromotionGateArtifact::try_seal(PromotionGateArtifactInput {
+            feedback_cycle_id,
+            candidate_recipe_hash: content_hash('b'),
+            candidate_model_version_id,
+            profile_ref: candidate.profile_ref.clone(),
+            category: MarketCategory::Crypto,
+            feedback_policy_hash,
+            decision_policy_snapshot_hash: bindings.policy_snapshot.snapshot_hash,
+            truth_freeze_hash: content_hash('1'),
+            attribution_plan_hash: content_hash('2'),
+            validation_artifact_hash: content_hash('3'),
+            quality_gate_report_hash: content_hash('4'),
+            comparison_artifact_hash: content_hash('5'),
+            shadow_artifact_hash: content_hash('6'),
+            decision_artifact_hash: content_hash('7'),
+            cpcv_path_set_id,
+            cpcv_path_set_hash,
+            explanation_validation_hash: explanation.report_hash,
+            feature_parity_run_id,
+            feature_parity_state_id,
+            feature_parity_evidence_hash,
+        })
+        .expect("seal permit promotion gate");
+        let calibration = bindings
+            .model
+            .calibration
+            .as_ref()
+            .map(|binding| (binding.artifact_id, binding.content_hash));
+        let training_dataset_id = candidate
+            .training_dataset_id
+            .expect("permit candidate training dataset");
+        let document = ModelCandidateManifestDocument::try_new(ModelCandidateManifestInput {
+            feedback_cycle_id,
+            candidate_recipe_hash: content_hash('b'),
+            model_version_id: candidate.model_version_id,
+            model_spec_id: candidate.model_spec_id,
+            model_family: candidate.model_family,
+            model_artifact_hash: candidate.artifact_hash,
+            serving_contract_hash: candidate.serving_contract_hash,
+            training_dataset_id,
+            training_dataset_hash: bindings.transform.training_dataset_hash,
+            feature_schema_hash: bindings.schemas.feature_schema_hash,
+            input_contract_hash: bindings.transform.input_contract_hash,
+            input_transform_hash: bindings.transform.input_transform_hash,
+            calibration_artifact_id: calibration.map(|(id, _)| id),
+            calibration_artifact_hash: calibration.map(|(_, hash)| hash),
+            cpcv_path_set_id,
+            cpcv_path_set_hash,
+            profile_ref: candidate.profile_ref.clone(),
+            category: MarketCategory::Crypto,
+            feedback_policy_hash,
+            decision_policy_snapshot_hash: bindings.policy_snapshot.snapshot_hash,
+            explanation_validation: explanation,
+            promotion_gate,
+        })
+        .expect("seal permit candidate manifest document");
+        let manifest =
+            NewModelCandidateManifest::try_new(document).expect("seal permit candidate manifest");
+        match PgModelCandidateManifestRepository::new(db.clone())
+            .insert(manifest)
+            .await
+            .expect("persist permit candidate manifest")
+        {
+            ModelCandidateManifestWriteOutcome::Inserted(manifest)
+            | ModelCandidateManifestWriteOutcome::AlreadyPresent(manifest) => manifest,
+        }
+    }
+
     fn scope(&self, expires_at: DateTime<Utc>, hash_seed: char) -> PromotionPermitScope {
         PromotionPermitScope::try_new(PromotionPermitScopeInput {
+            feedback_cycle_id: self.feedback_cycle_id,
             profile_ref: self.profile_ref.clone(),
             category: MarketCategory::Crypto,
             expected_policy_generation: self.expected_policy_generation,
+            expected_runtime_control_revision: 0,
             expected_decision_policy_snapshot_id: self.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: self.expected_snapshot_hash,
             champion_model_version_id: self.champion_model_version_id,
             champion_serving_contract_hash: self.champion_serving_contract_hash,
+            candidate_model_version_id: self.candidate_model_version_id,
+            candidate_manifest_id: self.candidate_manifest_id,
+            candidate_manifest_hash: self.candidate_manifest_hash,
+            promotion_gate_hash: self.promotion_gate_hash,
             allowed_runtime_modes: vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto],
             non_route_policy_hash: content_hash(hash_seed),
             serving_constraints_hash: content_hash('7'),

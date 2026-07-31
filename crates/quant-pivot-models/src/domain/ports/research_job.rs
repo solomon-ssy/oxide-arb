@@ -16,6 +16,7 @@ use crate::{
             RunCpcvBacktestRequest, TradePolicyValidationJobParams, TrainModelRequest,
         },
         pagination::Paginated,
+        ports::GovernanceActor,
     },
     types::{DecisionPolicySnapshotId, ModelVersionId, ResearchJobId},
 };
@@ -84,6 +85,7 @@ pub trait ResearchJobPort: Send + Sync {
         &self,
         request: FitModelCalibratorRequest,
         decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        actor: GovernanceActor,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView>;
 

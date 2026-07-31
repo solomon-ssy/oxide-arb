@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use quant_pivot_error::hashing::CanonicalDigestError;
+use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -27,7 +28,7 @@ use crate::{
 };
 
 /// Breaking wire and hash-domain version for the serving contract.
-pub const MODEL_SERVING_CONTRACT_VERSION: u32 = 2;
+pub const MODEL_SERVING_CONTRACT_VERSION: u32 = 3;
 const MODEL_SERVING_CONTRACT_HASH_DOMAIN: &str = "quant-pivot/model-serving-contract";
 const MODEL_INTRINSIC_INPUT_HASH_DOMAIN: &str = "quant-pivot/model-intrinsic-input";
 const MODEL_INTRINSIC_INPUT_VERSION: u32 = 2;
@@ -184,6 +185,18 @@ pub enum ModelServingEstimatorInput {
     },
 }
 
+/// Immutable proof that a classical estimator has a portable exact `TreeSHAP`
+/// representation and was cross-verified against the serialized estimator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelServingTreeShapBinding {
+    pub ensemble_hash: ContentHash,
+    pub background_distribution_hash: ContentHash,
+    pub verified_case_count: u64,
+    pub max_efficiency_residual: Decimal,
+    pub max_prediction_residual: Decimal,
+}
+
 /// Family-specific model commitment created before the outer artifact envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "estimator_kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -199,6 +212,7 @@ pub enum ModelServingEstimatorBinding {
         model_payload_hash: ContentHash,
         serialized_model_hash: ContentHash,
         serialization_format: ModelSerializationFormat,
+        tree_shap: Option<ModelServingTreeShapBinding>,
     },
 }
 
@@ -360,6 +374,8 @@ pub enum ModelServingContractError {
     ClassicalFactorPlaneForbidden,
     #[error("v1 classical estimators require bincode serialization")]
     ClassicalFormatMismatch,
+    #[error("only GradientBoostedTrees may bind exact TreeSHAP evidence")]
+    ClassicalExplanationMismatch,
     #[error("estimator binding is incompatible with model family {model_family:?}")]
     EstimatorFamilyMismatch { model_family: ModelFamily },
     #[error("WeightedFactor cannot consume model-intrinsic position inputs")]
@@ -647,12 +663,26 @@ impl ModelServingBindings {
                 ModelServingEstimatorBinding::Classical {
                     kind,
                     serialization_format,
+                    tree_shap,
                     ..
                 },
                 model_family,
             ) if model_family.classical_kind() == Some(*kind) => {
+                let explanation_mismatch = (*kind == ClassicalKind::GradientBoostedTrees)
+                    != tree_shap.is_some()
+                    || tree_shap.as_ref().is_some_and(|binding| {
+                        binding.verified_case_count == 0
+                            || binding.max_efficiency_residual.is_sign_negative()
+                            || binding.max_prediction_residual.is_sign_negative()
+                            || binding.max_efficiency_residual
+                                > Decimal::from_parts(1, 0, 0, false, 12)
+                            || binding.max_prediction_residual
+                                > Decimal::from_parts(1, 0, 0, false, 10)
+                    });
                 if *serialization_format != ModelSerializationFormat::Bincode {
                     Err(ModelServingContractError::ClassicalFormatMismatch)
+                } else if explanation_mismatch {
+                    Err(ModelServingContractError::ClassicalExplanationMismatch)
                 } else if self.factors.plane.definitions().is_empty() {
                     Ok(())
                 } else {
@@ -889,6 +919,7 @@ impl ModelServingBindings {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
+    use rust_decimal::Decimal;
     use serde_json::{Value, from_value, to_value};
 
     use super::{
@@ -897,9 +928,13 @@ mod tests {
         ModelServingDatasetBinding, ModelServingEstimatorBinding, ModelServingEstimatorInput,
         ModelServingFactorBinding, ModelServingIntrinsicInputKind, ModelServingIntrinsicInputRef,
         ModelServingModelBinding, ModelServingPolicySnapshotBinding, ModelServingSchemaBinding,
-        ModelServingTradePolicyBinding, ModelServingTransformBinding,
+        ModelServingTradePolicyBinding, ModelServingTransformBinding, ModelServingTreeShapBinding,
     };
     use crate::{
+        domain::quant::{
+            CandidateExplanationMethod, CandidateExplanationValidation,
+            CandidateExplanationVerification,
+        },
         enums::{
             common::MarketCategory,
             domain::DomainFamily,
@@ -1162,6 +1197,15 @@ mod tests {
                 model_payload_hash: hash(30),
                 serialized_model_hash: hash(31),
                 serialization_format: ModelSerializationFormat::Bincode,
+                tree_shap: (kind == ClassicalKind::GradientBoostedTrees).then_some(
+                    ModelServingTreeShapBinding {
+                        ensemble_hash: hash(32),
+                        background_distribution_hash: hash(33),
+                        verified_case_count: 10,
+                        max_efficiency_residual: Decimal::ZERO,
+                        max_prediction_residual: Decimal::ZERO,
+                    },
+                ),
             };
             bindings.model.calibration = None;
             bindings
@@ -1302,6 +1346,7 @@ mod tests {
     #[test]
     fn classical_contracts_are_exact() {
         for kind in [
+            ClassicalKind::GradientBoostedTrees,
             ClassicalKind::RandomForest,
             ClassicalKind::ExtraTrees,
             ClassicalKind::LogisticRegression,
@@ -1312,6 +1357,26 @@ mod tests {
             ModelServingContract::try_seal(ModelServingBindings::classical_fixture(kind))
                 .expect("valid classical serving contract");
         }
+
+        let gbdt_bindings =
+            ModelServingBindings::classical_fixture(ClassicalKind::GradientBoostedTrees);
+        let explanation =
+            CandidateExplanationValidation::try_from(&gbdt_bindings).expect("exact TreeSHAP proof");
+        assert_eq!(
+            explanation.method,
+            CandidateExplanationMethod::ExactTreeShap
+        );
+        let CandidateExplanationVerification::ExactTreeShap {
+            verified_case_count,
+            max_efficiency_residual,
+            max_prediction_residual,
+        } = explanation.verification
+        else {
+            panic!("exact TreeSHAP verification");
+        };
+        assert_eq!(verified_case_count, 10);
+        assert_eq!(max_efficiency_residual, Decimal::ZERO);
+        assert_eq!(max_prediction_residual, Decimal::ZERO);
 
         let mut wrong_format = ModelServingBindings::classical_fixture(ClassicalKind::RandomForest);
         let ModelServingEstimatorBinding::Classical {
@@ -1326,6 +1391,31 @@ mod tests {
             ModelServingContract::try_seal(wrong_format),
             Err(ModelServingContractError::ClassicalFormatMismatch)
         ));
+
+        let mut missing_tree_shap =
+            ModelServingBindings::classical_fixture(ClassicalKind::GradientBoostedTrees);
+        let ModelServingEstimatorBinding::Classical { tree_shap, .. } =
+            &mut missing_tree_shap.model.estimator
+        else {
+            panic!("classical fixture");
+        };
+        *tree_shap = None;
+        assert!(matches!(
+            ModelServingContract::try_seal(missing_tree_shap),
+            Err(ModelServingContractError::ClassicalExplanationMismatch)
+        ));
+
+        let mut imprecise_tree_shap =
+            ModelServingBindings::classical_fixture(ClassicalKind::GradientBoostedTrees);
+        let ModelServingEstimatorBinding::Classical {
+            tree_shap: Some(tree_shap),
+            ..
+        } = &mut imprecise_tree_shap.model.estimator
+        else {
+            panic!("GBDT TreeSHAP fixture");
+        };
+        tree_shap.max_prediction_residual = Decimal::ONE;
+        assert!(CandidateExplanationValidation::try_from(&imprecise_tree_shap).is_err());
 
         let mut wrong_family = ModelServingBindings::classical_fixture(ClassicalKind::ExtraTrees);
         wrong_family.model.model_family = ModelFamily::ClassicalRandomForest;

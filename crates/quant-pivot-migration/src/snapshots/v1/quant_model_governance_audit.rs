@@ -2,7 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{QpModelGovernanceAction, QpPublicationStatus};
+use super::sea_orm_active_enums::QpModelGovernanceAction;
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -17,8 +17,6 @@ pub struct Model {
     pub actor_username: String,
     pub actor_role: Option<String>,
     pub reason: String,
-    pub before_status: QpPublicationStatus,
-    pub after_status: QpPublicationStatus,
     #[sea_orm(column_type = "JsonBinary")]
     pub detail: Json,
     pub audit_event_id: Uuid,

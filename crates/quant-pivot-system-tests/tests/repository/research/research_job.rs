@@ -91,6 +91,7 @@ fn feedback_event(
         event_sequence: 2,
         stage: FeedbackStage::Coverage,
         event_kind: FeedbackStageEventKind::JobLinked,
+        trigger_family: None,
         research_job_id: Some(job_id),
         actor: None,
         reason_code: None,

@@ -36,15 +36,14 @@
 > 连续 24 小时 ReportOnly shadow 阻断；
 > **11.8 已完成（含 2026-07-16 P0 收尾复核）**：ReportRun / Prepared→Published、
 > PG durable scheduler、scope current、supersession execution cascade、censored attribution 与
-> operator workflow 的唯一验收真相见 11.8；**11.9 Implementation Closure 已完成**：包含
-> Crypto/Weather source、PIT、outcome/cohort、FeedbackCycle、PromotionPermit、category route、
-> protected REST/WS/UI 与两套 fresh production-stack、两轮 protected Chromium、288/288 人工像素证据。
-> **11.9 Operational Activation 未完成且未被宣称完成**：当前目标 PostgreSQL bootstrap identity
-> 不匹配、ClickHouse database/schema 不可用；Crypto v2 profile 仍为 `ResearchOnly` 且 19/19
-> current gates blocked；Weather 八个 family 均为 `MatureLabelsUnavailable`，其中七个 parser gate
-> 在每族达到 500 个真实成熟标签后仍需重验；不存在真实资金、Published current route 或
-> 24h/多日 shadow 完成声明。唯一逐项进度与证据真相见 11.9 Implementation Ledger；
-> 11.0/11.2.1/11.3/11.7.2/11.10–11.11 其余工作仍在设计、实施或部分落地阶段。
+> operator workflow 的唯一验收真相见 11.8；**11.9 的 current-byte Implementation Closure
+> 已于 2026-07-31 完成**。旧关闭结论曾因合同缺口撤回；canonical truth、attempt/rollup、单实例 durable
+> scheduler、完整 feedback DAG、quality gate、attribution、Weather 8-family、route governance
+> 与 UI/ops 现已按新生产合同实现并通过完整门禁。独立 11.10 已 `MERGED INTO 11.9`，不再形成后继依赖节点。
+> `Operational Activation` 仍独立 blocked：没有 authenticated current-data、mature labels、
+> 完整 retraining cooldown 的真实 ReportOnly shadow 或已授权 route activation，就不存在真实资金、
+> current Champion route 或 execution-authority 扩大声明。唯一逐项进度与证据真相见 11.9
+> Implementation Ledger；11.0/11.2.1/11.3/11.7.2/11.11 其余工作仍在设计、实施或部分落地阶段。
 >
 > 父文档（概念真理）：
 > [`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)、
@@ -115,7 +114,7 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 17 | **已关闭**：构建运行无 durable ledger、报告无 superseded/current 语义、missed tick 静默 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
 | 18 | FOK 来源是配置 `allow_market_orders`,非 recommendation 流动性要求;neg-risk | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 19 | 06.5 归因→自动再训练完全未实现 → 研究闭环开环 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
-| 20 | 06.6 反事实因子归因未实现;`max_adverse_excursion_bps:None` | [11.10](11.10-counterfactual-factor-attribution.md) |
+| 20 | 06.6 反事实因子归因未实现;`max_adverse_excursion_bps:None` | [11.9](11.9-attribution-feedback-and-auto-retraining.md)（11.10 已合并） |
 | 21 | factor governance 无 quality gate/shadow/WORM 审计 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 22 | preflight `order_client_ready`/`exit_monitor_health` 是占位 | [11.11](11.11-execution-governance-hardening.md) |
 | 23 | 死语义(DrawdownCap/Planned/superseded/EntryTriggerKind 未 emit) | [11.0](11.0-contract-freeze-and-deletion-inventory.md) + 各实现子phase |
@@ -139,8 +138,8 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.7.1 | Composable Entry Conditions + Crypto/Weather Events | typed AST + PIT facts/events + Recommendation shadow + vertical gates — **实施中** | — | [11.7.1](11.7.1-composable-entry-event-triggers.md) |
 | 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility baseline + cash-budget + PIT fee + purged CPCV/uniqueness/DSR/PBO/ESS，交付至 ReportOnly shadow — **仓库契约已闭环：Weather/structural producers、56/21 CPCV、2× latency、Evidence v3、独立 Validate、分页 drilldown 与 fact outbox 已接通；物理迁移/真实数据验收与 24h shadow 待目标环境完成；真实 canary 已移交 11.11** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
 | 11.8 | Report Lifecycle, Durable Scheduling & Operator Workflow | **已完成（含 P0 收尾复核）**：CH decision-fact、delivery claim-loss 与 censor accounting 闭环；历史版本已被 boot 基线取代 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
-| 11.9 | Crypto / Weather Verticals, Attribution Feedback & Auto-Retraining | 双垂直 source/PIT、研究反馈、model+factor 原子晋升、REST/WS/UI 与 production-stack 验收 — **Implementation Closure 已完成；Operational Activation 因 current PG/CH、eligible profile、成熟标签与 shadow 证据 blocked；唯一进度真相见 11.9 Implementation Ledger** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
-| 11.10 | Counterfactual Factor Attribution | 反事实归因 + MAE 回填 | 20 | [11.10](11.10-counterfactual-factor-attribution.md) |
+| 11.9 | Crypto / Weather Verticals, Attribution Feedback & Auto-Retraining | canonical truth、attempt/rollup、自动再训练、质量治理、三类 attribution、Weather 8-family、唯一 route authority 与 UI/ops — **Implementation Closure=DONE；Operational Activation 仍独立 blocked** | 19, 20, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
+| 11.10 | Counterfactual Factor Attribution | **MERGED INTO 11.9**；仅保留合并说明，不是独立实施或依赖节点 | — | [11.10](11.10-counterfactual-factor-attribution.md) |
 | 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
 
 ## 3. 依赖图
@@ -161,8 +160,7 @@ flowchart TD
     P1171["11.7.1 Conditions + Crypto/Weather Events"]
     P1172["11.7.2 Executable L2 Policy Validation"]
     P118["11.8 Report Lifecycle FSM"]
-    P119["11.9 Attribution Feedback + Retrain"]
-    P1110["11.10 Counterfactual Attribution"]
+    P119["11.9 Feedback + Retrain + Attribution"]
     P1111["11.11 Execution Hardening"]
 
     P110 --> P111
@@ -186,7 +184,6 @@ flowchart TD
     P115 --> P119
     P113 --> P119
     P116 --> P119
-    P119 --> P1110
     P110 --> P1111
     P119 --> P1111
 ```
@@ -206,7 +203,8 @@ flowchart TD
 - **11.7 → 11.8** 是 entry authority 闭环：退出/入场结构 → durable build/run → fact-verified
   publication → scope current/supersession → pre-submission execution containment；11.8 不把 Building/Failed
   塞入完整报告表。
-- **11.9 → 11.10** 是研究闭环:归因反馈 + 自动再训练 + 反事实归因,闭合"开环"。
+- **11.9** 自身闭合 attribution feedback、自动再训练和反事实分析；11.10 已合并，依赖图不存在
+  11.9↔11.10 循环。
 - **11.2 / 11.11** 相对独立,可并行。**11.2 已破坏式拆分为 [11.2.1](11.2.1-platform-structural-alpha.md)
   (平台内结构,先行) + [11.2.2](11.2.2-crypto-external-vertical.md)(crypto 外部垂直,**已落地**) + [11.2.3](11.2.3-tier2-llm-linkage.md)
   (Tier 2 LLM linkage 兜底,设计冻结、待实现)**,三篇合计
@@ -214,10 +212,11 @@ flowchart TD
   的垂直闭环设计(确定性优先 linkage 取代 LLM 优先;`ResolutionOracle` + basis 取代"特征源=结算源=Binance")。
   11.2.1 **提前**落地 11.3 的 `FavoriteLongshotBiasTable`(favorite-longshot 因子所需),11.3 正式落地时统一收敛
   治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。11.2.1/11.2.2 的历史版本波次已被
-  boot baseline 取代，但两层向量等业务决策保留。11.9 的 source/PIT、反馈、serving、REST/WS/UI
-  与工程验收已完成 Implementation Closure；Crypto/Weather Operational Activation 仍由 current PG/CH
-  truth、activation-eligible profile、真实成熟标签及 24h/多日 shadow 阻断。完整字段、测试和逐项状态只见
-  [11.9 Implementation Ledger](11.9-attribution-feedback-and-auto-retraining.md#11-implementation-ledger)。
+  boot baseline 取代，但两层向量等业务决策保留。11.9 的旧 Implementation Closure 曾撤回，
+  current-byte remediation、测试和关闭证据已于 2026-07-31 完成，逐项状态只见
+  [11.9 Implementation Ledger](11.9-attribution-feedback-and-auto-retraining.md#11-implementation-ledger)；
+  Operational Activation 仍由 authenticated current truth、activation-eligible profile、真实成熟标签
+  及至少一个完整 retraining cooldown 的 ReportOnly shadow 阻断。
   Tier 2 LLM linkage 若在首次部署前落地，直接修改 boot contract 并 fresh-install 验证；首次部署后必须正式
   bump 和 migration，任何状态都不得静默改写既有 persisted artifact。
 
@@ -225,8 +224,9 @@ flowchart TD
 
 沿用 [`phase-03/README.md`](../phase-03/README.md) §3 的六条基线,并新增 Phase 11 专属五条:
 
-1. **可解释优先**:任何新模型族(LTR/GBDT/校准器)必须能输出 recommendation-level 的因子贡献
-   (见 11.10);无法解释到 recommendation level 的模型只能 shadow,不能 auto-execution(与 08 §15.5 一致)。
+1. **可解释优先**:任何新模型族(LTR/GBDT/校准器)必须能输出 recommendation-level 的预测解释
+   (见 11.9);无法通过 exact explanation efficiency gate 的模型不能成为 Champion，更不能进入
+   auto-execution(与 08 §15.5 一致)。
 2. **校准是硬不变量**:任何进入 Kelly sizing 的 `expected_return`/`downside`/`P(win)` 必须来自
    **校准后**的模型输出;未校准 artifact 禁止 publish(11.3)。
 3. **防过拟合是硬门禁**:任何 model version publish 前必须有 CPCV 多路径分布 + Deflated Sharpe +
@@ -287,14 +287,15 @@ cd ui && pnpm lint && pnpm check && pnpm test:unit && pnpm build:antdv-next
 ## 8. 与既有 Phase 06 设计文档的关系(零兼容处理)
 
 Phase 06 中 `06.5`(attribution feedback & auto-retraining)与 `06.6`(counterfactual factor
-attribution)是**设计文档,未落地**(审计点 19/20)。Phase 11 采取**破坏式接管**:
+attribution)是历史设计文档。Phase 11 采取**破坏式接管**:
 
 - [11.9](11.9-attribution-feedback-and-auto-retraining.md) **取代** 06.5,并把 champion-challenger、
-  drift-triggered retraining、factor governance gates 一并纳入(06.5 原设计不含这些)。
-- [11.10](11.10-counterfactual-factor-attribution.md) **取代** 06.6,并升级为 SHAP/counterfactual
-  统一 attribution 引擎。
-- 落地时:06.5/06.6 文档头部标注 `> SUPERSEDED by phase-11/11.9(11.10)`,不做 re-export、不保留旧
-  seam 命名;新命名以 Phase 11 为准。
+  drift-triggered retraining、factor governance gates、prediction explanation、policy
+  counterfactual、outcome association 与 execution trajectory 一并纳入。
+- [11.10](11.10-counterfactual-factor-attribution.md) 标记 `MERGED INTO 11.9`；06.6 直接由 11.9
+  取代，不存在第二个 schema/artifact owner。
+- 06.5/06.6 文档只保留历史背景，不做 re-export、不保留旧 seam、realized-PnL factor
+  attribution 或 dual-write；新命名以 11.9 为准。
 - 06.0/06.1(exit reinference / opportunistic sell)已落地,Phase 11 **不回推**,只在 11.7 复用其
   `ExitSignalEvaluator` seam。
 
@@ -367,7 +368,7 @@ attribution)是**设计文档,未落地**(审计点 19/20)。Phase 11 采取**�
 - Champion-Challenger deployment: <https://www.snowflake.com/en/developers/guides/ml-champion-challenger-model-deployment/>
 - Zero-touch model promotion(Vertex AI): <https://medium.com/@artur.fejklowicz/zero-touch-ml-model-promotion-building-a-fully-automated-champion-challenger-pipeline-on-google-aa0bb5cfc854>
 
-**归因 / 反事实(11.10)**
+**归因 / 反事实（已合并到 11.9）**
 
 - SHAP(GitHub): <https://github.com/shap/shap>
 - SHAP docs: <https://shap.readthedocs.io/en/stable/>

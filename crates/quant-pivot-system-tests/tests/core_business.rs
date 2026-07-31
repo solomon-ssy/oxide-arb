@@ -105,7 +105,7 @@ async fn report_pipeline_recommendations() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn report_route_stays_pinned() {
     Box::pin(postgres::with_postgres_suite(
-        report_pipeline::pinned_route_ignores_registry(),
+        report_pipeline::pinned_route_uses_generation(),
     ))
     .await
     .expect("start pinned report-route PostgreSQL suite");
@@ -145,24 +145,13 @@ async fn core_business_scenarios_server() {
 
         scenario!(market_selection::provider_selector_mapper_trip);
 
-        scenario!(model_governance::publish_requires_quality_pass);
-        scenario!(model_governance::publish_without_training_transition);
-        scenario!(model_governance::publish_requires_backtest_report);
-        scenario!(model_governance::publish_requires_shadow_stability);
-        scenario!(model_governance::publish_succeeds_without_immutable);
-        scenario!(model_governance::retire_unrouted_without_routing);
-        scenario!(model_governance::rejects_routed_model_retirement);
-        scenario!(model_governance::uncalibrated_return_cannot_publish);
-        scenario!(model_governance::bind_calibration_creates_model);
-        scenario!(model_governance::path_binding_is_exact);
-        scenario!(model_governance::publish_rescans_not_findings);
-        scenario!(model_governance::sell_publish_requires_oof);
-        scenario!(model_governance::sell_cpcv_requires_oof);
+        scenario!(model_governance::model_artifact_append_only);
+        scenario!(model_governance::route_has_no_lifecycle);
 
         scenario!(model_runtime::online_loop_selection_candidates);
         scenario!(model_runtime::generation_rejects_bad_shadow);
         scenario!(model_runtime::cached_planes_stay_stable);
-        scenario!(model_runtime::generation_rejects_retired_model);
+        scenario!(model_runtime::generation_uses_route_authority);
         scenario!(model_runtime::model_run_create_fail);
 
         scenario!(model_training_backtest::train_cpcv_persists_decomposition);
@@ -170,7 +159,7 @@ async fn core_business_scenarios_server() {
         scenario!(participant_concentration::whale_trade_tape_monitor);
 
         scenario!(report_pipeline::ad_hoc_publishes_recommendations);
-        scenario!(report_pipeline::pinned_route_ignores_registry);
+        scenario!(report_pipeline::pinned_route_uses_generation);
         scenario!(report_pipeline::ad_hoc_idempotent_key);
         scenario!(report_pipeline::empty_selection_publishes_report);
         scenario!(report_pipeline::missing_non_empty_report);

@@ -48,9 +48,8 @@ use quant_pivot_models::{
             DownsideSource, EmptyReportReason, EntryConditionState, ExecutionOrderState,
             ExecutionWalletKind, ExitSettlementMode, FeatureParityLatchState,
             FeatureParityStateTransition, FillRequirement, ModelRunKind, OrderIntentStatus,
-            OutcomeSide, PriceComparison, PublicationStatus, QuantRuntimeMode,
-            RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
-            SizingModelKind,
+            OutcomeSide, PriceComparison, QuantRuntimeMode, RecommendationReportStatus,
+            RecommendationStatus, RedeemPolicy, ReportKind, SizingModelKind,
         },
         rbac::ResourceType,
     },
@@ -334,17 +333,12 @@ impl CalibratedModelFixture {
             training_dataset_id: Some(training_dataset_id),
             trade_policy_artifact_id: trade_policy.map(|binding| binding.0),
             trade_policy_hash: trade_policy.map(|binding| binding.1),
-            publish_path_set_id: None,
             derivation: ModelVersionDerivation::ReturnCalibration {
                 parent_model_version_id: self.parent_model_version_id,
                 calibration_artifact_id: self.calibration_artifact_id,
             },
             metrics: self.metrics.clone(),
             training_objective: self.training_objective.clone(),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Candidate,
-            published_at: None,
-            retired_at: None,
         }
     }
 }
@@ -516,7 +510,6 @@ async fn find_existing_demo_infra(
         .ok()??;
     let version = QuantModelVersionEntity::find()
         .filter(QuantModelVersionColumn::ModelSpecId.eq(spec.model_spec_id))
-        .filter(QuantModelVersionColumn::PublicationStatus.eq(PublicationStatus::Published))
         .order_by_desc(QuantModelVersionColumn::Version)
         .one(db)
         .await
@@ -2040,14 +2033,9 @@ pub async fn seed_calibrated_model(
             training_dataset_id: Some(parent_training_dataset_id),
             trade_policy_artifact_id: parent_trade_policy.map(|binding| binding.0),
             trade_policy_hash: parent_trade_policy.map(|binding| binding.1),
-            publish_path_set_id: None,
             derivation: NewModelVersion::training_derivation(),
             metrics: metrics.clone(),
             training_objective: training_objective.clone(),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Candidate,
-            published_at: None,
-            retired_at: None,
         })
         .await
         .expect("persist execution parent model");
@@ -2233,7 +2221,7 @@ async fn seed_model_version_named(
         .next_version_for_spec(&model_spec_id)
         .await
         .expect("next calibrated model version");
-    ModelVersionFixture::persist_published(db, fixture.version(model_spec_id, version))
+    ModelVersionFixture::persist_route_candidate(db, fixture.version(model_spec_id, version))
         .await
         .expect("publish model version through exact parity proof");
     let model_run_id = ModelRunId::from_v7();

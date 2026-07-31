@@ -11,7 +11,8 @@ use zeroize::Zeroizing;
 
 use super::{
     DeployConfig, DomainSourcesConfig, MAX_TRADE_TAPE_RECONCILIATION_ROWS, PolygonRpcEndpoint,
-    WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS, WeatherHistoricalBindingKind,
+    TornadoRegionScopeConfig, WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
+    WeatherHistoricalBindingKind,
 };
 use crate::{
     constants::POLYGON_CHAIN_ID,
@@ -501,7 +502,8 @@ fn validate_domain_sources(deploy: &DeployConfig, report: &mut ConfigValidationR
         });
     }
     if sources.ghcnh.enabled
-        && (sources.ghcnh.request_timeout_ms == 0
+        && (!valid_http_url(&sources.ghcnh.base_url)
+            || sources.ghcnh.request_timeout_ms == 0
             || sources.ghcnh.refresh_secs == 0
             || sources.ghcnh.calibration_years == 0
             || !(1..=8).contains(&sources.ghcnh.max_concurrency))
@@ -509,6 +511,19 @@ fn validate_domain_sources(deploy: &DeployConfig, report: &mut ConfigValidationR
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "domain_sources.ghcnh",
             detail: "request_timeout_ms, refresh_secs, and calibration_years must be > 0; max_concurrency must be between 1 and 8"
+                .into(),
+        });
+    }
+    if sources.ghcnd.enabled
+        && (!valid_http_url(&sources.ghcnd.base_url)
+            || sources.ghcnd.request_timeout_ms == 0
+            || sources.ghcnd.refresh_secs == 0
+            || sources.ghcnd.lookback_years == 0
+            || !(1..=8).contains(&sources.ghcnd.max_concurrency))
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "domain_sources.ghcnd",
+            detail: "base_url must be HTTP(S); request_timeout_ms, refresh_secs, and lookback_years must be > 0; max_concurrency must be between 1 and 8"
                 .into(),
         });
     }
@@ -527,14 +542,32 @@ fn validate_domain_sources(deploy: &DeployConfig, report: &mut ConfigValidationR
     }
     validate_public_weather_sources(sources, report);
     validate_weather_vertical_bindings(deploy, report);
+    validate_weather_stations(sources, report);
+}
+
+fn validate_weather_stations(sources: &DomainSourcesConfig, report: &mut ConfigValidationReport) {
     for (station, profile) in &sources.weather_stations {
         let historical_binding_valid = match profile.historical_binding_kind {
-            WeatherHistoricalBindingKind::ExactStation
-            | WeatherHistoricalBindingKind::OfficialNearbyProxy => profile
-                .ghcnh_station_id
-                .as_deref()
-                .is_some_and(valid_ghcnh_station_id),
-            WeatherHistoricalBindingKind::Unavailable => profile.ghcnh_station_id.is_none(),
+            WeatherHistoricalBindingKind::ExactStation => {
+                profile
+                    .ghcnh_station_id
+                    .as_deref()
+                    .is_some_and(valid_ncei_station_id)
+                    && profile
+                        .ghcnd_station_id
+                        .as_deref()
+                        .is_some_and(valid_ncei_station_id)
+            }
+            WeatherHistoricalBindingKind::OfficialNearbyProxy => {
+                profile
+                    .ghcnh_station_id
+                    .as_deref()
+                    .is_some_and(valid_ncei_station_id)
+                    && profile.ghcnd_station_id.is_none()
+            }
+            WeatherHistoricalBindingKind::Unavailable => {
+                profile.ghcnh_station_id.is_none() && profile.ghcnd_station_id.is_none()
+            }
         };
         if IcaoStation::parse(station).is_err()
             || profile.timezone.parse::<Tz>().is_err()
@@ -547,14 +580,14 @@ fn validate_domain_sources(deploy: &DeployConfig, report: &mut ConfigValidationR
             report.errors.push(ConfigValidationError::InvalidValue {
                 field: "domain_sources.weather_stations",
                 detail: format!(
-                    "station `{station}` must have a valid ICAO id, IANA timezone, coordinates, and a binding-kind-consistent official GHCNh identity"
+                    "station `{station}` must have a valid ICAO id, IANA timezone, coordinates, and binding-kind-consistent official GHCNh/GHCNd identities"
                 ),
             });
         }
     }
 }
 
-fn valid_ghcnh_station_id(value: &str) -> bool {
+fn valid_ncei_station_id(value: &str) -> bool {
     value.len() == 11
         && value
             .bytes()
@@ -568,14 +601,15 @@ fn validate_public_weather_sources(
     if sources.hko_open_data.enabled
         && (!valid_http_url(&sources.hko_open_data.base_url)
             || sources.hko_open_data.request_timeout_ms == 0
-            || sources.hko_open_data.rainfall_poll_secs == 0
+            || sources.hko_open_data.daily_rainfall_poll_secs == 0
+            || !(1..=366).contains(&sources.hko_open_data.daily_rainfall_lookback_days)
             || sources.hko_open_data.daily_temperature_poll_secs == 0
             || !(1..=120).contains(&sources.hko_open_data.daily_temperature_lookback_months))
     {
         invalid_domain_source(
             report,
             "domain_sources.hko_open_data",
-            "base_url must be HTTP(S), timeout/rainfall/daily-temperature cadences must be > 0, and daily_temperature_lookback_months must be in 1..=120",
+            "base_url must be HTTP(S), timeout/rainfall/daily-temperature cadences must be > 0, daily_rainfall_lookback_days must be in 1..=366, and daily_temperature_lookback_months must be in 1..=120",
         );
     }
     if sources.airnow.enabled
@@ -594,14 +628,17 @@ fn validate_public_weather_sources(
     if sources.tornado.enabled
         && (!valid_http_url(&sources.tornado.spc_base_url)
             || !valid_http_url(&sources.tornado.ncei_csv_base_url)
+            || !valid_http_url(&sources.tornado.ncei_time_series_base_url)
             || sources.tornado.request_timeout_ms == 0
             || sources.tornado.spc_poll_secs == 0
-            || sources.tornado.ncei_refresh_secs == 0)
+            || sources.tornado.ncei_refresh_secs == 0
+            || sources.tornado.ncei_time_series_poll_secs == 0
+            || !(1..=10).contains(&sources.tornado.ncei_backfill_years))
     {
         invalid_domain_source(
             report,
             "domain_sources.tornado",
-            "URLs must be HTTP(S), and timeout/refresh cadences must be > 0",
+            "URLs must be HTTP(S), timeout/refresh/poll cadences must be > 0, and ncei_backfill_years must be in 1..=10",
         );
     }
     if sources.nhc.enabled
@@ -619,6 +656,7 @@ fn validate_public_weather_sources(
     }
     if sources.nasa_gistemp.enabled
         && (!valid_http_url(&sources.nasa_gistemp.csv_url)
+            || !valid_http_url(&sources.nasa_gistemp.annual_url)
             || sources.nasa_gistemp.request_timeout_ms == 0
             || sources.nasa_gistemp.refresh_secs == 0)
     {
@@ -629,15 +667,17 @@ fn validate_public_weather_sources(
         );
     }
     if sources.nsidc_sea_ice.enabled
-        && (!valid_http_url(&sources.nsidc_sea_ice.north_csv_url)
-            || !valid_http_url(&sources.nsidc_sea_ice.south_csv_url)
+        && (!valid_http_url(&sources.nsidc_sea_ice.north_daily_csv_url)
+            || !valid_http_url(&sources.nsidc_sea_ice.south_daily_csv_url)
+            || !valid_http_url(&sources.nsidc_sea_ice.north_monthly_base_url)
+            || !valid_http_url(&sources.nsidc_sea_ice.south_monthly_base_url)
             || sources.nsidc_sea_ice.request_timeout_ms == 0
             || sources.nsidc_sea_ice.refresh_secs == 0)
     {
         invalid_domain_source(
             report,
             "domain_sources.nsidc_sea_ice",
-            "hemisphere URLs must be HTTP(S), and timeout/refresh cadence must be > 0",
+            "daily and monthly hemisphere URLs must be HTTP(S), and timeout/refresh cadence must be > 0",
         );
     }
     if sources.nws_observation.enabled
@@ -675,14 +715,23 @@ fn validate_weather_vertical_bindings(deploy: &DeployConfig, report: &mut Config
     let bindings = &deploy.domain_sources.weather_vertical_bindings;
     let mut identities = BTreeSet::new();
     for binding in &bindings.hko_rainfall {
-        let valid = printable_binding(&binding.place, 128)
-            && binding.timezone.parse::<Tz>().is_ok()
-            && identities.insert(format!("HKO:{}:RAIN", binding.place));
+        let station_segment = format!("/{}/", binding.station_key);
+        let coordinate_valid = binding.latitude >= dec!(-90)
+            && binding.latitude <= dec!(90)
+            && binding.longitude >= dec!(-180)
+            && binding.longitude <= dec!(180);
+        let valid = printable_binding(&binding.site_key, 128)
+            && HkoStation::parse(&binding.station_key).is_ok()
+            && valid_http_url(&binding.daily_csv_url)
+            && binding.daily_csv_url.contains(&station_segment)
+            && coordinate_valid
+            && binding.timezone == "Asia/Hong_Kong"
+            && identities.insert(format!("HKO:{}:RAIN", binding.station_key));
         if !valid {
             invalid_domain_source(
                 report,
                 "domain_sources.weather_vertical_bindings.hko_rainfall",
-                "place must be unique printable text and timezone must be an IANA identifier",
+                "binding must carry a unique HKO station, matching official HTTP(S) daily CSV, printable site, valid coordinates, and Asia/Hong_Kong timezone",
             );
         }
     }
@@ -739,21 +788,26 @@ fn validate_weather_vertical_bindings(deploy: &DeployConfig, report: &mut Config
         }
     }
     for binding in &bindings.tornado_regions {
-        let state_valid = binding.spc_state_code.len() == 2
-            && binding
-                .spc_state_code
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase());
+        let scope_valid = match &binding.scope {
+            TornadoRegionScopeConfig::UnitedStates => binding.region_id == "united_states",
+            TornadoRegionScopeConfig::State {
+                spc_state_code,
+                ncei_state_name,
+            } => {
+                spc_state_code.len() == 2
+                    && spc_state_code.bytes().all(|byte| byte.is_ascii_uppercase())
+                    && printable_binding(ncei_state_name, 128)
+            }
+        };
         let valid = printable_binding(&binding.region_id, 64)
-            && printable_binding(&binding.ncei_state_name, 128)
-            && state_valid
+            && scope_valid
             && binding.timezone.parse::<Tz>().is_ok()
             && identities.insert(format!("TORNADO:{}", binding.region_id));
         if !valid {
             invalid_domain_source(
                 report,
                 "domain_sources.weather_vertical_bindings.tornado_regions",
-                "region/state must form a unique printable binding and timezone must be an IANA identifier",
+                "scope must be a unique national or valid state binding and timezone must be an IANA identifier",
             );
         }
     }

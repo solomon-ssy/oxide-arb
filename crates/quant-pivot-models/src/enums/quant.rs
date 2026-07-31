@@ -214,6 +214,34 @@ pg_enum! {
 }
 
 pg_enum! {
+    type_name = "qp_resolution_projection_status",
+    /// Durable projection lifecycle for immutable source resolution observations.
+    @derive(Default)
+    pub enum ResolutionProjectionStatus {
+        #[default]
+        PendingMapping => "pending_mapping",
+        Delivering => "delivering",
+        Retrying => "retrying",
+        Quarantined => "quarantined",
+        Failed => "failed",
+        Verified => "verified",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_outcome_reconciliation_task_status",
+    /// Durable lease/retry lifecycle for attempt and recommendation-rollup work.
+    @derive(Default)
+    pub enum OutcomeReconciliationTaskStatus {
+        #[default]
+        Pending => "pending",
+        Delivering => "delivering",
+        Retrying => "retrying",
+        Completed => "completed",
+    }
+}
+
+pg_enum! {
     type_name = "qp_recommendation_status",
     /// Lifecycle state for a single recommendation.
     @derive(Default)
@@ -455,6 +483,20 @@ impl OrderIntentStatus {
 
     /// Terminal statuses with at least partial fill.
     pub const FILLED_TERMINAL: [Self; 2] = [Self::Filled, Self::PartiallyFilled];
+
+    /// Whether an intent with no submitted attempt is terminal for final rollup.
+    #[must_use]
+    pub const fn is_unsubmitted_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::AdmissionRejected
+                | Self::Rejected
+                | Self::Cancelled
+                | Self::Failed
+                | Self::Expired
+                | Self::Invalidated
+        )
+    }
 }
 
 pg_enum! {
@@ -472,24 +514,11 @@ pg_enum! {
 }
 
 pg_enum! {
-    type_name = "qp_publication_status",
-    /// Publication lifecycle for immutable model versions.
-    @derive(Default)
-    pub enum PublicationStatus {
-        #[default]
-        Candidate => "candidate",
-        Shadow => "shadow",
-        Published => "published",
-        Retired => "retired",
-    }
-}
-
-pg_enum! {
     type_name = "qp_model_version_derivation_kind",
     /// Immutable provenance for how one model-version artifact was produced.
     ///
-    /// Publication state is deliberately separate: derivation never changes
-    /// when a candidate advances through shadow/published/retired lifecycle.
+    /// Route role is deliberately separate: derivation never changes when an
+    /// artifact is referenced by a shadow or champion route.
     pub enum ModelVersionDerivationKind {
         Training => "training",
         ReturnCalibration => "return_calibration",
@@ -530,38 +559,19 @@ pg_enum! {
     }
 }
 
-impl PublicationStatus {
-    /// Returns whether transitioning from `self` to `next` is allowed by the
-    /// model publication state machine.
-    #[must_use]
-    pub const fn allows_transition_to(self, next: Self) -> bool {
-        match self {
-            Self::Candidate | Self::Shadow => {
-                matches!(next, Self::Shadow | Self::Published)
-            }
-            Self::Published => matches!(next, Self::Published | Self::Retired),
-            Self::Retired => matches!(next, Self::Published),
-        }
-    }
-}
-
 pg_enum! {
     type_name = "qp_model_governance_action",
     /// Model-governance action recorded in the `quant_model_governance_audit`
     /// trail. Append-only wire labels — never rename an existing value.
     pub enum ModelGovernanceAction {
-        /// A candidate / shadow version was published (gated).
-        Publish => "publish",
+        /// The first model for one previously empty category route was
+        /// activated under the dedicated bootstrap gate.
+        BootstrapRoute => "bootstrap_route",
         /// A shadow candidate and one exact category route were promoted in
         /// the same policy-generation transaction.
         PromoteRoute => "promote_route",
-        /// A published version was retired.
-        Retire => "retire",
-        /// A candidate model version bound a calibrated return model.
-        BindCalibration => "bind_calibration",
-        /// A candidate / shadow version bound the exact CPCV path set used by
-        /// publish quality gates, replacing implicit "latest" selection.
-        BindPublishPathSet => "bind_publish_path_set",
+        /// A calibrated return-model artifact was sealed immutably.
+        SealCalibration => "seal_calibration",
     }
 }
 
@@ -701,8 +711,12 @@ pg_enum! {
         CpcvBacktest => "cpcv_backtest",
         /// Deterministic training/serving feature replay.
         FeatureParity => "feature_parity",
+        /// Verify every canonical truth projector covers the cycle cutoff.
+        FeedbackTruthFreeze => "feedback_truth_freeze",
         /// Freeze cohort coverage and decide whether statistical drift may run.
         FeedbackCoverage => "feedback_coverage",
+        /// Freeze the PIT-safe attribution inputs available to recipe planning.
+        FeedbackAttributionPlan => "feedback_attribution_plan",
         /// Compute data/concept/label drift from immutable coverage evidence.
         FeedbackDrift => "feedback_drift",
         /// Seal the bounded Training/Calibration/Evaluation Dataset batch.
@@ -713,12 +727,14 @@ pg_enum! {
         FeedbackCalibration => "feedback_calibration",
         /// Run and bind the candidate CPCV evidence batch.
         FeedbackCpcv => "feedback_cpcv",
+        /// Apply the sole model-quality gate to every attempted candidate.
+        FeedbackValidation => "feedback_validation",
         /// Compare every CPCV-eligible challenger with the champion over the
         /// one-time reserved Evaluation holdout.
         FeedbackComparison => "feedback_comparison",
         /// Evaluate one F09-eligible challenger against exact production
         /// shadow observations from a published serving generation.
-        FeedbackShadowReplay => "feedback_shadow_replay",
+        FeedbackShadow => "feedback_shadow",
         /// Seal the evidence-only terminal decision from exact F06/F09/F10
         /// predecessors. This job has no route-promotion authority.
         FeedbackDecision => "feedback_decision",
@@ -759,11 +775,14 @@ pg_enum! {
         BacktestPathSet => "backtest_path_set",
         CalibrationArtifact => "calibration_artifact",
         FeatureParityRun => "feature_parity_run",
+        FeedbackTruthFreezeArtifact => "feedback_truth_freeze_artifact",
         FeedbackCoverageArtifact => "feedback_coverage_artifact",
+        FeedbackAttributionPlanArtifact => "feedback_attribution_plan_artifact",
         FeedbackDriftArtifact => "feedback_drift_artifact",
         FeedbackLearningStageArtifact => "feedback_learning_stage_artifact",
+        FeedbackValidationArtifact => "feedback_validation_artifact",
         FeedbackComparisonArtifact => "feedback_comparison_artifact",
-        FeedbackShadowReplayArtifact => "feedback_shadow_replay_artifact",
+        FeedbackShadowArtifact => "feedback_shadow_artifact",
         FeedbackDecisionArtifact => "feedback_decision_artifact",
         TradePolicyArtifact => "trade_policy_artifact",
         TradePolicyValidationRun => "trade_policy_validation_run",
@@ -895,8 +914,6 @@ pg_enum! {
     pub enum ModelWeightSource {
         /// Frozen weights from the content-addressed model artifact.
         Artifact => "artifact",
-        /// Runtime-config overlay for experimentation; never publish evidence.
-        ConfigOverlay => "config_overlay",
     }
 }
 
@@ -1011,12 +1028,12 @@ pg_enum! {
 }
 
 pg_enum! {
-    type_name = "qp_recommendation_execution_terminal_state",
+    type_name = "qp_execution_attempt_terminal_state",
     /// Fill state after a real execution attempt reaches terminal venue truth.
     ///
     /// `ReportOnly` and recommendations never submitted to the venue have no
     /// execution-outcome row; they are deliberately not represented as zero fill.
-    pub enum RecommendationExecutionTerminalState {
+    pub enum ExecutionAttemptTerminalState {
         Unfilled => "unfilled",
         PartiallyFilled => "partially_filled",
         FullyFilled => "fully_filled",
@@ -1024,12 +1041,12 @@ pg_enum! {
 }
 
 pg_enum! {
-    type_name = "qp_recommendation_execution_no_fill_reason",
+    type_name = "qp_execution_attempt_no_fill_reason",
     /// Terminal venue evidence proving that a real entry attempt filled zero shares.
     ///
     /// Pre-submission rejection, missing execution authority, and ambiguous
     /// placement are absence/censor states and therefore have no value here.
-    pub enum RecommendationExecutionNoFillReason {
+    pub enum ExecutionAttemptNoFillReason {
         VenueRejected => "venue_rejected",
         VenueCancelled => "venue_cancelled",
         VenueExpired => "venue_expired",
@@ -1097,8 +1114,8 @@ pg_enum! {
 
 pg_enum! {
     type_name = "qp_feedback_trigger_family",
-    /// Trigger family participates in cycle idempotency. Actor and reason are
-    /// append-only timeline evidence and deliberately do not fork identity.
+    /// Trigger source is append-only provenance and never forks the canonical
+    /// profile/cadence-cutoff cycle identity.
     pub enum FeedbackTriggerFamily {
         Scheduled => "scheduled",
         Manual => "manual",
@@ -1110,14 +1127,17 @@ pg_enum! {
     /// Closed feedback DAG stage vocabulary.
     pub enum FeedbackStage {
         Trigger => "trigger",
+        TruthFreeze => "truth_freeze",
         Coverage => "coverage",
+        AttributionPlan => "attribution_plan",
         Drift => "drift",
         DatasetSeal => "dataset_seal",
         Training => "training",
         Calibration => "calibration",
         Cpcv => "cpcv",
+        Validation => "validation",
         Comparison => "comparison",
-        ShadowReplay => "shadow_replay",
+        Shadow => "shadow",
         Decision => "decision",
     }
 }
@@ -1127,15 +1147,18 @@ impl FeedbackStage {
     #[must_use]
     pub const fn next(self) -> Option<Self> {
         match self {
-            Self::Trigger => Some(Self::Coverage),
-            Self::Coverage => Some(Self::Drift),
+            Self::Trigger => Some(Self::TruthFreeze),
+            Self::TruthFreeze => Some(Self::Coverage),
+            Self::Coverage => Some(Self::AttributionPlan),
+            Self::AttributionPlan => Some(Self::Drift),
             Self::Drift => Some(Self::DatasetSeal),
             Self::DatasetSeal => Some(Self::Training),
             Self::Training => Some(Self::Calibration),
             Self::Calibration => Some(Self::Cpcv),
-            Self::Cpcv => Some(Self::Comparison),
-            Self::Comparison => Some(Self::ShadowReplay),
-            Self::ShadowReplay => Some(Self::Decision),
+            Self::Cpcv => Some(Self::Validation),
+            Self::Validation => Some(Self::Comparison),
+            Self::Comparison => Some(Self::Shadow),
+            Self::Shadow => Some(Self::Decision),
             Self::Decision => None,
         }
     }
@@ -1153,6 +1176,28 @@ pg_enum! {
         CancellationRequested => "cancellation_requested",
         Cancelled => "cancelled",
         LeaseRecovered => "lease_recovered",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_attribution_artifact_kind",
+    /// Semantically distinct immutable explanation and association artifacts.
+    pub enum AttributionArtifactKind {
+        PredictionExplanation => "prediction_explanation",
+        DecisionCounterfactual => "decision_counterfactual",
+        OutcomeAssociation => "outcome_association",
+        ExecutionTrajectory => "execution_trajectory",
+        PolicyCounterfactualOutcome => "policy_counterfactual_outcome",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_attribution_cohort",
+    /// Earliest statistical role allowed to consume an attribution artifact.
+    pub enum AttributionCohort {
+        Training => "training",
+        Evaluation => "evaluation",
+        Shadow => "shadow",
     }
 }
 
@@ -1340,8 +1385,6 @@ wire_enum! {
         ReportOnlyMode => "report_only_mode",
         /// The risk envelope failed validation.
         RiskEnvelopeInvalid => "risk_envelope_invalid",
-        /// The model is not published.
-        ModelNotPublished => "model_not_published",
         /// Inputs were stale at decision time.
         DataStale => "data_stale",
         /// Confidence was below the execution floor.
@@ -1590,33 +1633,10 @@ mod tests {
     use std::str::FromStr;
 
     use super::{
-        CohortCensorReason, CohortExclusionReason, FeatureParityStage, FeedbackCohort,
-        OrderIntentStatus, PublicationStatus, RecommendationExecutionTerminalState,
-        RecommendationResolutionKind, RecommendationStatus,
+        CohortCensorReason, CohortExclusionReason, ExecutionAttemptTerminalState,
+        FeatureParityStage, FeedbackCohort, OrderIntentStatus, RecommendationResolutionKind,
+        RecommendationStatus,
     };
-
-    #[test]
-    fn model_publication_fsm_closed() {
-        assert_eq!(PublicationStatus::default(), PublicationStatus::Candidate);
-        for (status, wire) in [
-            (PublicationStatus::Candidate, "candidate"),
-            (PublicationStatus::Shadow, "shadow"),
-            (PublicationStatus::Published, "published"),
-            (PublicationStatus::Retired, "retired"),
-        ] {
-            assert_eq!(PublicationStatus::from_str(wire), Ok(status));
-        }
-        for removed in ["draft", "rejected"] {
-            assert!(
-                PublicationStatus::from_str(removed).is_err(),
-                "removed factor-era publication state `{removed}` must fail closed"
-            );
-        }
-        assert!(PublicationStatus::Candidate.allows_transition_to(PublicationStatus::Shadow));
-        assert!(PublicationStatus::Shadow.allows_transition_to(PublicationStatus::Published));
-        assert!(PublicationStatus::Published.allows_transition_to(PublicationStatus::Retired));
-        assert!(!PublicationStatus::Candidate.allows_transition_to(PublicationStatus::Retired));
-    }
 
     #[test]
     fn feedback_outcome_enums_stable() {
@@ -1641,20 +1661,17 @@ mod tests {
         }
 
         for (state, wire) in [
-            (RecommendationExecutionTerminalState::Unfilled, "unfilled"),
+            (ExecutionAttemptTerminalState::Unfilled, "unfilled"),
             (
-                RecommendationExecutionTerminalState::PartiallyFilled,
+                ExecutionAttemptTerminalState::PartiallyFilled,
                 "partially_filled",
             ),
-            (
-                RecommendationExecutionTerminalState::FullyFilled,
-                "fully_filled",
-            ),
+            (ExecutionAttemptTerminalState::FullyFilled, "fully_filled"),
         ] {
             let exhaustive_wire = match state {
-                RecommendationExecutionTerminalState::Unfilled => "unfilled",
-                RecommendationExecutionTerminalState::PartiallyFilled => "partially_filled",
-                RecommendationExecutionTerminalState::FullyFilled => "fully_filled",
+                ExecutionAttemptTerminalState::Unfilled => "unfilled",
+                ExecutionAttemptTerminalState::PartiallyFilled => "partially_filled",
+                ExecutionAttemptTerminalState::FullyFilled => "fully_filled",
             };
             assert_eq!(wire, exhaustive_wire);
             assert_eq!(state.as_str(), wire);

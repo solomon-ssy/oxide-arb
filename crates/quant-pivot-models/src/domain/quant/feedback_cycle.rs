@@ -6,6 +6,7 @@ use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 
+use super::feedback_trigger::FeedbackTriggerEventInfo;
 use crate::{
     domain::ports::FeedbackCandidateFamily,
     entities::{
@@ -28,7 +29,7 @@ use crate::{
 
 const FEEDBACK_CYCLE_KEY_VERSION: u32 = 1;
 const FEEDBACK_CYCLE_KEY_DOMAIN: &str = "quant-pivot/feedback-cycle-idempotency";
-const FEEDBACK_STAGE_EVENT_VERSION: u32 = 1;
+const FEEDBACK_STAGE_EVENT_VERSION: u32 = 2;
 const FEEDBACK_STAGE_EVENT_DOMAIN: &str = "quant-pivot/feedback-stage-event";
 const DRIFT_REPORT_VERSION: u32 = 1;
 const DRIFT_REPORT_DOMAIN: &str = "quant-pivot/drift-report";
@@ -45,7 +46,6 @@ const MAX_ROLE_BYTES: usize = 64;
 #[serde(deny_unknown_fields, try_from = "FeedbackCycleKeyDocument")]
 pub struct FeedbackCycleKey {
     format_version: u32,
-    trigger_family: FeedbackTriggerFamily,
     profile_ref: ResearchProfileRef,
     feedback_policy_hash: ContentHash,
     label_cutoff: DateTime<Utc>,
@@ -59,7 +59,6 @@ pub struct FeedbackCycleKey {
 #[serde(deny_unknown_fields)]
 struct FeedbackCycleKeyDocument {
     format_version: u32,
-    trigger_family: FeedbackTriggerFamily,
     profile_ref: ResearchProfileRef,
     feedback_policy_hash: ContentHash,
     label_cutoff: DateTime<Utc>,
@@ -72,7 +71,6 @@ struct FeedbackCycleKeyDocument {
 /// Inputs frozen by the server before a cycle row is claimed.
 #[derive(Debug, Clone)]
 pub struct FeedbackCycleKeyInput {
-    pub trigger_family: FeedbackTriggerFamily,
     pub profile_ref: ResearchProfileRef,
     pub feedback_policy_hash: ContentHash,
     pub label_cutoff: DateTime<Utc>,
@@ -87,7 +85,6 @@ impl FeedbackCycleKey {
     pub fn try_new(input: FeedbackCycleKeyInput) -> Result<Self, FeedbackError> {
         let key = Self {
             format_version: FEEDBACK_CYCLE_KEY_VERSION,
-            trigger_family: input.trigger_family,
             profile_ref: input.profile_ref,
             feedback_policy_hash: input.feedback_policy_hash,
             label_cutoff: input.label_cutoff,
@@ -148,11 +145,6 @@ impl FeedbackCycleKey {
     }
 
     #[must_use]
-    pub const fn trigger_family(&self) -> FeedbackTriggerFamily {
-        self.trigger_family
-    }
-
-    #[must_use]
     pub const fn profile_ref(&self) -> &ResearchProfileRef {
         &self.profile_ref
     }
@@ -199,7 +191,6 @@ impl TryFrom<FeedbackCycleKeyDocument> for FeedbackCycleKey {
     fn try_from(document: FeedbackCycleKeyDocument) -> Result<Self, Self::Error> {
         let key = Self {
             format_version: document.format_version,
-            trigger_family: document.trigger_family,
             profile_ref: document.profile_ref,
             feedback_policy_hash: document.feedback_policy_hash,
             label_cutoff: document.label_cutoff,
@@ -221,7 +212,6 @@ pub struct NewFeedbackCycle {
     idempotency_hash: ContentHash,
     #[sea_orm(column_type = "JsonBinary")]
     idempotency_key: FeedbackCycleKey,
-    trigger_family: FeedbackTriggerFamily,
     #[sea_orm(column_type = "JsonBinary")]
     profile_ref: ResearchProfileRef,
     research_profile_artifact_id: ResearchProfileArtifactId,
@@ -241,7 +231,6 @@ impl NewFeedbackCycle {
     pub fn try_seal(idempotency_key: FeedbackCycleKey) -> Result<Self, FeedbackError> {
         let idempotency_hash = idempotency_key.idempotency_hash()?;
         let profile_ref = idempotency_key.profile_ref().clone();
-        let trigger_family = idempotency_key.trigger_family();
         let feedback_policy_hash = idempotency_key.feedback_policy_hash();
         let label_cutoff = idempotency_key.label_cutoff();
         let capability_registry_hashes = idempotency_key.capability_registry_hashes().clone();
@@ -253,7 +242,6 @@ impl NewFeedbackCycle {
             feedback_cycle_id: FeedbackCycleId::from_idempotency_hash(&idempotency_hash),
             idempotency_hash,
             idempotency_key,
-            trigger_family,
             research_profile_artifact_id: ResearchProfileArtifactId::from_profile_ref(&profile_ref),
             profile_hash: profile_ref.content_hash,
             profile_ref,
@@ -280,6 +268,21 @@ impl NewFeedbackCycle {
     #[must_use]
     pub const fn label_cutoff(&self) -> DateTime<Utc> {
         self.label_cutoff
+    }
+
+    #[must_use]
+    pub const fn profile_ref(&self) -> &ResearchProfileRef {
+        &self.profile_ref
+    }
+
+    #[must_use]
+    pub const fn research_profile_artifact_id(&self) -> &ResearchProfileArtifactId {
+        &self.research_profile_artifact_id
+    }
+
+    #[must_use]
+    pub const fn feedback_policy_hash(&self) -> ContentHash {
+        self.feedback_policy_hash
     }
 }
 
@@ -440,7 +443,6 @@ pub struct FeedbackCycleInfo {
     pub feedback_cycle_id: FeedbackCycleId,
     pub idempotency_hash: ContentHash,
     pub idempotency_key: FeedbackCycleKey,
-    pub trigger_family: FeedbackTriggerFamily,
     pub profile_ref: ResearchProfileRef,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub profile_hash: ContentHash,
@@ -471,7 +473,6 @@ info_from_model!(
         feedback_cycle_id,
         idempotency_hash,
         idempotency_key,
-        trigger_family,
         profile_ref,
         research_profile_artifact_id,
         profile_hash,
@@ -503,7 +504,6 @@ impl FeedbackCycleInfo {
         self.feedback_cycle_id == candidate.feedback_cycle_id
             && self.idempotency_hash == candidate.idempotency_hash
             && self.idempotency_key == candidate.idempotency_key
-            && self.trigger_family == candidate.trigger_family
             && self.profile_ref == candidate.profile_ref
             && self.research_profile_artifact_id == candidate.research_profile_artifact_id
             && self.profile_hash == candidate.profile_hash
@@ -541,7 +541,6 @@ impl FeedbackCycleInfo {
             ResearchProfileArtifactId::from_profile_ref(self.idempotency_key.profile_ref());
         if self.idempotency_hash != expected_hash
             || self.feedback_cycle_id != FeedbackCycleId::from_idempotency_hash(&expected_hash)
-            || self.trigger_family != self.idempotency_key.trigger_family()
             || self.profile_ref != *self.idempotency_key.profile_ref()
             || self.research_profile_artifact_id != expected_profile_id
             || self.profile_hash != self.profile_ref.content_hash
@@ -644,6 +643,7 @@ pub struct FeedbackStageEventInput {
     pub event_sequence: i64,
     pub stage: FeedbackStage,
     pub event_kind: FeedbackStageEventKind,
+    pub trigger_family: Option<FeedbackTriggerFamily>,
     pub research_job_id: Option<ResearchJobId>,
     pub actor: Option<String>,
     pub reason_code: Option<String>,
@@ -661,6 +661,7 @@ pub struct NewFeedbackStageEvent {
     event_sequence: i64,
     stage: FeedbackStage,
     event_kind: FeedbackStageEventKind,
+    trigger_family: Option<FeedbackTriggerFamily>,
     research_job_id: Option<ResearchJobId>,
     actor: Option<String>,
     reason_code: Option<String>,
@@ -684,6 +685,7 @@ impl NewFeedbackStageEvent {
             event_sequence: input.event_sequence,
             stage: input.stage,
             event_kind: input.event_kind,
+            trigger_family: input.trigger_family,
             research_job_id: input.research_job_id,
             actor: input.actor,
             reason_code: input.reason_code,
@@ -714,6 +716,21 @@ impl NewFeedbackStageEvent {
         self.event_kind
     }
 
+    #[must_use]
+    pub const fn trigger_family(&self) -> Option<FeedbackTriggerFamily> {
+        self.trigger_family
+    }
+
+    #[must_use]
+    pub fn actor(&self) -> Option<&str> {
+        self.actor.as_deref()
+    }
+
+    #[must_use]
+    pub fn reason_code(&self) -> Option<&str> {
+        self.reason_code.as_deref()
+    }
+
     pub fn cancellation_reason(&self) -> Result<&str, FeedbackError> {
         if self.event_kind != FeedbackStageEventKind::CancellationRequested {
             return Err(FeedbackError::InvalidStageEvent {
@@ -739,6 +756,7 @@ struct StageEventDocument<'a> {
     event_sequence: i64,
     stage: FeedbackStage,
     event_kind: FeedbackStageEventKind,
+    trigger_family: Option<FeedbackTriggerFamily>,
     research_job_id: Option<ResearchJobId>,
     actor: &'a Option<String>,
     reason_code: &'a Option<String>,
@@ -754,6 +772,7 @@ impl<'a> From<&'a FeedbackStageEventInput> for StageEventDocument<'a> {
             event_sequence: input.event_sequence,
             stage: input.stage,
             event_kind: input.event_kind,
+            trigger_family: input.trigger_family,
             research_job_id: input.research_job_id,
             actor: &input.actor,
             reason_code: &input.reason_code,
@@ -773,6 +792,7 @@ pub struct FeedbackStageEventInfo {
     pub event_sequence: i64,
     pub stage: FeedbackStage,
     pub event_kind: FeedbackStageEventKind,
+    pub trigger_family: Option<FeedbackTriggerFamily>,
     pub research_job_id: Option<ResearchJobId>,
     pub actor: Option<String>,
     pub reason_code: Option<String>,
@@ -783,13 +803,45 @@ pub struct FeedbackStageEventInfo {
     pub created_at: DateTime<Utc>,
 }
 
+/// Immutable source of one globally ordered feedback invalidation.
+#[derive(Debug, Clone)]
+pub enum FeedbackOutboxSource {
+    Stage(FeedbackStageEventInfo),
+    Trigger(FeedbackTriggerEventInfo),
+}
+
+impl FeedbackOutboxSource {
+    #[must_use]
+    pub const fn feedback_cycle_id(&self) -> FeedbackCycleId {
+        match self {
+            Self::Stage(event) => event.feedback_cycle_id,
+            Self::Trigger(event) => event.feedback_cycle_id,
+        }
+    }
+
+    #[must_use]
+    pub const fn occurred_at(&self) -> DateTime<Utc> {
+        match self {
+            Self::Stage(event) => event.occurred_at,
+            Self::Trigger(event) => event.occurred_at,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), FeedbackError> {
+        match self {
+            Self::Stage(event) => event.validate(),
+            Self::Trigger(event) => event.validate(),
+        }
+    }
+}
+
 /// One globally ordered feedback event claimed for durable publication.
 #[derive(Debug, Clone)]
 pub struct FeedbackOutboxEntry {
     pub revision: i64,
     pub publish_attempts: i32,
     pub profile_id: ResearchProfileId,
-    pub event: FeedbackStageEventInfo,
+    pub source: FeedbackOutboxSource,
 }
 
 impl FeedbackOutboxEntry {
@@ -805,7 +857,7 @@ impl FeedbackOutboxEntry {
                 detail: "feedback outbox profile id must not be empty".to_owned(),
             });
         }
-        self.event.validate()
+        self.source.validate()
     }
 }
 
@@ -828,6 +880,7 @@ info_from_model!(
         event_sequence,
         stage,
         event_kind,
+        trigger_family,
         research_job_id,
         actor,
         reason_code,
@@ -848,6 +901,7 @@ impl FeedbackStageEventInfo {
             && self.event_sequence == candidate.event_sequence
             && self.stage == candidate.stage
             && self.event_kind == candidate.event_kind
+            && self.trigger_family == candidate.trigger_family
             && self.research_job_id == candidate.research_job_id
             && self.actor == candidate.actor
             && self.reason_code == candidate.reason_code
@@ -863,6 +917,7 @@ impl FeedbackStageEventInfo {
             event_sequence: self.event_sequence,
             stage: self.stage,
             event_kind: self.event_kind,
+            trigger_family: self.trigger_family,
             research_job_id: self.research_job_id,
             actor: self.actor.clone(),
             reason_code: self.reason_code.clone(),
@@ -1483,21 +1538,27 @@ impl FeedbackStageEventInput {
         let valid = match self.event_kind {
             FeedbackStageEventKind::Triggered => {
                 trigger_stage
+                    && self.trigger_family.is_some()
                     && self.research_job_id.is_none()
                     && self.actor.is_some()
                     && self.reason_code.is_some()
             }
             FeedbackStageEventKind::CancellationRequested => {
-                !trigger_stage && self.actor.is_some() && self.reason_code.is_some()
+                !trigger_stage
+                    && self.trigger_family.is_none()
+                    && self.actor.is_some()
+                    && self.reason_code.is_some()
             }
             FeedbackStageEventKind::JobLinked | FeedbackStageEventKind::Started => {
                 !trigger_stage
+                    && self.trigger_family.is_none()
                     && self.research_job_id.is_some()
                     && self.actor.is_none()
                     && self.reason_code.is_none()
             }
             FeedbackStageEventKind::Succeeded => {
                 !trigger_stage
+                    && self.trigger_family.is_none()
                     && self.research_job_id.is_some()
                     && self.actor.is_none()
                     && self.reason_code.is_none()
@@ -1507,6 +1568,7 @@ impl FeedbackStageEventInput {
             | FeedbackStageEventKind::Cancelled
             | FeedbackStageEventKind::LeaseRecovered => {
                 !trigger_stage
+                    && self.trigger_family.is_none()
                     && self.research_job_id.is_some()
                     && self.actor.is_none()
                     && self.reason_code.is_some()
@@ -1824,7 +1886,6 @@ mod tests {
                     .expect("canonical capabilities");
             let candidate_family = candidate_family(&profile_ref, &capability_registry_hashes);
             Self::try_new(FeedbackCycleKeyInput {
-                trigger_family: FeedbackTriggerFamily::Scheduled,
                 profile_ref,
                 feedback_policy_hash: hash(2),
                 label_cutoff: cutoff(),
@@ -1880,6 +1941,7 @@ mod tests {
             event_sequence: 1,
             stage: FeedbackStage::Trigger,
             event_kind: FeedbackStageEventKind::Triggered,
+            trigger_family: Some(FeedbackTriggerFamily::Scheduled),
             research_job_id: None,
             actor: Some("scheduler".to_owned()),
             reason_code: Some("scheduled_cadence".to_owned()),
@@ -1899,6 +1961,7 @@ mod tests {
                 event_sequence: 2,
                 stage: FeedbackStage::Training,
                 event_kind: FeedbackStageEventKind::Succeeded,
+                trigger_family: None,
                 research_job_id: Some(ResearchJobId::from_v7()),
                 actor: None,
                 reason_code: None,

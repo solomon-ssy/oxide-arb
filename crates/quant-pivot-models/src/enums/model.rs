@@ -3,6 +3,7 @@
 wire_enum! {
     /// Classical ML model kind (smartcore-backed).
     pub enum ClassicalKind {
+        GradientBoostedTrees => "gradient_boosted_trees",
         RandomForest => "random_forest",
         ExtraTrees => "extra_trees",
         LogisticRegression => "logistic_regression",
@@ -16,6 +17,7 @@ pg_enum! {
     @derive(schemars::JsonSchema)
     pub enum ModelFamily {
         WeightedFactor => "weighted_factor",
+        ClassicalGradientBoostedTrees => "classical_gradient_boosted_trees",
         ClassicalRandomForest => "classical_random_forest",
         ClassicalExtraTrees => "classical_extra_trees",
         ClassicalLogisticRegression => "classical_logistic_regression",
@@ -46,6 +48,7 @@ impl ModelFamily {
     pub const fn classical_kind(self) -> Option<ClassicalKind> {
         match self {
             Self::WeightedFactor | Self::HoldVsExitWeighted => None,
+            Self::ClassicalGradientBoostedTrees => Some(ClassicalKind::GradientBoostedTrees),
             Self::ClassicalRandomForest => Some(ClassicalKind::RandomForest),
             Self::ClassicalExtraTrees => Some(ClassicalKind::ExtraTrees),
             Self::ClassicalLogisticRegression => Some(ClassicalKind::LogisticRegression),
@@ -58,6 +61,7 @@ impl ModelFamily {
     #[must_use]
     pub const fn from_classical(kind: ClassicalKind) -> Self {
         match kind {
+            ClassicalKind::GradientBoostedTrees => Self::ClassicalGradientBoostedTrees,
             ClassicalKind::RandomForest => Self::ClassicalRandomForest,
             ClassicalKind::ExtraTrees => Self::ClassicalExtraTrees,
             ClassicalKind::LogisticRegression => Self::ClassicalLogisticRegression,

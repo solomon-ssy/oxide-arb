@@ -30,9 +30,9 @@ use quant_pivot_models::{
     runtime_config::DomainConfig,
     types::{
         ArtifactUri, CapabilityRegistryHashes, ClobMarketInfoVersion, ContentHash,
-        DATASET_ARTIFACT_FORMAT_VERSION, IcaoStation, ResearchProfileArtifact,
-        ResearchProfileDataSource, SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SourceSliceCatalogProof,
-        SourceSliceId, SourceSliceInvalidSession, SourceSliceManifest, SourceSliceManifestRef,
+        DATASET_ARTIFACT_FORMAT_VERSION, ResearchProfileArtifact, ResearchProfileDataSource,
+        SOURCE_SLICE_MANIFEST_FORMAT_VERSION, SourceSliceCatalogProof, SourceSliceId,
+        SourceSliceInvalidSession, SourceSliceManifest, SourceSliceManifestRef,
         SourceSliceObjectKind, SourceSliceObjectRef, SourceSlicePitCutoffs,
         SourceSliceSessionInvalidationReason,
     },
@@ -372,10 +372,11 @@ fn decode_frozen_source_slice(
         group_weather_observations(decode_records::<WeatherObservationFact>(take(
             &mut by_kind,
             SourceSliceObjectKind::WeatherObservation,
-        ))?)?;
-    let weather_forecasts = group_weather_forecasts(decode_records::<WeatherForecastPoint>(
-        take(&mut by_kind, SourceSliceObjectKind::WeatherForecast),
-    )?)?;
+        ))?);
+    let weather_forecasts = group_weather_forecasts(decode_records::<WeatherForecastPoint>(take(
+        &mut by_kind,
+        SourceSliceObjectKind::WeatherForecast,
+    ))?);
     let weather_calibrations = decode_records(take(
         &mut by_kind,
         SourceSliceObjectKind::CalibrationReference,
@@ -1235,34 +1236,28 @@ where
 
 fn group_weather_observations(
     values: Vec<WeatherObservationFact>,
-) -> QuantResult<HashMap<IcaoStation, Vec<WeatherObservationFact>>> {
+) -> HashMap<String, Vec<WeatherObservationFact>> {
     let mut grouped = HashMap::new();
     for value in values {
-        let station = value.station().ok_or_else(|| ResearchError::DatasetBuild {
-            detail: format!(
-                "Weather observation subject `{}` is not an ICAO station",
-                value.subject_key
-            ),
-        })?;
-        grouped.entry(station).or_insert_with(Vec::new).push(value);
+        grouped
+            .entry(value.subject_key.clone())
+            .or_insert_with(Vec::new)
+            .push(value);
     }
-    Ok(grouped)
+    grouped
 }
 
 fn group_weather_forecasts(
     values: Vec<WeatherForecastPoint>,
-) -> QuantResult<HashMap<IcaoStation, Vec<WeatherForecastPoint>>> {
+) -> HashMap<String, Vec<WeatherForecastPoint>> {
     let mut grouped = HashMap::new();
     for value in values {
-        let station = value.station().ok_or_else(|| ResearchError::DatasetBuild {
-            detail: format!(
-                "Weather forecast subject `{}` is not an ICAO station",
-                value.subject_key
-            ),
-        })?;
-        grouped.entry(station).or_insert_with(Vec::new).push(value);
+        grouped
+            .entry(value.subject_key.clone())
+            .or_insert_with(Vec::new)
+            .push(value);
     }
-    Ok(grouped)
+    grouped
 }
 
 fn ensure_not_cancelled(cancel: &CancellationToken, stage: &'static str) -> QuantResult<()> {

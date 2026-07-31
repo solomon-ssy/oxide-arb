@@ -2,27 +2,20 @@
 
 use std::{collections::HashMap, fmt::Display};
 
-use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity::QUANT_RECOMMENDATION};
 use quant_pivot_models::{
     domain::quant::{
         FeedbackCohortCandidate, FeedbackCohortPage, FeedbackCohortPageQuery,
-        FeedbackExecutionAttempt, FeedbackRecommendationContext,
-        RecommendationExecutionOutcomeInfo, RecommendationInfo, RecommendationReportInfo,
-        RecommendationResolutionOutcomeInfo,
+        FeedbackRecommendationContext, RecommendationExecutionRollupInfo, RecommendationInfo,
+        RecommendationReportInfo, RecommendationResolutionOutcomeInfo,
     },
     entities::{
-        quant_execution_order::{
-            Column as QuantExecutionOrderColumn, Entity as QuantExecutionOrderEntity,
-            Relation as QuantExecutionOrderRelation,
-        },
-        quant_order_intent::Column as QuantOrderIntentColumn,
         quant_recommendation::{
             Column as QuantRecommendationColumn, Entity as QuantRecommendationEntity,
         },
-        quant_recommendation_execution_outcome::{
-            Column as QuantRecommendationExecutionOutcomeColumn,
-            Entity as QuantRecommendationExecutionOutcomeEntity,
+        quant_recommendation_execution_rollup::{
+            Column as QuantRecommendationExecutionRollupColumn,
+            Entity as QuantRecommendationExecutionRollupEntity,
         },
         quant_recommendation_report::{
             Column as QuantRecommendationReportColumn, Entity as QuantRecommendationReportEntity,
@@ -32,16 +25,11 @@ use quant_pivot_models::{
             Entity as QuantRecommendationResolutionOutcomeEntity,
         },
     },
-    enums::{execution::ExecutionOrderPhase, quant::QuantRuntimeMode},
-    types::{
-        DecisionPolicySnapshotId, ExecutionOrderId, MarketId, ModelVersionId, OrderIntentId,
-        RecommendationId, ResearchProfileArtifactId, TokenId,
-    },
+    types::RecommendationId,
 };
 use sea_orm::{
     AccessMode, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    FromQueryResult, IsolationLevel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
-    TransactionTrait,
+    IsolationLevel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 
 use crate::traits::FeedbackCohortRepository;
@@ -55,20 +43,6 @@ impl PgFeedbackCohortRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
-}
-
-#[derive(Debug, FromQueryResult)]
-struct SubmittedAttemptRow {
-    recommendation_id: RecommendationId,
-    order_intent_id: OrderIntentId,
-    entry_execution_order_id: ExecutionOrderId,
-    submitted_at: DateTime<Utc>,
-    research_profile_artifact_id: ResearchProfileArtifactId,
-    decision_policy_snapshot_id: DecisionPolicySnapshotId,
-    model_version_id: ModelVersionId,
-    runtime_mode: QuantRuntimeMode,
-    market_id: MarketId,
-    token_id: TokenId,
 }
 
 #[async_trait::async_trait]
@@ -113,25 +87,17 @@ impl PgFeedbackCohortRepository {
             .collect::<Vec<_>>();
         let mut resolution_outcomes =
             Self::load_resolution_outcomes(transaction, query, &recommendation_ids).await?;
-        let mut execution_outcomes =
-            Self::load_execution_outcomes(transaction, query, &recommendation_ids).await?;
-        let mut execution_attempts =
-            Self::load_execution_attempts(transaction, query, &contexts).await?;
+        let mut execution_rollups =
+            Self::load_execution_rollups(transaction, query, &recommendation_ids).await?;
         let candidates = contexts
             .into_iter()
             .map(|context| {
                 let recommendation_id = context.recommendation_id();
-                let execution_attempt = cohort.requires_execution().then(|| {
-                    execution_attempts
-                        .remove(&recommendation_id)
-                        .unwrap_or(FeedbackExecutionAttempt::NotAttempted)
-                });
                 FeedbackCohortCandidate::try_new(
                     cohort,
                     context,
-                    execution_attempt,
                     resolution_outcomes.remove(&recommendation_id),
-                    execution_outcomes.remove(&recommendation_id),
+                    execution_rollups.remove(&recommendation_id),
                 )
                 .map_err(feedback_contract_error)
             })
@@ -145,7 +111,8 @@ impl PgFeedbackCohortRepository {
         transaction: &DatabaseTransaction,
         query: &FeedbackCohortPageQuery,
     ) -> Result<Vec<FeedbackRecommendationContext>, StorageError> {
-        let window = query.window();
+        let snapshot = query.snapshot();
+        let window = snapshot.decision_window();
         let profile_artifact_id = window.profile_ref().artifact_id();
         let keyset = query.after().map(|cursor| {
             Condition::any()
@@ -164,7 +131,6 @@ impl PgFeedbackCohortRepository {
                 QuantRecommendationColumn::ResearchProfileArtifactId
                     .eq(profile_artifact_id.clone()),
             )
-            .add(QuantRecommendationColumn::CreatedAt.gte(window.window_start()))
             .add(QuantRecommendationColumn::CreatedAt.lte(window.cutoff()))
             .add(QuantRecommendationReportColumn::ResearchProfileArtifactId.eq(profile_artifact_id))
             .add(QuantRecommendationReportColumn::DecisionAt.gte(window.window_start()))
@@ -215,7 +181,7 @@ impl PgFeedbackCohortRepository {
             )
             .filter(
                 QuantRecommendationResolutionOutcomeColumn::AvailableAt
-                    .lte(query.window().cutoff()),
+                    .lte(query.snapshot().truth_cutoff()),
             )
             .all(transaction)
             .await
@@ -231,146 +197,34 @@ impl PgFeedbackCohortRepository {
 }
 
 impl PgFeedbackCohortRepository {
-    async fn load_execution_outcomes(
+    async fn load_execution_rollups(
         transaction: &DatabaseTransaction,
         query: &FeedbackCohortPageQuery,
         recommendation_ids: &[RecommendationId],
-    ) -> Result<HashMap<RecommendationId, RecommendationExecutionOutcomeInfo>, StorageError> {
+    ) -> Result<HashMap<RecommendationId, RecommendationExecutionRollupInfo>, StorageError> {
         if recommendation_ids.is_empty() || !query.cohort().requires_execution() {
             return Ok(HashMap::new());
         }
-        let rows = QuantRecommendationExecutionOutcomeEntity::find()
+        let rows = QuantRecommendationExecutionRollupEntity::find()
             .filter(
-                QuantRecommendationExecutionOutcomeColumn::RecommendationId
+                QuantRecommendationExecutionRollupColumn::RecommendationId
                     .is_in(recommendation_ids.iter().copied()),
             )
             .filter(
-                QuantRecommendationExecutionOutcomeColumn::AvailableAt.lte(query.window().cutoff()),
+                QuantRecommendationExecutionRollupColumn::AvailableAt
+                    .lte(query.snapshot().truth_cutoff()),
             )
             .all(transaction)
             .await
             .map_err(StorageError::from)?;
         rows.into_iter()
             .map(|row| {
-                let outcome = RecommendationExecutionOutcomeInfo::from(row);
-                outcome.validate().map_err(feedback_contract_error)?;
-                Ok((outcome.recommendation_id, outcome))
+                let rollup = RecommendationExecutionRollupInfo::from(row);
+                rollup.validate().map_err(feedback_contract_error)?;
+                Ok((rollup.recommendation_id, rollup))
             })
             .collect()
     }
-}
-
-impl PgFeedbackCohortRepository {
-    async fn load_execution_attempts(
-        transaction: &DatabaseTransaction,
-        query: &FeedbackCohortPageQuery,
-        contexts: &[FeedbackRecommendationContext],
-    ) -> Result<HashMap<RecommendationId, FeedbackExecutionAttempt>, StorageError> {
-        if contexts.is_empty() || !query.cohort().requires_execution() {
-            return Ok(HashMap::new());
-        }
-        let recommendation_ids = contexts
-            .iter()
-            .map(FeedbackRecommendationContext::recommendation_id)
-            .collect::<Vec<_>>();
-        let rows = QuantExecutionOrderEntity::find()
-            .select_only()
-            .column_as(
-                QuantOrderIntentColumn::RecommendationId,
-                "recommendation_id",
-            )
-            .column_as(QuantOrderIntentColumn::OrderIntentId, "order_intent_id")
-            .column_as(
-                QuantExecutionOrderColumn::ExecutionOrderId,
-                "entry_execution_order_id",
-            )
-            .column_as(QuantExecutionOrderColumn::SubmittedAt, "submitted_at")
-            .column_as(
-                QuantOrderIntentColumn::ResearchProfileArtifactId,
-                "research_profile_artifact_id",
-            )
-            .column_as(
-                QuantOrderIntentColumn::DecisionPolicySnapshotId,
-                "decision_policy_snapshot_id",
-            )
-            .column_as(QuantOrderIntentColumn::ModelVersionId, "model_version_id")
-            .column_as(QuantOrderIntentColumn::RuntimeMode, "runtime_mode")
-            .column_as(QuantExecutionOrderColumn::MarketId, "market_id")
-            .column_as(QuantExecutionOrderColumn::TokenId, "token_id")
-            .join(
-                JoinType::InnerJoin,
-                QuantExecutionOrderRelation::OrderIntent.def(),
-            )
-            .filter(
-                QuantOrderIntentColumn::RecommendationId.is_in(recommendation_ids.iter().copied()),
-            )
-            .filter(QuantExecutionOrderColumn::OrderPhase.eq(ExecutionOrderPhase::Entry))
-            .filter(QuantExecutionOrderColumn::SubmittedAt.is_not_null())
-            .filter(QuantExecutionOrderColumn::SubmittedAt.lte(query.window().cutoff()))
-            .order_by_asc(QuantOrderIntentColumn::RecommendationId)
-            .order_by_asc(QuantExecutionOrderColumn::ExecutionOrderId)
-            .into_model::<SubmittedAttemptRow>()
-            .all(transaction)
-            .await
-            .map_err(StorageError::from)?;
-        let contexts = contexts
-            .iter()
-            .map(|context| (context.recommendation_id(), context))
-            .collect::<HashMap<_, _>>();
-        let mut attempts = HashMap::with_capacity(rows.len());
-        for row in rows {
-            let context = contexts.get(&row.recommendation_id).ok_or_else(|| {
-                StorageError::invariant_violation(
-                    Some(QUANT_RECOMMENDATION),
-                    "submitted attempt escaped the bounded recommendation page",
-                )
-            })?;
-            validate_submitted_attempt(&row, context)?;
-            if attempts
-                .insert(
-                    row.recommendation_id,
-                    FeedbackExecutionAttempt::Submitted {
-                        order_intent_id: row.order_intent_id,
-                        entry_execution_order_id: row.entry_execution_order_id,
-                        submitted_at: row.submitted_at,
-                    },
-                )
-                .is_some()
-            {
-                return Err(StorageError::invariant_violation(
-                    Some(QUANT_RECOMMENDATION),
-                    format!(
-                        "recommendation {} contains multiple submitted entry orders",
-                        row.recommendation_id
-                    ),
-                ));
-            }
-        }
-        Ok(attempts)
-    }
-}
-
-fn validate_submitted_attempt(
-    row: &SubmittedAttemptRow,
-    context: &FeedbackRecommendationContext,
-) -> Result<(), StorageError> {
-    let expected_profile = context.profile_ref().artifact_id();
-    let identity_matches = row.research_profile_artifact_id == expected_profile
-        && row.decision_policy_snapshot_id == context.decision_policy_snapshot_id()
-        && row.model_version_id == context.model_version_id()
-        && row.runtime_mode == context.runtime_mode()
-        && &row.market_id == context.market_id()
-        && &row.token_id == context.token_id();
-    if !identity_matches {
-        return Err(StorageError::invariant_violation(
-            Some(QUANT_RECOMMENDATION),
-            format!(
-                "submitted attempt lineage does not match recommendation {}",
-                row.recommendation_id
-            ),
-        ));
-    }
-    Ok(())
 }
 
 fn feedback_contract_error(error: impl Display) -> StorageError {

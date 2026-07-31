@@ -33,7 +33,7 @@ use crate::{
     execution::ExitMonitorHealthHandle,
     governance::{
         RuntimeControlsHandle,
-        quality_gate_load::{active_load_ok, active_publication_status_ok, shadow_load_ok},
+        quality_gate_load::{active_load_ok, shadow_load_ok},
     },
     runtime_config::DecisionPolicyStore,
 };
@@ -84,7 +84,7 @@ impl ModePreflight for DefaultModePreflight {
             self.check_credentials(),
             self.check_jwt(target),
             self.check_order_client_ready(),
-            self.check_model_available(&config, now).await?,
+            self.check_model_available(&config).await?,
             self.check_data_quality(&config),
             self.check_no_unresolvable().await?,
             self.check_no_impaired_capital().await?,
@@ -92,7 +92,7 @@ impl ModePreflight for DefaultModePreflight {
         ];
 
         if target == QuantRuntimeMode::AutoExecution {
-            checks.push(self.check_published_model(&config).await?);
+            checks.push(self.check_active_route_model(&config).await?);
             checks.push(self.check_shadow_period(&config, now).await?);
             checks.push(Self::check_auto_policy(&config));
             checks.push(self.check_kill_switch_closed());
@@ -236,9 +236,7 @@ impl DefaultModePreflight {
     async fn check_model_available(
         &self,
         config: &DecisionPolicySnapshot,
-        now: DateTime<Utc>,
     ) -> QuantResult<PreflightCheck> {
-        let min_age = config.model_routing.model.min_quality_gate_age_secs;
         let active_reference = BuyModelRoute::try_from(&config.recommendation.selection)
             .map_err(|error| error.to_string())
             .and_then(|route| {
@@ -249,25 +247,25 @@ impl DefaultModePreflight {
                     .map_err(|error| error.to_string())
             });
         let active = match active_reference {
-            Ok(reference) => self.active_status(reference, min_age, now).await?,
+            Ok(reference) => self.active_status(reference).await?,
             Err(error) => Err(error),
         };
         if active.is_ok() {
             return Ok(PreflightCheck::hard(
                 "model_available",
                 true,
-                "active published model is loadable",
+                "active route model is loadable",
             ));
         }
         let shadow = match &config.model_routing.model.shadow_model_version_id {
-            Some(reference) => self.shadow_status(reference, min_age, now).await?,
+            Some(reference) => self.shadow_status(reference).await?,
             None => Err("no shadow model configured".to_owned()),
         };
         match shadow {
             Ok(()) => Ok(PreflightCheck::hard(
                 "model_available",
                 true,
-                "approved candidate/shadow model is loadable",
+                "shadow route model is loadable",
             )),
             Err(shadow_detail) => Ok(PreflightCheck::hard(
                 "model_available",
@@ -280,7 +278,7 @@ impl DefaultModePreflight {
         }
     }
 
-    async fn check_published_model(
+    async fn check_active_route_model(
         &self,
         config: &DecisionPolicySnapshot,
     ) -> QuantResult<PreflightCheck> {
@@ -296,7 +294,7 @@ impl DefaultModePreflight {
             Ok(reference) => reference,
             Err(error) => {
                 return Ok(PreflightCheck::hard(
-                    "published_model",
+                    "active_route_model",
                     false,
                     format!("auto_execution requires the exact active report route: {error}"),
                 ));
@@ -305,14 +303,18 @@ impl DefaultModePreflight {
         let id = reference.id;
         let Some(version) = self.deps.model_registry.find_model_version(&id).await? else {
             return Ok(PreflightCheck::hard(
-                "published_model",
+                "active_route_model",
                 false,
                 format!("active model {id} not found in registry"),
             ));
         };
-        Ok(match active_publication_status_ok(&version) {
-            Ok(()) => PreflightCheck::hard("published_model", true, "active model is published"),
-            Err(detail) => PreflightCheck::hard("published_model", false, detail),
+        Ok(match active_load_ok(&version) {
+            Ok(()) => PreflightCheck::hard(
+                "active_route_model",
+                true,
+                "active route model contract is valid",
+            ),
+            Err(detail) => PreflightCheck::hard("active_route_model", false, detail),
         })
     }
 
@@ -399,29 +401,19 @@ impl DefaultModePreflight {
         )
     }
 
-    async fn active_status(
-        &self,
-        reference: &ModelVersionRef,
-        min_age: u64,
-        now: DateTime<Utc>,
-    ) -> QuantResult<Result<(), String>> {
+    async fn active_status(&self, reference: &ModelVersionRef) -> QuantResult<Result<(), String>> {
         let id = reference.id;
         let Some(version) = self.deps.model_registry.find_model_version(&id).await? else {
             return Ok(Err(format!("active model {id} not found")));
         };
-        Ok(active_load_ok(&version, min_age, now))
+        Ok(active_load_ok(&version))
     }
 
-    async fn shadow_status(
-        &self,
-        reference: &ModelVersionRef,
-        min_age: u64,
-        now: DateTime<Utc>,
-    ) -> QuantResult<Result<(), String>> {
+    async fn shadow_status(&self, reference: &ModelVersionRef) -> QuantResult<Result<(), String>> {
         let id = reference.id;
         let Some(version) = self.deps.model_registry.find_model_version(&id).await? else {
             return Ok(Err(format!("shadow model {id} not found")));
         };
-        Ok(shadow_load_ok(&version, min_age, now))
+        Ok(shadow_load_ok(&version))
     }
 }

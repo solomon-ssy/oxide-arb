@@ -23,7 +23,7 @@ use quant_pivot_models::{
             RecommendationReportInfo,
         },
     },
-    enums::{market::MarketStatus, quant::PublicationStatus, settlement::SettlementRoute},
+    enums::{market::MarketStatus, settlement::SettlementRoute},
     types::{ClobMarketInfoVersion, Usd},
 };
 use quant_pivot_repository::traits::{
@@ -165,7 +165,9 @@ impl AdmissionInputBuilder {
             &recommendation,
         )
         .await?;
-        let model_state = self.resolve_model_state(fetched.model_version).await?;
+        let model_state = self
+            .resolve_model_state(fetched.model_version, &fetched.active_version)
+            .await?;
         let exposure = AdmissionExposureState {
             has_blocking_inflight: fetched.has_blocking_inflight,
             manual_block: fetched.manual_block,
@@ -337,10 +339,17 @@ impl AdmissionInputBuilder {
     async fn resolve_model_state(
         &self,
         model_version: Option<ModelVersionInfo>,
+        active_version: &DecisionPolicySnapshotInfo,
     ) -> QuantResult<AdmissionModelState> {
-        let published = model_version
-            .as_ref()
-            .is_some_and(|version| version.publication_status == PublicationStatus::Published);
+        let route_bound = model_version.as_ref().is_some_and(|version| {
+            let routing = &active_version.snapshot.model_routing.model;
+            routing
+                .active_model_version_id
+                .iter()
+                .chain(routing.active_exit_model_version_id.iter())
+                .chain(routing.category_model_pointers.values())
+                .any(|reference| reference.id == version.model_version_id)
+        });
         let return_model_calibrated = match model_version.as_ref() {
             Some(version) => {
                 let artifact =
@@ -360,7 +369,7 @@ impl AdmissionInputBuilder {
             None => false,
         };
         Ok(AdmissionModelState {
-            published,
+            route_bound,
             return_model_calibrated,
         })
     }

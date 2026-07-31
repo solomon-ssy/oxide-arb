@@ -82,7 +82,10 @@ impl LinkageResolverService {
         )?;
         Ok(Self {
             deps,
-            resolver: LayeredResolver::deterministic(weather_station_registry),
+            resolver: LayeredResolver::deterministic(
+                weather_station_registry,
+                weather_vertical_bindings,
+            ),
             classifier,
             capability_registry_hash,
         })
@@ -545,6 +548,20 @@ fn validate_weather_groups(
                         return Err(weather_group_failure(
                             &event_id,
                             format!("catalog sibling `{market_id}` resolved to Crypto"),
+                        ));
+                    }
+                    MarketSubject::WeatherPrecipitation(_)
+                    | MarketSubject::WeatherAqi(_)
+                    | MarketSubject::WeatherTornado(_)
+                    | MarketSubject::WeatherTropicalCyclone(_)
+                    | MarketSubject::WeatherGlobalTemperature(_)
+                    | MarketSubject::WeatherSeaIce(_)
+                    | MarketSubject::WeatherWindExtreme(_) => {
+                        return Err(weather_group_failure(
+                            &event_id,
+                            format!(
+                                "catalog sibling `{market_id}` does not share the daily-temperature contract family"
+                            ),
                         ));
                     }
                 },

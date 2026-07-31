@@ -26,6 +26,7 @@ pub struct DomainSourcesConfig {
     pub chainlink_data_streams: ChainlinkDataStreamsSourceConfig,
     pub aviation_weather: AviationWeatherSourceConfig,
     pub ghcnh: GhcnhSourceConfig,
+    pub ghcnd: GhcndSourceConfig,
     pub gefs: GefsSourceConfig,
     pub hko_open_data: HkoOpenDataSourceConfig,
     pub airnow: AirNowSourceConfig,
@@ -54,6 +55,7 @@ impl Default for DomainSourcesConfig {
             chainlink_data_streams: ChainlinkDataStreamsSourceConfig::default(),
             aviation_weather: AviationWeatherSourceConfig::default(),
             ghcnh: GhcnhSourceConfig::default(),
+            ghcnd: GhcndSourceConfig::default(),
             gefs: GefsSourceConfig::default(),
             hko_open_data: HkoOpenDataSourceConfig::default(),
             airnow: AirNowSourceConfig::default(),
@@ -88,7 +90,13 @@ impl Default for WeatherVerticalBindingsConfig {
     fn default() -> Self {
         Self {
             hko_rainfall: vec![HkoRainfallBindingConfig {
-                place: "North District".to_owned(),
+                site_key: "Hong Kong Observatory".to_owned(),
+                station_key: "HKO".to_owned(),
+                daily_csv_url:
+                    "https://data.weather.gov.hk/weatherAPI/cis/csvfile/HKO/ALL/daily_HKO_RF_ALL.csv"
+                        .to_owned(),
+                latitude: dec!(22.301944),
+                longitude: dec!(114.174167),
                 timezone: "Asia/Hong_Kong".to_owned(),
             }],
             hko_daily_temperature: vec![HkoDailyTemperatureBindingConfig {
@@ -128,12 +136,21 @@ impl Default for WeatherVerticalBindingsConfig {
                 longitude: dec!(-74.036218),
                 timezone: "America/New_York".to_owned(),
             }],
-            tornado_regions: vec![TornadoRegionBindingConfig {
-                region_id: "oklahoma".to_owned(),
-                spc_state_code: "OK".to_owned(),
-                ncei_state_name: "OKLAHOMA".to_owned(),
-                timezone: "America/Chicago".to_owned(),
-            }],
+            tornado_regions: vec![
+                TornadoRegionBindingConfig {
+                    region_id: "united_states".to_owned(),
+                    scope: TornadoRegionScopeConfig::UnitedStates,
+                    timezone: "America/New_York".to_owned(),
+                },
+                TornadoRegionBindingConfig {
+                    region_id: "oklahoma".to_owned(),
+                    scope: TornadoRegionScopeConfig::State {
+                        spc_state_code: "OK".to_owned(),
+                        ncei_state_name: "OKLAHOMA".to_owned(),
+                    },
+                    timezone: "America/Chicago".to_owned(),
+                },
+            ],
             nhc_historical_storms: vec![NhcHistoricalStormBindingConfig {
                 basin: "atlantic".to_owned(),
                 storm_id: "AL092021".to_owned(),
@@ -149,7 +166,11 @@ impl Default for WeatherVerticalBindingsConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HkoRainfallBindingConfig {
-    pub place: String,
+    pub site_key: String,
+    pub station_key: String,
+    pub daily_csv_url: String,
+    pub latitude: Decimal,
+    pub longitude: Decimal,
     pub timezone: String,
 }
 
@@ -186,9 +207,18 @@ pub struct AirNowPm25SiteBindingConfig {
 #[serde(deny_unknown_fields)]
 pub struct TornadoRegionBindingConfig {
     pub region_id: String,
-    pub spc_state_code: String,
-    pub ncei_state_name: String,
+    pub scope: TornadoRegionScopeConfig,
     pub timezone: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+pub enum TornadoRegionScopeConfig {
+    UnitedStates,
+    State {
+        spc_state_code: String,
+        ncei_state_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,14 +235,16 @@ pub struct NwsWindStationBindingConfig {
     pub timezone: String,
 }
 
-/// Hong Kong Observatory public current-weather feed.
+/// Hong Kong Observatory official climate-data products.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HkoOpenDataSourceConfig {
     pub enabled: bool,
     pub base_url: String,
     pub request_timeout_ms: u64,
-    pub rainfall_poll_secs: u64,
+    pub daily_rainfall_poll_secs: u64,
+    /// Completed daily-rainfall rows retained on each immutable file scan.
+    pub daily_rainfall_lookback_days: u16,
     pub daily_temperature_poll_secs: u64,
     /// Maximum monthly partitions inspected newest-first when the latest
     /// documented publication is not yet present in the source file.
@@ -225,7 +257,8 @@ impl Default for HkoOpenDataSourceConfig {
             enabled: true,
             base_url: "https://data.weather.gov.hk/weatherAPI/opendata".to_owned(),
             request_timeout_ms: 10_000,
-            rainfall_poll_secs: 300,
+            daily_rainfall_poll_secs: 86_400,
+            daily_rainfall_lookback_days: 62,
             daily_temperature_poll_secs: 1_800,
             daily_temperature_lookback_months: 24,
         }
@@ -267,9 +300,13 @@ pub struct TornadoSourceConfig {
     pub enabled: bool,
     pub spc_base_url: String,
     pub ncei_csv_base_url: String,
+    pub ncei_time_series_base_url: String,
     pub request_timeout_ms: u64,
     pub spc_poll_secs: u64,
     pub ncei_refresh_secs: u64,
+    pub ncei_time_series_poll_secs: u64,
+    /// Complete official archive years re-read on every NCEI refresh.
+    pub ncei_backfill_years: u8,
 }
 
 impl Default for TornadoSourceConfig {
@@ -279,9 +316,13 @@ impl Default for TornadoSourceConfig {
             spc_base_url: "https://www.spc.noaa.gov/climo/reports".to_owned(),
             ncei_csv_base_url: "https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles"
                 .to_owned(),
+            ncei_time_series_base_url:
+                "https://www.ncei.noaa.gov/access/monitoring/tornadoes/time-series".to_owned(),
             request_timeout_ms: 120_000,
             spc_poll_secs: 600,
             ncei_refresh_secs: 2_678_400,
+            ncei_time_series_poll_secs: 300,
+            ncei_backfill_years: 2,
         }
     }
 }
@@ -317,6 +358,7 @@ impl Default for NhcSourceConfig {
 pub struct NasaGistempSourceConfig {
     pub enabled: bool,
     pub csv_url: String,
+    pub annual_url: String,
     pub request_timeout_ms: u64,
     pub refresh_secs: u64,
 }
@@ -326,19 +368,22 @@ impl Default for NasaGistempSourceConfig {
         Self {
             enabled: true,
             csv_url: "https://data.giss.nasa.gov/gistemp/tabledata_v4/GLB.Ts+dSST.csv".to_owned(),
+            annual_url: "https://data.giss.nasa.gov/gistemp/graphs/graph_data/Global_Mean_Estimates_based_on_Land_and_Ocean_Data/graph.txt".to_owned(),
             request_timeout_ms: 30_000,
             refresh_secs: 2_678_400,
         }
     }
 }
 
-/// NOAA/NSIDC Sea Ice Index v4 daily extent files.
+/// NOAA/NSIDC Sea Ice Index v4 daily and monthly extent files.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NsidcSeaIceSourceConfig {
     pub enabled: bool,
-    pub north_csv_url: String,
-    pub south_csv_url: String,
+    pub north_daily_csv_url: String,
+    pub south_daily_csv_url: String,
+    pub north_monthly_base_url: String,
+    pub south_monthly_base_url: String,
     pub request_timeout_ms: u64,
     pub refresh_secs: u64,
 }
@@ -348,8 +393,10 @@ impl Default for NsidcSeaIceSourceConfig {
         let base = "https://noaadata.apps.nsidc.org/NOAA/G02135";
         Self {
             enabled: true,
-            north_csv_url: format!("{base}/north/daily/data/N_seaice_extent_daily_v4.0.csv"),
-            south_csv_url: format!("{base}/south/daily/data/S_seaice_extent_daily_v4.0.csv"),
+            north_daily_csv_url: format!("{base}/north/daily/data/N_seaice_extent_daily_v4.0.csv"),
+            south_daily_csv_url: format!("{base}/south/daily/data/S_seaice_extent_daily_v4.0.csv"),
+            north_monthly_base_url: format!("{base}/north/monthly/data"),
+            south_monthly_base_url: format!("{base}/south/monthly/data"),
             request_timeout_ms: 120_000,
             refresh_secs: 86_400,
         }
@@ -414,6 +461,7 @@ pub struct WeatherStationProfileConfig {
     pub longitude: Decimal,
     pub elevation_meters: Decimal,
     pub ghcnh_station_id: Option<String>,
+    pub ghcnd_station_id: Option<String>,
     pub historical_binding_kind: WeatherHistoricalBindingKind,
 }
 
@@ -433,7 +481,7 @@ pub enum WeatherHistoricalBindingKind {
 /// Frozen airport profiles in the active Polymarket daily-temperature catalog.
 ///
 /// Coordinates/elevation are sourced from `AviationWeather` station metadata;
-/// `GHCNh` ids are official NCEI archive identities.
+/// `GHCNh` and `GHCNd` ids are official NCEI archive identities.
 #[must_use]
 pub fn builtin_weather_station_profiles() -> BTreeMap<String, WeatherStationProfileConfig> {
     weather_station_profiles_1()
@@ -891,6 +939,11 @@ fn station(
             longitude,
             elevation_meters,
             ghcnh_station_id: Some(ghcnh_station_id.to_owned()),
+            ghcnd_station_id: matches!(
+                historical_binding_kind,
+                WeatherHistoricalBindingKind::ExactStation
+            )
+            .then(|| ghcnh_station_id.to_owned()),
             historical_binding_kind,
         },
     )
@@ -911,6 +964,7 @@ fn station_without_historical(
             longitude,
             elevation_meters,
             ghcnh_station_id: None,
+            ghcnd_station_id: None,
             historical_binding_kind: WeatherHistoricalBindingKind::Unavailable,
         },
     )
@@ -1058,6 +1112,31 @@ impl Default for GhcnhSourceConfig {
             request_timeout_ms: 120_000,
             refresh_secs: 86_400,
             calibration_years: 2,
+            max_concurrency: 2,
+        }
+    }
+}
+
+/// NOAA `GHCNd` station-file source used only for archive-quality daily labels.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GhcndSourceConfig {
+    pub enabled: bool,
+    pub base_url: String,
+    pub request_timeout_ms: u64,
+    pub refresh_secs: u64,
+    pub lookback_years: u8,
+    pub max_concurrency: usize,
+}
+
+impl Default for GhcndSourceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_url: "https://www.ncei.noaa.gov/pub/data/ghcn/daily".into(),
+            request_timeout_ms: 120_000,
+            refresh_secs: 86_400,
+            lookback_years: 2,
             max_concurrency: 2,
         }
     }

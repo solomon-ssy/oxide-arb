@@ -265,6 +265,7 @@ mod tests {
                         | "/research/feedback-cycles"
                         | "/research/feedback-cycles/{cycle_id}"
                         | "/research/drift-reports"
+                        | "/research/feedback-schedulers"
                 ) && spec.method == Method::GET
             })
             .map(|spec| (spec.method, spec.path, spec.rule))
@@ -293,6 +294,11 @@ mod tests {
                     "/research/drift-reports",
                     Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
                 ),
+                (
+                    Method::GET,
+                    "/research/feedback-schedulers",
+                    Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+                ),
             ]
         );
     }
@@ -306,8 +312,12 @@ mod tests {
                     spec.path,
                     "/research/feedback-cycles"
                         | "/research/feedback-cycles/{cycle_id}/cancel"
-                        | "/research/feedback-promotion-permits"
-                        | "/research/feedback-promotion-permits/{permit_id}/revoke"
+                        | "/research/feedback-schedulers/{profile_id}/pause"
+                        | "/research/feedback-schedulers/{profile_id}/resume"
+                        | "/research/model-route-activation-permits"
+                        | "/research/model-route-activation-permits/{permit_id}/revoke"
+                        | "/research/model-route-bootstraps"
+                        | "/research/model-route-activations"
                 ) && spec.method == Method::POST
             })
             .map(|spec| (spec.method, spec.path, spec.rule))
@@ -328,13 +338,33 @@ mod tests {
                 ),
                 (
                     Method::POST,
-                    "/research/feedback-promotion-permits",
+                    "/research/feedback-schedulers/{profile_id}/pause",
+                    Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Update),
+                ),
+                (
+                    Method::POST,
+                    "/research/feedback-schedulers/{profile_id}/resume",
+                    Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Update),
+                ),
+                (
+                    Method::POST,
+                    "/research/model-route-activation-permits",
                     Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
                 ),
                 (
                     Method::POST,
-                    "/research/feedback-promotion-permits/{permit_id}/revoke",
+                    "/research/model-route-activation-permits/{permit_id}/revoke",
                     Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Retire),
+                ),
+                (
+                    Method::POST,
+                    "/research/model-route-bootstraps",
+                    Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
+                ),
+                (
+                    Method::POST,
+                    "/research/model-route-activations",
+                    Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
                 ),
             ]
         );
@@ -345,7 +375,8 @@ mod tests {
         let routes = protected_route_specs()
             .into_iter()
             .filter(|spec| {
-                spec.path == "/research/feedback-promotion-permits" && spec.method == Method::GET
+                spec.path == "/research/model-route-activation-permits"
+                    && spec.method == Method::GET
             })
             .map(|spec| (spec.method, spec.path, spec.rule))
             .collect::<Vec<_>>();
@@ -354,7 +385,7 @@ mod tests {
             routes,
             [(
                 Method::GET,
-                "/research/feedback-promotion-permits",
+                "/research/model-route-activation-permits",
                 Rule::ResourceOp(ResourceType::Publication, Operation::Read),
             )]
         );

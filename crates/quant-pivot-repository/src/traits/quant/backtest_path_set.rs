@@ -19,12 +19,6 @@ pub struct CpcvPathSetCommit {
 /// Persistence port for the append-only CPCV + trial-grid validation ledger.
 #[async_trait::async_trait]
 pub trait BacktestPathSetRepository: Send + Sync {
-    /// Insert a new path-set row, returning the persisted projection.
-    async fn create(
-        &self,
-        path_set: NewBacktestPathSet,
-    ) -> Result<BacktestPathSetInfo, StorageError>;
-
     /// Atomically append one path set and succeed its exact pre-assigned run.
     /// Exact retries return the stored path set; every other collision fails closed.
     async fn commit_cpcv(

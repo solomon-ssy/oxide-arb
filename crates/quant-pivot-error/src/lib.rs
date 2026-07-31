@@ -58,6 +58,7 @@ use control::ControlError;
 use execution::ExecutionError;
 use feedback::{
     FeedbackCycleCommandError, FeedbackError, PromotionCommitError, PromotionPermitCommandError,
+    RouteBootstrapCommitError,
 };
 use governance::GovernanceError;
 use hashing::CanonicalDigestError;
@@ -246,7 +247,18 @@ impl From<PromotionCommitError> for QuantError {
     fn from(error: PromotionCommitError) -> Self {
         match error {
             PromotionCommitError::Contract(error) => Self::Feedback(error),
+            PromotionCommitError::Authorization(error) => Self::Rbac(error),
             PromotionCommitError::Storage(error) => Self::Storage(error),
+        }
+    }
+}
+
+impl From<RouteBootstrapCommitError> for QuantError {
+    fn from(error: RouteBootstrapCommitError) -> Self {
+        match error {
+            RouteBootstrapCommitError::Contract(error) => Self::Feedback(error),
+            RouteBootstrapCommitError::Authorization(error) => Self::Rbac(error),
+            RouteBootstrapCommitError::Storage(error) => Self::Storage(error),
         }
     }
 }

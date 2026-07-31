@@ -12,9 +12,10 @@ use quant_pivot_models::{
         api::{BuildTrainingDatasetRequest, DriftReportListQuery, FeedbackCycleListQuery},
         pagination::PageRequest,
         quant::{
-            FeedbackCycleActor, FeedbackCycleTerminal, FeedbackStageEventInput,
-            FeedbackStageJobIdentity, GovernedFeedbackCancellation, GovernedFeedbackTrigger,
-            NewFeedbackStageEvent, NewResearchJob,
+            FeedbackCycleActor, FeedbackCycleTerminal, FeedbackOutboxSource,
+            FeedbackStageEventInput, FeedbackStageJobIdentity, GovernedFeedbackCancellation,
+            GovernedFeedbackTrigger, NewFeedbackSchedulerState, NewFeedbackStageEvent,
+            NewResearchJob,
         },
         rbac::{AssignPermissions, AssignRoles, NewRole, NewUser, Permission},
     },
@@ -33,15 +34,16 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgFeedbackCycleRepository, PgResearchJobRepository, PgRolePermissionRepository,
-        PgRoleRepository, PgUserRepository, PgUserRoleRepository,
+        PgFeedbackCycleRepository, PgFeedbackSchedulerRepository, PgResearchJobRepository,
+        PgRolePermissionRepository, PgRoleRepository, PgUserRepository, PgUserRoleRepository,
     },
     traits::{
         DriftReportWriteOutcome, FeedbackCycleCasOutcome, FeedbackCycleClaim,
         FeedbackCycleClaimMode, FeedbackCycleGeneration, FeedbackCycleRepository,
         FeedbackCycleWriteOutcome, FeedbackEvaluationWriteOutcome, FeedbackOutboxRepository,
-        FeedbackStageWriteOutcome, ResearchJobRepository, RolePermissionRepository, RoleRepository,
-        UserRepository, UserRoleRepository,
+        FeedbackSchedulerRepository, FeedbackStageWriteOutcome, FeedbackTriggerCommit,
+        FeedbackTriggerWriteOutcome, ResearchJobRepository, RolePermissionRepository,
+        RoleRepository, UserRepository, UserRoleRepository,
     },
 };
 use quant_pivot_system_tests::postgres::setup_pg;
@@ -75,6 +77,7 @@ fn cancellation_event(
         event_sequence: sequence,
         stage: FeedbackStage::Coverage,
         event_kind: FeedbackStageEventKind::CancellationRequested,
+        trigger_family: None,
         research_job_id: None,
         actor: Some("operator".to_owned()),
         reason_code: Some("operator_cancelled".to_owned()),
@@ -96,6 +99,7 @@ fn stage_event(
         event_sequence: sequence,
         stage: FeedbackStage::Coverage,
         event_kind: kind,
+        trigger_family: None,
         research_job_id: Some(job_id),
         actor: None,
         reason_code: None,
@@ -155,10 +159,11 @@ impl FeedbackSchemaFixture {
             .expect("retry exact trigger");
         assert!(matches!(
             retry,
-            (
-                FeedbackCycleWriteOutcome::AlreadyPresent(_),
-                FeedbackStageWriteOutcome::AlreadyPresent(_)
-            )
+            FeedbackTriggerCommit {
+                cycle: FeedbackCycleWriteOutcome::AlreadyPresent(_),
+                stage: FeedbackStageWriteOutcome::AlreadyPresent(_),
+                trigger: FeedbackTriggerWriteOutcome::AlreadyPresent(_),
+            }
         ));
         let replay = repo.list_outbox(0, 10).await.expect("list trigger outbox");
         assert_eq!(replay.len(), 2, "exact trigger retry cannot fork revision");
@@ -167,8 +172,8 @@ impl FeedbackSchemaFixture {
                 .windows(2)
                 .all(|pair| pair[0].revision < pair[1].revision)
         );
-        assert_eq!(replay[0].event.feedback_cycle_id, self.cycle_id);
-        assert_eq!(replay[1].event.feedback_cycle_id, self.second_cycle_id);
+        assert_eq!(replay[0].source.feedback_cycle_id(), self.cycle_id);
+        assert_eq!(replay[1].source.feedback_cycle_id(), self.second_cycle_id);
         assert!(
             replay
                 .iter()
@@ -192,10 +197,11 @@ async fn record_cycles(repo: &PgFeedbackCycleRepository, fixture: &FeedbackSchem
         .expect("record first trigger");
     assert!(matches!(
         first,
-        (
-            FeedbackCycleWriteOutcome::Inserted(_),
-            FeedbackStageWriteOutcome::Inserted(_)
-        )
+        FeedbackTriggerCommit {
+            cycle: FeedbackCycleWriteOutcome::Inserted(_),
+            stage: FeedbackStageWriteOutcome::Inserted(_),
+            trigger: FeedbackTriggerWriteOutcome::Inserted(_),
+        }
     ));
     let second = repo
         .record_trigger(
@@ -206,10 +212,11 @@ async fn record_cycles(repo: &PgFeedbackCycleRepository, fixture: &FeedbackSchem
         .expect("record second trigger");
     assert!(matches!(
         second,
-        (
-            FeedbackCycleWriteOutcome::Inserted(_),
-            FeedbackStageWriteOutcome::Inserted(_)
-        )
+        FeedbackTriggerCommit {
+            cycle: FeedbackCycleWriteOutcome::Inserted(_),
+            stage: FeedbackStageWriteOutcome::Inserted(_),
+            trigger: FeedbackTriggerWriteOutcome::Inserted(_),
+        }
     ));
 }
 
@@ -286,46 +293,54 @@ pub async fn trigger_exact_retry() {
         .expect("retry exact trigger");
     assert!(matches!(
         retry,
-        (
-            FeedbackCycleWriteOutcome::AlreadyPresent(_),
-            FeedbackStageWriteOutcome::AlreadyPresent(_)
-        )
+        FeedbackTriggerCommit {
+            cycle: FeedbackCycleWriteOutcome::AlreadyPresent(_),
+            stage: FeedbackStageWriteOutcome::AlreadyPresent(_),
+            trigger: FeedbackTriggerWriteOutcome::AlreadyPresent(_),
+        }
     ));
 
-    let conflict = repo
+    let converged = repo
         .record_trigger(
             fixture.cycle.clone(),
             fixture.stage_event(fixture.cycle_id, "different-actor"),
         )
         .await
-        .expect_err("same event sequence cannot bind different content");
+        .expect("another provenance event must converge on the canonical cycle");
     assert!(matches!(
-        conflict,
-        StorageError::StateConflict {
-            entity: owner,
-            ..
-        } if owner == entity::QUANT_FEEDBACK_STAGE_EVENT
+        converged,
+        FeedbackTriggerCommit {
+            cycle: FeedbackCycleWriteOutcome::AlreadyPresent(_),
+            stage: FeedbackStageWriteOutcome::AlreadyPresent(_),
+            trigger: FeedbackTriggerWriteOutcome::Inserted(_),
+        }
     ));
+    let provenance = repo
+        .list_trigger_events(&fixture.cycle_id)
+        .await
+        .expect("list converged trigger provenance");
+    assert_eq!(provenance.len(), 2);
+    assert_eq!(provenance[0].actor_label, "scheduler");
+    assert_eq!(provenance[1].actor_label, "different-actor");
 }
 
-pub async fn governed_mutation_contracts() {
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    let fixture = Box::pin(prepare_fixture(&db)).await;
-    let repo = PgFeedbackCycleRepository::new(db.clone());
-    let owner = feedback_actor(&db, "feedback_owner", &[Operation::Create]).await;
-    let second_owner = feedback_actor(&db, "feedback_backup", &[Operation::Create]).await;
-    let reader = feedback_actor(&db, "feedback_reader", &[Operation::Read]).await;
+async fn assert_trigger_contracts(
+    repo: &PgFeedbackCycleRepository,
+    fixture: &FeedbackSchemaFixture,
+    owner: &FeedbackCycleActor,
+    second_owner: &FeedbackCycleActor,
+    reader: &FeedbackCycleActor,
+) -> i64 {
     let trigger = GovernedFeedbackTrigger {
         actor: owner.clone(),
-        cycle: fixture.second_cycle.clone(),
+        cycle: fixture.cycle.clone(),
         reason_code: "operator_retrain".to_owned(),
     };
 
     assert!(matches!(
         repo.record_governed_trigger(GovernedFeedbackTrigger {
             actor: reader.clone(),
-            cycle: fixture.second_cycle.clone(),
+            cycle: fixture.cycle.clone(),
             reason_code: "operator_retrain".to_owned(),
         })
         .await,
@@ -334,7 +349,7 @@ pub async fn governed_mutation_contracts() {
         ))
     ));
     assert!(
-        repo.find_cycle(&fixture.second_cycle_id)
+        repo.find_cycle(&fixture.cycle_id)
             .await
             .expect("check denied trigger")
             .is_none(),
@@ -346,18 +361,20 @@ pub async fn governed_mutation_contracts() {
         .record_governed_trigger(trigger.clone())
         .await
         .expect("record governed trigger");
-    let (
-        FeedbackCycleWriteOutcome::Inserted(triggered),
-        FeedbackStageWriteOutcome::Inserted(event),
-    ) = first
+    let FeedbackTriggerCommit {
+        cycle: FeedbackCycleWriteOutcome::Inserted(triggered),
+        stage: FeedbackStageWriteOutcome::Inserted(event),
+        trigger: FeedbackTriggerWriteOutcome::Inserted(provenance),
+    } = first
     else {
-        panic!("first governed trigger must insert cycle and event");
+        panic!("first governed trigger must insert cycle, lifecycle, and provenance");
     };
     assert_eq!(
         event.actor.as_deref(),
         Some("feedback_owner_user@feedback_owner")
     );
     assert_eq!(event.reason_code.as_deref(), Some("operator_retrain"));
+    assert_eq!(provenance.reason_code, "operator_retrain");
     assert!(event.occurred_at >= before_trigger);
 
     sleep(StdDuration::from_millis(2)).await;
@@ -365,34 +382,47 @@ pub async fn governed_mutation_contracts() {
         repo.record_governed_trigger(trigger.clone())
             .await
             .expect("retry governed trigger across database time"),
-        (
-            FeedbackCycleWriteOutcome::AlreadyPresent(_),
-            FeedbackStageWriteOutcome::AlreadyPresent(_)
-        )
+        FeedbackTriggerCommit {
+            cycle: FeedbackCycleWriteOutcome::AlreadyPresent(_),
+            stage: FeedbackStageWriteOutcome::AlreadyPresent(_),
+            trigger: FeedbackTriggerWriteOutcome::AlreadyPresent(_),
+        }
     ));
     assert!(matches!(
         repo.record_governed_trigger(GovernedFeedbackTrigger {
-            actor: second_owner,
-            cycle: fixture.second_cycle.clone(),
+            actor: second_owner.clone(),
+            cycle: fixture.cycle.clone(),
             reason_code: "operator_retrain".to_owned(),
         })
-        .await,
-        Err(FeedbackCycleCommandError::Storage(
-            StorageError::StateConflict { .. }
-        ))
+        .await
+        .expect("another authorized trigger converges on the cadence cycle"),
+        FeedbackTriggerCommit {
+            cycle: FeedbackCycleWriteOutcome::AlreadyPresent(_),
+            stage: FeedbackStageWriteOutcome::AlreadyPresent(_),
+            trigger: FeedbackTriggerWriteOutcome::Inserted(_),
+        }
     ));
+    triggered.generation
+}
 
+async fn assert_cancel_contracts(
+    repo: &PgFeedbackCycleRepository,
+    fixture: &FeedbackSchemaFixture,
+    owner: &FeedbackCycleActor,
+    reader: &FeedbackCycleActor,
+    triggered_generation: i64,
+) {
     let cancellation = GovernedFeedbackCancellation {
-        actor: owner,
-        feedback_cycle_id: fixture.second_cycle_id,
-        expected_generation: triggered.generation,
+        actor: owner.clone(),
+        feedback_cycle_id: fixture.cycle_id,
+        expected_generation: triggered_generation,
         expected_event_sequence: 2,
-        stage: FeedbackStage::Coverage,
+        stage: FeedbackStage::TruthFreeze,
         reason_code: "operator_cancelled".to_owned(),
     };
     assert!(matches!(
         repo.request_governed_cancel(GovernedFeedbackCancellation {
-            actor: reader,
+            actor: reader.clone(),
             ..cancellation.clone()
         })
         .await,
@@ -412,7 +442,7 @@ pub async fn governed_mutation_contracts() {
         panic!("first governed cancellation must apply");
     };
     assert_eq!(cancelled.status, FeedbackCycleStatus::Cancelled);
-    assert_eq!(cancelled.generation, triggered.generation + 1);
+    assert_eq!(cancelled.generation, triggered_generation + 1);
     assert_eq!(
         cancel_event.actor.as_deref(),
         Some("feedback_owner_user@feedback_owner")
@@ -431,11 +461,45 @@ pub async fn governed_mutation_contracts() {
         )
     ));
     let events = repo
-        .list_stage_events(&fixture.second_cycle_id)
+        .list_stage_events(&fixture.cycle_id)
         .await
         .expect("read governed timeline");
+    let triggers = repo
+        .list_trigger_events(&fixture.cycle_id)
+        .await
+        .expect("read governed trigger provenance");
     let outbox = repo.list_outbox(0, 10).await.expect("read governed outbox");
-    assert_eq!((events.len(), outbox.len()), (2, 2));
+    assert_eq!((events.len(), outbox.len()), (2, 3));
+    assert_eq!(triggers.len(), 2);
+    let [
+        first_trigger_revision,
+        second_trigger_revision,
+        cancellation_revision,
+    ] = outbox.as_slice()
+    else {
+        panic!("governed trigger/cancellation outbox cardinality changed");
+    };
+    let FeedbackOutboxSource::Trigger(first_trigger) = &first_trigger_revision.source else {
+        panic!("initial governed trigger must publish trigger provenance");
+    };
+    let FeedbackOutboxSource::Trigger(second_trigger) = &second_trigger_revision.source else {
+        panic!("second governed actor must publish distinct trigger provenance");
+    };
+    let FeedbackOutboxSource::Stage(cancellation_event) = &cancellation_revision.source else {
+        panic!("governed cancellation must publish lifecycle stage evidence");
+    };
+    assert_eq!(
+        (
+            first_trigger.actor_label.as_str(),
+            second_trigger.actor_label.as_str(),
+            cancellation_event.event_kind,
+        ),
+        (
+            "feedback_owner_user",
+            "feedback_backup_user",
+            FeedbackStageEventKind::CancellationRequested,
+        )
+    );
     assert_eq!(
         events
             .iter()
@@ -443,6 +507,31 @@ pub async fn governed_mutation_contracts() {
             .collect::<Vec<_>>(),
         [1, 2]
     );
+}
+
+pub async fn governed_mutation_contracts() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let fixture = Box::pin(prepare_fixture(&db)).await;
+    let repo = PgFeedbackCycleRepository::new(db.clone());
+    let profile = fixture
+        .profile_ref
+        .resolve_builtin_research_profile()
+        .expect("resolve governed trigger profile");
+    let database_now = repo.database_time().await.expect("read scheduler clock");
+    PgFeedbackSchedulerRepository::new(db.clone())
+        .sync_state(
+            NewFeedbackSchedulerState::try_new(&profile, database_now)
+                .expect("derive governed scheduler state"),
+        )
+        .await
+        .expect("persist governed scheduler state");
+    let owner = feedback_actor(&db, "feedback_owner", &[Operation::Create]).await;
+    let second_owner = feedback_actor(&db, "feedback_backup", &[Operation::Create]).await;
+    let reader = feedback_actor(&db, "feedback_reader", &[Operation::Read]).await;
+    let triggered_generation =
+        assert_trigger_contracts(&repo, &fixture, &owner, &second_owner, &reader).await;
+    assert_cancel_contracts(&repo, &fixture, &owner, &reader, triggered_generation).await;
 }
 
 pub async fn read_page_contracts() {
@@ -613,11 +702,11 @@ pub async fn outbox_delivery_contracts() {
         .await
         .expect("replay stage revision");
     assert_eq!(stage_replay.len(), 1);
-    assert_eq!(stage_replay[0].event.research_job_id, Some(job_id));
-    assert_eq!(
-        stage_replay[0].event.event_kind,
-        FeedbackStageEventKind::Started
-    );
+    let FeedbackOutboxSource::Stage(stage_event) = &stage_replay[0].source else {
+        panic!("non-trigger lifecycle append must publish a stage-source invalidation");
+    };
+    assert_eq!(stage_event.research_job_id, Some(job_id));
+    assert_eq!(stage_event.event_kind, FeedbackStageEventKind::Started);
     assert_eq!(stage_replay[0].profile_id, fixture.profile_ref.id);
     assert_eq!(
         repo.queue_snapshot()

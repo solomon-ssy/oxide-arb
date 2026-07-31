@@ -20,14 +20,14 @@ use quant_pivot_models::{
             FitModelCalibratorRequest, ResearchJobView,
         },
         pagination::Paginated,
-        ports::JobSubmitContext,
+        ports::{GovernanceActor, JobSubmitContext},
     },
     enums::{
         operation_log::OperationCategory,
         quant::CalibrationKind,
         rbac::{Operation, ResourceType},
     },
-    types::CalibrationArtifactId,
+    types::{CalibrationArtifactId, RoleCode, UserId},
 };
 
 use crate::{
@@ -149,6 +149,7 @@ pub async fn fit_bias_table(
 /// `POST /api/research/calibration-artifacts/fit-model-calibrator` — enqueue calibrator fit.
 pub async fn fit_model_calibrator(
     state: Data<AppState>,
+    actor: AuthedActor,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
@@ -164,17 +165,25 @@ pub async fn fit_model_calibrator(
             WebError::Conflict("no active runtime-config version to fit against".to_owned())
         })?
         .decision_policy_snapshot_id;
-    let job = state
-        .research_jobs
-        .enqueue_model_calibration_fit(
-            request,
-            decision_policy_snapshot_id,
-            JobSubmitContext {
-                acting_role: acting_role.0.clone(),
-                requested_by: None,
-            },
-        )
-        .await?;
+    let job =
+        state
+            .research_jobs
+            .enqueue_model_calibration_fit(
+                request,
+                decision_policy_snapshot_id,
+                GovernanceActor::authenticated(
+                    actor.claims.sub.parse::<UserId>().map_err(|error| {
+                        WebError::BadRequest(format!("invalid user id: {error}"))
+                    })?,
+                    actor.claims.username.clone(),
+                    RoleCode::new(&acting_role.0),
+                ),
+                JobSubmitContext {
+                    acting_role: acting_role.0.clone(),
+                    requested_by: Some(actor.claims.sub),
+                },
+            )
+            .await?;
     op_ctx.set_action(
         OperationCategory::Other,
         "calibration_artifact.fit_model_calibrator",

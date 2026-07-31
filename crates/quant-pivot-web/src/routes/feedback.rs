@@ -7,9 +7,12 @@ use actix_web::{
 use quant_pivot_models::{
     domain::{
         api::{
-            CancelFeedbackCycleRequest, DriftReportListQuery, DriftReportView,
-            FeedbackCycleDetailView, FeedbackCycleListQuery, FeedbackCycleMutationView,
-            FeedbackCycleView, FeedbackOverviewView, IssuePromotionPermitRequest,
+            ActivateModelRouteRequest, BootstrapModelRouteRequest, CancelFeedbackCycleRequest,
+            DriftReportListQuery, DriftReportView, FeedbackCycleDetailView, FeedbackCycleListQuery,
+            FeedbackCycleMutationView, FeedbackCycleTriggerView, FeedbackCycleView,
+            FeedbackOverviewView, FeedbackSchedulerControlRequest, FeedbackSchedulerListView,
+            FeedbackSchedulerMutationView, IssuePromotionPermitRequest,
+            ModelRouteActivationReceiptView, ModelRouteBootstrapReceiptView,
             PromotionPermitListQuery, PromotionPermitMutationView, PromotionPermitView,
             RevokePromotionPermitRequest, TriggerFeedbackCycleRequest,
         },
@@ -21,7 +24,7 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::{ContentHash, FeedbackCycleId, PromotionPermitId, RoleCode},
+    types::{ContentHash, FeedbackCycleId, PromotionPermitId, ResearchProfileId, RoleCode},
 };
 use serde::Serialize;
 
@@ -76,21 +79,51 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         ),
         spec(
             Method::GET,
-            "/research/feedback-promotion-permits",
+            "/research/feedback-schedulers",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            list_schedulers,
+        ),
+        spec(
+            Method::POST,
+            "/research/feedback-schedulers/{profile_id}/pause",
+            Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Update),
+            pause_scheduler,
+        ),
+        spec(
+            Method::POST,
+            "/research/feedback-schedulers/{profile_id}/resume",
+            Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Update),
+            resume_scheduler,
+        ),
+        spec(
+            Method::GET,
+            "/research/model-route-activation-permits",
             Rule::ResourceOp(ResourceType::Publication, Operation::Read),
             list_permits,
         ),
         spec(
             Method::POST,
-            "/research/feedback-promotion-permits",
+            "/research/model-route-activation-permits",
             Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
             issue_permit,
         ),
         spec(
             Method::POST,
-            "/research/feedback-promotion-permits/{permit_id}/revoke",
+            "/research/model-route-activation-permits/{permit_id}/revoke",
             Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Retire),
             revoke_permit,
+        ),
+        spec(
+            Method::POST,
+            "/research/model-route-bootstraps",
+            Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
+            bootstrap_route,
+        ),
+        spec(
+            Method::POST,
+            "/research/model-route-activations",
+            Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Publish),
+            activate_route,
         ),
     ]
 }
@@ -137,6 +170,75 @@ pub async fn list_drift_reports(
     Ok(WebResponse::ok(page))
 }
 
+/// `GET /api/research/feedback-schedulers`.
+pub async fn list_schedulers(
+    state: Data<AppState>,
+) -> Result<WebResponse<FeedbackSchedulerListView>, WebError> {
+    Ok(WebResponse::ok(
+        state.feedback_read.list_schedulers().await?,
+    ))
+}
+
+/// `POST /api/research/feedback-schedulers/{profile_id}/pause`.
+pub async fn pause_scheduler(
+    state: Data<AppState>,
+    profile_id: Path<ResearchProfileId>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<FeedbackSchedulerControlRequest>,
+) -> Result<WebResponse<FeedbackSchedulerMutationView>, WebError> {
+    let profile_id = profile_id.into_inner();
+    let view = state
+        .feedback_mutation
+        .control_scheduler(profile_id.clone(), true, body.into_inner())
+        .await?;
+    let after_hash = canonical_state_hash(&view.state)?;
+    op_ctx.set_action(OperationCategory::Governance, "feedback.scheduler.pause");
+    op_ctx.set_resource(ResourceType::Materialization, profile_id.to_string());
+    op_ctx.set_state_hashes(None, Some(after_hash));
+    op_ctx.set_detail(serde_json::json!({
+        "profile_id": profile_id.to_string(),
+        "paused": true,
+        "pause_revision": view.state.pause_revision,
+        "actor": actor.claims.username,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }))?;
+    Ok(WebResponse::ok(view))
+}
+
+/// `POST /api/research/feedback-schedulers/{profile_id}/resume`.
+pub async fn resume_scheduler(
+    state: Data<AppState>,
+    profile_id: Path<ResearchProfileId>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<FeedbackSchedulerControlRequest>,
+) -> Result<WebResponse<FeedbackSchedulerMutationView>, WebError> {
+    let profile_id = profile_id.into_inner();
+    let view = state
+        .feedback_mutation
+        .control_scheduler(profile_id.clone(), false, body.into_inner())
+        .await?;
+    let after_hash = canonical_state_hash(&view.state)?;
+    op_ctx.set_action(OperationCategory::Governance, "feedback.scheduler.resume");
+    op_ctx.set_resource(ResourceType::Materialization, profile_id.to_string());
+    op_ctx.set_state_hashes(None, Some(after_hash));
+    op_ctx.set_detail(serde_json::json!({
+        "profile_id": profile_id.to_string(),
+        "paused": false,
+        "pause_revision": view.state.pause_revision,
+        "actor": actor.claims.username,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }))?;
+    Ok(WebResponse::ok(view))
+}
+
 /// `POST /api/research/feedback-cycles`.
 pub async fn trigger_cycle(
     state: Data<AppState>,
@@ -145,7 +247,7 @@ pub async fn trigger_cycle(
     request_id: RequestId,
     op_ctx: OperationCtx,
     body: ValidatedJson<TriggerFeedbackCycleRequest>,
-) -> Result<WebResponse<FeedbackCycleMutationView>, WebError> {
+) -> Result<WebResponse<FeedbackCycleTriggerView>, WebError> {
     let request = body.into_inner();
     let profile_id = request.profile_id.clone();
     let view = state
@@ -161,7 +263,8 @@ pub async fn trigger_cycle(
         "feedback_cycle_id": cycle_id.to_string(),
         "profile_id": profile_id.to_string(),
         "status": view.cycle.status,
-        "replayed": view.replayed,
+        "cycle_reused": view.cycle_reused,
+        "trigger_replayed": view.trigger_replayed,
         "acting_role": acting_role.0,
         "request_id": request_id.0,
     }))?;
@@ -201,7 +304,7 @@ pub async fn cancel_cycle(
     Ok(WebResponse::accepted(view))
 }
 
-/// `GET /api/research/feedback-promotion-permits`.
+/// `GET /api/research/model-route-activation-permits`.
 pub async fn list_permits(
     state: Data<AppState>,
     query: Query<PromotionPermitListQuery>,
@@ -213,7 +316,7 @@ pub async fn list_permits(
     Ok(WebResponse::ok(page))
 }
 
-/// `POST /api/research/feedback-promotion-permits`.
+/// `POST /api/research/model-route-activation-permits`.
 pub async fn issue_permit(
     state: Data<AppState>,
     actor: AuthedActor,
@@ -244,7 +347,7 @@ pub async fn issue_permit(
     Ok(WebResponse::created(view))
 }
 
-/// `POST /api/research/feedback-promotion-permits/{permit_id}/revoke`.
+/// `POST /api/research/model-route-activation-permits/{permit_id}/revoke`.
 pub async fn revoke_permit(
     state: Data<AppState>,
     permit_id: Path<PromotionPermitId>,
@@ -276,6 +379,77 @@ pub async fn revoke_permit(
         "request_id": request_id.0,
     }))?;
     Ok(WebResponse::ok(view))
+}
+
+/// `POST /api/research/model-route-bootstraps`.
+pub async fn bootstrap_route(
+    state: Data<AppState>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<BootstrapModelRouteRequest>,
+) -> Result<WebResponse<ModelRouteBootstrapReceiptView>, WebError> {
+    let request = body.into_inner();
+    let model_version_id = request.model_version_id;
+    let view = state
+        .feedback_mutation
+        .bootstrap_route(request, feedback_actor(&actor, &acting_role)?)
+        .await?;
+    let after_hash = canonical_state_hash(&view)?;
+    op_ctx.set_action(OperationCategory::Governance, "model_route.bootstrap");
+    op_ctx.set_resource(
+        ResourceType::Publication,
+        view.policy_activation_id.to_string(),
+    );
+    op_ctx.set_state_hashes(None, Some(after_hash));
+    op_ctx.set_detail(serde_json::json!({
+        "model_version_id": model_version_id.to_string(),
+        "route": view.route,
+        "previous_route_generation": view.previous_route_generation,
+        "activated_route_generation": view.activated_route_generation,
+        "transaction_hash": view.transaction_hash,
+        "replayed": view.replayed,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }))?;
+    Ok(WebResponse::created(view))
+}
+
+/// `POST /api/research/model-route-activations`.
+pub async fn activate_route(
+    state: Data<AppState>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<ActivateModelRouteRequest>,
+) -> Result<WebResponse<ModelRouteActivationReceiptView>, WebError> {
+    let request = body.into_inner();
+    let permit_id = request.promotion_permit_id;
+    let cycle_id = request.feedback_cycle_id;
+    let view = state
+        .feedback_mutation
+        .activate_route(request, feedback_actor(&actor, &acting_role)?)
+        .await?;
+    let after_hash = canonical_state_hash(&view)?;
+    op_ctx.set_action(OperationCategory::Governance, "model_route.activate");
+    op_ctx.set_resource(
+        ResourceType::Publication,
+        view.policy_activation_id.to_string(),
+    );
+    op_ctx.set_state_hashes(None, Some(after_hash));
+    op_ctx.set_detail(serde_json::json!({
+        "promotion_permit_id": permit_id.to_string(),
+        "feedback_cycle_id": cycle_id.to_string(),
+        "previous_route_generation": view.previous_route_generation,
+        "activated_route_generation": view.activated_route_generation,
+        "transaction_hash": view.transaction_hash,
+        "replayed": view.replayed,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }))?;
+    Ok(WebResponse::created(view))
 }
 
 fn feedback_actor(

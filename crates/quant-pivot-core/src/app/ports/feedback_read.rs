@@ -9,47 +9,171 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     domain::{
         api::{
-            DriftReportListQuery, DriftReportView, FeedbackCohortCountsView,
-            FeedbackCoverageDecision, FeedbackCoverageView, FeedbackCycleDetailView,
-            FeedbackCycleListQuery, FeedbackCycleView, FeedbackEvaluationUseView,
-            FeedbackOverviewView, FeedbackProfileOverviewView, FeedbackQueueView,
-            FeedbackReadinessView, FeedbackStageEventView,
+            DriftReportListQuery, DriftReportView, FeedbackAttributionSummaryView,
+            FeedbackCandidateComparisonView, FeedbackCandidateReadyView,
+            FeedbackCandidateShadowView, FeedbackCohortCountsView, FeedbackCoverageDecision,
+            FeedbackCoverageView, FeedbackCycleDetailView, FeedbackCycleListQuery,
+            FeedbackCycleView, FeedbackEvaluationUseView, FeedbackOverviewView,
+            FeedbackProfileOverviewView, FeedbackQueueView, FeedbackReadinessView,
+            FeedbackRouteDiffView, FeedbackSchedulerListView, FeedbackSchedulerStateView,
+            FeedbackStageEventView, FeedbackTriggerEventView, FeedbackTruthOperationsView,
         },
         pagination::{PageRequest, Paginated},
         ports::{FeedbackReadPort, ResearchReadinessPort},
         quant::{FeedbackCycleInfo, FeedbackStageEventInfo},
     },
-    enums::quant::{FeedbackStage, FeedbackStageEventKind},
+    enums::quant::{
+        AttributionArtifactKind, FeedbackCycleStatus, FeedbackDecision, FeedbackStage,
+        FeedbackStageEventKind,
+    },
     types::{
         ArtifactUri, ContentHash, FeedbackCycleId, ResearchProfileArtifact,
         builtin_research_profiles,
     },
 };
-use quant_pivot_repository::traits::FeedbackCycleRepository;
+use quant_pivot_repository::traits::{
+    ExecutionAttemptOutcomeRepository, FeedbackCycleRepository, FeedbackSchedulerRepository,
+    RecommendationExecutionRollupRepository, ResolutionObservationRepository,
+};
 use quant_pivot_research::{
     artifact::ArtifactStore,
     feedback::{CoverageGateOutcome, FeedbackCoverageArtifact, FeedbackCoverageCodec},
 };
 
+use crate::service::feedback_decision_stage::{
+    FeedbackDecisionStageAdapter, PromotionDecisionEvidence,
+};
+
 /// Read-only feedback dependencies.
+pub struct CoreFeedbackReadDeps {
+    pub cycles: Arc<dyn FeedbackCycleRepository>,
+    pub scheduler: Arc<dyn FeedbackSchedulerRepository>,
+    pub readiness: Arc<dyn ResearchReadinessPort>,
+    pub artifacts: Arc<dyn ArtifactStore>,
+    pub resolutions: Arc<dyn ResolutionObservationRepository>,
+    pub attempts: Arc<dyn ExecutionAttemptOutcomeRepository>,
+    pub rollups: Arc<dyn RecommendationExecutionRollupRepository>,
+    pub decisions: Arc<FeedbackDecisionStageAdapter>,
+}
+
 pub struct CoreFeedbackReadPort {
     cycles: Arc<dyn FeedbackCycleRepository>,
+    scheduler: Arc<dyn FeedbackSchedulerRepository>,
     readiness: Arc<dyn ResearchReadinessPort>,
     artifacts: Arc<dyn ArtifactStore>,
+    resolutions: Arc<dyn ResolutionObservationRepository>,
+    attempts: Arc<dyn ExecutionAttemptOutcomeRepository>,
+    rollups: Arc<dyn RecommendationExecutionRollupRepository>,
+    decisions: Arc<FeedbackDecisionStageAdapter>,
 }
 
 impl CoreFeedbackReadPort {
     #[must_use]
-    pub const fn new(
-        cycles: Arc<dyn FeedbackCycleRepository>,
-        readiness: Arc<dyn ResearchReadinessPort>,
-        artifacts: Arc<dyn ArtifactStore>,
-    ) -> Self {
+    pub fn new(deps: CoreFeedbackReadDeps) -> Self {
         Self {
-            cycles,
-            readiness,
-            artifacts,
+            cycles: deps.cycles,
+            scheduler: deps.scheduler,
+            readiness: deps.readiness,
+            artifacts: deps.artifacts,
+            resolutions: deps.resolutions,
+            attempts: deps.attempts,
+            rollups: deps.rollups,
+            decisions: deps.decisions,
         }
+    }
+
+    fn evidence_count(value: usize, field: &'static str) -> QuantResult<u64> {
+        u64::try_from(value).map_err(|error| {
+            FeedbackError::InvalidCycleState {
+                detail: format!("{field} cannot be represented as u64: {error}"),
+            }
+            .into()
+        })
+    }
+
+    fn candidate_ready_view(
+        evidence: &PromotionDecisionEvidence,
+    ) -> QuantResult<FeedbackCandidateReadyView> {
+        let mut prediction_explanation_count = 0_u64;
+        let mut decision_counterfactual_count = 0_u64;
+        let mut outcome_association_count = 0_u64;
+        let mut execution_trajectory_count = 0_u64;
+        let mut policy_counterfactual_count = 0_u64;
+        for artifact in &evidence.dag.attribution_plan.produced {
+            let count = match artifact.artifact_kind {
+                AttributionArtifactKind::PredictionExplanation => &mut prediction_explanation_count,
+                AttributionArtifactKind::DecisionCounterfactual => {
+                    &mut decision_counterfactual_count
+                }
+                AttributionArtifactKind::OutcomeAssociation => &mut outcome_association_count,
+                AttributionArtifactKind::ExecutionTrajectory => &mut execution_trajectory_count,
+                AttributionArtifactKind::PolicyCounterfactualOutcome => {
+                    &mut policy_counterfactual_count
+                }
+            };
+            *count = count
+                .checked_add(1)
+                .ok_or_else(|| FeedbackError::InvalidCycleState {
+                    detail: "attribution artifact count overflowed u64".to_owned(),
+                })?;
+        }
+        let contract = &evidence.shadow_contract;
+        let comparison = &evidence.comparison;
+        let shadow = &evidence.shadow;
+        let proposed_route_generation = contract
+            .policy_bundle_generation()
+            .checked_next()
+            .map_err(|error| FeedbackError::InvalidCycleState {
+                detail: format!("candidate route generation overflowed: {error}"),
+            })?;
+        Ok(FeedbackCandidateReadyView {
+            quality_gate: (&evidence.dag.quality_gate_report).into(),
+            comparison: FeedbackCandidateComparisonView {
+                observation_count: evidence.comparison_observation_count,
+                effect_bps: comparison.effect_bps.inner().normalize().to_string(),
+                simultaneous_lower_bound_bps: comparison
+                    .simultaneous_lower_bound_bps
+                    .inner()
+                    .normalize()
+                    .to_string(),
+                adjusted_p_value: comparison.adjusted_p_value.normalize().to_string(),
+                confidence: comparison.confidence.normalize().to_string(),
+            },
+            shadow: FeedbackCandidateShadowView {
+                observed: shadow.observed,
+                required: contract.minimum_observations(),
+                observed_window_secs: shadow.observed_window_secs,
+                required_window_secs: contract.required_window_secs(),
+                mean_topn_overlap: shadow.mean_topn_overlap.inner().normalize().to_string(),
+                minimum_topn_overlap: contract
+                    .minimum_topn_overlap()
+                    .inner()
+                    .normalize()
+                    .to_string(),
+                any_hard_divergence: shadow.any_hard_divergence,
+            },
+            attribution: FeedbackAttributionSummaryView {
+                prior_cycle_use_count: Self::evidence_count(
+                    evidence.dag.attribution_plan.uses.len(),
+                    "attribution prior-cycle use count",
+                )?,
+                prediction_explanation_count,
+                decision_counterfactual_count,
+                outcome_association_count,
+                execution_trajectory_count,
+                policy_counterfactual_count,
+                use_set_hash: evidence.dag.attribution_plan.use_set_hash,
+                produced_set_hash: evidence.dag.attribution_plan.produced_set_hash,
+            },
+            route_diff: FeedbackRouteDiffView {
+                current_route_generation: contract.policy_bundle_generation(),
+                proposed_route_generation,
+                champion_model_version_id: contract.champion_model_version_id(),
+                candidate_model_version_id: contract.candidate_model_version_id(),
+                execution_authority_unchanged: true,
+            },
+            blockers: Vec::new(),
+        })
     }
 
     async fn load_coverage(
@@ -205,8 +329,13 @@ impl CoreFeedbackReadPort {
 #[async_trait]
 impl FeedbackReadPort for CoreFeedbackReadPort {
     async fn overview(&self) -> QuantResult<FeedbackOverviewView> {
-        let generated_at = self.cycles.database_time().await?;
-        let queue = self.cycles.queue_snapshot().await?;
+        let truth_observed_at = self.cycles.database_time().await?;
+        let (queue, resolution, attempts, rollups) = tokio::try_join!(
+            self.cycles.queue_snapshot(),
+            self.resolutions.barrier(truth_observed_at),
+            self.attempts.barrier(truth_observed_at),
+            self.rollups.barrier(truth_observed_at),
+        )?;
         let revision = self.cycles.latest_outbox_revision().await?;
         let readiness = self
             .readiness
@@ -224,13 +353,37 @@ impl FeedbackReadPort for CoreFeedbackReadPort {
         for profile in profiles {
             profile_views.push(self.profile_overview(profile).await?);
         }
+        let generated_at = self.cycles.database_time().await?;
         Ok(FeedbackOverviewView {
             revision,
             generated_at,
             queue: FeedbackQueueView::from(queue),
+            truth_operations: FeedbackTruthOperationsView {
+                observed_at: truth_observed_at,
+                resolution_unresolved_count: resolution.unresolved_count,
+                resolution_quarantined_count: resolution.quarantined_count,
+                resolution_oldest_unresolved_at: resolution.oldest_unresolved_at,
+                resolution_verified_through: resolution.verified_through,
+                execution_attempt_unsealed_count: attempts.eligible_unsealed_count,
+                execution_attempt_sealed_through: attempts.sealed_through,
+                recommendation_rollup_unsealed_count: rollups.eligible_unsealed_count,
+                recommendation_rollup_sealed_through: rollups.sealed_through,
+            },
             readiness,
             profiles: profile_views,
         })
+    }
+
+    async fn list_schedulers(&self) -> QuantResult<FeedbackSchedulerListView> {
+        let observed_at = self.cycles.database_time().await?;
+        let items = self
+            .scheduler
+            .list_states()
+            .await?
+            .into_iter()
+            .map(FeedbackSchedulerStateView::from)
+            .collect();
+        Ok(FeedbackSchedulerListView { observed_at, items })
     }
 
     async fn list_cycles(
@@ -262,19 +415,36 @@ impl FeedbackReadPort for CoreFeedbackReadPort {
         let Some(cycle) = self.cycles.find_cycle(cycle_id).await? else {
             return Ok(None);
         };
-        let (timeline, drift_reports, evaluation_uses) = tokio::try_join!(
+        let (triggers, timeline, drift_reports, evaluation_uses) = tokio::try_join!(
+            self.cycles.list_trigger_events(cycle_id),
             self.cycles.list_stage_events(cycle_id),
             self.cycles.list_drift_reports(cycle_id),
             self.cycles.list_evaluation_uses(cycle_id),
         )?;
         let coverage = self.load_coverage(&cycle, &timeline).await?;
+        let candidate_ready = if cycle.status == FeedbackCycleStatus::Succeeded
+            && cycle.decision == Some(FeedbackDecision::CandidateReady)
+        {
+            let evidence = self
+                .decisions
+                .promotion_evidence(&cycle.feedback_cycle_id)
+                .await?;
+            Some(Self::candidate_ready_view(&evidence)?)
+        } else {
+            None
+        };
         Ok(Some(FeedbackCycleDetailView {
             cycle: FeedbackCycleView::from(cycle),
+            triggers: triggers
+                .into_iter()
+                .map(FeedbackTriggerEventView::from)
+                .collect(),
             timeline: timeline
                 .into_iter()
                 .map(FeedbackStageEventView::from)
                 .collect(),
             coverage,
+            candidate_ready,
             drift_reports: drift_reports.into_iter().map(Into::into).collect(),
             evaluation_uses: evaluation_uses
                 .into_iter()

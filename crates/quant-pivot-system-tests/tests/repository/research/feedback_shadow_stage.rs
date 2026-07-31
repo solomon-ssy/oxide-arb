@@ -17,6 +17,7 @@ use quant_pivot_models::{
             FeedbackComparisonCandidateRef, FeedbackComparisonJobInput,
             FeedbackComparisonJobParams, FeedbackEvaluationUseRef,
             FeedbackLearningStageArtifactRef, FeedbackShadowExecutionPort, FeedbackShadowSubject,
+            FeedbackValidationArtifactRef,
         },
         quant::{
             FeedbackCycleKey, FeedbackCycleKeyInput, FeedbackEvaluationUseInput,
@@ -32,8 +33,7 @@ use quant_pivot_models::{
         model::ModelFamily,
         quant::{
             DatasetPurpose, FeedbackStage, FeedbackStageEventKind, FeedbackTriggerFamily,
-            ModelWeightSource, PublicationStatus, ResearchJobKind, ResearchJobResultKind,
-            ResearchJobStatus,
+            ModelWeightSource, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
         },
         runtime_config::ConfigResourceKind,
     },
@@ -44,9 +44,9 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, BacktestPathSetId, BacktestReportId, Bps, ContentHash,
         DecisionPolicySnapshotId, FeedbackComparisonArtifactId, FeedbackLearningStageArtifactId,
-        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        Probability, ResearchJobId, ResearchJobParams, ResearchProfileRef, RoleCode, SchemaVersion,
-        ShadowComparisonId, Usd, WorkerId,
+        FeedbackValidationArtifactId, ModelInputContract, ModelRunId, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, Probability, ResearchJobId, ResearchJobParams,
+        ResearchProfileRef, RoleCode, SchemaVersion, ShadowComparisonId, Usd, WorkerId,
         factor::FactorServingPlane,
         model_metrics::ModelVersionMetrics,
         model_training::ModelTrainingObjective,
@@ -74,7 +74,7 @@ use quant_pivot_research::{
         FeedbackComparisonReplayRef, RomanoWolfCandidateInput, RomanoWolfOutcome,
         RomanoWolfStepdown,
     },
-    feedback_shadow::{FeedbackShadowOutcome, FeedbackShadowReplayCodec},
+    feedback_shadow::{FeedbackShadowCodec, FeedbackShadowOutcome},
     hashing::ResearchHasher,
     model::ReturnModelSpec,
 };
@@ -152,14 +152,9 @@ fn new_model_version(
         training_dataset_id: Some(training_dataset_id),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
-        publish_path_set_id: None,
         derivation: NewModelVersion::training_derivation(),
         metrics: ModelVersionMetrics::not_measured("F10 production-shadow fixture"),
         training_objective: ModelTrainingObjective::hand_authored("F10 production-shadow fixture"),
-        quality_gate_report: None,
-        publication_status: PublicationStatus::Candidate,
-        published_at: None,
-        retired_at: None,
     }
 }
 
@@ -310,9 +305,9 @@ async fn build_scoped_models(
             .expect("positive F10 prediction horizon"),
     };
     let (champion, champion_id) = seal.seal("champion", 1).await;
-    let champion = ModelVersionFixture::persist_published(db, champion)
+    let champion = ModelVersionFixture::persist_route_candidate(db, champion)
         .await
-        .expect("publish F10 champion");
+        .expect("persist F10 champion route candidate");
     assert_eq!(champion.model_version_id, champion_id);
 
     let (candidate, candidate_id) = seal.seal("candidate", 2).await;
@@ -496,7 +491,6 @@ async fn record_prepared_cycle(
     let source = &family.shared_evaluation().source_lineage;
     let cycle = NewFeedbackCycle::try_seal(
         FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
-            trigger_family: FeedbackTriggerFamily::Manual,
             profile_ref: schema.profile_ref.clone(),
             feedback_policy_hash: profile
                 .spec
@@ -522,6 +516,7 @@ async fn record_prepared_cycle(
                 event_sequence: 1,
                 stage: FeedbackStage::Trigger,
                 event_kind: FeedbackStageEventKind::Triggered,
+                trigger_family: Some(FeedbackTriggerFamily::Manual),
                 research_job_id: None,
                 actor: Some("f10-shadow-stage".to_owned()),
                 reason_code: Some("f10_contract".to_owned()),
@@ -573,8 +568,6 @@ pub async fn comparison_params(
     models: &ShadowModels,
 ) -> FeedbackComparisonJobParams {
     let cycle = &claim.cycle;
-    let cpcv_uri = ArtifactUri::parse("s3://f10-shadow-stage/cpcv.json").expect("F10 CPCV URI");
-    let cpcv_hash = content_hash('1');
     let previous = FeedbackLearningStageArtifactRef {
         feedback_cycle_id: cycle.feedback_cycle_id,
         stage: FeedbackStage::Cpcv,
@@ -586,10 +579,45 @@ pub async fn comparison_params(
         .expect("F10 CPCV artifact identity"),
         input_hash: content_hash('2'),
         artifact: ResearchJobArtifactRef {
-            uri: cpcv_uri.clone(),
-            content_hash: cpcv_hash,
+            uri: ArtifactUri::parse("s3://f10-shadow-stage/cpcv.json").expect("F10 CPCV URI"),
+            content_hash: content_hash('1'),
         },
     };
+    let validation = FeedbackValidationArtifactRef {
+        feedback_cycle_id: cycle.feedback_cycle_id,
+        job_id: ResearchJobId::from_v7(),
+        artifact_id: FeedbackValidationArtifactId::from_cycle_id(cycle.feedback_cycle_id),
+        input_hash: content_hash('4'),
+        cpcv: previous,
+        artifact: ResearchJobArtifactRef {
+            uri: ArtifactUri::parse("s3://f10-shadow-stage/validation.json")
+                .expect("F10 Validation URI"),
+            content_hash: content_hash('5'),
+        },
+    };
+    comparison_params_with_validation(
+        db,
+        schema,
+        claim,
+        models,
+        validation,
+        BacktestPathSetId::from_v7(),
+        content_hash('3'),
+    )
+    .await
+}
+
+pub async fn comparison_params_with_validation(
+    db: &DatabaseConnection,
+    schema: &FeedbackSchemaFixture,
+    claim: &FeedbackCycleClaim,
+    models: &ShadowModels,
+    validation: FeedbackValidationArtifactRef,
+    path_set_id: BacktestPathSetId,
+    path_set_hash: ContentHash,
+) -> FeedbackComparisonJobParams {
+    let cycle = &claim.cycle;
+    let previous = validation.cpcv.clone();
     let evaluation = NewFeedbackEvaluationUse::try_seal(FeedbackEvaluationUseInput {
         feedback_cycle_id: cycle.feedback_cycle_id,
         profile_ref: cycle.profile_ref.clone(),
@@ -607,8 +635,8 @@ pub async fn comparison_params(
             .candidate_family
             .comparison_contract()
             .comparison_contract_hash(),
-        cpcv_artifact_uri: cpcv_uri,
-        cpcv_artifact_hash: cpcv_hash,
+        cpcv_artifact_uri: previous.artifact.uri.clone(),
+        cpcv_artifact_hash: previous.artifact.content_hash,
     })
     .expect("seal F10 Evaluation reservation");
     let evaluation = match PgFeedbackCycleRepository::new(db.clone())
@@ -625,7 +653,7 @@ pub async fn comparison_params(
         feedback_cycle_id: cycle.feedback_cycle_id,
         cycle_idempotency_hash: cycle.idempotency_hash,
         candidate_family_hash: cycle.candidate_family_hash,
-        previous,
+        validation,
         evaluation_use: FeedbackEvaluationUseRef::from(&evaluation),
         comparison_contract: cycle.candidate_family.comparison_contract().clone(),
         decision_policy_snapshot_id: cycle
@@ -639,8 +667,8 @@ pub async fn comparison_params(
             candidate_recipe_hash,
             model_version_id: models.candidate.model_version_id,
             serving_contract_hash: models.candidate.serving_contract_hash,
-            path_set_id: BacktestPathSetId::from_v7(),
-            path_set_hash: content_hash('3'),
+            path_set_id,
+            path_set_hash,
             model_run_id: ModelRunId::from_feedback_comparison(
                 artifact_id,
                 models.candidate.model_version_id,
@@ -822,6 +850,7 @@ pub async fn record_comparison(
                 event_sequence,
                 stage: FeedbackStage::Comparison,
                 event_kind: FeedbackStageEventKind::Succeeded,
+                trigger_family: None,
                 research_job_id: Some(identity.job_id()),
                 actor: None,
                 reason_code: None,
@@ -952,17 +981,15 @@ pub async fn terminal_restart_tamper() {
         max_recovery_attempts: 3,
     })
     .expect("build F10 stage");
-    let identity = FeedbackStageJobIdentity::try_root(
-        claim.cycle.feedback_cycle_id,
-        FeedbackStage::ShadowReplay,
-    )
-    .expect("F10 job identity");
+    let identity =
+        FeedbackStageJobIdentity::try_root(claim.cycle.feedback_cycle_id, FeedbackStage::Shadow)
+            .expect("F10 job identity");
     let job = stage
         .prepare_shadow(&claim.cycle, claim.lease, identity)
         .await
         .expect("prepare exact F10 job");
     let params = match &job.params_json {
-        ResearchJobParams::FeedbackShadowReplay(params) => params.as_ref().clone(),
+        ResearchJobParams::FeedbackShadow(params) => params.as_ref().clone(),
         _ => panic!("F10 stage emitted another job kind"),
     };
     let FeedbackShadowSubject::Candidate { contract, .. } = &params.subject else {
@@ -977,7 +1004,7 @@ pub async fn terminal_restart_tamper() {
     }
     let worker = WorkerId::from_v7();
     jobs.lease_next(
-        &[ResearchJobKind::FeedbackShadowReplay],
+        &[ResearchJobKind::FeedbackShadow],
         &worker,
         Utc::now() + Duration::seconds(JOB_LEASE_SECS),
     )
@@ -996,7 +1023,7 @@ pub async fn terminal_restart_tamper() {
         .get(&result.artifact.uri)
         .await
         .expect("read F10 terminal artifact");
-    let artifact = FeedbackShadowReplayCodec::decode(&bytes).expect("decode F10 artifact");
+    let artifact = FeedbackShadowCodec::decode(&bytes).expect("decode F10 artifact");
     assert!(matches!(
         artifact.outcome(),
         FeedbackShadowOutcome::InsufficientObservations { observed: 1, .. }
@@ -1007,7 +1034,7 @@ pub async fn terminal_restart_tamper() {
             &worker,
             ResearchJobFinalization::succeeded(
                 Some(ResearchJobResultRef {
-                    kind: ResearchJobResultKind::FeedbackShadowReplayArtifact,
+                    kind: ResearchJobResultKind::FeedbackShadowArtifact,
                     id: result.artifact_id.as_uuid(),
                 }),
                 Some(result.artifact.clone()),

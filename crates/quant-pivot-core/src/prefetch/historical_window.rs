@@ -36,7 +36,7 @@ use quant_pivot_models::{
     enums::domain::DomainFamily,
     runtime_config::DomainConfig,
     types::{
-        Bps, DomainInstrumentKey, IcaoStation, MarketId, PayoutRatio, Price, TokenId, Usd,
+        Bps, DomainInstrumentKey, MarketId, PayoutRatio, Price, TokenId, Usd,
         calibration::PublishedWeatherStationLeadBias,
     },
 };
@@ -45,7 +45,7 @@ use quant_pivot_repository::traits::{
     QuantFactReadRepository,
 };
 use quant_pivot_research::{
-    domain::{crypto_lookback_secs, oracle_instrument},
+    domain::{crypto_lookback_secs, oracle_instrument, weather_history_start},
     features::{MarketWindowSnapshot, MicrostructureBucket, TradeTapeWindowSnapshot},
     pit::{BookSnapshotAt, MaterializedPitEngine},
     selection::SelectedMarket,
@@ -103,10 +103,10 @@ pub struct Prefetched {
     pub domain_observations: HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
     /// Source-native Crypto reports per settlement instrument, ascending.
     pub crypto_reports: HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>>,
-    /// Typed AviationWeather/GHCNh facts per station.
-    pub weather_observations: HashMap<IcaoStation, Vec<WeatherObservationFact>>,
-    /// Raw GEFS points per station, including calibration history and target days.
-    pub weather_forecasts: HashMap<IcaoStation, Vec<WeatherForecastPoint>>,
+    /// Typed Weather facts per exact source-native subject key.
+    pub weather_observations: HashMap<String, Vec<WeatherObservationFact>>,
+    /// Forecast points per exact source-native subject key.
+    pub weather_forecasts: HashMap<String, Vec<WeatherForecastPoint>>,
     /// Immutable Weather calibration publication ledger visible through the window end.
     pub weather_calibrations: Vec<PublishedWeatherStationLeadBias>,
     /// Frozen linkage ledger records per market covering the window (any
@@ -314,8 +314,8 @@ impl HistoricalWindowLoader {
         HashMap<MarketId, Vec<MarketLinkage>>,
         HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
         HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>>,
-        HashMap<IcaoStation, Vec<WeatherObservationFact>>,
-        HashMap<IcaoStation, Vec<WeatherForecastPoint>>,
+        HashMap<String, Vec<WeatherObservationFact>>,
+        HashMap<String, Vec<WeatherForecastPoint>>,
     )> {
         let mapped_markets = mapped_domain_markets(spec, sample_markets, catalog_markets);
         if mapped_markets.is_empty() {
@@ -374,7 +374,7 @@ impl HistoricalWindowLoader {
             end_boundary.decision_at(),
         )
         .await?;
-        let weather_from = checked_sub_duration(
+        let calibration_from = checked_sub_duration(
             start_boundary.cutoff_for(DecisionSource::DomainWeather),
             Duration::from_secs(
                 u64::from(spec.domain.weather.calibration_lookback_days)
@@ -383,10 +383,11 @@ impl HistoricalWindowLoader {
             ),
             "Weather calibration lookback",
         )?;
+        let weather_from = calibration_from.min(linkage_window.weather_history_from);
         let weather_cutoff = end_boundary.cutoff_for(DecisionSource::DomainWeather);
         let (weather_observations, weather_forecasts) = load_weather_facts(
             self.fact_read.as_ref(),
-            &linkage_window.weather_stations,
+            &linkage_window.weather_subject_keys,
             weather_from,
             linkage_window.weather_valid_to,
             weather_cutoff,
@@ -428,7 +429,8 @@ struct DomainLinkageWindow {
     linkages: HashMap<MarketId, Vec<MarketLinkage>>,
     instruments: HashSet<DomainInstrumentKey>,
     oracle_instruments: HashSet<DomainInstrumentKey>,
-    weather_stations: HashSet<IcaoStation>,
+    weather_subject_keys: HashSet<String>,
+    weather_history_from: DateTime<Utc>,
     weather_valid_to: DateTime<Utc>,
 }
 
@@ -445,7 +447,8 @@ async fn load_domain_linkages(
         linkages: HashMap::new(),
         instruments: HashSet::new(),
         oracle_instruments: HashSet::new(),
-        weather_stations: HashSet::new(),
+        weather_subject_keys: HashSet::new(),
+        weather_history_from: boundary.decision_at(),
         weather_valid_to: boundary.decision_at(),
     };
     for info in rows {
@@ -462,12 +465,14 @@ async fn load_domain_linkages(
                 window.instruments.insert(oracle_key.clone());
                 window.oracle_instruments.insert(oracle_key);
             }
-            if let MarketSubject::Weather(subject) = &binding.subject {
-                window
-                    .weather_stations
-                    .insert(subject.decision_group.station.clone());
-                window.weather_valid_to =
-                    window.weather_valid_to.max(weather_local_day_end(subject)?);
+            if let Some(subject_key) = binding.subject.weather_subject_key() {
+                window.weather_subject_keys.insert(subject_key);
+                window.weather_history_from = window
+                    .weather_history_from
+                    .min(weather_history_start(&binding.subject)?);
+                window.weather_valid_to = window
+                    .weather_valid_to
+                    .max(weather_subject_end(&binding.subject)?);
             }
         }
         window.linkages.entry(market_id).or_default().push(linkage);
@@ -576,23 +581,23 @@ async fn load_crypto_reports(
 
 async fn load_weather_facts(
     fact_read: &dyn QuantFactReadRepository,
-    stations: &HashSet<IcaoStation>,
+    subject_keys: &HashSet<String>,
     from: DateTime<Utc>,
     valid_to: DateTime<Utc>,
     cutoff: DateTime<Utc>,
     decision_at: DateTime<Utc>,
 ) -> QuantResult<(
-    HashMap<IcaoStation, Vec<WeatherObservationFact>>,
-    HashMap<IcaoStation, Vec<WeatherForecastPoint>>,
+    HashMap<String, Vec<WeatherObservationFact>>,
+    HashMap<String, Vec<WeatherForecastPoint>>,
 )> {
-    let stations = stations.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let subject_keys = subject_keys.iter().cloned().collect::<Vec<_>>();
     let observation_to = cutoff
         .timestamp_millis()
         .checked_add(1)
         .ok_or_else(|| QuantError::config("Weather observation cutoff overflowed i64"))?;
     let rows = fact_read
         .weather_observation_facts_between(
-            stations.clone(),
+            subject_keys.clone(),
             from.timestamp_millis(),
             observation_to,
             cutoff.timestamp_millis(),
@@ -600,20 +605,17 @@ async fn load_weather_facts(
         )
         .await
         .map_err(QuantError::from)?;
-    let mut observations = HashMap::<IcaoStation, Vec<WeatherObservationFact>>::new();
+    let mut observations = HashMap::<String, Vec<WeatherObservationFact>>::new();
     for row in rows {
         let fact = WeatherObservationFact::from_clickhouse_row(row).ok_or_else(|| {
             ResearchError::PitResolution {
                 detail: "Weather observation contains an invalid persisted value".to_owned(),
             }
         })?;
-        let station = fact.station().ok_or_else(|| ResearchError::PitResolution {
-            detail: format!(
-                "Weather observation subject `{}` is not an ICAO station",
-                fact.subject_key
-            ),
-        })?;
-        observations.entry(station).or_default().push(fact);
+        observations
+            .entry(fact.subject_key.clone())
+            .or_default()
+            .push(fact);
     }
     for series in observations.values_mut() {
         series.sort_by(|left, right| {
@@ -630,7 +632,7 @@ async fn load_weather_facts(
         .ok_or_else(|| QuantError::config("GEFS valid-time cutoff overflowed i64"))?;
     let rows = fact_read
         .weather_forecast_facts_between(
-            stations,
+            subject_keys,
             from.timestamp_millis(),
             forecast_to,
             cutoff.timestamp_millis(),
@@ -638,20 +640,17 @@ async fn load_weather_facts(
         )
         .await
         .map_err(QuantError::from)?;
-    let mut forecasts = HashMap::<IcaoStation, Vec<WeatherForecastPoint>>::new();
+    let mut forecasts = HashMap::<String, Vec<WeatherForecastPoint>>::new();
     for row in rows {
         let fact = WeatherForecastPoint::from_clickhouse_row(row).ok_or_else(|| {
             ResearchError::PitResolution {
                 detail: "GEFS point contains an invalid persisted value".to_owned(),
             }
         })?;
-        let station = fact.station().ok_or_else(|| ResearchError::PitResolution {
-            detail: format!(
-                "Weather forecast subject `{}` is not an ICAO station",
-                fact.subject_key
-            ),
-        })?;
-        forecasts.entry(station).or_default().push(fact);
+        forecasts
+            .entry(fact.subject_key.clone())
+            .or_default()
+            .push(fact);
     }
     for series in forecasts.values_mut() {
         series.sort_by_key(|point| {
@@ -664,6 +663,25 @@ async fn load_weather_facts(
         });
     }
     Ok((observations, forecasts))
+}
+
+fn weather_subject_end(subject: &MarketSubject) -> QuantResult<DateTime<Utc>> {
+    match subject {
+        MarketSubject::Weather(subject) => weather_local_day_end(subject),
+        MarketSubject::WeatherPrecipitation(_)
+        | MarketSubject::WeatherAqi(_)
+        | MarketSubject::WeatherTornado(_)
+        | MarketSubject::WeatherTropicalCyclone(_)
+        | MarketSubject::WeatherGlobalTemperature(_)
+        | MarketSubject::WeatherSeaIce(_)
+        | MarketSubject::WeatherWindExtreme(_) => subject
+            .weather_window()
+            .map(|window| window.end_at)
+            .ok_or_else(|| QuantError::config("Weather subject is missing its contract window")),
+        MarketSubject::Crypto(_) => Err(QuantError::config(
+            "Crypto subject has no Weather contract end",
+        )),
+    }
 }
 
 fn weather_local_day_end(subject: &WeatherSubject) -> QuantResult<DateTime<Utc>> {

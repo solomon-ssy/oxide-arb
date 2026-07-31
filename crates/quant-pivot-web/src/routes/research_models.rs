@@ -31,8 +31,8 @@ use quant_pivot_models::{
             BacktestPathSetListQuery, BacktestPathSetView, BacktestReportListQuery,
             BacktestReportView, ComparisonReportListQuery, CreateModelSpecRequest,
             FeatureContractView, ModelComparisonReportView, ModelDetailQuery, ModelDetailView,
-            ModelPublishedCatalogQuery, ModelSpecListQuery, ModelVersionListQuery,
-            PublishedModelOptionView, QualityGatePreviewQuery, QualityGateReportView,
+            ModelRouteCandidateQuery, ModelRouteCandidateView, ModelSpecListQuery,
+            ModelVersionListQuery, QualityGatePreviewQuery, QualityGateReportView,
             QuantModelSpecView, ResearchJobView, RunBacktestRequest, RunCpcvBacktestRequest,
             TrainModelRequest, TrainedModelView,
         },
@@ -100,9 +100,9 @@ fn model_route_specs() -> Vec<RouteSpec> {
         ),
         spec(
             Method::GET,
-            "/research/models/published-catalog",
+            "/research/models/route-candidates",
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
-            list_published_catalog,
+            list_route_candidates,
         ),
         spec(
             Method::POST,
@@ -285,16 +285,14 @@ pub async fn list_models(
     Ok(WebResponse::ok(page))
 }
 
-/// `GET /api/research/models/published-catalog` — the `Published`,
-/// side-and-category-eligible candidates for one `ModelVersionSelect`
-/// runtime-config field.
-pub async fn list_published_catalog(
+/// Side-and-category-eligible immutable artifacts for a governed route field.
+pub async fn list_route_candidates(
     state: Data<AppState>,
-    query: Query<ModelPublishedCatalogQuery>,
-) -> Result<WebResponse<Vec<PublishedModelOptionView>>, WebError> {
+    query: Query<ModelRouteCandidateQuery>,
+) -> Result<WebResponse<Vec<ModelRouteCandidateView>>, WebError> {
     let options = state
         .research_catalog
-        .list_published_model_options(query.into_inner())
+        .list_model_route_candidates(query.into_inner())
         .await?;
     Ok(WebResponse::ok(options))
 }
@@ -394,10 +392,10 @@ pub async fn get_version(
     Ok(WebResponse::ok(view))
 }
 
-/// `GET /api/research/models/{id}/quality-gate` — read-only publish-readiness dry-run.
+/// `GET /api/research/models/{id}/quality-gate` — read-only candidate-readiness dry-run.
 ///
-/// Runs the same quality gate as `publish` (no persistence, no state change) and
-/// returns the full per-gate scorecard so operators can judge readiness before acting.
+/// Runs the sole quality gate without persistence and returns the full per-gate
+/// scorecard so operators can judge readiness before acting.
 pub async fn preview_quality_gate(
     state: Data<AppState>,
     id: Path<ModelVersionId>,

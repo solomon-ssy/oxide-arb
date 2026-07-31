@@ -381,10 +381,16 @@ pub enum MaterializationRunKind {
     FeedbackCalibration,
     /// Feedback-owned candidate CPCV qualification.
     FeedbackCpcv,
+    /// Canonical truth frontier at the cycle cutoff.
+    FeedbackTruthFreeze,
+    /// PIT-safe attribution inputs admitted to recipe planning.
+    FeedbackAttributionPlan,
+    /// Sole complete candidate quality-gate universe.
+    FeedbackValidation,
     /// Reserved same-window Romano-Wolf candidate-family comparison.
     FeedbackComparison,
     /// Exact published-generation production-shadow observation gate.
-    FeedbackShadowReplay,
+    FeedbackShadow,
     /// Evidence-only feedback terminal decision.
     FeedbackDecision,
 }
@@ -421,14 +427,17 @@ impl From<ResearchJobKind> for MaterializationRunKind {
             ResearchJobKind::FeatureParity => Self::FeatureParity,
             ResearchJobKind::TradePolicyFit => Self::TradePolicyFit,
             ResearchJobKind::TradePolicyValidation => Self::TradePolicyValidation,
+            ResearchJobKind::FeedbackTruthFreeze => Self::FeedbackTruthFreeze,
             ResearchJobKind::FeedbackCoverage => Self::FeedbackCoverage,
+            ResearchJobKind::FeedbackAttributionPlan => Self::FeedbackAttributionPlan,
             ResearchJobKind::FeedbackDrift => Self::FeedbackDrift,
             ResearchJobKind::FeedbackDatasetSeal => Self::FeedbackDatasetSeal,
             ResearchJobKind::FeedbackTraining => Self::FeedbackTraining,
             ResearchJobKind::FeedbackCalibration => Self::FeedbackCalibration,
             ResearchJobKind::FeedbackCpcv => Self::FeedbackCpcv,
+            ResearchJobKind::FeedbackValidation => Self::FeedbackValidation,
             ResearchJobKind::FeedbackComparison => Self::FeedbackComparison,
-            ResearchJobKind::FeedbackShadowReplay => Self::FeedbackShadowReplay,
+            ResearchJobKind::FeedbackShadow => Self::FeedbackShadow,
             ResearchJobKind::FeedbackDecision => Self::FeedbackDecision,
         }
     }

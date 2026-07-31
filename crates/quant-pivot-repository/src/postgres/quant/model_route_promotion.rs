@@ -17,10 +17,10 @@ use quant_pivot_models::{
         },
         ports::FeedbackShadowSubject,
         quant::{
-            CommitModelRoutePromotion, FeedbackCycleInfo, ModelGovernanceAuditDetail,
-            ModelGovernanceAuditInfo, ModelRoutePromotionPolicy, ModelRoutePromotionRecord,
-            ModelRoutePromotionRecordInput, ModelRoutePromotionRoute, ModelVersionInfo,
-            NewRoutePromotionAudit, PromotionPermitInfo, PromotionPermitStatus,
+            CommitModelRoutePromotion, FeedbackCycleInfo, ModelCandidateManifestInfo,
+            ModelGovernanceAuditDetail, ModelGovernanceAuditInfo, ModelRoutePromotionPolicy,
+            ModelRoutePromotionRecord, ModelRoutePromotionRecordInput, ModelRoutePromotionRoute,
+            ModelVersionInfo, NewRoutePromotionAudit, PromotionPermitInfo, PromotionPermitStatus,
             PromotionPolicyProjection, PromotionPreflight,
         },
     },
@@ -42,6 +42,7 @@ use quant_pivot_models::{
         quant_feedback_stage_event::{
             Column as StageEventColumn, Entity as StageEventEntity, Model as StageEventModel,
         },
+        quant_model_candidate_manifest::Entity as CandidateManifestEntity,
         quant_model_governance_audit::{Entity as ModelAuditEntity, Model as ModelAuditModel},
         quant_model_spec::Entity as ModelSpecEntity,
         quant_model_version::{Column as ModelVersionColumn, Entity as ModelVersionEntity},
@@ -51,9 +52,9 @@ use quant_pivot_models::{
     enums::{
         quant::{
             FeedbackCycleStatus, FeedbackDecision, FeedbackStage, FeedbackStageEventKind,
-            ModelGovernanceAction, PublicationStatus, ResearchJobKind, ResearchJobResultKind,
-            ResearchJobStatus,
+            ModelGovernanceAction, ResearchJobKind, ResearchJobResultKind, ResearchJobStatus,
         },
+        rbac::{Operation, ResourceType},
         runtime_config::{
             CheckOutcome, ConfigResourceKind, DecisionPolicySnapshotSource, PolicyActivationKind,
             PolicyActorKind, PolicyApprovalDecision, PolicyPreflightCheckKind,
@@ -68,7 +69,7 @@ use quant_pivot_models::{
     types::{
         AuditEventId, ContentHash, DecisionPolicySnapshotId, FeedbackCycleId,
         ModelGovernanceAuditId, PolicyActivationId, PolicyApprovalId, PolicyBundleGeneration,
-        PolicyIdempotencyKey, PolicyRevisionId, PromotionPermitId, ResearchJobParams,
+        PolicyRevisionId, PromotionPermitId, ResearchJobParams,
     },
 };
 use sea_orm::{
@@ -78,6 +79,7 @@ use sea_orm::{
 
 use crate::{
     postgres::{
+        authorization::{self, AuthorizedGovernedActor},
         governance::PgPolicyRepository,
         primitives,
         quant::{
@@ -135,14 +137,6 @@ impl PgModelRoutePromotionRepository {
             detail: detail.into(),
         }
         .into()
-    }
-
-    fn idempotency_key(
-        permit_id: PromotionPermitId,
-    ) -> Result<PolicyIdempotencyKey, PromotionCommitError> {
-        format!("model-promotion:{permit_id}")
-            .parse::<PolicyIdempotencyKey>()
-            .map_err(|error| Self::conflict(error.to_string()))
     }
 
     async fn lock_permit(
@@ -258,8 +252,8 @@ impl PgModelRoutePromotionRepository {
             && params.input_hash()? == preflight.decision_job_input_hash()
             && params.feedback_cycle_id == preflight.feedback_cycle_id()
             && params.cycle_idempotency_hash == preflight.cycle_idempotency_hash()
-            && params.shadow_replay.artifact_id == preflight.shadow_artifact_id()
-            && params.shadow_replay.artifact.content_hash == preflight.shadow_object_hash();
+            && params.shadow.artifact_id == preflight.shadow_artifact_id()
+            && params.shadow.artifact.content_hash == preflight.shadow_object_hash();
         if !exact_result || locked.event.evidence_hash != Some(preflight.decision_object_hash()) {
             return Err(Self::conflict(
                 "Decision job identity, input, result, or shadow lineage changed",
@@ -272,8 +266,8 @@ impl PgModelRoutePromotionRepository {
         locked: &LockedStage,
         preflight: &PromotionPreflight,
     ) -> Result<(), PromotionCommitError> {
-        let ResearchJobParams::FeedbackShadowReplay(params) = &locked.job.params_json else {
-            return Err(Self::conflict("ShadowReplay job lost its typed parameters"));
+        let ResearchJobParams::FeedbackShadow(params) = &locked.job.params_json else {
+            return Err(Self::conflict("Shadow job lost its typed parameters"));
         };
         params.validate()?;
         let FeedbackShadowSubject::Candidate {
@@ -282,11 +276,11 @@ impl PgModelRoutePromotionRepository {
         } = &params.subject
         else {
             return Err(Self::conflict(
-                "ShadowReplay job no longer carries a candidate subject",
+                "Shadow job no longer carries a candidate subject",
             ));
         };
-        let exact_result = locked.job.kind == ResearchJobKind::FeedbackShadowReplay
-            && locked.job.result_kind == Some(ResearchJobResultKind::FeedbackShadowReplayArtifact)
+        let exact_result = locked.job.kind == ResearchJobKind::FeedbackShadow
+            && locked.job.result_kind == Some(ResearchJobResultKind::FeedbackShadowArtifact)
             && locked.job.result_ref == Some(params.artifact_id.as_uuid())
             && locked.job.result_artifact_hash == Some(preflight.shadow_object_hash())
             && params.artifact_id == preflight.shadow_artifact_id()
@@ -302,7 +296,7 @@ impl PgModelRoutePromotionRepository {
                     .candidate_serving_contract_hash();
         if !exact_result || locked.event.evidence_hash != Some(preflight.shadow_object_hash()) {
             return Err(Self::conflict(
-                "ShadowReplay job identity, candidate, contract, or result changed",
+                "Shadow job identity, candidate, contract, or result changed",
             ));
         }
         Ok(())
@@ -338,7 +332,7 @@ impl PgModelRoutePromotionRepository {
             ));
         }
         let decision = Self::lock_stage(transaction, cycle_id, FeedbackStage::Decision).await?;
-        let shadow = Self::lock_stage(transaction, cycle_id, FeedbackStage::ShadowReplay).await?;
+        let shadow = Self::lock_stage(transaction, cycle_id, FeedbackStage::Shadow).await?;
         Self::verify_decision(&decision, preflight)?;
         Self::verify_shadow(&shadow, preflight)?;
         Ok(cycle)
@@ -406,6 +400,53 @@ impl PgModelRoutePromotionRepository {
         })
     }
 
+    async fn lock_manifest(
+        transaction: &DatabaseTransaction,
+        preflight: &PromotionPreflight,
+        candidate: &ModelVersionInfo,
+    ) -> Result<(), PromotionCommitError> {
+        let constraints = preflight.serving_constraints();
+        let manifest = CandidateManifestEntity::find_by_id(constraints.candidate_manifest_id())
+            .lock_shared()
+            .into_partial_model::<ModelCandidateManifestInfo>()
+            .one(transaction)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::not_found(
+                    "quant_model_candidate_manifest",
+                    constraints.candidate_manifest_id(),
+                )
+            })?;
+        manifest
+            .validate()
+            .map_err(|error| Self::conflict(error.to_string()))?;
+        let document = &manifest.document;
+        if manifest.manifest_hash != constraints.candidate_manifest_hash()
+            || manifest.promotion_gate_hash != constraints.promotion_gate_hash()
+            || manifest.feedback_cycle_id != preflight.feedback_cycle_id()
+            || manifest.candidate_recipe_hash != preflight.candidate_recipe_hash()
+            || manifest.model_version_id != candidate.model_version_id
+            || document.model_spec_id != candidate.model_spec_id
+            || document.model_family != candidate.model_family
+            || document.model_artifact_hash != candidate.artifact_hash
+            || document.serving_contract_hash != candidate.serving_contract_hash
+            || document.training_dataset_id != constraints.candidate_training_dataset_id()
+            || document.promotion_gate.feature_parity_run_id != constraints.feature_parity_run_id()
+            || document.promotion_gate.feature_parity_state_id
+                != constraints.feature_parity_state_id()
+            || document.promotion_gate.feature_parity_evidence_hash
+                != constraints.feature_parity_evidence_hash()
+            || document.profile_ref != *constraints.profile_ref()
+            || document.category != constraints.category()
+        {
+            return Err(Self::conflict(
+                "candidate manifest differs from the frozen promotion preflight",
+            ));
+        }
+        Ok(())
+    }
+
     async fn lock_parity(
         transaction: &DatabaseTransaction,
         preflight: &PromotionPreflight,
@@ -451,7 +492,7 @@ impl PgModelRoutePromotionRepository {
         snapshot: &DecisionPolicySnapshot,
         snapshot_id: DecisionPolicySnapshotId,
         snapshot_hash: ContentHash,
-        permit: &PromotionPermitInfo,
+        record: &ModelRoutePromotionRecord,
     ) -> Result<NewDecisionPolicySnapshot, PromotionCommitError> {
         let document = snapshot
             .persistence_document()
@@ -491,20 +532,22 @@ impl PgModelRoutePromotionRepository {
             snapshot: document,
             source: DecisionPolicySnapshotSource::Activation,
             created_by_kind: PolicyActorKind::Operator,
-            created_by_user_id: Some(permit.issued_by_user_id),
-            created_by_label: permit.issued_by_username.clone(),
-            reason: permit.issuance_reason.clone(),
+            created_by_user_id: Some(record.actor_user_id()),
+            created_by_label: record.actor_username().to_owned(),
+            reason: record.audit_reason(),
         })
     }
 
     fn build_rows(
         permit: &PromotionPermitInfo,
-        preflight: &PromotionPreflight,
+        command: &CommitModelRoutePromotion,
+        authorized: &AuthorizedGovernedActor,
         current: &ActivePolicyBundle,
         projection: &PromotionPolicyProjection,
         models: &LockedModels,
         database_now: DateTime<Utc>,
     ) -> Result<PromotionRows, PromotionCommitError> {
+        let preflight = command.preflight();
         let old_revision = current
             .snapshot
             .resource_revision_id(ConfigResourceKind::ModelRouting)
@@ -557,25 +600,19 @@ impl PgModelRoutePromotionRepository {
             permit_issuance_hash: permit.issuance_hash,
             permit_issued_at: permit.issued_at,
             preflight: preflight.clone(),
-            actor_user_id: permit.issued_by_user_id,
-            actor_username: permit.issued_by_username.clone(),
-            actor_role: permit.issued_by_role.clone(),
-            reason: permit.issuance_reason.clone(),
+            actor_user_id: authorized.user_id,
+            actor_username: authorized.username.clone(),
+            actor_role: authorized.role.clone(),
+            idempotency_key: command.idempotency_key().clone(),
+            reason_code: command.reason_code().to_owned(),
+            note: command.note().to_owned(),
             route,
             policy,
         })?;
-        Self::finish_rows(
-            permit,
-            current,
-            &candidate_snapshot,
-            models,
-            database_now,
-            record,
-        )
+        Self::finish_rows(current, &candidate_snapshot, models, database_now, record)
     }
 
     fn finish_rows(
-        permit: &PromotionPermitInfo,
         current: &ActivePolicyBundle,
         candidate_snapshot: &DecisionPolicySnapshot,
         models: &LockedModels,
@@ -603,8 +640,9 @@ impl PgModelRoutePromotionRepository {
             candidate_snapshot,
             policy.committed_snapshot_id,
             policy.committed_snapshot_hash,
-            permit,
+            &record,
         )?;
+        let audit_reason = record.audit_reason();
         let revision = NewPolicyRevision {
             policy_revision_id: policy.committed_model_routing_revision_id,
             resource_kind: ConfigResourceKind::ModelRouting,
@@ -619,7 +657,7 @@ impl PgModelRoutePromotionRepository {
             created_by_kind: PolicyActorKind::Operator,
             created_by_user_id: Some(record.actor_user_id()),
             created_by_label: record.actor_username().to_owned(),
-            reason: record.reason().to_owned(),
+            reason: audit_reason.clone(),
         };
         let approval = NewPolicyApproval {
             policy_approval_id: policy.policy_approval_id,
@@ -631,7 +669,7 @@ impl PgModelRoutePromotionRepository {
             decided_by_kind: PolicyActorKind::Operator,
             decided_by_user_id: Some(record.actor_user_id()),
             decided_by_label: record.actor_username().to_owned(),
-            reason: record.reason().to_owned(),
+            reason: audit_reason.clone(),
             decided_at: database_now,
             expires_at: Some(record.preflight().scope().expires_at()),
         };
@@ -643,9 +681,7 @@ impl PgModelRoutePromotionRepository {
             actor_user_id: Some(record.actor_user_id()),
             actor_username: record.actor_username().to_owned(),
             actor_role: Some(record.actor_role().clone()),
-            reason: record.reason().to_owned(),
-            before_status: PublicationStatus::Shadow,
-            after_status: PublicationStatus::Published,
+            reason: audit_reason.clone(),
             detail: ModelGovernanceAuditDetail::PromoteRoute {
                 record: Box::new(record.clone()),
             },
@@ -664,13 +700,13 @@ impl PgModelRoutePromotionRepository {
             activated_by_kind: PolicyActorKind::Operator,
             activated_by_user_id: record.actor_user_id(),
             activated_by_label: record.actor_username().to_owned(),
-            reason: record.reason().to_owned(),
+            reason: audit_reason,
             activation_kind: PolicyActivationKind::ModelPromotion,
             expected_active_revision_id: policy.previous_model_routing_revision_id,
             previous_policy_revision_id: policy.previous_model_routing_revision_id,
             rollback_target_revision_id: None,
             preflight_token_hash: record.preflight().preflight_hash(),
-            idempotency_key: Self::idempotency_key(record.promotion_permit_id())?,
+            idempotency_key: record.idempotency_key().clone(),
             activation_request_hash: transaction_hash,
             audit_event_id,
             promotion_permit_id: record.promotion_permit_id(),
@@ -691,7 +727,6 @@ impl PgModelRoutePromotionRepository {
         transaction: &DatabaseTransaction,
         guard: &ActivationGuardModel,
         cycle: &CycleModel,
-        models: &LockedModels,
         rows: PromotionRows,
         database_now: DateTime<Utc>,
     ) -> Result<ResolvedCommit, PromotionCommitError> {
@@ -704,7 +739,6 @@ impl PgModelRoutePromotionRepository {
             .await
             .map_err(StorageError::from)?;
         PgPolicyRepository::insert_snapshot_if_absent(transaction, rows.snapshot.clone()).await?;
-        Self::publish_candidate(transaction, &models.candidate, database_now).await?;
         ModelAuditEntity::insert(rows.audit.into_active_model())
             .exec(transaction)
             .await
@@ -731,44 +765,6 @@ impl PgModelRoutePromotionRepository {
             ));
         }
         Ok(resolved)
-    }
-
-    async fn publish_candidate(
-        transaction: &DatabaseTransaction,
-        candidate: &ModelVersionInfo,
-        database_now: DateTime<Utc>,
-    ) -> Result<(), PromotionCommitError> {
-        let updated = ModelVersionEntity::update_many()
-            .col_expr(
-                ModelVersionColumn::PublicationStatus,
-                primitives::enum_value(&PublicationStatus::Published),
-            )
-            .col_expr(
-                ModelVersionColumn::PublishedAt,
-                Expr::value(Some(database_now)),
-            )
-            .col_expr(
-                ModelVersionColumn::RetiredAt,
-                Expr::value(Option::<DateTime<Utc>>::None),
-            )
-            .filter(ModelVersionColumn::ModelVersionId.eq(candidate.model_version_id))
-            .filter(ModelVersionColumn::PublicationStatus.eq(PublicationStatus::Shadow))
-            .filter(ModelVersionColumn::ArtifactHash.eq(candidate.artifact_hash))
-            .filter(
-                ModelVersionColumn::ServingContractHash
-                    .eq(candidate.serving_contract_hash.as_bytes().to_vec()),
-            )
-            .filter(ModelVersionColumn::PublishedAt.is_null())
-            .filter(ModelVersionColumn::RetiredAt.is_null())
-            .exec(transaction)
-            .await
-            .map_err(StorageError::from)?;
-        if updated.rows_affected != 1 {
-            return Err(Self::conflict(
-                "candidate Shadow-to-Published CAS affected no row",
-            ));
-        }
-        Ok(())
     }
 
     async fn advance_guard(
@@ -910,6 +906,7 @@ impl PgModelRoutePromotionRepository {
         let policy = record.policy();
         let route = record.route();
         let transaction_hash = record.transaction_hash();
+        let audit_reason = record.audit_reason();
         let audit_exact = audit.audit_id
             == ModelGovernanceAuditId::from_content_hash(&transaction_hash)
             && audit.model_version_id == Some(route.candidate_model_version_id)
@@ -924,9 +921,7 @@ impl PgModelRoutePromotionRepository {
             && audit.actor_user_id == Some(record.actor_user_id())
             && audit.actor_username == record.actor_username()
             && audit.actor_role.as_ref() == Some(record.actor_role())
-            && audit.reason == record.reason()
-            && audit.before_status == PublicationStatus::Shadow
-            && audit.after_status == PublicationStatus::Published
+            && audit.reason == audit_reason
             && audit.audit_event_id == AuditEventId::from_content_hash(&transaction_hash)
             && audit.promotion_permit_id == Some(record.promotion_permit_id())
             && audit.promotion_transaction_hash == Some(transaction_hash);
@@ -941,14 +936,14 @@ impl PgModelRoutePromotionRepository {
             && activation.activated_by_kind == PolicyActorKind::Operator
             && activation.activated_by_user_id == Some(record.actor_user_id())
             && activation.activated_by_label == record.actor_username()
-            && activation.reason == record.reason()
+            && activation.reason == audit_reason
             && activation.expected_active_revision_id
                 == Some(policy.previous_model_routing_revision_id)
             && activation.previous_policy_revision_id
                 == Some(policy.previous_model_routing_revision_id)
             && activation.rollback_target_revision_id.is_none()
             && activation.preflight_token_hash == record.preflight().preflight_hash()
-            && activation.idempotency_key == Self::idempotency_key(record.promotion_permit_id())?
+            && activation.idempotency_key == *record.idempotency_key()
             && activation.activation_request_hash == transaction_hash
             && activation.audit_event_id == audit.audit_event_id
             && activation.promotion_permit_id == Some(record.promotion_permit_id())
@@ -1125,6 +1120,7 @@ impl PgModelRoutePromotionRepository {
             issues: Vec::new(),
             preflight: Self::passed_preflight(),
         };
+        let audit_reason = record.audit_reason();
         let revision_exact = revision.resource_kind == ConfigResourceKind::ModelRouting
             && revision.revision_hash == revision_hash
             && revision.document == document
@@ -1136,7 +1132,7 @@ impl PgModelRoutePromotionRepository {
             && revision.created_by_kind == PolicyActorKind::Operator
             && revision.created_by_user_id == Some(record.actor_user_id())
             && revision.created_by_label == record.actor_username()
-            && revision.reason == record.reason();
+            && revision.reason == audit_reason;
         let approval_exact = approval.policy_revision_id == revision.policy_revision_id
             && approval.resource_kind == ConfigResourceKind::ModelRouting
             && approval.revision_hash == revision_hash
@@ -1145,7 +1141,7 @@ impl PgModelRoutePromotionRepository {
             && approval.decided_by_kind == PolicyActorKind::Operator
             && approval.decided_by_user_id == Some(record.actor_user_id())
             && approval.decided_by_label == record.actor_username()
-            && approval.reason == record.reason()
+            && approval.reason == audit_reason
             && approval.expires_at == Some(record.preflight().scope().expires_at());
         if !revision_exact || !approval_exact {
             return Err(Self::conflict(
@@ -1211,6 +1207,20 @@ impl PgModelRoutePromotionRepository {
         }
         Ok((bundle, projection))
     }
+
+    fn command_matches(
+        record: &ModelRoutePromotionRecord,
+        command: &CommitModelRoutePromotion,
+        authorized: &AuthorizedGovernedActor,
+    ) -> bool {
+        record.preflight() == command.preflight()
+            && record.actor_user_id() == authorized.user_id
+            && record.actor_username() == authorized.username
+            && record.actor_role() == &authorized.role
+            && record.idempotency_key() == command.idempotency_key()
+            && record.reason_code() == command.reason_code()
+            && record.note() == command.note()
+    }
 }
 
 #[async_trait]
@@ -1237,13 +1247,21 @@ impl ModelRoutePromotionRepository for PgModelRoutePromotionRepository {
     ) -> Result<ModelRoutePromotionCommit, PromotionCommitError> {
         command.preflight().validate()?;
         let transaction = self.db.begin().await.map_err(StorageError::from)?;
+        let authorized = authorization::authorize_actor::<PromotionCommitError>(
+            &transaction,
+            command.actor().user_id,
+            &command.actor().acting_role,
+            ResourceType::Publication,
+            Operation::Publish,
+        )
+        .await?;
         let guard = PgPolicyRepository::acquire_activation_lock(&transaction).await?;
         if let Some(resolved) =
             Self::load_commit(&transaction, command.promotion_permit_id()).await?
         {
-            if resolved.record.preflight() != command.preflight() {
+            if !Self::command_matches(&resolved.record, &command, &authorized) {
                 return Err(Self::conflict(
-                    "promotion permit is committed with a different preflight",
+                    "promotion permit is committed with a different activation request",
                 ));
             }
             transaction.commit().await.map_err(StorageError::from)?;
@@ -1256,9 +1274,11 @@ impl ModelRoutePromotionRepository for PgModelRoutePromotionRepository {
             Self::current_projection(&transaction, &guard, command.preflight()).await?;
         Self::lock_parity(&transaction, command.preflight()).await?;
         let models = Self::lock_models(&transaction, command.preflight()).await?;
+        Self::lock_manifest(&transaction, command.preflight(), &models.candidate).await?;
         let rows = Self::build_rows(
             &permit.permit,
-            command.preflight(),
+            &command,
+            &authorized,
             &bundle,
             &projection,
             &models,
@@ -1268,7 +1288,6 @@ impl ModelRoutePromotionRepository for PgModelRoutePromotionRepository {
             &transaction,
             &guard,
             &cycle,
-            &models,
             rows,
             permit.observed_at,
         ))

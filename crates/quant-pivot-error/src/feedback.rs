@@ -62,11 +62,23 @@ pub enum FeedbackError {
     #[error("promotion permit conflict: {detail}")]
     PromotionPermitConflict { detail: String },
 
+    #[error("invalid shared model-route evidence: {detail}")]
+    InvalidModelRouteEvidence { detail: String },
+
     #[error("invalid promotion preflight: {detail}")]
     InvalidPromotionPreflight { detail: String },
 
     #[error("model-route promotion conflict: {detail}")]
     PromotionTransactionConflict { detail: String },
+
+    #[error("invalid model-route bootstrap preflight: {detail}")]
+    InvalidBootstrapPreflight { detail: String },
+
+    #[error("model-route bootstrap conflict: {detail}")]
+    BootstrapTransactionConflict { detail: String },
+
+    #[error("model-route runtime convergence conflict: {detail}")]
+    ModelRouteConvergenceConflict { detail: String },
 
     #[error(transparent)]
     Hash(#[from] CanonicalDigestError),
@@ -111,6 +123,22 @@ pub enum FeedbackCycleCommandError {
 pub enum PromotionCommitError {
     #[error(transparent)]
     Contract(#[from] FeedbackError),
+
+    #[error(transparent)]
+    Authorization(#[from] RbacError),
+
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+/// Failures from the atomic first-champion model-route transaction.
+#[derive(Debug, Error)]
+pub enum RouteBootstrapCommitError {
+    #[error(transparent)]
+    Contract(#[from] FeedbackError),
+
+    #[error(transparent)]
+    Authorization(#[from] RbacError),
 
     #[error(transparent)]
     Storage(#[from] StorageError),

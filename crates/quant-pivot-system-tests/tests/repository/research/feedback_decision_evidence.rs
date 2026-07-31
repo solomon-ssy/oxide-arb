@@ -293,15 +293,21 @@ pub struct DecisionPathEvidence {
 }
 
 impl DecisionPathEvidence {
+    fn validate_hashes(&self) {
+        ContentHash::parse(&self.decision_artifact.bytes_hash)
+            .expect("decision bytes hash uses canonical BLAKE3 text");
+        ContentHash::parse(&self.decision_artifact.semantic_hash)
+            .expect("decision semantic hash uses canonical BLAKE3 text");
+        ContentHash::parse(&self.restart_read_back.canonical_read_back_hash)
+            .expect("restart read-back hash uses canonical BLAKE3 text");
+    }
+
     pub fn validate(&self) {
         assert_eq!(self.decision, self.path.expected_decision());
         assert!(!self.decision_reason.trim().is_empty());
         assert!(!self.exact_ids.feedback_cycle_id.trim().is_empty());
         assert!(!self.decision_artifact.uri.trim().is_empty());
-        ContentHash::parse(&self.decision_artifact.bytes_hash)
-            .expect("decision bytes hash uses canonical BLAKE3 text");
-        ContentHash::parse(&self.decision_artifact.semantic_hash)
-            .expect("decision semantic hash uses canonical BLAKE3 text");
+        self.validate_hashes();
         assert_eq!(self.permit.is_some(), self.path.requires_permit());
         assert_eq!(
             self.exact_ids.promotion_permit_id.is_some(),
@@ -379,8 +385,6 @@ impl DecisionPathEvidence {
         assert!(self.restart_read_back.fresh_repository_owners);
         assert!(self.restart_read_back.fresh_stage_adapter);
         assert!(self.restart_read_back.exact_match);
-        ContentHash::parse(&self.restart_read_back.canonical_read_back_hash)
-            .expect("restart read-back hash uses canonical BLAKE3 text");
         assert!(
             self.replay
                 .inserted_by_exact_replay
@@ -397,7 +401,8 @@ impl DecisionPathEvidence {
             .worm_timeline
             .last()
             .expect("W4-E04 timeline has a Decision event");
-        assert_eq!(decision_event.sequence, 5);
+        let expected_decision_sequence = if self.path.requires_permit() { 8 } else { 5 };
+        assert_eq!(decision_event.sequence, expected_decision_sequence);
         assert_eq!(decision_event.stage, "decision");
         assert_eq!(decision_event.event_kind, "succeeded");
         assert_eq!(

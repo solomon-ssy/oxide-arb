@@ -50,7 +50,8 @@ use quant_pivot_models::{
             BacktestPort, CpcvBacktestPort, FeedbackComparisonCandidateRef,
             FeedbackComparisonContract, FeedbackComparisonJobInput, FeedbackComparisonJobParams,
             FeedbackEvaluationUseRef, FeedbackLearningStageArtifactRef,
-            ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+            FeedbackValidationArtifactRef, GovernanceActor, ModelCalibrationFitJobParams,
+            ModelCalibrationFitOutcome, ModelCalibrationFitPort,
         },
         quant::{
             CalibrationArtifactPayload, FactorDefinitionInfo, FactorRegistrationOutcome,
@@ -73,9 +74,9 @@ use quant_pivot_models::{
         factor::FactorFamily,
         model::ModelFamily,
         quant::{
-            CalibrationKind, CalibrationMethod, DataQualityStatus, DatasetPurpose, FactorDirection,
-            FeedbackStage, ModelRunErrorCode, ModelRunKind, ModelRunStatus, OutcomeSide,
-            PublicationStatus, TrainingDatasetStatus,
+            CalibrationKind, CalibrationMethod, DataQualityStatus, DatasetPurpose, DownsideSource,
+            FactorDirection, FeedbackStage, ModelRunErrorCode, ModelRunKind, ModelRunStatus,
+            OutcomeSide, TrainingDatasetStatus,
         },
         runtime_config::ConfigResourceKind,
     },
@@ -89,13 +90,13 @@ use quant_pivot_models::{
         ArtifactUri, BacktestPathSetId, BacktestReportId, ContentHash, DatasetSourceLineage,
         DecisionPolicySnapshotId, EventId, FactorDefinitionId, FeatureCell, FeatureStaleness,
         FeatureValue, FeatureVectorId, FeedbackComparisonArtifactId, FeedbackCycleId,
-        FeedbackEvaluationUseId, FeedbackLearningStageArtifactId, MarketId, ModelInputContract,
-        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OrderIntentId,
-        POOLED_1H_CONTROL_PROFILE_ID, POOLED_1H_HORIZON_SECS, PositionId, Price, Probability,
-        ResearchEvaluationTrack, ResearchJobId, ResearchJobProgress, SchemaVersion, Shares,
-        SourceSliceManifest, TokenId, TradePolicyEvidenceBundleManifest, TrainingDatasetId,
-        TrainingExampleId, TrainingSampleSource, TrainingSampleSources, Usd,
-        builtin_research_profiles,
+        FeedbackEvaluationUseId, FeedbackLearningStageArtifactId, FeedbackValidationArtifactId,
+        MarketId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
+        ModelVersionId, OrderIntentId, POOLED_1H_CONTROL_PROFILE_ID, POOLED_1H_HORIZON_SECS,
+        PositionId, Price, Probability, ResearchEvaluationTrack, ResearchJobId,
+        ResearchJobProgress, SchemaVersion, Shares, SourceSliceManifest, TokenId,
+        TradePolicyEvidenceBundleManifest, TrainingDatasetId, TrainingExampleId,
+        TrainingSampleSource, TrainingSampleSources, Usd, builtin_research_profiles,
         factor::{FactorDefinitionRef, FactorExplanation, FactorServingPlane},
         model_metrics::{HeldOutMetricKind, ModelVersionMetricsDefinition},
         model_serving::ModelServingTradePolicyBinding,
@@ -1461,7 +1462,6 @@ struct WeightedVersionContract<'a> {
 impl WeightedVersionContract<'_> {
     fn assert_metrics(&self) {
         let version = self.version;
-        assert_eq!(version.publication_status, PublicationStatus::Candidate);
         let ModelTrainingObjectiveDefinition::LearningToRank { spec } =
             &version.training_objective.definition
         else {
@@ -2826,6 +2826,8 @@ async fn assert_calibration_rejected(
                 reason: "reject a tampered Calibration Dataset".to_owned(),
             },
             decision_policy_snapshot_id: policy_snapshot_id,
+            downside_source: DownsideSource::MfeMae,
+            actor: GovernanceActor::system(),
         },
         Arc::new(NoopProgressSink),
         CancellationToken::new(),
@@ -2893,6 +2895,8 @@ async fn assert_sample_floor_terminal(
             reason: "record an underpowered isotonic fit".to_owned(),
         },
         decision_policy_snapshot_id: policy_snapshot_id,
+        downside_source: DownsideSource::MfeMae,
+        actor: GovernanceActor::system(),
     };
     let outcome = Box::pin(fitter.fit(
         params.clone(),
@@ -3312,6 +3316,18 @@ async fn comparison_replay_fixture(
         evaluation_use_hash: fixture_hash("evaluation-use"),
     };
     let artifact_id = FeedbackComparisonArtifactId::from_cycle_id(feedback_cycle_id);
+    let validation = FeedbackValidationArtifactRef {
+        feedback_cycle_id,
+        job_id: ResearchJobId::from_v7(),
+        artifact_id: FeedbackValidationArtifactId::from_cycle_id(feedback_cycle_id),
+        input_hash: fixture_hash("validation-input"),
+        cpcv: previous,
+        artifact: ResearchJobArtifactRef {
+            uri: ArtifactUri::parse("s3://comparison/validation.json")
+                .expect("validation artifact URI"),
+            content_hash: fixture_hash("validation-artifact"),
+        },
+    };
     let candidate_ref = FeedbackComparisonCandidateRef {
         candidate_recipe_hash: fixture_hash("candidate-recipe"),
         model_version_id: candidate.model_version_id,
@@ -3328,7 +3344,7 @@ async fn comparison_replay_fixture(
         feedback_cycle_id,
         cycle_idempotency_hash,
         candidate_family_hash,
-        previous,
+        validation,
         evaluation_use,
         comparison_contract,
         decision_policy_snapshot_id: scenario.policy_snapshot_id,
@@ -3359,6 +3375,8 @@ async fn assert_calibration_persisted(
             reason: "persist an exact-preimage model calibrator".to_owned(),
         },
         decision_policy_snapshot_id: scenario.policy_snapshot_id,
+        downside_source: DownsideSource::MfeMae,
+        actor: GovernanceActor::system(),
     };
     let model_run_id = fit_params.model_run_id;
     let fit_outcome = Box::pin(services.calibration_fitter.fit(
@@ -3867,30 +3885,23 @@ async fn assert_cpcv_view_bind(
     assert_eq!(cpcv_run.window_start, view.window_start);
     assert_eq!(cpcv_run.window_end, view.window_end);
 
-    let bound = registry
+    let unchanged = registry
         .find_model_version(&version.model_version_id)
         .await
         .expect("reload version")
         .expect("version");
-    assert!(
-        bound.publish_path_set_id.is_none(),
-        "CPCV must not auto-bind publish_path_set_id; explicit governance bind required"
-    );
-
-    registry
-        .set_publish_path(&version.model_version_id, Some(*path_set_id))
-        .await
-        .expect("explicit bind for publish gate");
-
-    let bound = registry
-        .find_model_version(&version.model_version_id)
-        .await
-        .expect("reload after bind")
-        .expect("version");
     assert_eq!(
-        bound.publish_path_set_id.as_ref(),
-        Some(path_set_id),
-        "explicit bind must pin publish_path_set_id"
+        (
+            unchanged.artifact_hash,
+            unchanged.serving_contract_hash,
+            unchanged.training_dataset_id,
+        ),
+        (
+            version.artifact_hash,
+            version.serving_contract_hash,
+            version.training_dataset_id,
+        ),
+        "CPCV seals independent evidence and must not mutate the model artifact"
     );
 
     let listed = PgBacktestPathSetRepository::new(db.clone())

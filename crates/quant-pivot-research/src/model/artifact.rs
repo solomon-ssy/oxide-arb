@@ -35,6 +35,7 @@ use quant_pivot_models::{
         model_serving::{
             ModelServingContract, ModelServingEstimatorBinding, ModelServingEstimatorInput,
             ModelServingIntrinsicInputKind, ModelServingIntrinsicInputRef,
+            ModelServingTreeShapBinding,
         },
         model_training::TrainingObjectiveSpec,
     },
@@ -44,6 +45,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
+    attribution::TreeShapModelContract,
     factors::FrozenReferenceQuantiles,
     features::{FeatureName, FeatureUnit, FeatureValueKind, NullReason},
     hashing::ResearchHasher,
@@ -1024,6 +1026,10 @@ pub struct ClassicalModelPayload {
     pub serialization_format: ModelSerializationFormat,
     /// Frozen unit-conversion, imputation, indicators, and standardization.
     pub input_transform: FittedInputTransform,
+    /// Exact portable tree representation and training-time verification.
+    ///
+    /// Required for GBDT and forbidden for every other classical estimator.
+    pub tree_shap: Option<TreeShapModelContract>,
     /// Training metrics + feature importances.
     pub metrics: ClassicalModelMetrics,
 }
@@ -1111,6 +1117,37 @@ impl ClassicalModelPayload {
             ));
         }
         self.input_transform.transform_hash()?;
+        match (self.kind, &self.tree_shap) {
+            (ClassicalKind::GradientBoostedTrees, Some(tree_shap)) => {
+                tree_shap.validate()?;
+                let input_contract_hash = model_input_contract_hash(&self.input_contract)?;
+                let encoded_names = self
+                    .input_transform
+                    .encoded_columns
+                    .iter()
+                    .map(|column| column.name.to_string())
+                    .collect::<Vec<_>>();
+                if tree_shap.ensemble.serialized_model_hash != self.serialized_model_hash
+                    || tree_shap.ensemble.input_contract_hash != input_contract_hash
+                    || tree_shap.ensemble.feature_names != encoded_names
+                {
+                    return Err(invalid_classical_artifact(
+                        "GBDT TreeSHAP contract differs from serialized estimator or input contract",
+                    ));
+                }
+            }
+            (ClassicalKind::GradientBoostedTrees, None) => {
+                return Err(invalid_classical_artifact(
+                    "GBDT payload requires an exact TreeSHAP contract",
+                ));
+            }
+            (_, Some(_)) => {
+                return Err(invalid_classical_artifact(
+                    "only GBDT payloads may carry a TreeSHAP contract",
+                ));
+            }
+            (_, None) => {}
+        }
         Ok(())
     }
 }
@@ -1426,7 +1463,7 @@ fn validate_classical_metrics(
 const WEIGHTED_MODEL_PAYLOAD_HASH_DOMAIN: &str = "quant-pivot/model-payload/weighted-factor";
 const WEIGHTED_MODEL_PAYLOAD_VERSION: u32 = 1;
 const CLASSICAL_MODEL_PAYLOAD_HASH_DOMAIN: &str = "quant-pivot/model-payload/classical";
-const CLASSICAL_MODEL_PAYLOAD_VERSION: u32 = 1;
+const CLASSICAL_MODEL_PAYLOAD_VERSION: u32 = 2;
 const SELL_MODEL_PAYLOAD_HASH_DOMAIN: &str = "quant-pivot/model-payload/hold-vs-exit";
 const SELL_MODEL_PAYLOAD_VERSION: u32 = 1;
 
@@ -1486,6 +1523,17 @@ impl ModelPayload {
                     model_payload_hash,
                     serialized_model_hash: payload.serialized_model_hash,
                     serialization_format: payload.serialization_format,
+                    tree_shap: payload.tree_shap.as_ref().map(|contract| {
+                        ModelServingTreeShapBinding {
+                            ensemble_hash: contract.ensemble_hash,
+                            background_distribution_hash: contract
+                                .ensemble
+                                .background_distribution_hash,
+                            verified_case_count: contract.verified_case_count,
+                            max_efficiency_residual: contract.max_efficiency_residual,
+                            max_prediction_residual: contract.max_prediction_residual,
+                        }
+                    }),
                 })
             }
         }
@@ -1502,7 +1550,7 @@ pub struct ModelArtifact {
 }
 
 /// Breaking stored-model wire version. No legacy parser is provided.
-pub const MODEL_ARTIFACT_FORMAT_VERSION: u32 = 2;
+pub const MODEL_ARTIFACT_FORMAT_VERSION: u32 = 3;
 
 #[derive(Serialize)]
 pub(crate) struct StoredModelArtifactRef<'a> {
@@ -1738,6 +1786,7 @@ fn validate_payload_contract(
                 model_payload_hash,
                 serialized_model_hash,
                 serialization_format,
+                tree_shap,
             },
             ModelPayload::Classical(classical),
         ) if bindings.model.model_family == ModelFamily::from_classical(*kind) => {
@@ -1759,6 +1808,24 @@ fn validate_payload_contract(
                     "classical payload kind {} differs from contract kind {}",
                     classical.kind, kind
                 )));
+            }
+            let expected_tree_shap =
+                classical
+                    .tree_shap
+                    .as_ref()
+                    .map(|contract| ModelServingTreeShapBinding {
+                        ensemble_hash: contract.ensemble_hash,
+                        background_distribution_hash: contract
+                            .ensemble
+                            .background_distribution_hash,
+                        verified_case_count: contract.verified_case_count,
+                        max_efficiency_residual: contract.max_efficiency_residual,
+                        max_prediction_residual: contract.max_prediction_residual,
+                    });
+            if *tree_shap != expected_tree_shap {
+                return Err(invalid_model_payload(
+                    "classical TreeSHAP serving binding differs from payload".to_owned(),
+                ));
             }
             classical.validate()?;
             validate_transform(
@@ -1933,7 +2000,7 @@ mod tests {
         domain::quant::ModelVersionInfo,
         enums::{
             model::ModelFamily,
-            quant::{DataQualityStatus, DownsideSource, PublicationStatus},
+            quant::{DataQualityStatus, DownsideSource},
         },
         runtime_config::{DecimalValue, SellScorerConfig},
         types::{
@@ -1993,7 +2060,6 @@ mod tests {
             training_dataset_id: Some(bindings.dataset.manifest.training_dataset_id),
             trade_policy_artifact_id: trade_policy.map(|(artifact_id, _)| artifact_id),
             trade_policy_hash: trade_policy.map(|(_, content_hash)| content_hash),
-            publish_path_set_id: None,
             derivation_kind: ModelVersionInfo::training_derivation_kind(),
             parent_model_version_id: None,
             calibration_artifact_id: model
@@ -2003,10 +2069,6 @@ mod tests {
             derivation_evidence_hash: None,
             metrics: ModelVersionMetrics::not_measured("test fixture"),
             training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Published,
-            published_at: Some(Utc::now()),
-            retired_at: None,
             created_at: Utc::now(),
             serving_contract,
         }

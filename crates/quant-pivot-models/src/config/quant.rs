@@ -134,14 +134,17 @@ impl ResearchJobsConfig {
             ResearchJobKind::ModelCalibrationFit => self.model_calibration_fit_concurrency,
             ResearchJobKind::CpcvBacktest => self.cpcv_backtest_concurrency,
             ResearchJobKind::FeatureParity => self.feature_parity_concurrency,
-            ResearchJobKind::FeedbackCoverage => self.feedback_coverage_concurrency,
-            ResearchJobKind::FeedbackDrift => self.feedback_drift_concurrency,
+            ResearchJobKind::FeedbackTruthFreeze
+            | ResearchJobKind::FeedbackCoverage
+            | ResearchJobKind::FeedbackAttributionPlan
+            | ResearchJobKind::FeedbackDrift => self.feedback_coverage_concurrency,
             ResearchJobKind::FeedbackDatasetSeal
             | ResearchJobKind::FeedbackTraining
             | ResearchJobKind::FeedbackCalibration
             | ResearchJobKind::FeedbackCpcv
+            | ResearchJobKind::FeedbackValidation
             | ResearchJobKind::FeedbackComparison
-            | ResearchJobKind::FeedbackShadowReplay
+            | ResearchJobKind::FeedbackShadow
             | ResearchJobKind::FeedbackDecision => self.feedback_learning_concurrency,
             ResearchJobKind::TradePolicyFit => self.trade_policy_fit_concurrency,
             ResearchJobKind::TradePolicyValidation => self.trade_policy_validation_concurrency,

@@ -202,6 +202,30 @@ pub struct MetricsHub {
     pub feedback_outbox_pending: IntGauge,
     /// Running cycles that crossed the configured DB-clock age threshold.
     pub feedback_stuck_total: IntCounter,
+    /// Age of the oldest unresolved inbox observation.
+    pub feedback_resolution_inbox_age_seconds: IntGauge,
+    /// Resolution observations currently quarantined.
+    pub feedback_resolution_quarantined: IntGauge,
+    /// DB-clock lag of the canonical resolution projection frontier.
+    pub feedback_resolution_projector_lag_seconds: IntGauge,
+    /// DB-clock lag of the immutable execution-attempt frontier.
+    pub feedback_attempt_projector_lag_seconds: IntGauge,
+    /// DB-clock lag of the sealed recommendation-rollup frontier.
+    pub feedback_rollup_lag_seconds: IntGauge,
+    /// Scheduler profiles whose effective durable due time has elapsed.
+    pub feedback_scheduler_overdue_profiles: IntGauge,
+    /// Maximum DB-clock lateness among overdue scheduler profiles.
+    pub feedback_scheduler_max_overdue_seconds: IntGauge,
+    /// Explanation efficiency failures by bounded method.
+    pub feedback_attribution_efficiency_failures_total: IntCounterVec,
+    /// Validation quality-gate outcomes by bounded gate and status.
+    pub feedback_quality_gate_total: IntCounterVec,
+    /// Governed activation attempts rejected because the permit expired.
+    pub feedback_permit_expiry_total: IntCounter,
+    /// Model-route governance conflicts by bounded action and authority layer.
+    pub feedback_route_governance_conflict_total: IntCounterVec,
+    /// Durable feedback WebSocket retries and recoveries.
+    pub feedback_ws_recovery_total: IntCounterVec,
     /// Advisory progress values superseded in the single latest-value slot.
     pub research_progress_coalesced_total: IntCounter,
     /// Research-job lease heartbeat failures by controlled operation/result.
@@ -334,6 +358,18 @@ struct ResearchFeedbackMetrics {
     cycle_queued: IntGauge,
     outbox_pending: IntGauge,
     stuck_total: IntCounter,
+    resolution_inbox_age: IntGauge,
+    resolution_quarantined: IntGauge,
+    resolution_projector_lag: IntGauge,
+    attempt_projector_lag: IntGauge,
+    rollup_lag: IntGauge,
+    scheduler_overdue_profiles: IntGauge,
+    scheduler_max_overdue: IntGauge,
+    attribution_efficiency_failures: IntCounterVec,
+    quality_gate_total: IntCounterVec,
+    permit_expiry_total: IntCounter,
+    route_governance_conflict_total: IntCounterVec,
+    ws_recovery_total: IntCounterVec,
     progress_coalesced: IntCounter,
     heartbeat_total: IntCounterVec,
 }
@@ -726,6 +762,70 @@ fn register_research_feedback_metrics(registry: &Registry) -> ResearchFeedbackMe
             "quant_feedback_stuck_total",
             "Running feedback cycles that crossed the configured DB-clock age threshold"
         ),
+        resolution_inbox_age: register_gauge_int!(
+            registry,
+            "quant_feedback_resolution_inbox_oldest_age_seconds",
+            "Age of the oldest unresolved resolution inbox observation on the PostgreSQL clock"
+        ),
+        resolution_quarantined: register_gauge_int!(
+            registry,
+            "quant_feedback_resolution_quarantined",
+            "Resolution inbox observations currently quarantined"
+        ),
+        resolution_projector_lag: register_gauge_int!(
+            registry,
+            "quant_feedback_resolution_projector_lag_seconds",
+            "PostgreSQL-clock lag of the canonical resolution projection frontier"
+        ),
+        attempt_projector_lag: register_gauge_int!(
+            registry,
+            "quant_feedback_execution_attempt_projector_lag_seconds",
+            "PostgreSQL-clock lag of the immutable execution-attempt outcome frontier"
+        ),
+        rollup_lag: register_gauge_int!(
+            registry,
+            "quant_feedback_recommendation_rollup_lag_seconds",
+            "PostgreSQL-clock lag of the sealed recommendation execution-rollup frontier"
+        ),
+        scheduler_overdue_profiles: register_gauge_int!(
+            registry,
+            "quant_feedback_scheduler_overdue_profiles",
+            "Unpaused feedback scheduler profiles whose effective durable due time elapsed"
+        ),
+        scheduler_max_overdue: register_gauge_int!(
+            registry,
+            "quant_feedback_scheduler_max_overdue_seconds",
+            "Maximum PostgreSQL-clock lateness among overdue feedback scheduler profiles"
+        ),
+        attribution_efficiency_failures: register_counter_vec!(
+            registry,
+            "quant_feedback_attribution_efficiency_failures_total",
+            "Prediction-explanation efficiency failures by bounded explanation method",
+            &["method"]
+        ),
+        quality_gate_total: register_counter_vec!(
+            registry,
+            "quant_feedback_quality_gate_total",
+            "Feedback Validation quality-gate outcomes by bounded gate and status",
+            &["gate", "status"]
+        ),
+        permit_expiry_total: register_counter!(
+            registry,
+            "quant_feedback_promotion_permit_expiry_total",
+            "Model-route activation attempts rejected because their permit expired"
+        ),
+        route_governance_conflict_total: register_counter_vec!(
+            registry,
+            "quant_feedback_route_governance_conflict_total",
+            "Governed model-route conflicts by bounded action and authority layer",
+            &["action", "layer"]
+        ),
+        ws_recovery_total: register_counter_vec!(
+            registry,
+            "quant_feedback_ws_recovery_total",
+            "Durable research.feedback WebSocket outbox retry and recovery outcomes",
+            &["outcome"]
+        ),
         progress_coalesced: register_counter!(
             registry,
             "quant_research_progress_coalesced_total",
@@ -951,6 +1051,20 @@ impl MetricsHub {
             feedback_cycle_queued: research_feedback.cycle_queued,
             feedback_outbox_pending: research_feedback.outbox_pending,
             feedback_stuck_total: research_feedback.stuck_total,
+            feedback_resolution_inbox_age_seconds: research_feedback.resolution_inbox_age,
+            feedback_resolution_quarantined: research_feedback.resolution_quarantined,
+            feedback_resolution_projector_lag_seconds: research_feedback.resolution_projector_lag,
+            feedback_attempt_projector_lag_seconds: research_feedback.attempt_projector_lag,
+            feedback_rollup_lag_seconds: research_feedback.rollup_lag,
+            feedback_scheduler_overdue_profiles: research_feedback.scheduler_overdue_profiles,
+            feedback_scheduler_max_overdue_seconds: research_feedback.scheduler_max_overdue,
+            feedback_attribution_efficiency_failures_total: research_feedback
+                .attribution_efficiency_failures,
+            feedback_quality_gate_total: research_feedback.quality_gate_total,
+            feedback_permit_expiry_total: research_feedback.permit_expiry_total,
+            feedback_route_governance_conflict_total: research_feedback
+                .route_governance_conflict_total,
+            feedback_ws_recovery_total: research_feedback.ws_recovery_total,
             research_progress_coalesced_total: research_feedback.progress_coalesced,
             research_heartbeat_total: research_feedback.heartbeat_total,
             auto_execution_halted: execution.auto_execution_halted,
@@ -1192,6 +1306,61 @@ impl MetricsHub {
             .set(i64::try_from(pending_outbox).unwrap_or(i64::MAX));
     }
 
+    pub fn set_feedback_truth(
+        &self,
+        inbox_age_secs: u64,
+        quarantined: u64,
+        resolution_lag_secs: u64,
+        attempt_lag_secs: u64,
+        rollup_lag_secs: u64,
+    ) {
+        self.feedback_resolution_inbox_age_seconds
+            .set(i64::try_from(inbox_age_secs).unwrap_or(i64::MAX));
+        self.feedback_resolution_quarantined
+            .set(i64::try_from(quarantined).unwrap_or(i64::MAX));
+        self.feedback_resolution_projector_lag_seconds
+            .set(i64::try_from(resolution_lag_secs).unwrap_or(i64::MAX));
+        self.feedback_attempt_projector_lag_seconds
+            .set(i64::try_from(attempt_lag_secs).unwrap_or(i64::MAX));
+        self.feedback_rollup_lag_seconds
+            .set(i64::try_from(rollup_lag_secs).unwrap_or(i64::MAX));
+    }
+
+    pub fn set_scheduler_overdue(&self, profiles: u64, max_overdue_secs: u64) {
+        self.feedback_scheduler_overdue_profiles
+            .set(i64::try_from(profiles).unwrap_or(i64::MAX));
+        self.feedback_scheduler_max_overdue_seconds
+            .set(i64::try_from(max_overdue_secs).unwrap_or(i64::MAX));
+    }
+
+    pub fn record_attribution_efficiency_failure(&self, method: &str) {
+        self.feedback_attribution_efficiency_failures_total
+            .with_label_values(&[method])
+            .inc();
+    }
+
+    pub fn record_feedback_quality_gate(&self, gate: &str, status: &str) {
+        self.feedback_quality_gate_total
+            .with_label_values(&[gate, status])
+            .inc();
+    }
+
+    pub fn record_feedback_permit_expiry(&self) {
+        self.feedback_permit_expiry_total.inc();
+    }
+
+    pub fn record_route_governance_conflict(&self, action: &str, layer: &str) {
+        self.feedback_route_governance_conflict_total
+            .with_label_values(&[action, layer])
+            .inc();
+    }
+
+    pub fn record_feedback_ws_recovery(&self, outcome: &str) {
+        self.feedback_ws_recovery_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
     pub fn record_research_heartbeat(&self, operation: &str, result: &str) {
         self.research_heartbeat_total
             .with_label_values(&[operation, result])
@@ -1277,6 +1446,41 @@ mod tests {
         }
         assert!(body.contains(r#"reason="build_failed""#));
         assert!(body.contains(r#"profile_id="weather_forecast_24h""#));
+    }
+
+    #[test]
+    fn feedback_operations_metrics_contract() {
+        let hub = MetricsHub::new();
+        hub.set_feedback_truth(60, 2, 30, 20, 10);
+        hub.set_scheduler_overdue(1, 120);
+        hub.record_attribution_efficiency_failure("exact_tree_shap");
+        hub.record_feedback_quality_gate("pbo", "fail");
+        hub.record_feedback_permit_expiry();
+        hub.record_route_governance_conflict("promotion", "route");
+        hub.record_feedback_ws_recovery("recovered");
+
+        let (_, text) = hub.gather_prometheus_text().expect("gather");
+        let body = String::from_utf8(text).expect("utf8");
+        for name in [
+            "quant_feedback_resolution_inbox_oldest_age_seconds",
+            "quant_feedback_resolution_quarantined",
+            "quant_feedback_resolution_projector_lag_seconds",
+            "quant_feedback_execution_attempt_projector_lag_seconds",
+            "quant_feedback_recommendation_rollup_lag_seconds",
+            "quant_feedback_scheduler_overdue_profiles",
+            "quant_feedback_scheduler_max_overdue_seconds",
+            "quant_feedback_attribution_efficiency_failures_total",
+            "quant_feedback_quality_gate_total",
+            "quant_feedback_promotion_permit_expiry_total",
+            "quant_feedback_route_governance_conflict_total",
+            "quant_feedback_ws_recovery_total",
+        ] {
+            assert!(body.contains(name), "missing metric {name}");
+        }
+        assert!(body.contains(r#"method="exact_tree_shap""#));
+        assert!(body.contains(r#"gate="pbo""#));
+        assert!(body.contains(r#"layer="route""#));
+        assert!(body.contains(r#"outcome="recovered""#));
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod execution_recovery;
 pub mod feature_integrity;
 pub mod feature_parity_execution;
 pub mod feedback_execution;
+pub mod feedback_governance;
 pub mod feedback_mutation;
 pub mod feedback_read;
 pub mod market_linkage;
@@ -52,16 +53,24 @@ pub use feedback_execution::{
     FeedbackDecisionJobInput, FeedbackDecisionJobParams, FeedbackDriftArtifactRef,
     FeedbackDriftExecutionPort, FeedbackDriftExecutionResult, FeedbackEvaluationUseRef,
     FeedbackLearningExecutionPort, FeedbackLearningExecutionResult,
-    FeedbackLearningStageArtifactRef, FeedbackShadowContract, FeedbackShadowContractInput,
-    FeedbackShadowExecutionPort, FeedbackShadowExecutionResult, FeedbackShadowJobParams,
-    FeedbackShadowObservationSource, FeedbackShadowReplayArtifactRef, FeedbackShadowSubject,
+    FeedbackLearningStageArtifactRef, FeedbackShadowArtifactRef, FeedbackShadowContract,
+    FeedbackShadowContractInput, FeedbackShadowExecutionPort, FeedbackShadowExecutionResult,
+    FeedbackShadowJobParams, FeedbackShadowObservationSource, FeedbackShadowSubject,
     FeedbackShadowUnavailableReason, FeedbackTrainingCommand, FeedbackTrainingJobParams,
+};
+pub use feedback_governance::{
+    FeedbackAttributionPlanArtifact, FeedbackAttributionPlanJobParams, FeedbackAttributionProduced,
+    FeedbackAttributionUse, FeedbackCandidateValidation, FeedbackGovernanceExecutionPort,
+    FeedbackGovernanceExecutionResult, FeedbackTruthBlocker, FeedbackTruthFreezeArtifact,
+    FeedbackTruthFreezeJobParams, FeedbackValidationArtifact, FeedbackValidationArtifactRef,
+    FeedbackValidationJobParams, FeedbackValidationTrialOutcome,
 };
 pub use feedback_mutation::FeedbackMutationPort;
 pub use feedback_read::FeedbackReadPort;
 pub use market_linkage::MarketLinkageGovernancePort;
 pub use model_governance::{
-    GovernanceActor, ModelGovernancePort, PublishModelCommand, RetireModelCommand,
+    BootstrapQualityGateEvidence, BootstrapQualityGateInput, CalibratedModelSealCommand,
+    CandidateQualityGateEvidence, GovernanceActor, ModelGovernancePort,
 };
 pub use model_spec::{CreateModelSpecCommand, ModelSpecPort};
 pub use model_training::ModelTrainingPort;

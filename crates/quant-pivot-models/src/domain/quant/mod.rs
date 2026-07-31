@@ -1,6 +1,8 @@
 //! Quant-pivot persistence DTOs for schema-first repositories.
 
 mod account;
+#[allow(clippy::needless_update)] // Insert DTO omits DB-managed availability timestamps.
+mod attribution;
 #[allow(clippy::needless_update)] // NewBacktestReport omits DB-managed created_at
 mod backtest;
 #[allow(clippy::needless_update)] // NewBacktestPathSet omits DB-managed created_at
@@ -19,6 +21,7 @@ mod dataset;
 mod entry_condition;
 mod execution;
 mod execution_account;
+mod execution_attempt_outcome;
 mod exit_training;
 mod factor;
 mod feature;
@@ -27,18 +30,25 @@ mod feature_parity;
 mod feedback_cohort;
 #[allow(clippy::needless_update)] // New feedback DTOs omit DB-managed lifecycle/timestamps.
 mod feedback_cycle;
+#[allow(clippy::needless_update)] // Scheduler sync payload omits DB-managed lifecycle/timestamps.
+mod feedback_scheduler;
+#[allow(clippy::needless_update)] // Trigger inserts omit DB-managed timestamps.
+mod feedback_trigger;
 #[allow(clippy::needless_update)] // NewModelGovernanceAudit omits DB-managed created_at
 mod governance_audit;
 #[allow(clippy::needless_update)] // NewMarketLinkage omits DB-managed created_at
 mod linkage;
 #[allow(clippy::needless_update)] // NewModelRun omits DB-managed lifecycle columns
 mod model;
+#[allow(clippy::needless_update)] // Insert DTO omits DB-managed created_at.
+mod model_candidate_manifest;
+mod model_route_bootstrap;
 mod outcome_reconciliation;
 mod portfolio;
 mod position;
 mod promotion_permit;
 mod recommendation;
-mod recommendation_execution_outcome;
+mod recommendation_execution_rollup;
 #[allow(clippy::needless_update)] // Insert DTO omits DB-managed created_at.
 mod recommendation_resolution_outcome;
 mod reconciliation;
@@ -53,6 +63,7 @@ mod report_txn;
 mod research_job;
 #[allow(clippy::needless_update)] // Insert DTO omits DB-managed created_at.
 mod research_readiness;
+mod resolution_observation;
 #[allow(clippy::needless_update)] // NewMarketSelectionMember covers all ActiveModel columns
 mod selection;
 #[allow(clippy::needless_update)] // Child settlement inserts omit DB-managed timestamps.
@@ -72,6 +83,10 @@ mod trade_policy_trial;
 pub use account::{
     AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery, LiveAccountSnapshot,
     NewAccountSnapshot, NewEquitySnapshot,
+};
+pub use attribution::{
+    AttributionArtifactContractError, AttributionArtifactInfo, AttributionSubject,
+    NewAttributionArtifact,
 };
 pub use backtest::{BacktestReportInfo, NewBacktestReport};
 pub use backtest_path_set::{
@@ -103,6 +118,9 @@ pub use execution::{
     OrderIntentInfo, SubmissionLedgerWrite,
 };
 pub use execution_account::{ExecutionAccountInfo, NewExecutionAccount};
+pub use execution_attempt_outcome::{
+    ExecutionAttemptOutcomeContractError, ExecutionAttemptOutcomeInfo, NewExecutionAttemptOutcome,
+};
 pub use exit_training::{ExitTrainingLotRow, LotExitEventRow};
 pub use factor::{
     FactorDefinitionInfo, FactorDefinitionProjectionError, FactorRegistrationOutcome,
@@ -120,38 +138,64 @@ pub use feature_parity::{
 pub use feedback_cohort::{
     FEEDBACK_COHORT_PAGE_LIMIT, FeedbackCohortCandidate, FeedbackCohortContractError,
     FeedbackCohortCursor, FeedbackCohortDecision, FeedbackCohortEvidence, FeedbackCohortPage,
-    FeedbackCohortPageQuery, FeedbackCohortWindow, FeedbackExecutionAttempt,
-    FeedbackExecutionEvidence, FeedbackRecommendationContext, FeedbackResolutionEvidence,
+    FeedbackCohortPageQuery, FeedbackCohortSnapshot, FeedbackCohortWindow,
+    FeedbackExecutionEvidence, FeedbackExecutionState, FeedbackRecommendationContext,
+    FeedbackResolutionEvidence,
 };
 pub use feedback_cycle::{
     DriftReportInfo, DriftReportInput, FeedbackCycleActor, FeedbackCycleInfo, FeedbackCycleKey,
     FeedbackCycleKeyInput, FeedbackCycleTerminal, FeedbackEvaluationUseInfo,
     FeedbackEvaluationUseInput, FeedbackEvaluationUseKey, FeedbackOutboxEntry,
-    FeedbackQueueSnapshot, FeedbackStageEventInfo, FeedbackStageEventInput,
+    FeedbackOutboxSource, FeedbackQueueSnapshot, FeedbackStageEventInfo, FeedbackStageEventInput,
     GovernedFeedbackCancellation, GovernedFeedbackTrigger, NewDriftReport, NewFeedbackCycle,
     NewFeedbackEvaluationUse, NewFeedbackStageEvent,
 };
+pub use feedback_scheduler::{
+    FeedbackSchedulerClaim, FeedbackSchedulerControl, FeedbackSchedulerLease,
+    FeedbackSchedulerStateInfo, FeedbackSchedulerSuccess, NewFeedbackSchedulerState,
+    cadence_cutoff,
+};
+pub use feedback_trigger::{FeedbackTriggerEventInfo, NewFeedbackTriggerEvent};
 pub use governance_audit::{
     ModelGovernanceAuditDetail, ModelGovernanceAuditInfo, NewModelGovernanceAudit,
     NewRoutePromotionAudit,
 };
 pub use linkage::{
-    CryptoSubject, GroundingField, GroundingKind, GroundingProof, GroundingSpan, LinkageOutcome,
-    LinkageSourceMetadata, LinkageUnresolvedReason, LinkageValidationFailure, ManualEvidenceInput,
-    MarketLinkage, MarketLinkageDerivation, MarketLinkageInfo, MarketSubject, NewMarketLinkage,
-    OverrideContext, PriceBoundaryInclusion, PriceComparator, ResolutionOracle, ResolvedBinding,
-    ResolvedSourceBinding, WeatherDecisionGroupKey, WeatherSubject,
+    CryptoSubject, GlobalTemperatureOutcome, GlobalTemperatureRank, GroundingField, GroundingKind,
+    GroundingProof, GroundingSpan, LinkageOutcome, LinkageSourceMetadata, LinkageUnresolvedReason,
+    LinkageValidationFailure, ManualEvidenceInput, MarketLinkage, MarketLinkageDerivation,
+    MarketLinkageInfo, MarketSubject, NewMarketLinkage, OverrideContext, PriceBoundaryInclusion,
+    PriceComparator, ResolutionOracle, ResolvedBinding, ResolvedSourceBinding, SeaIceAggregation,
+    SeaIceHemisphere, SeaIceProduct, TropicalCycloneOutcome, WeatherAqiAggregation,
+    WeatherAqiPollutant, WeatherAqiSubject, WeatherContractWindow, WeatherDecisionGroupKey,
+    WeatherGlobalTemperatureSubject, WeatherPrecipitationSubject, WeatherRoundingRule,
+    WeatherSeaIceSubject, WeatherSubject, WeatherTornadoFinalization, WeatherTornadoSubject,
+    WeatherTropicalCycloneSubject, WeatherTruthPolicy, WeatherValueComparator,
+    WeatherWindExtremeSubject, WeatherWindStatistic,
 };
 pub use model::{
-    ModelRunInfo, ModelSpecInfo, ModelVersionInfo, ModelVersionPersistenceError, NewModelRun,
-    NewModelSpec, NewModelVersion, PublishedModelCatalogInfo, QuantModelRunModel,
+    ModelCatalogInfo, ModelRunInfo, ModelSpecInfo, ModelVersionInfo, ModelVersionPersistenceError,
+    NewModelRun, NewModelSpec, NewModelVersion, QuantModelRunModel,
+};
+pub use model_candidate_manifest::{
+    CandidateExplanationMethod, CandidateExplanationValidation, CandidateExplanationVerification,
+    ModelCandidateManifestDocument, ModelCandidateManifestError, ModelCandidateManifestInfo,
+    ModelCandidateManifestInput, NewModelCandidateManifest, PromotionGateArtifact,
+    PromotionGateArtifactInput,
+};
+pub use model_route_bootstrap::{
+    BootstrapModelRoute, CommitModelRouteBootstrap, ModelBootstrapManifest,
+    ModelBootstrapManifestInput, ModelBootstrapPolicyProjection, ModelRouteBootstrapPolicy,
+    ModelRouteBootstrapPreflight, ModelRouteBootstrapPreflightInput, ModelRouteBootstrapRecord,
+    ModelRouteBootstrapRecordInput, ModelRouteBootstrapRoute,
 };
 pub use outcome_reconciliation::{
-    ExecutionOutcomeDeferredReason, ExecutionOutcomeDerivation,
-    ExecutionOutcomeReconciliationError, ExecutionOutcomeReconciliationResult,
-    ExecutionOutcomeSourceGraph, RecommendationExecutionReconciliationCandidate,
+    ExecutionAttemptBarrier, ExecutionAttemptDeferredReason, ExecutionAttemptDerivation,
+    ExecutionAttemptReconciliationCandidate, ExecutionAttemptReconciliationError,
+    ExecutionAttemptReconciliationResult, ExecutionAttemptSourceGraph, ExecutionAttemptTaskClaim,
+    ExecutionRollupTaskClaim, OutcomeTaskSettlement,
     RecommendationResolutionReconciliationCandidate, ResolutionOutcomeDeferredReason,
-    ResolutionOutcomeReconciliationResult,
+    ResolutionOutcomeReconciliationResult, ResolutionOutcomeTaskClaim,
 };
 pub use portfolio::{NewPortfolioPlan, PortfolioPlanInfo};
 pub use position::{NewPosition, PositionExit, PositionFill, PositionInfo};
@@ -167,9 +211,11 @@ pub use promotion_permit::{
 pub use recommendation::{
     NewRecommendation, NewRecommendationReport, RecommendationInfo, RecommendationReportInfo,
 };
-pub use recommendation_execution_outcome::{
-    NewRecommendationExecutionOutcome, RecommendationExecutionOutcomeContractError,
-    RecommendationExecutionOutcomeInfo,
+pub use recommendation_execution_rollup::{
+    ExecutionRollupBarrier, ExecutionRollupDeferredReason, ExecutionRollupReconciliationResult,
+    NewRecommendationExecutionRollup, NewRecommendationExecutionRollupAttempt,
+    RecommendationExecutionRollupAttemptInfo, RecommendationExecutionRollupContractError,
+    RecommendationExecutionRollupInfo, RecommendationExecutionRollupSeal,
 };
 pub use recommendation_resolution_outcome::{
     InsertResolutionOutcomeResult, NewRecommendationResolutionOutcome,
@@ -203,6 +249,12 @@ pub use research_job::{
     ResearchJobArtifactRef, ResearchJobFinalization, ResearchJobInfo, ResearchJobResultRef,
 };
 pub use research_readiness::{NewResearchReadinessEvidence, ResearchReadinessEvidenceInfo};
+pub use resolution_observation::{
+    NewResolutionObservationInbox, ResolutionObservationContractError,
+    ResolutionObservationInboxInfo, ResolutionObservationProjectionInfo,
+    ResolutionProjectionBarrier, ResolutionProjectionClaim, ResolutionProjectionSettlement,
+    ResolutionScanCommitOutcome,
+};
 pub use selection::{
     MarketSelectionInfo, MarketSelectionMemberInfo, MarketSelectionModel, NewMarketSelection,
     NewMarketSelectionMember,

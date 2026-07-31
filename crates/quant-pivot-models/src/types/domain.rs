@@ -495,6 +495,21 @@ impl DomainInstrumentKey {
         Self::new(format!("GHCNH:{station}"))
     }
 
+    /// Canonical key for one archive-quality `GHCNd` daily temperature series.
+    #[must_use]
+    pub fn ghcnd_temperature(
+        station: &IcaoStation,
+        statistic: WeatherTemperatureStatistic,
+    ) -> Self {
+        Self::new(format!(
+            "GHCND:{station}:{}",
+            match statistic {
+                WeatherTemperatureStatistic::Maximum => "TMAX",
+                WeatherTemperatureStatistic::Minimum => "TMIN",
+            }
+        ))
+    }
+
     /// Canonical key for an airport-bound GEFS forecast series.
     #[must_use]
     pub fn gefs(station: &IcaoStation) -> Self {
@@ -507,10 +522,10 @@ impl DomainInstrumentKey {
         Self::new(format!("GEFS_BACKFILL:{station}"))
     }
 
-    /// Canonical HKO rainfall reporting-place key.
+    /// Canonical HKO completed daily rainfall station key.
     #[must_use]
-    pub fn hko_rainfall(place: &str) -> Self {
-        Self::new(format!("HKO:{place}:RAIN"))
+    pub fn hko_daily_rainfall(station: &str) -> Self {
+        Self::new(format!("HKO:{station}:DAILY_RAIN"))
     }
 
     /// Canonical HKO daily maximum/minimum temperature series.
@@ -556,6 +571,12 @@ impl DomainInstrumentKey {
         Self::new(format!("NCEI:{region}:TORNADO"))
     }
 
+    /// Canonical NCEI national tornado time-series key.
+    #[must_use]
+    pub fn ncei_tornado_time_series() -> Self {
+        Self::new("NCEI_TORNADO_TS:united_states:TORNADO")
+    }
+
     /// Canonical NHC current-advisory storm key.
     #[must_use]
     pub fn nhc_advisory(basin: &str, storm: &str) -> Self {
@@ -574,10 +595,22 @@ impl DomainInstrumentKey {
         Self::new("GISTEMP:LOTI")
     }
 
-    /// Canonical NSIDC Sea Ice Index hemisphere extent key.
+    /// Canonical NASA GISTEMP v4 annual unsmoothed LOTI key.
     #[must_use]
-    pub fn nsidc_sea_ice_extent(hemisphere: &str) -> Self {
-        Self::new(format!("NSIDC:{hemisphere}:EXTENT"))
+    pub fn nasa_gistemp_loti_annual() -> Self {
+        Self::new("GISTEMP:LOTI:ANNUAL")
+    }
+
+    /// Canonical NSIDC Sea Ice Index daily hemisphere extent key.
+    #[must_use]
+    pub fn nsidc_daily_extent(hemisphere: &str) -> Self {
+        Self::new(format!("NSIDC:{hemisphere}:DAILY_EXTENT"))
+    }
+
+    /// Canonical NSIDC Sea Ice Index monthly hemisphere extent key.
+    #[must_use]
+    pub fn nsidc_monthly_extent(hemisphere: &str) -> Self {
+        Self::new(format!("NSIDC:{hemisphere}:MONTHLY_EXTENT"))
     }
 
     /// Canonical NWS station wind-speed key.
@@ -609,11 +642,13 @@ impl DomainInstrumentKey {
             "CHAINLINK_DATA_STREAMS" => Some(DomainSourceId::chainlink_data_streams()),
             "AVIATION_WEATHER" => Some(DomainSourceId::aviation_weather()),
             "GHCNH" => Some(DomainSourceId::ghcnh()),
+            "GHCND" => Some(DomainSourceId::ghcnd()),
             "GEFS" | "GEFS_BACKFILL" => Some(DomainSourceId::gefs()),
             "HKO" => Some(DomainSourceId::hko_open_data()),
             "AIRNOW" => Some(DomainSourceId::airnow()),
             "SPC" => Some(DomainSourceId::spc_storm_reports()),
             "NCEI" => Some(DomainSourceId::ncei_storm_events()),
+            "NCEI_TORNADO_TS" => Some(DomainSourceId::ncei_tornado_time_series()),
             "NHC" => Some(DomainSourceId::nhc_advisory()),
             "HURDAT2" => Some(DomainSourceId::nhc_hurdat2()),
             "GISTEMP" => Some(DomainSourceId::nasa_gistemp()),

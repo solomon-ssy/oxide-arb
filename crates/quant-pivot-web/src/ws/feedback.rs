@@ -3,6 +3,7 @@
 use std::{sync::Arc, time::Duration};
 
 use bytestring::ByteString;
+use prometheus::IntCounterVec;
 use quant_pivot_error::{
     QuantResult,
     feedback::FeedbackError,
@@ -31,6 +32,7 @@ pub struct FeedbackOutboxWorker {
     registry: SessionRegistry,
     lease_secs: u64,
     poll_interval: Duration,
+    recovery_total: IntCounterVec,
 }
 
 pub(super) struct ResearchFeedbackFrame(ByteString);
@@ -74,6 +76,7 @@ impl FeedbackOutboxWorker {
         outbox: Arc<dyn FeedbackOutboxRepository>,
         registry: SessionRegistry,
         config: ResearchJobsConfig,
+        recovery_total: IntCounterVec,
     ) -> QuantResult<Self> {
         let lease_secs = u64::try_from(config.lease_ttl_secs).map_err(|error| {
             FeedbackError::InvalidCoordinatorConfig {
@@ -93,6 +96,7 @@ impl FeedbackOutboxWorker {
             registry,
             lease_secs,
             poll_interval: Duration::from_secs(config.poll_secs),
+            recovery_total,
         })
     }
 
@@ -124,13 +128,19 @@ impl FeedbackOutboxWorker {
         for (index, entry) in entries.iter().enumerate() {
             let result = match self.dispatch(entry).await {
                 Ok(()) => {
-                    self.outbox
+                    let result = self
+                        .outbox
                         .publish_outbox(entry.revision, self.worker_id)
-                        .await
+                        .await;
+                    if result.is_ok() && entry.publish_attempts > 1 {
+                        self.recovery_total.with_label_values(&["recovered"]).inc();
+                    }
+                    result
                 }
                 Err(error) => Err(error),
             };
             if let Err(error) = result {
+                self.recovery_total.with_label_values(&["retry"]).inc();
                 let detail = format!("feedback websocket delivery failed: {error}")
                     .chars()
                     .take(500)
@@ -192,18 +202,20 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use prometheus::{GaugeVec, Histogram, HistogramOpts, IntCounter, IntGauge, IntGaugeVec, Opts};
+    use prometheus::{
+        GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    };
     use quant_pivot_error::storage::StorageError;
     use quant_pivot_models::{
         config::ResearchJobsConfig,
         domain::{
             quant::{
-                FeedbackOutboxEntry, FeedbackStageEventInfo, FeedbackStageEventInput,
-                NewFeedbackStageEvent,
+                FeedbackOutboxEntry, FeedbackOutboxSource, FeedbackStageEventInfo,
+                FeedbackStageEventInput, NewFeedbackStageEvent,
             },
             ws::{SubscriptionKey, WsChannel},
         },
-        enums::quant::{FeedbackStage, FeedbackStageEventKind},
+        enums::quant::{FeedbackStage, FeedbackStageEventKind, FeedbackTriggerFamily},
         types::{FeedbackCycleId, ResearchProfileId, UserId, WorkerId},
     };
     use quant_pivot_repository::traits::FeedbackOutboxRepository;
@@ -308,6 +320,7 @@ mod tests {
             event_sequence: 1,
             stage: FeedbackStage::Trigger,
             event_kind: FeedbackStageEventKind::Triggered,
+            trigger_family: Some(FeedbackTriggerFamily::Scheduled),
             research_job_id: None,
             actor: Some("scheduler".to_owned()),
             reason_code: Some("scheduled_cadence".to_owned()),
@@ -325,7 +338,9 @@ mod tests {
             revision,
             publish_attempts: 1,
             profile_id: ResearchProfileId::new(profile_id),
-            event: from_value::<FeedbackStageEventInfo>(value).expect("decode stage event info"),
+            source: FeedbackOutboxSource::Stage(
+                from_value::<FeedbackStageEventInfo>(value).expect("decode stage event info"),
+            ),
         }
     }
 
@@ -372,11 +387,22 @@ mod tests {
         (registry, hub, shutdown)
     }
 
+    fn recovery_metric() -> IntCounterVec {
+        let id = METRIC_ID.fetch_add(1, Ordering::Relaxed);
+        IntCounterVec::new(
+            Opts::new(format!("feedback_ws_recovery_{id}"), "test"),
+            &["outcome"],
+        )
+        .expect("recovery metric")
+    }
+
     #[tokio::test]
     async fn worker_publishes_durable_revision() {
-        let entry = outbox_entry(7, "crypto_price_15m");
+        let mut entry = outbox_entry(7, "crypto_price_15m");
+        entry.publish_attempts = 2;
         let outbox = Arc::new(FakeOutbox::new(vec![entry]));
         let (registry, hub, shutdown) = test_registry();
+        let recovery = recovery_metric();
         let hub_task = tokio::spawn(hub.run(shutdown.clone()));
         let (outbound, mut receiver) = mpsc::channel(8);
         let session_id = registry
@@ -401,6 +427,7 @@ mod tests {
             Arc::clone(&outbox) as Arc<dyn FeedbackOutboxRepository>,
             registry.clone(),
             ResearchJobsConfig::default(),
+            recovery.clone(),
         )
         .expect("build feedback outbox worker")
         .run_once()
@@ -422,6 +449,7 @@ mod tests {
             [7]
         );
         assert!(outbox.failed.lock().expect("failed lock").is_empty());
+        assert_eq!(recovery.with_label_values(&["recovered"]).get(), 1);
         shutdown.cancel();
         hub_task.await.expect("hub task");
     }
@@ -430,12 +458,14 @@ mod tests {
     async fn invalid_payload_nacks_claim() {
         let outbox = Arc::new(FakeOutbox::new(vec![outbox_entry(9, "")]));
         let (registry, hub, shutdown) = test_registry();
+        let recovery = recovery_metric();
         let hub_task = tokio::spawn(hub.run(shutdown.clone()));
         assert!(
             FeedbackOutboxWorker::try_new(
                 Arc::clone(&outbox) as Arc<dyn FeedbackOutboxRepository>,
                 registry.clone(),
                 ResearchJobsConfig::default(),
+                recovery.clone(),
             )
             .expect("build feedback outbox worker")
             .run_once()
@@ -444,6 +474,7 @@ mod tests {
         );
         assert!(outbox.published.lock().expect("published lock").is_empty());
         assert_eq!(outbox.failed.lock().expect("failed lock").as_slice(), [9]);
+        assert_eq!(recovery.with_label_values(&["retry"]).get(), 1);
         shutdown.cancel();
         hub_task.await.expect("hub task");
     }

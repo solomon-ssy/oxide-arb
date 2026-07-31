@@ -38,7 +38,7 @@ use quant_pivot_models::{
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource, MarketCategory},
         model::ModelFamily,
-        quant::{ModelRunKind, ModelWeightSource, OutcomeSide, PublicationStatus},
+        quant::{ModelRunKind, ModelWeightSource, OutcomeSide},
     },
     runtime_config::BuyModelRoute,
     types::{
@@ -47,9 +47,7 @@ use quant_pivot_models::{
         shadow::ShadowComparison,
     },
 };
-use quant_pivot_repository::traits::{
-    ModelRegistryRepository, ModelRunRepository, ShadowComparisonRepository,
-};
+use quant_pivot_repository::traits::{ModelRunRepository, ShadowComparisonRepository};
 use quant_pivot_research::{
     factors::{FrozenReferenceQuantiles, MarketFactorOutcome},
     features::FeatureVector,
@@ -249,8 +247,6 @@ pub(crate) struct AlignedFeatureCrossSection {
 pub struct ModelRunnerDeps {
     /// Model-run ledger (create / finalize live + shadow runs).
     pub model_run_repo: Arc<dyn ModelRunRepository>,
-    /// Model registry (resolve active / shadow versions).
-    pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     /// Shadow-comparison ledger (signal-layer divergence persistence).
     pub shadow_comparison_repo: Arc<dyn ShadowComparisonRepository>,
     /// Sole atomic owner of validated active/shadow/category generations.
@@ -268,7 +264,6 @@ pub struct ModelRunnerDeps {
 /// Online inference orchestrator.
 pub struct ModelRunner {
     model_run_repo: Arc<dyn ModelRunRepository>,
-    model_registry_repo: Arc<dyn ModelRegistryRepository>,
     shadow_comparison_repo: Arc<dyn ShadowComparisonRepository>,
     serving_generations: Arc<ModelServingGenerationStore>,
     factor_pipeline: Arc<FactorPipelineService>,
@@ -285,7 +280,6 @@ impl ModelRunner {
     pub fn new(deps: ModelRunnerDeps) -> Self {
         Self {
             model_run_repo: deps.model_run_repo,
-            model_registry_repo: deps.model_registry_repo,
             shadow_comparison_repo: deps.shadow_comparison_repo,
             serving_generations: deps.serving_generations,
             factor_pipeline: deps.factor_pipeline,
@@ -307,9 +301,7 @@ impl ModelRunner {
         request
             .serving
             .ensure_policy(request.decision_policy_snapshot_id)?;
-        request
-            .serving
-            .validate_active(request.boundary.decision_at())?;
+        request.serving.validate_active()?;
         ensure_route_membership(request.serving.route(), request.selection)?;
         let run_version_id = request.serving.active_model_version_id();
         let run_serving = request.serving.active_runtime();
@@ -391,7 +383,7 @@ impl ModelRunner {
             .serving_generations
             .resolve_route(ModelServingGenerationRequest::from(request.policy))
             .await?;
-        serving.validate_active(request.decision_at)?;
+        serving.validate_active()?;
         let route = serving.route();
         let version = serving.active_version().clone();
         let model_requirements = serving.model_requirements();
@@ -479,10 +471,7 @@ impl ModelRunner {
     ) -> Option<ShadowRunOutcome> {
         let (shadow_version, loaded) = request.serving.shadow()?;
         let shadow_version_id = shadow_version.model_version_id;
-        if let Err(error) = request
-            .serving
-            .validate_shadow(shadow_version, request.boundary.decision_at())
-        {
+        if let Err(error) = ModelServingRouteSnapshot::validate_shadow(shadow_version) {
             return Some(
                 finalize_shadow_failure(
                     &self.model_run_repo,
@@ -619,7 +608,6 @@ impl ModelRunner {
             &output.candidates,
         )
         .await;
-        self.maybe_promote_shadow_status(shadow_version_id).await;
 
         Ok(ShadowRunOutcome {
             model_run_id: Some(*model_run_id),
@@ -848,32 +836,6 @@ impl ModelRunner {
         let row = new_shadow_comparison(&comparison);
         if let Err(error) = self.shadow_comparison_repo.create(row).await {
             tracing::warn!(%error, "failed to persist shadow comparison");
-        }
-    }
-
-    /// Promote a candidate to `Shadow` after the first successful shadow inference
-    /// round (best-effort; idempotent when already `Shadow`).
-    async fn maybe_promote_shadow_status(&self, shadow_version_id: &ModelVersionId) {
-        let Ok(Some(version)) = self
-            .model_registry_repo
-            .find_model_version(shadow_version_id)
-            .await
-        else {
-            return;
-        };
-        if version.publication_status != PublicationStatus::Candidate {
-            return;
-        }
-        if let Err(error) = self
-            .model_registry_repo
-            .promote_model_to_shadow(shadow_version_id)
-            .await
-        {
-            tracing::warn!(
-                %error,
-                %shadow_version_id,
-                "failed to promote shadow model to Shadow status"
-            );
         }
     }
 
@@ -1339,21 +1301,14 @@ fn input_hash(
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
-    use chrono::{DateTime, Duration, Utc};
+    use chrono::Utc;
     use quant_pivot_models::{
-        domain::{data_plane::DecisionClock, quant::ModelVersionInfo},
-        enums::{
-            common::MarketCategory,
-            model::ModelFamily,
-            quant::{DataQualityStatus, PublicationStatus},
-        },
+        domain::data_plane::DecisionClock,
+        enums::{common::MarketCategory, model::ModelFamily, quant::DataQualityStatus},
         runtime_config::BuyModelRoute,
         types::{
             ContentHash, EventId, FeatureVectorId, MarketId, ModelRunId, ModelVersionId,
             SchemaVersion, TokenId,
-            model_quality::{
-                GateIntent, GateSubject, QUALITY_GATE_REPORT_FORMAT_VERSION, QualityGateReport,
-            },
         },
     };
     use quant_pivot_research::{
@@ -1363,38 +1318,6 @@ mod tests {
     };
 
     use super::{AlignedFeatureCrossSection, ensure_route_membership, project_model_input_rows};
-    use crate::{
-        governance::quality_gate_staleness_ok,
-        service::model_serving_test_support::{model_artifact, model_version},
-    };
-
-    fn gate_report(
-        model_version_id: ModelVersionId,
-        evaluated_at: DateTime<Utc>,
-    ) -> QualityGateReport {
-        QualityGateReport {
-            format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
-            subject: GateSubject::ModelVersion(model_version_id),
-            intent: GateIntent::Candidate,
-            evaluated_at,
-            gates: Vec::new(),
-            hard_failures: Vec::new(),
-            soft_warnings: Vec::new(),
-            passed: true,
-            report_hash: ContentHash::parse(&format!("blake3:{}", "1".repeat(64))).expect("hash"),
-        }
-    }
-
-    fn version(
-        status: PublicationStatus,
-        gate_evaluated_at: Option<DateTime<Utc>>,
-    ) -> ModelVersionInfo {
-        let artifact = model_artifact(None);
-        let quality_gate_report = gate_evaluated_at
-            .map(|evaluated_at| gate_report(artifact.header().model_version_id(), evaluated_at));
-        model_version(&artifact, status, quality_gate_report)
-    }
-
     #[test]
     fn route_authority_rejects_mismatch() {
         let selected_market = |category| SelectedMarket {
@@ -1498,66 +1421,6 @@ mod tests {
         assert_ne!(
             first_row.audit_fingerprint, second_row.audit_fingerprint,
             "feature-vector identity must participate in the audit fingerprint"
-        );
-    }
-
-    #[test]
-    fn fresh_gate_report_candidate() {
-        let now = Utc::now();
-        assert!(
-            quality_gate_staleness_ok(
-                &version(PublicationStatus::Candidate, Some(now)),
-                86_400,
-                now,
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn stale_quality_denied_candidate() {
-        let now = Utc::now();
-        let stale = now - Duration::seconds(90_000);
-        assert!(
-            quality_gate_staleness_ok(
-                &version(PublicationStatus::Candidate, Some(stale)),
-                86_400,
-                now,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn published_active_exempt_deny() {
-        let now = Utc::now();
-        let stale = now - Duration::seconds(90_000);
-        assert!(
-            quality_gate_staleness_ok(
-                &version(PublicationStatus::Published, Some(stale)),
-                86_400,
-                now,
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn zero_budget_disables_check() {
-        let now = Utc::now();
-        let stale = now - Duration::days(365);
-        assert!(
-            quality_gate_staleness_ok(&version(PublicationStatus::Candidate, Some(stale)), 0, now,)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn absent_report_not_staleness() {
-        let now = Utc::now();
-        assert!(
-            quality_gate_staleness_ok(&version(PublicationStatus::Candidate, None), 86_400, now,)
-                .is_ok()
         );
     }
 }

@@ -9,8 +9,8 @@ use quant_pivot_models::{
         },
         quant::{
             DriftReportInput, FeedbackCohortWindow, FeedbackCycleKey, FeedbackCycleKeyInput,
-            FeedbackEvaluationUseInput, FeedbackStageEventInput, NewDriftReport, NewFeedbackCycle,
-            NewFeedbackEvaluationUse, NewFeedbackStageEvent,
+            FeedbackEvaluationUseInput, FeedbackStageEventInput, ModelVersionInfo, NewDriftReport,
+            NewFeedbackCycle, NewFeedbackEvaluationUse, NewFeedbackStageEvent, TrainingDatasetInfo,
         },
     },
     enums::{
@@ -68,7 +68,10 @@ pub struct FeedbackSchemaFixture {
     pub cohort_manifest_hash: ContentHash,
     pub evaluation_window_start: DateTime<Utc>,
     pub evaluation_window_end: DateTime<Utc>,
+    pub second_evaluation_window_start: DateTime<Utc>,
+    pub second_evaluation_window_end: DateTime<Utc>,
     pub label_cutoff: DateTime<Utc>,
+    pub second_label_cutoff: DateTime<Utc>,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -78,11 +81,17 @@ impl FeedbackSchemaFixture {
         feedback_cycle_id: FeedbackCycleId,
         actor: &str,
     ) -> NewFeedbackStageEvent {
+        let trigger_family = if feedback_cycle_id == self.cycle_id {
+            FeedbackTriggerFamily::Scheduled
+        } else {
+            FeedbackTriggerFamily::Manual
+        };
         NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
             feedback_cycle_id,
             event_sequence: 1,
             stage: FeedbackStage::Trigger,
             event_kind: FeedbackStageEventKind::Triggered,
+            trigger_family: Some(trigger_family),
             research_job_id: None,
             actor: Some(actor.to_owned()),
             reason_code: Some("schema_fixture".to_owned()),
@@ -132,6 +141,20 @@ impl FeedbackSchemaFixture {
         } else {
             self.second_comparison_contract_hash
         };
+        let label_cutoff = if feedback_cycle_id == self.cycle_id {
+            self.label_cutoff
+        } else {
+            self.second_label_cutoff
+        };
+        let (evaluation_window_start, evaluation_window_end) = if feedback_cycle_id == self.cycle_id
+        {
+            (self.evaluation_window_start, self.evaluation_window_end)
+        } else {
+            (
+                self.second_evaluation_window_start,
+                self.second_evaluation_window_end,
+            )
+        };
         NewFeedbackEvaluationUse::try_seal(FeedbackEvaluationUseInput {
             feedback_cycle_id,
             profile_ref: self.profile_ref.clone(),
@@ -139,9 +162,9 @@ impl FeedbackSchemaFixture {
             evaluation_dataset_hash,
             evaluation_artifact_bytes_hash: self.evaluation_artifact_bytes_hash,
             cohort_manifest_hash: self.cohort_manifest_hash,
-            evaluation_window_start: self.evaluation_window_start,
-            evaluation_window_end: self.evaluation_window_end,
-            label_cutoff: self.label_cutoff,
+            evaluation_window_start,
+            evaluation_window_end,
+            label_cutoff,
             champion_model_version_id: self.champion_model_version_id,
             champion_serving_contract_hash: self.champion_serving_contract_hash,
             candidate_family_hash,
@@ -159,12 +182,12 @@ impl FeedbackSchemaFixture {
             db.execute_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "INSERT INTO quant_feedback_cycle (
-                    feedback_cycle_id, idempotency_hash, idempotency_key, trigger_family,
+                    feedback_cycle_id, idempotency_hash, idempotency_key,
                     profile_ref, research_profile_artifact_id, profile_hash, feedback_policy_hash,
                     label_cutoff, capability_registry_hashes, champion_model_version_id,
                     champion_serving_contract_hash, candidate_family, candidate_family_hash
                  )
-                 SELECT $1, idempotency_hash, idempotency_key, trigger_family,
+                 SELECT $1, idempotency_hash, idempotency_key,
                         profile_ref, research_profile_artifact_id, profile_hash,
                         feedback_policy_hash, label_cutoff, capability_registry_hashes,
                         champion_model_version_id, champion_serving_contract_hash, candidate_family,
@@ -512,6 +535,7 @@ struct FeedbackCyclePairSeed {
     profile_ref: ResearchProfileRef,
     feedback_policy_hash: ContentHash,
     label_cutoff: DateTime<Utc>,
+    second_label_cutoff: DateTime<Utc>,
     capability_registry_hashes: CapabilityRegistryHashes,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
@@ -527,13 +551,12 @@ impl FeedbackCyclePairSeed {
         let second_family_hash = second_family.candidate_family_hash();
         let first_comparison_hash = first_family.comparison_contract_hash();
         let second_comparison_hash = second_family.comparison_contract_hash();
-        let seal = |trigger_family, candidate_family| {
+        let seal = |label_cutoff, candidate_family| {
             NewFeedbackCycle::try_seal(
                 FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
-                    trigger_family,
                     profile_ref: self.profile_ref.clone(),
                     feedback_policy_hash: self.feedback_policy_hash,
-                    label_cutoff: self.label_cutoff,
+                    label_cutoff,
                     capability_registry_hashes: self.capability_registry_hashes.clone(),
                     champion_model_version_id: self.champion_model_version_id,
                     champion_serving_contract_hash: self.champion_serving_contract_hash,
@@ -544,8 +567,8 @@ impl FeedbackCyclePairSeed {
             .expect("seal feedback cycle")
         };
         FeedbackCyclePair {
-            first: seal(FeedbackTriggerFamily::Scheduled, first_family),
-            second: seal(FeedbackTriggerFamily::Manual, second_family),
+            first: seal(self.label_cutoff, first_family),
+            second: seal(self.second_label_cutoff, second_family),
             first_family_hash,
             second_family_hash,
             first_comparison_hash,
@@ -554,11 +577,58 @@ impl FeedbackCyclePairSeed {
     }
 }
 
-pub async fn prepare_profile_fixture(
+struct FeedbackChampionFixture {
+    model_spec_id: ModelSpecId,
+    model_version: ModelVersionInfo,
+    training_dataset: TrainingDatasetInfo,
+}
+
+struct FeedbackWindows {
+    cadence_cutoff: DateTime<Utc>,
+    evaluation_window_start: DateTime<Utc>,
+    evaluation_window_end: DateTime<Utc>,
+    second_evaluation_window_start: DateTime<Utc>,
+    second_evaluation_window_end: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
+}
+
+impl FeedbackWindows {
+    fn resolve(
+        profile_ref: &ResearchProfileRef,
+        prediction_horizon_secs: u64,
+        now: DateTime<Utc>,
+    ) -> Self {
+        let profile = profile_ref
+            .resolve_builtin_research_profile()
+            .expect("resolve feedback-schema cadence profile");
+        let cadence_secs = i64::try_from(profile.spec.feedback_policy.feedback_cadence_secs)
+            .expect("feedback cadence fits chrono duration");
+        let feedback_cadence = Duration::seconds(cadence_secs);
+        let cadence_cutoff =
+            DateTime::from_timestamp(now.timestamp().div_euclid(cadence_secs) * cadence_secs, 0)
+                .expect("feedback cadence cutoff fits chrono");
+        let horizon = Duration::seconds(
+            i64::try_from(prediction_horizon_secs)
+                .expect("prediction horizon fits chrono duration"),
+        );
+        let evaluation_window_end = cadence_cutoff - horizon;
+        let evaluation_window_start = evaluation_window_end - Duration::hours(1);
+        Self {
+            cadence_cutoff,
+            evaluation_window_start,
+            evaluation_window_end,
+            second_evaluation_window_start: evaluation_window_start - feedback_cadence,
+            second_evaluation_window_end: evaluation_window_end - feedback_cadence,
+            observed_at: now - Duration::milliseconds(1),
+        }
+    }
+}
+
+async fn prepare_champion_fixture(
     db: &DatabaseConnection,
     expected_profile_ref: ResearchProfileRef,
     prediction_horizon_secs: i64,
-) -> FeedbackSchemaFixture {
+) -> FeedbackChampionFixture {
     bootstrap_default_policy_bundle(db, "pg-feedback-schema", "feedback boot-schema contract")
         .await;
     let registry = PgModelRegistryRepository::new(db.clone());
@@ -603,6 +673,42 @@ pub async fn prepare_profile_fixture(
         .await
         .expect("load feedback-schema Training Dataset")
         .expect("feedback-schema Training Dataset exists");
+    FeedbackChampionFixture {
+        model_spec_id,
+        model_version,
+        training_dataset,
+    }
+}
+
+fn evaluation_request(
+    dataset: &TrainingDatasetInfo,
+    profile_ref: &ResearchProfileRef,
+) -> FeedbackDatasetBuildRequest {
+    FeedbackDatasetBuildRequest {
+        training_dataset_id: dataset.training_dataset_id,
+        model_spec_id: dataset.model_spec_id,
+        model_spec_definition_hash: dataset.model_spec_definition_hash,
+        source_lineage: dataset.source_lineage.clone(),
+        window: FeedbackCohortWindow::try_new(
+            profile_ref.clone(),
+            dataset.window_start,
+            dataset.window_end,
+        )
+        .expect("freeze Evaluation Dataset window"),
+        purpose: DatasetPurpose::Evaluation,
+    }
+}
+
+pub async fn prepare_profile_fixture(
+    db: &DatabaseConnection,
+    expected_profile_ref: ResearchProfileRef,
+    prediction_horizon_secs: i64,
+) -> FeedbackSchemaFixture {
+    let FeedbackChampionFixture {
+        model_spec_id,
+        model_version,
+        training_dataset,
+    } = prepare_champion_fixture(db, expected_profile_ref, prediction_horizon_secs).await;
     let training = training_dataset
         .materialization()
         .expect("feedback-schema Training Dataset materialization");
@@ -611,9 +717,18 @@ pub async fn prepare_profile_fixture(
         .expect("verify feedback-schema serving contract")
         .bindings();
     let now = db_clock(db).await;
-    let evaluation_window_start = now - Duration::hours(4);
-    let evaluation_window_end = now - Duration::hours(3);
-    let observed_at = now - Duration::hours(1);
+    let FeedbackWindows {
+        cadence_cutoff,
+        evaluation_window_start,
+        evaluation_window_end,
+        second_evaluation_window_start,
+        second_evaluation_window_end,
+        observed_at,
+    } = FeedbackWindows::resolve(
+        &model_version.profile_ref,
+        bindings.model.prediction_horizon_secs,
+        now,
+    );
     let evaluation_dataset = ModelDatasetLedgerFixture::persist(
         db,
         &ModelDatasetLedgerFixture::local_store(),
@@ -639,6 +754,31 @@ pub async fn prepare_profile_fixture(
     )
     .await
     .expect("persist feedback-schema Evaluation Dataset");
+    let second_evaluation_dataset = ModelDatasetLedgerFixture::persist(
+        db,
+        &ModelDatasetLedgerFixture::local_store(),
+        ModelDatasetLedgerSeed {
+            scope: "pg-feedback-schema:previous-evaluation".to_owned(),
+            model_spec_id,
+            model_family: model_version.model_family,
+            model_spec_definition_hash: model_version.model_spec_definition_hash,
+            factor_serving_plane: training.factor_serving_plane.clone(),
+            feature_schema_version: training.manifest.feature_schema_version,
+            feature_schema_hash: *training.feature_schema_hash,
+            decision_policy_snapshot_id: bindings.policy_snapshot.decision_policy_snapshot_id,
+            profile_ref: model_version.profile_ref.clone(),
+            prediction_horizon_secs: bindings.model.prediction_horizon_secs,
+            purpose: DatasetPurpose::Evaluation,
+            window_start: second_evaluation_window_start,
+            window_end: second_evaluation_window_end,
+            research_program_hash: training_dataset.source_lineage.research_program_hash,
+            sample_count: 10,
+            decision_interval_secs: 1,
+            trade_policy: bindings.trade_policy.clone(),
+        },
+    )
+    .await
+    .expect("persist previous feedback-schema Evaluation Dataset");
     let evaluation = evaluation_dataset
         .materialization()
         .expect("feedback-schema Evaluation Dataset materialization");
@@ -649,32 +789,25 @@ pub async fn prepare_profile_fixture(
     let cohort_manifest_hash =
         CanonicalDigest::content_hash_json(cohort_manifest).expect("cohort manifest hash");
     let label_cutoff = evaluation_dataset.source_lineage.pit_cutoff;
+    assert_eq!(label_cutoff, cadence_cutoff);
+    let second_label_cutoff = second_evaluation_dataset.source_lineage.pit_cutoff;
     let (feedback_policy_hash, comparison_contract) = feedback_method(&model_version.profile_ref);
     let capability_registry_hashes = evaluation_dataset
         .source_lineage
         .capability_registry_hashes
         .clone();
-    let shared_evaluation = FeedbackDatasetBuildRequest {
-        training_dataset_id: evaluation_dataset.training_dataset_id,
-        model_spec_id: evaluation_dataset.model_spec_id,
-        model_spec_definition_hash: evaluation_dataset.model_spec_definition_hash,
-        source_lineage: evaluation_dataset.source_lineage.clone(),
-        window: FeedbackCohortWindow::try_new(
-            model_version.profile_ref.clone(),
-            evaluation_window_start,
-            evaluation_window_end,
-        )
-        .expect("freeze Evaluation Dataset window"),
-        purpose: DatasetPurpose::Evaluation,
-    };
-    let candidate_family =
-        build_candidate_family(shared_evaluation.clone(), comparison_contract.clone());
-    let second_candidate_family = build_candidate_family(shared_evaluation, comparison_contract);
+    let shared_evaluation = evaluation_request(&evaluation_dataset, &model_version.profile_ref);
+    let second_shared_evaluation =
+        evaluation_request(&second_evaluation_dataset, &model_version.profile_ref);
+    let candidate_family = build_candidate_family(shared_evaluation, comparison_contract.clone());
+    let second_candidate_family =
+        build_candidate_family(second_shared_evaluation, comparison_contract);
     let retained_candidate_family = candidate_family.clone();
     let pair = FeedbackCyclePairSeed {
         profile_ref: model_version.profile_ref.clone(),
         feedback_policy_hash,
         label_cutoff,
+        second_label_cutoff,
         capability_registry_hashes,
         champion_model_version_id: model_version.model_version_id,
         champion_serving_contract_hash: model_version.serving_contract_hash,
@@ -704,7 +837,10 @@ pub async fn prepare_profile_fixture(
         cohort_manifest_hash,
         evaluation_window_start,
         evaluation_window_end,
+        second_evaluation_window_start,
+        second_evaluation_window_end,
         label_cutoff,
+        second_label_cutoff,
         observed_at,
     }
 }

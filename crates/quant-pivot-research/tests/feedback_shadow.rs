@@ -11,13 +11,13 @@ use quant_pivot_models::{
     },
     types::{
         ArtifactUri, ContentHash, DecisionPolicySnapshotId, FeedbackComparisonArtifactId,
-        FeedbackCycleId, FeedbackShadowReplayArtifactId, ModelVersionId, PolicyBundleGeneration,
+        FeedbackCycleId, FeedbackShadowArtifactId, ModelVersionId, PolicyBundleGeneration,
         Probability, ResearchJobId, builtin_research_profiles,
     },
 };
 use quant_pivot_research::feedback_shadow::{
-    FeedbackShadowEvaluator, FeedbackShadowOutcome, FeedbackShadowReplayArtifact,
-    FeedbackShadowReplayArtifactInput, FeedbackShadowReplayCodec, FeedbackShadowUnstableReason,
+    FeedbackShadowArtifact, FeedbackShadowArtifactInput, FeedbackShadowCodec,
+    FeedbackShadowEvaluator, FeedbackShadowOutcome, FeedbackShadowUnstableReason,
 };
 use rust_decimal_macros::dec;
 use serde_json::Value;
@@ -69,7 +69,7 @@ fn params(contract: FeedbackShadowContract) -> FeedbackShadowJobParams {
     FeedbackShadowJobParams {
         feedback_cycle_id,
         cycle_idempotency_hash: cycle_hash,
-        artifact_id: FeedbackShadowReplayArtifactId::from_cycle_id(feedback_cycle_id),
+        artifact_id: FeedbackShadowArtifactId::from_cycle_id(feedback_cycle_id),
         previous: FeedbackComparisonArtifactRef {
             feedback_cycle_id,
             job_id: ResearchJobId::from_v7(),
@@ -97,9 +97,9 @@ fn f10_surface_is_linked() {
     assert!(size_of::<FeedbackShadowContract>() > 0);
     assert!(size_of::<FeedbackShadowJobParams>() > 0);
     assert!(size_of::<FeedbackShadowOutcome>() > 0);
-    assert!(size_of::<FeedbackShadowReplayArtifact>() > 0);
+    assert!(size_of::<FeedbackShadowArtifact>() > 0);
     assert_ne!(
-        FeedbackShadowReplayCodec::schema_hash().expect("schema hash"),
+        FeedbackShadowCodec::schema_hash().expect("schema hash"),
         hash(0)
     );
     assert!(size_of::<&ShadowExecutionPort>() > 0);
@@ -217,7 +217,7 @@ fn artifact_restart_detects_tamper() {
         },
     )
     .expect("stable outcome");
-    let artifact = FeedbackShadowReplayArtifact::try_seal(FeedbackShadowReplayArtifactInput {
+    let artifact = FeedbackShadowArtifact::try_seal(FeedbackShadowArtifactInput {
         artifact_id: params.artifact_id,
         feedback_cycle_id: params.feedback_cycle_id,
         job_input_hash: params.input_hash().expect("input hash"),
@@ -229,14 +229,14 @@ fn artifact_restart_detects_tamper() {
     })
     .expect("artifact");
     artifact.validate_for(&params).expect("exact params");
-    let bytes = FeedbackShadowReplayCodec::encode(&artifact).expect("encode");
-    let restored = FeedbackShadowReplayCodec::decode(&bytes).expect("restart decode");
+    let bytes = FeedbackShadowCodec::encode(&artifact).expect("encode");
+    let restored = FeedbackShadowCodec::decode(&bytes).expect("restart decode");
     assert_eq!(restored, artifact);
 
     let mut tampered: Value = serde_json::from_slice(&bytes).expect("JSON");
     tampered["outcome"]["evidence"]["mean_topn_overlap"] = serde_json::json!("0.20");
     let tampered = serde_json::to_vec(&tampered).expect("tampered bytes");
-    assert!(FeedbackShadowReplayCodec::decode(&tampered).is_err());
+    assert!(FeedbackShadowCodec::decode(&tampered).is_err());
 
     let short = FeedbackShadowEvaluator::evaluate(
         contract,

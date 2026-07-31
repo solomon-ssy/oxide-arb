@@ -22,8 +22,8 @@ use quant_pivot_models::{
             FactorDefinitionDetailQuery, FactorDefinitionDetailView, FactorDefinitionListQuery,
             FactorDefinitionView, FactorServingUsageView, FeedbackEvaluationUseView,
             ModelDetailQuery, ModelDetailView, ModelPromotionLineageView, ModelPromotionRole,
-            ModelPublishedCatalogQuery, ModelSpecListQuery, ModelVersionListQuery,
-            PublishedModelOptionView, TrainedModelView, TrainingDatasetListQuery,
+            ModelRouteCandidateQuery, ModelRouteCandidateView, ModelSpecListQuery,
+            ModelVersionListQuery, TrainedModelView, TrainingDatasetListQuery,
         },
         pagination::{PageRequest, Paginated},
         ports::ResearchCatalogPort,
@@ -204,8 +204,6 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
                 actor_username: audit.actor_username,
                 actor_role: audit.actor_role,
                 reason: audit.reason,
-                before_status: audit.before_status,
-                after_status: audit.after_status,
                 record: *record,
                 created_at: audit.created_at,
             });
@@ -231,17 +229,17 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
             .map_err(QuantError::from)
     }
 
-    async fn list_published_model_options(
+    async fn list_model_route_candidates(
         &self,
-        query: ModelPublishedCatalogQuery,
-    ) -> QuantResult<Vec<PublishedModelOptionView>> {
+        query: ModelRouteCandidateQuery,
+    ) -> QuantResult<Vec<ModelRouteCandidateView>> {
         self.models
-            .list_published_catalog(query.side, query.category)
+            .list_model_catalog(query.side, query.category)
             .await
             .map_err(QuantError::from)
             .map(|rows| {
                 rows.into_iter()
-                    .map(|row| PublishedModelOptionView {
+                    .map(|row| ModelRouteCandidateView {
                         model_version_id: row.model_version_id,
                         model_spec_id: row.model_spec_id,
                         spec_name: row.spec_name,
@@ -249,7 +247,6 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
                         artifact_hash: row.artifact_hash,
                         model_family: row.model_family,
                         category_scope: row.category_scope,
-                        published_at: row.published_at,
                     })
                     .collect()
             })
@@ -347,7 +344,6 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
                 artifact_hash: model.artifact_hash,
                 serving_contract_version,
                 serving_contract_hash: model.serving_contract_hash,
-                publication_status: model.publication_status,
                 created_at: model.created_at,
             });
         }

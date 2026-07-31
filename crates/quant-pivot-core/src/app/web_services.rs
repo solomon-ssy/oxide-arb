@@ -18,14 +18,17 @@ use quant_pivot_repository::{
     traits::{
         AccountSnapshotRepository, BasisAlertRepository, CalibrationArtifactRepository,
         CatalogLedgerRepository, DomainSourceCursorRepository, DomainSourceExpectationRepository,
-        EntryConditionRepository, EquitySnapshotRepository, ExecutionOrderRepository,
-        FeatureParityEventRepository, FeatureRepository, FeedbackCohortRepository,
-        FeedbackCycleRepository, FeedbackOutboxRepository, MenuRepository, OperationLogRepository,
-        OrderIntentRepository, PolicyRepository, PositionRepository, PromotionPermitRepository,
-        RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-        ReportRunRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
-        ServingEvidenceRepository, TradePolicyRepository, TradeTapeBlockCursorRepository,
-        UserRepository, UserRoleRepository, quant::settlement_redeem::SettlementRedeemRepository,
+        EntryConditionRepository, EquitySnapshotRepository, ExecutionAttemptOutcomeRepository,
+        ExecutionOrderRepository, FeatureParityEventRepository, FeatureRepository,
+        FeedbackCohortRepository, FeedbackCycleRepository, FeedbackOutboxRepository,
+        FeedbackSchedulerRepository, MenuRepository, OperationLogRepository, OrderIntentRepository,
+        PolicyRepository, PositionRepository, PromotionPermitRepository,
+        RecommendationExecutionRollupRepository, RecommendationReportRepository,
+        RecommendationRepository, ReconciliationRepository, ReportRunRepository,
+        ResolutionObservationRepository, RoleMenuRepository, RolePermissionRepository,
+        RoleRepository, ServingEvidenceRepository, TradePolicyRepository,
+        TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
+        quant::settlement_redeem::SettlementRedeemRepository,
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
@@ -51,7 +54,7 @@ use crate::{
             execution_read::CoreExecutionReadPort,
             execution_recovery::CoreExecutionRecoveryPort,
             feedback_mutation::{CoreFeedbackMutationDeps, CoreFeedbackMutationPort},
-            feedback_read::CoreFeedbackReadPort,
+            feedback_read::{CoreFeedbackReadDeps, CoreFeedbackReadPort},
             market_data::CoreMarketData,
             metrics_scrape::CoreMetricsScrape,
             model_training::CoreModelTrainingPort,
@@ -101,6 +104,7 @@ impl AppContext {
             Arc::clone(&self.infra.repos.feedback_cycle) as Arc<dyn FeedbackOutboxRepository>,
             ws_sessions.clone(),
             self.config.quant.research_jobs,
+            self.infra.metrics.feedback_ws_recovery_total.clone(),
         )?;
         let state = build_app_state(
             self,
@@ -220,22 +224,35 @@ async fn build_app_state(
         )),
         research_jobs,
         research_readiness: Arc::clone(&research_readiness) as Arc<dyn ResearchReadinessPort>,
-        feedback_read: Arc::new(CoreFeedbackReadPort::new(
-            Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
-            Arc::clone(&research_readiness) as Arc<dyn ResearchReadinessPort>,
-            Arc::clone(&ctx.research.artifact_store),
-        )) as Arc<dyn FeedbackReadPort>,
+        feedback_read: Arc::new(CoreFeedbackReadPort::new(CoreFeedbackReadDeps {
+            cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
+            scheduler: Arc::clone(&repos.feedback_scheduler)
+                as Arc<dyn FeedbackSchedulerRepository>,
+            readiness: Arc::clone(&research_readiness) as Arc<dyn ResearchReadinessPort>,
+            artifacts: Arc::clone(&ctx.research.artifact_store),
+            resolutions: Arc::clone(&repos.resolution_observation)
+                as Arc<dyn ResolutionObservationRepository>,
+            attempts: Arc::clone(&repos.execution_attempt_outcome)
+                as Arc<dyn ExecutionAttemptOutcomeRepository>,
+            rollups: Arc::clone(&repos.recommendation_execution_rollup)
+                as Arc<dyn RecommendationExecutionRollupRepository>,
+            decisions: Arc::clone(&ctx.research.feedback_decisions),
+        })) as Arc<dyn FeedbackReadPort>,
         feedback_outbox: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackOutboxRepository>,
         feedback_mutation: Arc::new(CoreFeedbackMutationPort::new(CoreFeedbackMutationDeps {
             cycles: Arc::clone(&repos.feedback_cycle) as Arc<dyn FeedbackCycleRepository>,
+            scheduler: Arc::clone(&repos.feedback_scheduler)
+                as Arc<dyn FeedbackSchedulerRepository>,
             permits: Arc::clone(&repos.promotion_permit) as Arc<dyn PromotionPermitRepository>,
             permit_service: Arc::clone(&ctx.governance.promotion_permits),
             promotion_preflight: Arc::clone(&ctx.research.promotion_preflight),
             serving_preimages: Arc::clone(&ctx.research.serving_preimages),
             serving_generations: Arc::clone(&ctx.research.serving_generations),
+            route_governance: Arc::clone(&ctx.research.model_route_governance),
             training_datasets: Arc::clone(&research_ports.training_datasets),
             feedback_wake,
             shutdown: ctx.shutdown.clone(),
+            metrics: Arc::clone(&ctx.infra.metrics),
         })) as Arc<dyn FeedbackMutationPort>,
         feature_integrity: (ctx).build_feature_integrity(),
         calibration_artifacts: Arc::clone(&ctx.research.calibration_artifact_fit),

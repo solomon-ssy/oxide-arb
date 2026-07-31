@@ -3,13 +3,13 @@
 //! UI surface for offline model training from a frozen training dataset:
 //!
 //! 1. Operator picks an integrity-gated `ready` [`TrainingDatasetId`].
-//! 2. `POST /research/models/train` — train, register a **Candidate** version,
+//! 2. `POST /research/models/train` — train and register an immutable version,
 //!    and return its [`TrainedModelView`].
 //! 3. `GET /research/models/{id}` — poll the registered version.
 //!
 //! The trainer produces a content-addressed artifact (`models/<hash>.json`) and
-//! a `quant_model_version` row in `Candidate` status; promotion to `Published`
-//! is governed separately.
+//! an append-only `quant_model_version` row. Serving role is derived only from
+//! an activated `ModelRouting` generation.
 
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
@@ -21,11 +21,10 @@ use crate::{
         pagination::{PageRequest, Paginated},
         quant::{ModelRoutePromotionRecord, ModelVersionInfo},
     },
-    enums::quant::PublicationStatus,
     types::{
-        AuditEventId, BacktestPathSetId, ContentHash, FeedbackCycleId, ModelGovernanceAuditId,
-        ModelRunId, ModelSpecId, ModelVersionId, PromotionPermitId, RoleCode,
-        TradePolicyArtifactId, TrainingDatasetId, model_lineage::ModelVersionDerivation,
+        AuditEventId, ContentHash, FeedbackCycleId, ModelGovernanceAuditId, ModelRunId,
+        ModelSpecId, ModelVersionId, PromotionPermitId, RoleCode, TradePolicyArtifactId,
+        TrainingDatasetId, model_lineage::ModelVersionDerivation,
         model_metrics::ModelVersionMetrics, model_serving::ModelServingContract,
         model_spec::ModelSpecThesis, model_training::ModelTrainingObjective,
     },
@@ -89,11 +88,6 @@ pub struct TrainedModelView {
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
     pub trade_policy_hash: Option<ContentHash>,
-    /// CPCV path set bound for publish quality gates (`None` until bound).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub publish_path_set_id: Option<BacktestPathSetId>,
-    /// Lifecycle status — a freshly trained version is `candidate`.
-    pub publication_status: String,
     /// Trainer metrics (in-sample + validation objective report).
     pub metrics: ModelVersionMetrics,
     /// Frozen training objective provenance used for this model version.
@@ -110,13 +104,12 @@ pub struct TrainedModelView {
 
 /// Paginated filter for the trained-model registry catalog.
 ///
-/// `from` / `to` bound `created_at`; `model_spec_id` scopes to one spec and
-/// `publication_status` narrows the governance lifecycle. The pagination window
-/// is the shared [`PageRequest`], flattened so the query string stays flat.
+/// `from` / `to` bound `created_at`; `model_spec_id` scopes to one spec. The
+/// pagination window is the shared [`PageRequest`], flattened so the query
+/// string stays flat.
 #[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct ModelVersionListQuery {
     pub model_spec_id: Option<ModelSpecId>,
-    pub publication_status: Option<PublicationStatus>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     #[normalize_page]
@@ -152,8 +145,6 @@ pub struct ModelPromotionLineageView {
     pub actor_username: String,
     pub actor_role: Option<RoleCode>,
     pub reason: String,
-    pub before_status: PublicationStatus,
-    pub after_status: PublicationStatus,
     pub record: ModelRoutePromotionRecord,
     pub created_at: DateTime<Utc>,
 }
@@ -183,8 +174,6 @@ impl From<ModelVersionInfo> for TrainedModelView {
             training_dataset_id: info.training_dataset_id,
             trade_policy_artifact_id: info.trade_policy_artifact_id,
             trade_policy_hash: info.trade_policy_hash,
-            publish_path_set_id: info.publish_path_set_id,
-            publication_status: info.publication_status.to_string(),
             metrics: info.metrics,
             training_objective: info.training_objective,
             created_at: info.created_at,

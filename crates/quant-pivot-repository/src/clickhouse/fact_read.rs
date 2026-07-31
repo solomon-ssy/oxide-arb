@@ -295,7 +295,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                      FROM quant_weather_observation_fact \
                      WHERE subject_key IN ? \
                      AND observed_at >= ? \
-                     AND observed_at < ? \
+                     AND observed_at <= ? \
+                     AND observed_at <= ? \
+                     AND (valid_from IS NULL OR valid_from <= ?) \
                      AND published_at <= fromUnixTimestamp64Milli(?) \
                      AND available_at <= fromUnixTimestamp64Milli(?)\
                  ) WHERE dedupe_rank = 1 \
@@ -304,6 +306,8 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .bind(stations)
             .bind(from_ms)
             .bind(to_ms)
+            .bind(decision_at_ms)
+            .bind(decision_at_ms)
             .bind(publish_cutoff_ms)
             .bind(decision_at_ms)
             .fetch_all::<WeatherObservationFactRow>()

@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::{
     domain::quant::{
-        RecommendationExecutionOutcomeContractError, RecommendationExecutionOutcomeInfo,
+        RecommendationExecutionRollupContractError, RecommendationExecutionRollupInfo,
         RecommendationInfo, RecommendationReportInfo, RecommendationResolutionOutcomeContractError,
         RecommendationResolutionOutcomeInfo,
     },
@@ -16,17 +16,16 @@ use crate::{
         common::MarketCategory,
         quant::{
             CohortCensorReason, CohortExclusionReason, FeedbackCohort, OutcomeSide,
-            QuantRuntimeMode, RecommendationExecutionNoFillReason,
-            RecommendationExecutionTerminalState, RecommendationReportStatus,
-            RecommendationResolutionKind, RecommendationStatus, ReportKind,
+            QuantRuntimeMode, RecommendationReportStatus, RecommendationResolutionKind,
+            RecommendationStatus, ReportKind,
         },
     },
     types::{
-        BookSnapshotRef, ContentHash, DecisionPolicySnapshotId, EventId, ExecutionOrderId,
-        FactorDefinitionId, FeatureVectorId, MarketContext, MarketId, MarketSelectionId,
-        ModelRunId, ModelVersionId, OrderIntentId, PayoutRatio, RecommendationFactorBreakdown,
-        RecommendationId, RecommendationIdentity, RecommendationReportId,
-        ReportDataQualitySnapshotId, ResearchProfileRef, Shares, TokenId,
+        BookSnapshotRef, ContentHash, DecisionPolicySnapshotId, EventId, FactorDefinitionId,
+        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
+        PayoutRatio, Probability, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationIdentity, RecommendationReportId, ReportDataQualitySnapshotId,
+        ResearchProfileRef, Shares, TokenId, Usd,
     },
 };
 
@@ -80,6 +79,47 @@ impl FeedbackCohortWindow {
     }
 }
 
+/// Decision-time cohort bounds plus the later immutable-truth visibility cutoff.
+///
+/// A recommendation belongs to the cohort by `decision_window`; resolution and
+/// execution facts are visible only through `truth_cutoff`. Keeping these
+/// frontiers distinct prevents a prediction horizon from either censoring every
+/// mature label or admitting recommendations created after the evaluation
+/// window closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedbackCohortSnapshot {
+    decision_window: FeedbackCohortWindow,
+    truth_cutoff: DateTime<Utc>,
+}
+
+impl FeedbackCohortSnapshot {
+    pub fn try_new(
+        decision_window: FeedbackCohortWindow,
+        truth_cutoff: DateTime<Utc>,
+    ) -> Result<Self, FeedbackCohortContractError> {
+        if truth_cutoff < decision_window.cutoff() {
+            return Err(FeedbackCohortContractError::TruthCutoffBeforeDecision {
+                decision_cutoff: decision_window.cutoff(),
+                truth_cutoff,
+            });
+        }
+        Ok(Self {
+            decision_window,
+            truth_cutoff,
+        })
+    }
+
+    #[must_use]
+    pub const fn decision_window(&self) -> &FeedbackCohortWindow {
+        &self.decision_window
+    }
+
+    #[must_use]
+    pub const fn truth_cutoff(&self) -> DateTime<Utc> {
+        self.truth_cutoff
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FeedbackCohortWindowDocument {
@@ -123,6 +163,12 @@ pub struct FeedbackRecommendationContext {
     event_id: EventId,
     token_id: TokenId,
     outcome_side: OutcomeSide,
+    rank: i32,
+    rank_before_portfolio: i32,
+    composite_score: Probability,
+    confidence: Probability,
+    top_n: i32,
+    horizon_secs: i64,
     decision_at: DateTime<Utc>,
     available_at: DateTime<Utc>,
     published_at: Option<DateTime<Utc>>,
@@ -193,6 +239,12 @@ impl FeedbackRecommendationContext {
             event_id: recommendation.event_id.clone(),
             token_id: recommendation.token_id.clone(),
             outcome_side: recommendation.outcome_side,
+            rank: recommendation.rank,
+            rank_before_portfolio: recommendation.rank_before_portfolio,
+            composite_score: recommendation.composite_score,
+            confidence: recommendation.confidence,
+            top_n: report.top_n,
+            horizon_secs: report.horizon_secs,
             decision_at: report.decision_at,
             available_at: recommendation.created_at,
             published_at: report.published_at,
@@ -261,6 +313,36 @@ impl FeedbackRecommendationContext {
     #[must_use]
     pub const fn outcome_side(&self) -> OutcomeSide {
         self.outcome_side
+    }
+
+    #[must_use]
+    pub const fn rank(&self) -> i32 {
+        self.rank
+    }
+
+    #[must_use]
+    pub const fn rank_before_portfolio(&self) -> i32 {
+        self.rank_before_portfolio
+    }
+
+    #[must_use]
+    pub const fn composite_score(&self) -> Probability {
+        self.composite_score
+    }
+
+    #[must_use]
+    pub const fn confidence(&self) -> Probability {
+        self.confidence
+    }
+
+    #[must_use]
+    pub const fn top_n(&self) -> i32 {
+        self.top_n
+    }
+
+    #[must_use]
+    pub const fn horizon_secs(&self) -> i64 {
+        self.horizon_secs
     }
 
     #[must_use]
@@ -364,15 +446,15 @@ fn validate_publication_timeline(
     Ok(())
 }
 
-/// Submitted entry evidence visible to an execution-learning scan.
+/// Final execution state derived only from an immutable recommendation rollup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
-pub enum FeedbackExecutionAttempt {
+pub enum FeedbackExecutionState {
     NotAttempted,
-    Submitted {
-        order_intent_id: OrderIntentId,
-        entry_execution_order_id: ExecutionOrderId,
-        submitted_at: DateTime<Utc>,
+    Attempted {
+        attempt_count: u32,
+        first_attempt_terminal_at: DateTime<Utc>,
+        last_attempt_terminal_at: DateTime<Utc>,
     },
 }
 
@@ -424,7 +506,7 @@ impl Ord for FeedbackCohortCursor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedbackCohortPageQuery {
     cohort: FeedbackCohort,
-    window: FeedbackCohortWindow,
+    snapshot: FeedbackCohortSnapshot,
     after: Option<FeedbackCohortCursor>,
     limit: u32,
 }
@@ -432,7 +514,7 @@ pub struct FeedbackCohortPageQuery {
 impl FeedbackCohortPageQuery {
     pub fn try_new(
         cohort: FeedbackCohort,
-        window: FeedbackCohortWindow,
+        snapshot: FeedbackCohortSnapshot,
         after: Option<FeedbackCohortCursor>,
         limit: u32,
     ) -> Result<Self, FeedbackCohortContractError> {
@@ -443,17 +525,16 @@ impl FeedbackCohortPageQuery {
             });
         }
         if let Some(cursor) = after
-            && (cursor.available_at < window.window_start || cursor.available_at > window.cutoff)
+            && cursor.available_at > snapshot.truth_cutoff
         {
-            return Err(FeedbackCohortContractError::CursorOutsideWindow {
+            return Err(FeedbackCohortContractError::CursorAfterTruthCutoff {
                 cursor_available_at: cursor.available_at,
-                window_start: window.window_start,
-                cutoff: window.cutoff,
+                truth_cutoff: snapshot.truth_cutoff,
             });
         }
         Ok(Self {
             cohort,
-            window,
+            snapshot,
             after,
             limit,
         })
@@ -465,8 +546,8 @@ impl FeedbackCohortPageQuery {
     }
 
     #[must_use]
-    pub const fn window(&self) -> &FeedbackCohortWindow {
-        &self.window
+    pub const fn snapshot(&self) -> &FeedbackCohortSnapshot {
+        &self.snapshot
     }
 
     #[must_use]
@@ -485,27 +566,21 @@ impl FeedbackCohortPageQuery {
 pub struct FeedbackCohortCandidate {
     cohort: FeedbackCohort,
     context: FeedbackRecommendationContext,
-    execution_attempt: Option<FeedbackExecutionAttempt>,
     resolution_outcome: Option<RecommendationResolutionOutcomeInfo>,
-    execution_outcome: Option<RecommendationExecutionOutcomeInfo>,
+    execution_rollup: Option<RecommendationExecutionRollupInfo>,
 }
 
 impl FeedbackCohortCandidate {
     pub fn try_new(
         cohort: FeedbackCohort,
         context: FeedbackRecommendationContext,
-        execution_attempt: Option<FeedbackExecutionAttempt>,
         resolution_outcome: Option<RecommendationResolutionOutcomeInfo>,
-        execution_outcome: Option<RecommendationExecutionOutcomeInfo>,
+        execution_rollup: Option<RecommendationExecutionRollupInfo>,
     ) -> Result<Self, FeedbackCohortContractError> {
         let plane_is_valid = match cohort {
-            FeedbackCohort::ModelLearning => {
-                execution_attempt.is_none() && execution_outcome.is_none()
-            }
-            FeedbackCohort::ExecutionLearning => {
-                execution_attempt.is_some() && resolution_outcome.is_none()
-            }
-            FeedbackCohort::PolicyEvaluation => execution_attempt.is_some(),
+            FeedbackCohort::ModelLearning => execution_rollup.is_none(),
+            FeedbackCohort::ExecutionLearning => resolution_outcome.is_none(),
+            FeedbackCohort::PolicyEvaluation => true,
         };
         if !plane_is_valid {
             return Err(FeedbackCohortContractError::InvalidCandidateTruthPlane { cohort });
@@ -513,9 +588,8 @@ impl FeedbackCohortCandidate {
         Ok(Self {
             cohort,
             context,
-            execution_attempt,
             resolution_outcome,
-            execution_outcome,
+            execution_rollup,
         })
     }
 
@@ -530,18 +604,13 @@ impl FeedbackCohortCandidate {
     }
 
     #[must_use]
-    pub const fn execution_attempt(&self) -> Option<FeedbackExecutionAttempt> {
-        self.execution_attempt
-    }
-
-    #[must_use]
     pub const fn resolution_outcome(&self) -> Option<&RecommendationResolutionOutcomeInfo> {
         self.resolution_outcome.as_ref()
     }
 
     #[must_use]
-    pub const fn execution_outcome(&self) -> Option<&RecommendationExecutionOutcomeInfo> {
-        self.execution_outcome.as_ref()
+    pub const fn execution_rollup(&self) -> Option<&RecommendationExecutionRollupInfo> {
+        self.execution_rollup.as_ref()
     }
 
     #[must_use]
@@ -617,14 +686,18 @@ pub struct FeedbackResolutionEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackExecutionEvidence {
-    pub order_intent_id: OrderIntentId,
-    pub entry_execution_order_id: ExecutionOrderId,
-    pub terminal_state: RecommendationExecutionTerminalState,
-    pub no_fill_reason: Option<RecommendationExecutionNoFillReason>,
-    pub requested_shares: Shares,
-    pub filled_shares: Shares,
+    pub intent_count: u32,
+    pub attempt_count: u32,
+    pub unfilled_attempt_count: u32,
+    pub partially_filled_attempt_count: u32,
+    pub fully_filled_attempt_count: u32,
+    pub total_requested_shares: Shares,
+    pub total_filled_shares: Shares,
+    pub total_realized_pnl_usd: Usd,
+    pub first_attempt_terminal_at: Option<DateTime<Utc>>,
+    pub last_attempt_terminal_at: Option<DateTime<Utc>>,
     pub available_at: DateTime<Utc>,
-    pub outcome_hash: ContentHash,
+    pub rollup_hash: ContentHash,
 }
 
 /// Cohort-specific evidence carried only after eligibility succeeds.
@@ -634,9 +707,9 @@ pub enum FeedbackCohortEvidence {
     ModelLearning(FeedbackResolutionEvidence),
     ExecutionLearning(FeedbackExecutionEvidence),
     PolicyEvaluation {
-        execution_attempt: FeedbackExecutionAttempt,
+        execution_state: Option<FeedbackExecutionState>,
         resolution_outcome_hash: Option<ContentHash>,
-        execution_outcome_hash: Option<ContentHash>,
+        execution_rollup_hash: Option<ContentHash>,
     },
 }
 
@@ -657,15 +730,21 @@ pub enum FeedbackCohortContractError {
         window_start: DateTime<Utc>,
         cutoff: DateTime<Utc>,
     },
+    #[error(
+        "feedback truth cutoff {truth_cutoff} is earlier than decision cutoff {decision_cutoff}"
+    )]
+    TruthCutoffBeforeDecision {
+        decision_cutoff: DateTime<Utc>,
+        truth_cutoff: DateTime<Utc>,
+    },
     #[error("feedback page limit must be within 1..={maximum}, got {actual}")]
     InvalidPageLimit { actual: u32, maximum: u32 },
     #[error(
-        "feedback cursor availability {cursor_available_at} is outside {window_start}..={cutoff}"
+        "feedback cursor availability {cursor_available_at} is later than truth cutoff {truth_cutoff}"
     )]
-    CursorOutsideWindow {
+    CursorAfterTruthCutoff {
         cursor_available_at: DateTime<Utc>,
-        window_start: DateTime<Utc>,
-        cutoff: DateTime<Utc>,
+        truth_cutoff: DateTime<Utc>,
     },
     #[error("feedback candidate contains a truth plane forbidden for {cohort:?}")]
     InvalidCandidateTruthPlane { cohort: FeedbackCohort },
@@ -719,26 +798,16 @@ pub enum FeedbackCohortContractError {
     ResolutionTokenMismatch,
     #[error("resolution truth was already observable at or before the recommendation decision")]
     ResolutionNotForwardLooking,
-    #[error("visible execution outcome failed its immutable contract")]
-    InvalidExecutionOutcome(#[source] RecommendationExecutionOutcomeContractError),
-    #[error("execution outcome recommendation identity mismatch")]
+    #[error("visible execution rollup failed its immutable contract")]
+    InvalidExecutionRollup(#[source] RecommendationExecutionRollupContractError),
+    #[error("execution rollup recommendation identity mismatch")]
     ExecutionRecommendationMismatch,
-    #[error("execution outcome market identity mismatch")]
-    ExecutionMarketMismatch,
-    #[error("execution outcome token identity mismatch")]
-    ExecutionTokenMismatch,
-    #[error("execution outcome runtime mode does not match the recommendation report")]
-    ExecutionRuntimeModeMismatch,
-    #[error("ReportOnly recommendation contains a submitted execution attempt")]
+    #[error("execution rollup became terminal before recommendation publication")]
+    ExecutionTerminalBeforePublication,
+    #[error("execution rollup count cannot be represented by the feedback contract")]
+    ExecutionCountOverflow,
+    #[error("ReportOnly recommendation contains attempted execution")]
     ReportOnlyExecutionAttempt,
-    #[error("submitted execution attempt predates recommendation publication")]
-    ExecutionAttemptBeforePublication,
-    #[error("visible execution outcome has no submitted attempt")]
-    ExecutionOutcomeWithoutAttempt,
-    #[error("execution outcome does not match the submitted intent/order identity")]
-    ExecutionAttemptIdentityMismatch,
-    #[error("execution outcome became terminal before the submitted attempt")]
-    ExecutionTerminalBeforeSubmission,
 }
 
 #[cfg(test)]
@@ -750,9 +819,10 @@ mod tests {
     use super::{
         FEEDBACK_COHORT_PAGE_LIMIT, FeedbackCohortCandidate, FeedbackCohortContractError,
         FeedbackCohortCursor, FeedbackCohortDecision, FeedbackCohortPage, FeedbackCohortPageQuery,
-        FeedbackCohortWindow, FeedbackExecutionAttempt, FeedbackRecommendationContext,
+        FeedbackCohortSnapshot, FeedbackCohortWindow, FeedbackRecommendationContext,
     };
     use crate::{
+        domain::quant::{NewRecommendationExecutionRollup, RecommendationExecutionRollupInfo},
         enums::{
             common::{MarketCategory, TickSize},
             market::MarketStatus,
@@ -763,10 +833,10 @@ mod tests {
         },
         types::{
             BookSnapshotRef, BookSnapshotSource, ContentHash, DecisionPolicySnapshotId, EventId,
-            ExecutionOrderId, FeatureVectorId, MarketContext, MarketId, MarketSelectionId,
-            ModelRunId, ModelVersionId, OrderIntentId, RecommendationFactorBreakdown,
-            RecommendationId, RecommendationIdentity, RecommendationReportId,
-            ReportDataQualitySnapshotId, TokenId, Usd, builtin_research_profiles,
+            FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelRunId,
+            ModelVersionId, Probability, RecommendationFactorBreakdown, RecommendationId,
+            RecommendationIdentity, RecommendationReportId, ReportDataQualitySnapshotId, TokenId,
+            Usd, builtin_research_profiles,
         },
     };
 
@@ -790,6 +860,12 @@ mod tests {
             event_id: EventId::new("feedback-page-event"),
             token_id: token_id.clone(),
             outcome_side: OutcomeSide::Yes,
+            rank: 1,
+            rank_before_portfolio: 1,
+            composite_score: Probability::ZERO,
+            confidence: Probability::ZERO,
+            top_n: 10,
+            horizon_secs: 3_600,
             decision_at: available_at - Duration::minutes(1),
             available_at,
             published_at: Some(available_at + Duration::seconds(1)),
@@ -834,11 +910,43 @@ mod tests {
         }
     }
 
-    fn submitted_attempt(available_at: DateTime<Utc>) -> FeedbackExecutionAttempt {
-        FeedbackExecutionAttempt::Submitted {
-            order_intent_id: OrderIntentId::from_v7(),
-            entry_execution_order_id: ExecutionOrderId::from_v7(),
-            submitted_at: available_at + Duration::seconds(2),
+    fn execution_rollup(available_at: DateTime<Utc>) -> RecommendationExecutionRollupInfo {
+        let context = page_context(available_at);
+        let terminal_at = context.published_at().expect("published") + Duration::seconds(1);
+        let available_at = terminal_at + Duration::seconds(1);
+        let seal = NewRecommendationExecutionRollup::aggregate(
+            context.recommendation_id(),
+            0,
+            terminal_at,
+            terminal_at,
+            Vec::new(),
+        )
+        .expect("empty rollup");
+        let rollup = seal.rollup;
+        let rollup_hash = rollup
+            .expected_rollup_hash(available_at)
+            .expect("rollup hash");
+        RecommendationExecutionRollupInfo {
+            recommendation_id: rollup.recommendation_id,
+            intent_count: rollup.intent_count,
+            attempt_count: rollup.attempt_count,
+            unfilled_attempt_count: rollup.unfilled_attempt_count,
+            partially_filled_attempt_count: rollup.partially_filled_attempt_count,
+            fully_filled_attempt_count: rollup.fully_filled_attempt_count,
+            total_requested_shares: rollup.total_requested_shares,
+            total_filled_shares: rollup.total_filled_shares,
+            total_entry_fee_usd: rollup.total_entry_fee_usd,
+            total_exit_fee_usd: rollup.total_exit_fee_usd,
+            total_settlement_payout_usd: rollup.total_settlement_payout_usd,
+            total_realized_pnl_usd: rollup.total_realized_pnl_usd,
+            first_attempt_terminal_at: rollup.first_attempt_terminal_at,
+            last_attempt_terminal_at: rollup.last_attempt_terminal_at,
+            terminal_at: rollup.terminal_at,
+            source_observed_at: rollup.source_observed_at,
+            available_at,
+            attempt_set_hash: rollup.attempt_set_hash,
+            rollup_hash,
+            created_at: available_at,
         }
     }
 
@@ -848,7 +956,6 @@ mod tests {
         FeedbackCohortCandidate::try_new(
             FeedbackCohort::ModelLearning,
             page_context(available_at),
-            None,
             None,
             None,
         )
@@ -932,13 +1039,16 @@ mod tests {
         let cutoff = window_start + Duration::days(1);
         let window =
             FeedbackCohortWindow::try_new(profile_ref, window_start, cutoff).expect("window");
+        let truth_cutoff = cutoff + Duration::hours(1);
+        let snapshot =
+            FeedbackCohortSnapshot::try_new(window.clone(), truth_cutoff).expect("cohort snapshot");
         let recommendation_id = RecommendationId::from_v7();
 
         for actual in [0, FEEDBACK_COHORT_PAGE_LIMIT + 1] {
             assert!(matches!(
                 FeedbackCohortPageQuery::try_new(
                     FeedbackCohort::ModelLearning,
-                    window.clone(),
+                    snapshot.clone(),
                     None,
                     actual,
                 ),
@@ -948,30 +1058,26 @@ mod tests {
                 }) if rejected == actual
             ));
         }
-        for cursor_available_at in [
-            window_start - Duration::nanoseconds(1),
-            cutoff + Duration::nanoseconds(1),
-        ] {
-            assert!(matches!(
-                FeedbackCohortPageQuery::try_new(
-                    FeedbackCohort::ModelLearning,
-                    window.clone(),
-                    Some(FeedbackCohortCursor::new(
-                        cursor_available_at,
-                        recommendation_id,
-                    )),
-                    1,
-                ),
-                Err(FeedbackCohortContractError::CursorOutsideWindow {
-                    cursor_available_at: rejected,
-                    ..
-                }) if rejected == cursor_available_at
-            ));
-        }
-        for cursor_available_at in [window_start, cutoff] {
+        let cursor_available_at = truth_cutoff + Duration::nanoseconds(1);
+        assert!(matches!(
+            FeedbackCohortPageQuery::try_new(
+                FeedbackCohort::ModelLearning,
+                snapshot.clone(),
+                Some(FeedbackCohortCursor::new(
+                    cursor_available_at,
+                    recommendation_id,
+                )),
+                1,
+            ),
+            Err(FeedbackCohortContractError::CursorAfterTruthCutoff {
+                cursor_available_at: rejected,
+                ..
+            }) if rejected == cursor_available_at
+        ));
+        for cursor_available_at in [window_start, cutoff, truth_cutoff] {
             let query = FeedbackCohortPageQuery::try_new(
                 FeedbackCohort::ModelLearning,
-                window.clone(),
+                snapshot.clone(),
                 Some(FeedbackCohortCursor::new(
                     cursor_available_at,
                     recommendation_id,
@@ -985,6 +1091,10 @@ mod tests {
             );
             assert_eq!(query.limit(), FEEDBACK_COHORT_PAGE_LIMIT);
         }
+        assert!(matches!(
+            FeedbackCohortSnapshot::try_new(window, cutoff - Duration::nanoseconds(1),),
+            Err(FeedbackCohortContractError::TruthCutoffBeforeDecision { .. })
+        ));
     }
 
     #[test]
@@ -993,16 +1103,15 @@ mod tests {
             .with_ymd_and_hms(2026, 7, 1, 0, 1, 0)
             .single()
             .expect("available at");
-        let attempt = submitted_attempt(available_at);
+        let rollup = execution_rollup(available_at);
 
         assert!(model_candidate(available_at).is_ok());
         assert!(matches!(
             FeedbackCohortCandidate::try_new(
                 FeedbackCohort::ModelLearning,
                 page_context(available_at),
-                Some(attempt),
                 None,
-                None,
+                Some(rollup.clone()),
             ),
             Err(FeedbackCohortContractError::InvalidCandidateTruthPlane {
                 cohort: FeedbackCohort::ModelLearning,
@@ -1012,46 +1121,38 @@ mod tests {
             FeedbackCohortCandidate::try_new(
                 FeedbackCohort::ExecutionLearning,
                 page_context(available_at),
-                Some(attempt),
                 None,
-                None,
+                Some(rollup),
             )
             .is_ok()
         );
-        assert!(matches!(
+        assert!(
             FeedbackCohortCandidate::try_new(
                 FeedbackCohort::ExecutionLearning,
                 page_context(available_at),
                 None,
                 None,
-                None,
-            ),
-            Err(FeedbackCohortContractError::InvalidCandidateTruthPlane {
-                cohort: FeedbackCohort::ExecutionLearning,
-            })
-        ));
+            )
+            .is_ok()
+        );
         assert!(
             FeedbackCohortCandidate::try_new(
                 FeedbackCohort::PolicyEvaluation,
                 page_context(available_at),
-                Some(attempt),
                 None,
                 None,
             )
             .is_ok()
         );
-        assert!(matches!(
+        assert!(
             FeedbackCohortCandidate::try_new(
                 FeedbackCohort::PolicyEvaluation,
                 page_context(available_at),
                 None,
                 None,
-                None,
-            ),
-            Err(FeedbackCohortContractError::InvalidCandidateTruthPlane {
-                cohort: FeedbackCohort::PolicyEvaluation,
-            })
-        ));
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1089,7 +1190,6 @@ mod tests {
         let execution = FeedbackCohortCandidate::try_new(
             FeedbackCohort::ExecutionLearning,
             page_context(second_at + Duration::seconds(1)),
-            Some(submitted_attempt(second_at)),
             None,
             None,
         )

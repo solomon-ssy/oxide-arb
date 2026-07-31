@@ -1,12 +1,12 @@
-//! Immutable recommendation-execution outcome persistence contracts.
+//! Immutable execution-attempt outcome persistence contracts.
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::quant::{
-        ExecutionOutcomeDeferredReason, ExecutionOutcomeReconciliationResult, NewExecutionOrder,
-        NewPosition, NewRecommendationExecutionOutcome, NewReconciliation,
-        RecommendationExecutionOutcomeInfo,
+        ExecutionAttemptDeferredReason, ExecutionAttemptOutcomeInfo,
+        ExecutionAttemptReconciliationResult, NewExecutionAttemptOutcome, NewExecutionOrder,
+        NewPosition, NewReconciliation, OutcomeTaskSettlement,
     },
     entities::{
         quant_execution_order::Entity as QuantExecutionOrderEntity,
@@ -23,19 +23,18 @@ use quant_pivot_models::{
             ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus,
         },
         quant::{
-            AccountSource, ExecutionOrderState, OrderIntentStatus, OutcomeSide, QuantRuntimeMode,
-            RecommendationExecutionNoFillReason, RecommendationExecutionTerminalState,
+            AccountSource, ExecutionAttemptNoFillReason, ExecutionAttemptTerminalState,
+            ExecutionOrderState, OrderIntentStatus, OutcomeSide, QuantRuntimeMode,
         },
     },
     types::{
-        Bps, ContentHash, EventId, ExecutionOrderId, MarketId, OrderId, OrderIntentId, PositionId,
+        ContentHash, EventId, ExecutionOrderId, MarketId, OrderId, OrderIntentId, PositionId,
         Price, ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
-        SchemaVersion, Shares, TokenId, Usd, VenueOrderAmount,
+        SchemaVersion, Shares, TokenId, Usd, VenueOrderAmount, WorkerId,
     },
 };
 use quant_pivot_repository::{
-    postgres::PgRecommendationExecutionOutcomeRepository,
-    traits::RecommendationExecutionOutcomeRepository,
+    postgres::PgExecutionAttemptOutcomeRepository, traits::ExecutionAttemptOutcomeRepository,
 };
 use quant_pivot_system_tests::{
     postgres::{PostgresClock, setup_pg},
@@ -126,7 +125,7 @@ pub async fn terminal_preserve_zero_semantics() {
     let unfilled = (SourceShape::Unfilled).persist_shape().await;
     assert_eq!(
         unfilled.terminal_state,
-        RecommendationExecutionTerminalState::Unfilled
+        ExecutionAttemptTerminalState::Unfilled
     );
     assert_eq!(unfilled.filled_shares, Shares::ZERO);
     assert_eq!(
@@ -135,14 +134,12 @@ pub async fn terminal_preserve_zero_semantics() {
     );
     assert_eq!(unfilled.entry_fee_usd, Some(Usd::ZERO));
     assert_eq!(unfilled.realized_pnl_usd, None);
-    assert_eq!(unfilled.max_adverse_excursion_bps, None);
-    assert_eq!(unfilled.max_favorable_excursion_bps, None);
     assert_eq!(unfilled.position_id, None);
 
     let partial = (SourceShape::PartiallyFilled).persist_shape().await;
     assert_eq!(
         partial.terminal_state,
-        RecommendationExecutionTerminalState::PartiallyFilled
+        ExecutionAttemptTerminalState::PartiallyFilled
     );
     assert_eq!(partial.filled_shares, Shares::new(dec!(16)));
     assert_eq!(
@@ -152,21 +149,17 @@ pub async fn terminal_preserve_zero_semantics() {
     assert_eq!(partial.entry_fee_usd, Some(Usd::ZERO));
     assert_eq!(partial.exit_fee_usd, Some(Usd::ZERO));
     assert_eq!(partial.realized_pnl_usd, Some(Usd::ZERO));
-    assert_eq!(partial.max_adverse_excursion_bps, None);
-    assert_eq!(partial.max_favorable_excursion_bps, None);
 
     let full = (SourceShape::FullyFilled).persist_shape().await;
     assert_eq!(
         full.terminal_state,
-        RecommendationExecutionTerminalState::FullyFilled
+        ExecutionAttemptTerminalState::FullyFilled
     );
     assert_eq!(
         full.fill_ratio().expect("valid full-fill ratio"),
         Decimal::ONE
     );
     assert_eq!(full.realized_pnl_usd, Some(Usd::ZERO));
-    assert_eq!(full.max_adverse_excursion_bps, None);
-    assert_eq!(full.max_favorable_excursion_bps, Some(Bps::ZERO));
 }
 
 pub async fn invalid_state_report_rejects() {
@@ -204,14 +197,14 @@ pub async fn invalid_state_report_rejects() {
 
     let (report_pool, _report_database) = setup_pg().await;
     let report_db = report_pool.connection().clone();
-    let never_submitted = seed_report_fixture(&report_db).await;
-    let report_repository = PgRecommendationExecutionOutcomeRepository::new(report_db);
-    assert_eq!(
+    let _never_submitted = seed_report_fixture(&report_db).await;
+    let report_repository = PgExecutionAttemptOutcomeRepository::new(report_db);
+    assert!(
         report_repository
-            .find_by_recommendation(&never_submitted.recommendation)
+            .claim_reconciliation(Utc::now(), WorkerId::from_v7(), 60, 10,)
             .await
-            .expect("read absent execution outcome"),
-        None,
+            .expect("scan absent execution outcomes")
+            .is_empty(),
         "a recommendation without a submitted order must not acquire an unfilled row"
     );
 }
@@ -220,18 +213,18 @@ pub async fn reconcile_idempotent_worm_evident() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let source = seed_execution_source(&db, SourceShape::FullyFilled).await;
-    let repository = PgRecommendationExecutionOutcomeRepository::new(db.clone());
+    let repository = PgExecutionAttemptOutcomeRepository::new(db.clone());
     let initial_cutoff = db.statement_time().await;
     let inserted = repository
         .reconcile_intent(&source.order_intent_id, initial_cutoff)
         .await
         .expect("reconcile execution outcome");
     let inserted = match inserted {
-        ExecutionOutcomeReconciliationResult::Inserted(outcome) => outcome,
-        ExecutionOutcomeReconciliationResult::AlreadyPresent(_) => {
+        ExecutionAttemptReconciliationResult::Inserted(outcome) => outcome,
+        ExecutionAttemptReconciliationResult::AlreadyPresent(_) => {
             panic!("first append must insert the outcome")
         }
-        ExecutionOutcomeReconciliationResult::Deferred(reason) => {
+        ExecutionAttemptReconciliationResult::Deferred(reason) => {
             panic!("complete source graph must not defer: {reason:?}")
         }
     };
@@ -243,11 +236,11 @@ pub async fn reconcile_idempotent_worm_evident() {
         .await
         .expect("idempotent execution-outcome retry");
     let duplicate = match duplicate {
-        ExecutionOutcomeReconciliationResult::AlreadyPresent(outcome) => outcome,
-        ExecutionOutcomeReconciliationResult::Inserted(_) => {
+        ExecutionAttemptReconciliationResult::AlreadyPresent(outcome) => outcome,
+        ExecutionAttemptReconciliationResult::Inserted(_) => {
             panic!("exact retry must not insert another outcome")
         }
-        ExecutionOutcomeReconciliationResult::Deferred(reason) => {
+        ExecutionAttemptReconciliationResult::Deferred(reason) => {
             panic!("complete source graph must not defer: {reason:?}")
         }
     };
@@ -275,38 +268,38 @@ pub async fn reconcile_idempotent_worm_evident() {
 
     let mutation = db
         .execute_unprepared(
-            "UPDATE quant_recommendation_execution_outcome \
-             SET max_favorable_excursion_bps = 1",
+            "UPDATE quant_execution_attempt_outcome \
+             SET realized_pnl_usd = 1",
         )
         .await;
     assert!(mutation.is_err(), "WORM trigger must reject updates");
     let deletion = db
-        .execute_unprepared("DELETE FROM quant_recommendation_execution_outcome")
+        .execute_unprepared("DELETE FROM quant_execution_attempt_outcome")
         .await;
     assert!(deletion.is_err(), "WORM trigger must reject deletes");
 
     db.execute_unprepared(
-        "ALTER TABLE quant_recommendation_execution_outcome \
-         DISABLE TRIGGER trg_quant_recommendation_execution_outcome_append_only",
+        "ALTER TABLE quant_execution_attempt_outcome \
+         DISABLE TRIGGER trg_quant_execution_attempt_outcome_append_only",
     )
     .await
     .expect("disable trigger to simulate storage corruption");
     db.execute_unprepared(
-        "UPDATE quant_recommendation_execution_outcome \
-         SET max_favorable_excursion_bps = 1",
+        "UPDATE quant_execution_attempt_outcome \
+         SET realized_pnl_usd = 1",
     )
     .await
     .expect("simulate stored semantic-content tampering");
     db.execute_unprepared(
-        "ALTER TABLE quant_recommendation_execution_outcome \
-         ENABLE TRIGGER trg_quant_recommendation_execution_outcome_append_only",
+        "ALTER TABLE quant_execution_attempt_outcome \
+         ENABLE TRIGGER trg_quant_execution_attempt_outcome_append_only",
     )
     .await
     .expect("restore append-only trigger");
 
     assert!(matches!(
         repository
-            .find_by_recommendation(&source.ids.recommendation)
+            .find_by_intent(&source.order_intent_id)
             .await
             .expect_err("read boundary must detect stored content tampering"),
         StorageError::InvariantViolation { .. }
@@ -319,36 +312,66 @@ pub async fn reconciliation_candidates_require_source() {
     let terminal = seed_execution_source(&db, SourceShape::Unfilled).await;
     let pre_submission = seed_report_fixture(&db).await;
     let pre_submission_intent = seed_approved_intent(&db, &pre_submission).await;
-    let repository = PgRecommendationExecutionOutcomeRepository::new(db.clone());
+    let repository = PgExecutionAttemptOutcomeRepository::new(db.clone());
     let cutoff = db.statement_time().await;
+    let worker = WorkerId::from_v7();
 
-    let candidates = repository
-        .list_reconciliation_candidates(cutoff, None, 10)
+    let claims = repository
+        .claim_reconciliation(cutoff, worker, 60, 10)
         .await
         .expect("execution reconciliation candidates");
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].order_intent_id, terminal.order_intent_id);
-    assert_eq!(candidates[0].recommendation_id, terminal.ids.recommendation);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(
+        claims[0].candidate.order_intent_id,
+        terminal.order_intent_id
+    );
+    assert_eq!(
+        claims[0].candidate.recommendation_id,
+        terminal.ids.recommendation
+    );
     assert!(
-        candidates
+        claims
             .iter()
-            .all(|candidate| candidate.order_intent_id != pre_submission_intent),
+            .all(|claim| claim.candidate.order_intent_id != pre_submission_intent),
         "pre-submission intent must not be fabricated as an unfilled execution outcome"
     );
-
-    let terminal_page = repository
-        .list_reconciliation_candidates(cutoff, Some(terminal.order_intent_id), 10)
+    let lagging_barrier = repository
+        .barrier(cutoff)
         .await
-        .expect("terminal execution candidate keyset page");
-    assert!(terminal_page.is_empty());
+        .expect("read attempt barrier with pending terminal intent");
+    assert_eq!(lagging_barrier.eligible_unsealed_count, 1);
+    assert!(
+        lagging_barrier.sealed_through <= cutoff,
+        "pending attempt work must keep the truth frontier at or before its cutoff"
+    );
+
+    let competing_claim = repository
+        .claim_reconciliation(cutoff, WorkerId::from_v7(), 60, 10)
+        .await
+        .expect("competing execution task claim");
+    assert!(competing_claim.is_empty());
 
     repository
         .reconcile_intent(&terminal.order_intent_id, cutoff)
         .await
         .expect("seal terminal execution outcome");
+    repository
+        .settle_reconciliation(
+            terminal.order_intent_id,
+            worker,
+            OutcomeTaskSettlement::Completed,
+        )
+        .await
+        .expect("complete durable reconciliation task");
+    let sealed_barrier = repository
+        .barrier(cutoff)
+        .await
+        .expect("read sealed attempt barrier");
+    assert_eq!(sealed_barrier.eligible_unsealed_count, 0);
+    assert_eq!(sealed_barrier.sealed_through, cutoff);
     assert!(
         repository
-            .list_reconciliation_candidates(cutoff, None, 10)
+            .claim_reconciliation(cutoff, WorkerId::from_v7(), 60, 10)
             .await
             .expect("execution candidates after seal")
             .is_empty()
@@ -359,12 +382,12 @@ pub async fn late_source_defers() {
     let (pool, _database) = setup_pg().await;
     let db = pool.connection().clone();
     let source = seed_execution_source(&db, SourceShape::Unfilled).await;
-    let repository = PgRecommendationExecutionOutcomeRepository::new(db);
+    let repository = PgExecutionAttemptOutcomeRepository::new(db);
     let frozen_before_source = source.terminal_at;
 
     assert!(
         repository
-            .list_reconciliation_candidates(frozen_before_source, None, 10)
+            .claim_reconciliation(frozen_before_source, WorkerId::from_v7(), 60, 10,)
             .await
             .expect("scan candidates before database source visibility")
             .is_empty(),
@@ -375,13 +398,13 @@ pub async fn late_source_defers() {
             .reconcile_intent(&source.order_intent_id, frozen_before_source)
             .await
             .expect("late execution source returns a typed deferred result"),
-        ExecutionOutcomeReconciliationResult::Deferred(
-            ExecutionOutcomeDeferredReason::SourceAvailableAfterCutoff
+        ExecutionAttemptReconciliationResult::Deferred(
+            ExecutionAttemptDeferredReason::SourceAvailableAfterCutoff
         )
     );
     assert!(
         repository
-            .find_by_recommendation(&source.ids.recommendation)
+            .find_by_intent(&source.order_intent_id)
             .await
             .expect("read outcome after late-source deferral")
             .is_none(),
@@ -390,31 +413,28 @@ pub async fn late_source_defers() {
 }
 
 impl SourceShape {
-    async fn persist_shape(self) -> RecommendationExecutionOutcomeInfo {
+    async fn persist_shape(self) -> ExecutionAttemptOutcomeInfo {
         let (pool, _database) = setup_pg().await;
         let db = pool.connection().clone();
         let source = seed_execution_source(&db, self).await;
         let cutoff = db.statement_time().await;
-        let inserted = PgRecommendationExecutionOutcomeRepository::new(db)
+        let inserted = PgExecutionAttemptOutcomeRepository::new(db)
             .reconcile_intent(&source.order_intent_id, cutoff)
             .await
             .expect("reconcile execution outcome");
         match inserted {
-            ExecutionOutcomeReconciliationResult::Inserted(outcome) => outcome,
-            ExecutionOutcomeReconciliationResult::AlreadyPresent(_) => {
+            ExecutionAttemptReconciliationResult::Inserted(outcome) => outcome,
+            ExecutionAttemptReconciliationResult::AlreadyPresent(_) => {
                 panic!("isolated fixture must insert a new outcome")
             }
-            ExecutionOutcomeReconciliationResult::Deferred(reason) => {
+            ExecutionAttemptReconciliationResult::Deferred(reason) => {
                 panic!("terminal source fixture must not defer: {reason:?}")
             }
         }
     }
 }
 
-fn new_outcome(
-    source: &ExecutionSourceFixture,
-    shape: SourceShape,
-) -> NewRecommendationExecutionOutcome {
+fn new_outcome(source: &ExecutionSourceFixture, shape: SourceShape) -> NewExecutionAttemptOutcome {
     let (
         terminal_state,
         no_fill_reason,
@@ -430,12 +450,10 @@ fn new_outcome(
         exit_at,
         settlement_payout_usd,
         realized_pnl_usd,
-        max_adverse_excursion_bps,
-        max_favorable_excursion_bps,
     ) = match shape {
         SourceShape::Unfilled => (
-            RecommendationExecutionTerminalState::Unfilled,
-            Some(RecommendationExecutionNoFillReason::VenueRejected),
+            ExecutionAttemptTerminalState::Unfilled,
+            Some(ExecutionAttemptNoFillReason::VenueRejected),
             ExecutionOrderState::Failed,
             Shares::ZERO,
             None,
@@ -448,11 +466,9 @@ fn new_outcome(
             None,
             None,
             None,
-            None,
-            None,
         ),
         SourceShape::PartiallyFilled => (
-            RecommendationExecutionTerminalState::PartiallyFilled,
+            ExecutionAttemptTerminalState::PartiallyFilled,
             None,
             ExecutionOrderState::PartiallyFilled,
             Shares::new(dec!(16)),
@@ -466,11 +482,9 @@ fn new_outcome(
             Some(source.terminal_at),
             None,
             Some(Usd::ZERO),
-            None,
-            None,
         ),
         SourceShape::FullyFilled => (
-            RecommendationExecutionTerminalState::FullyFilled,
+            ExecutionAttemptTerminalState::FullyFilled,
             None,
             ExecutionOrderState::Filled,
             Shares::new(dec!(40)),
@@ -484,11 +498,9 @@ fn new_outcome(
             Some(source.terminal_at),
             None,
             Some(Usd::ZERO),
-            Some(Bps::new(dec!(-125))),
-            Some(Bps::ZERO),
         ),
     };
-    NewRecommendationExecutionOutcome {
+    NewExecutionAttemptOutcome {
         recommendation_id: source.ids.recommendation,
         order_intent_id: source.order_intent_id,
         entry_execution_order_id: source.entry_execution_order_id,
@@ -514,8 +526,6 @@ fn new_outcome(
         exit_at,
         settlement_payout_usd,
         realized_pnl_usd,
-        max_adverse_excursion_bps,
-        max_favorable_excursion_bps,
         terminal_at: source.terminal_at,
         source_checkpoint_hash: hash('a'),
         execution_fact_hash: hash('b'),

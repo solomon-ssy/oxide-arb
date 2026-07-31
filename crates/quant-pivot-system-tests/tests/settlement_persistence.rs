@@ -36,7 +36,7 @@ use quant_pivot_models::{
     domain::{
         api::settlement_redeem::SettlementRedeemListQuery,
         quant::{
-            ExecutionOutcomeReconciliationResult, NewExecutionAccount, PositionInfo,
+            ExecutionAttemptReconciliationResult, NewExecutionAccount, PositionInfo,
             settlement::{
                 ApproveSettlementAuthorization, BeginSettlementDispatch,
                 NewSettlementChainSubmission, NewSettlementRedeem,
@@ -100,17 +100,17 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgCapitalAllocationRepository, PgEventRepository, PgExecutionAccountRepository,
-        PgExecutionSubmissionRepository, PgMarketRepository, PgOrderIntentRepository,
-        PgPositionRepository, PgRecommendationExecutionOutcomeRepository, PgUserRepository,
+        PgExecutionAttemptOutcomeRepository, PgExecutionSubmissionRepository, PgMarketRepository,
+        PgOrderIntentRepository, PgPositionRepository, PgUserRepository,
         quant::{
             settlement_governance::PgSettlementGovernanceRepository,
             settlement_redeem::PgSettlementRedeemRepository,
         },
     },
     traits::{
-        CapitalAllocationRepository, EventRepository, ExecutionAccountRepository, MarketRepository,
-        OrderIntentRepository, PositionRepository, RecommendationExecutionOutcomeRepository,
-        UserRepository,
+        CapitalAllocationRepository, EventRepository, ExecutionAccountRepository,
+        ExecutionAttemptOutcomeRepository, MarketRepository, OrderIntentRepository,
+        PositionRepository, UserRepository,
         quant::{
             settlement_governance::{
                 SettlementExternalCursorRepository, SettlementGovernanceRepository,
@@ -1045,12 +1045,12 @@ async fn partial_exchange_resolution_scenario() {
         .await
         .expect("confirm mixed exchange/settlement accounting");
 
-    let outcome = PgRecommendationExecutionOutcomeRepository::new(db.clone())
+    let outcome = PgExecutionAttemptOutcomeRepository::new(db.clone())
         .reconcile_intent(&fixture.intent_id, db.statement_time().await)
         .await
         .expect("seal mixed execution outcome");
     let outcome = match outcome {
-        ExecutionOutcomeReconciliationResult::Inserted(outcome) => outcome,
+        ExecutionAttemptReconciliationResult::Inserted(outcome) => outcome,
         other => panic!("expected inserted mixed execution outcome, got {other:?}"),
     };
     assert_eq!(outcome.exit_filled_shares, Some(Shares::new(dec!(10))));
@@ -1332,12 +1332,12 @@ async fn assert_confirmed_accounting(
             .exit_state,
         ExitState::Exited
     );
-    let execution_outcome = PgRecommendationExecutionOutcomeRepository::new(db.clone())
+    let execution_outcome = PgExecutionAttemptOutcomeRepository::new(db.clone())
         .reconcile_intent(intent_id, db.statement_time().await)
         .await
         .expect("seal settled execution outcome");
     let execution_outcome = match execution_outcome {
-        ExecutionOutcomeReconciliationResult::Inserted(outcome) => outcome,
+        ExecutionAttemptReconciliationResult::Inserted(outcome) => outcome,
         other => panic!("expected inserted settled execution outcome, got {other:?}"),
     };
     assert_eq!(

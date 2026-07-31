@@ -56,9 +56,7 @@ use quant_pivot_models::{
         factor::FactorFamily,
         market::{EventStatus, MarketStatus},
         model::ModelFamily,
-        quant::{
-            DatasetPurpose, ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus,
-        },
+        quant::{DatasetPurpose, ModelRunErrorCode, ModelRunKind, ModelRunStatus},
         runtime_config::ConfigResourceKind,
     },
     runtime_config::{
@@ -751,7 +749,7 @@ async fn publish_weighted_model(
     .await
     .expect("seal runtime model fixture");
     fixture.store(store).await.expect("store runtime model");
-    ModelVersionFixture::persist_published(
+    ModelVersionFixture::persist_route_candidate(
         db,
         model_version_fixture(&fixture, model_spec_id, 1, fixture.artifact_hash()),
     )
@@ -787,14 +785,9 @@ fn model_version_fixture(
         training_dataset_id: Some(training_dataset_id),
         trade_policy_artifact_id: trade_policy.map(|binding| binding.0),
         trade_policy_hash: trade_policy.map(|binding| binding.1),
-        publish_path_set_id: None,
         derivation: NewModelVersion::training_derivation(),
         metrics: ModelVersionMetrics::not_measured("test fixture"),
         training_objective: ModelTrainingObjective::hand_authored("test fixture"),
-        quality_gate_report: None,
-        publication_status: PublicationStatus::Candidate,
-        published_at: None,
-        retired_at: None,
     }
 }
 
@@ -1001,8 +994,6 @@ async fn build_runner(
     ));
     let model_run_repo =
         Arc::new(PgModelRunRepository::new(db.clone())) as Arc<dyn ModelRunRepository>;
-    let registry =
-        Arc::new(PgModelRegistryRepository::new(db.clone())) as Arc<dyn ModelRegistryRepository>;
     let shadow_comparison_repo = Arc::new(PgShadowComparisonRepository::new(db.clone()))
         as Arc<dyn ShadowComparisonRepository>;
     let evidence_scope = EvidenceScopeIdentity::from_config(
@@ -1020,7 +1011,6 @@ async fn build_runner(
     .await?;
     Ok(ModelRunner::new(ModelRunnerDeps {
         model_run_repo,
-        model_registry_repo: registry,
         shadow_comparison_repo,
         serving_generations,
         factor_pipeline,
@@ -1279,7 +1269,7 @@ pub async fn cached_planes_stay_stable() {
     assert_eq!(shadow_run.run_kind, ModelRunKind::Shadow);
 }
 
-pub async fn generation_rejects_retired_model() {
+pub async fn generation_uses_route_authority() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db).await;
@@ -1291,26 +1281,16 @@ pub async fn generation_rejects_retired_model() {
     let active = publish_weighted_model(&db, &store, &factors, &features, training_policy_id).await;
     register_enabled_factors(&db, &factors, &features).await;
     let _policy = activate_model_config(&db, &active, None).await;
-    PgModelRegistryRepository::new(db.clone())
-        .retire_model_version(&active)
+    let _runner = build_runner(&db, Arc::clone(&store), Arc::new(AtomicUsize::new(0)))
         .await
-        .expect("retire published version");
-
-    let result = build_runner(&db, Arc::clone(&store), Arc::new(AtomicUsize::new(0))).await;
-    let Err(error) = result else {
-        panic!("retired active model must reject serving generation bootstrap");
-    };
-    assert!(
-        error.to_string().contains("must be published"),
-        "failure must cite publication status: {error}"
-    );
+        .expect("the active route, not a global model status, owns serving authority");
     assert!(
         ModelRunEntity::find()
             .all(&db)
             .await
-            .expect("load model runs after retired generation")
+            .expect("load model runs after route generation bootstrap")
             .is_empty(),
-        "retired generation rejection must precede model-run persistence"
+        "generation bootstrap must not create an inference run"
     );
 }
 

@@ -27,9 +27,19 @@ pub mod entity {
 
     /// `quant_recommendation`.
     pub const QUANT_RECOMMENDATION: &str = "quant_recommendation";
-    /// `quant_recommendation_execution_outcome`.
-    pub const QUANT_RECOMMENDATION_EXECUTION_OUTCOME: &str =
-        "quant_recommendation_execution_outcome";
+    /// `quant_execution_attempt_outcome`.
+    pub const QUANT_EXECUTION_ATTEMPT_OUTCOME: &str = "quant_execution_attempt_outcome";
+    /// `quant_execution_attempt_reconciliation_task`.
+    pub const QUANT_EXECUTION_ATTEMPT_RECONCILIATION_TASK: &str =
+        "quant_execution_attempt_reconciliation_task";
+    /// `quant_execution_rollup_reconciliation_task`.
+    pub const QUANT_EXECUTION_ROLLUP_RECONCILIATION_TASK: &str =
+        "quant_execution_rollup_reconciliation_task";
+    /// `quant_resolution_outcome_reconciliation_task`.
+    pub const QUANT_RESOLUTION_OUTCOME_RECONCILIATION_TASK: &str =
+        "quant_resolution_outcome_reconciliation_task";
+    /// `quant_recommendation_execution_rollup`.
+    pub const QUANT_RECOMMENDATION_EXECUTION_ROLLUP: &str = "quant_recommendation_execution_rollup";
     /// `quant_recommendation_resolution_outcome`.
     pub const QUANT_RECOMMENDATION_RESOLUTION_OUTCOME: &str =
         "quant_recommendation_resolution_outcome";
@@ -77,6 +87,10 @@ pub mod entity {
     pub const QUANT_RESEARCH_READINESS_EVIDENCE: &str = "quant_research_readiness_evidence";
     /// `quant_calibration_artifact`.
     pub const QUANT_CALIBRATION_ARTIFACT: &str = "quant_calibration_artifact";
+    /// `quant_attribution_artifact`.
+    pub const QUANT_ATTRIBUTION_ARTIFACT: &str = "quant_attribution_artifact";
+    /// `quant_model_candidate_manifest`.
+    pub const QUANT_MODEL_CANDIDATE_MANIFEST: &str = "quant_model_candidate_manifest";
     /// `quant_trade_policy_artifact`.
     pub const QUANT_TRADE_POLICY_ARTIFACT: &str = "quant_trade_policy_artifact";
     /// `quant_domain_source_cursor`.
@@ -85,12 +99,21 @@ pub mod entity {
     pub const QUANT_DOMAIN_SOURCE_EXPECTATION: &str = "quant_domain_source_expectation";
     /// `quant_domain_event_outbox`.
     pub const QUANT_DOMAIN_EVENT_OUTBOX: &str = "quant_domain_event_outbox";
+    /// `quant_resolution_observation_inbox`.
+    pub const QUANT_RESOLUTION_OBSERVATION_INBOX: &str = "quant_resolution_observation_inbox";
+    /// `quant_resolution_observation_projection`.
+    pub const QUANT_RESOLUTION_OBSERVATION_PROJECTION: &str =
+        "quant_resolution_observation_projection";
     /// `quant_research_job`.
     pub const QUANT_RESEARCH_JOB: &str = "quant_research_job";
     /// `quant_feedback_cycle`.
     pub const QUANT_FEEDBACK_CYCLE: &str = "quant_feedback_cycle";
+    /// `quant_feedback_scheduler_state`.
+    pub const QUANT_FEEDBACK_SCHEDULER_STATE: &str = "quant_feedback_scheduler_state";
     /// `quant_feedback_stage_event`.
     pub const QUANT_FEEDBACK_STAGE_EVENT: &str = "quant_feedback_stage_event";
+    /// `quant_feedback_trigger_event`.
+    pub const QUANT_FEEDBACK_TRIGGER_EVENT: &str = "quant_feedback_trigger_event";
     /// `quant_feedback_event_outbox`.
     pub const QUANT_FEEDBACK_EVENT_OUTBOX: &str = "quant_feedback_event_outbox";
     /// `quant_drift_report`.

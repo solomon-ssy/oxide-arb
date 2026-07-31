@@ -72,13 +72,15 @@ impl WeatherStationRegistry {
     }
 
     #[must_use]
-    pub fn has_historical_calibration(&self, station: &IcaoStation) -> bool {
-        self.get(station)
-            .is_some_and(|profile| profile.ghcnh_station_id.is_some())
+    pub fn has_daily_truth(&self, station: &IcaoStation) -> bool {
+        self.get(station).is_some_and(|profile| {
+            profile.ghcnh_station_id.is_some() && profile.ghcnd_station_id.is_some()
+        })
     }
 
     fn validate(&self) -> QuantResult<()> {
-        let mut historical_ids = BTreeSet::new();
+        let mut hourly_ids = BTreeSet::new();
+        let mut daily_ids = BTreeSet::new();
         for (station_key, profile) in &self.profiles {
             let station = IcaoStation::parse(station_key)
                 .map_err(|error| QuantError::config(error.to_string()))?;
@@ -103,19 +105,36 @@ impl WeatherStationRegistry {
             match (
                 profile.historical_binding_kind,
                 profile.ghcnh_station_id.as_deref(),
+                profile.ghcnd_station_id.as_deref(),
             ) {
                 (
-                    WeatherHistoricalBindingKind::ExactStation
-                    | WeatherHistoricalBindingKind::OfficialNearbyProxy,
-                    Some(ghcnh_station_id),
+                    WeatherHistoricalBindingKind::ExactStation,
+                    Some(hourly_station_id),
+                    Some(daily_station_id),
                 ) => {
-                    if !historical_ids.insert(ghcnh_station_id) {
+                    if !hourly_ids.insert(hourly_station_id) {
+                        return Err(QuantError::config(format!(
+                            "weather station `{station_key}` reuses GHCNh id `{hourly_station_id}`"
+                        )));
+                    }
+                    if !daily_ids.insert(daily_station_id) {
+                        return Err(QuantError::config(format!(
+                            "weather station `{station_key}` reuses GHCNd id `{daily_station_id}`"
+                        )));
+                    }
+                }
+                (
+                    WeatherHistoricalBindingKind::OfficialNearbyProxy,
+                    Some(ghcnh_station_id),
+                    None,
+                ) => {
+                    if !hourly_ids.insert(ghcnh_station_id) {
                         return Err(QuantError::config(format!(
                             "weather station `{station_key}` reuses GHCNh id `{ghcnh_station_id}`"
                         )));
                     }
                 }
-                (WeatherHistoricalBindingKind::Unavailable, None) => {}
+                (WeatherHistoricalBindingKind::Unavailable, None, None) => {}
                 _ => {
                     return Err(QuantError::config(format!(
                         "weather station `{station_key}` has an inconsistent historical binding"
@@ -629,6 +648,7 @@ mod tests {
             longitude: dec!(-73.8740),
             elevation_meters: dec!(6.4),
             ghcnh_station_id: Some("USW00014732".to_owned()),
+            ghcnd_station_id: Some("USW00014732".to_owned()),
             historical_binding_kind: WeatherHistoricalBindingKind::ExactStation,
         }
     }
@@ -756,6 +776,7 @@ mod tests {
                     longitude: dec!(28.740),
                     elevation_meters: dec!(99),
                     ghcnh_station_id: Some("TUI0000LTFM".to_owned()),
+                    ghcnd_station_id: Some("TUI0000LTFM".to_owned()),
                     historical_binding_kind: WeatherHistoricalBindingKind::ExactStation,
                 },
             )]))
@@ -820,6 +841,7 @@ mod tests {
 
         let mut unavailable = station_profile();
         unavailable.ghcnh_station_id = None;
+        unavailable.ghcnd_station_id = None;
         unavailable.historical_binding_kind = WeatherHistoricalBindingKind::Unavailable;
         let unavailable_registry = WeatherStationRegistry::try_new(BTreeMap::from([(
             "ZBAA".to_owned(),
@@ -827,8 +849,7 @@ mod tests {
         )]))
         .expect("an explicit unavailable historical binding is valid");
         assert!(
-            !unavailable_registry
-                .has_historical_calibration(&IcaoStation::parse("ZBAA").expect("station"))
+            !unavailable_registry.has_daily_truth(&IcaoStation::parse("ZBAA").expect("station"))
         );
 
         unavailable.historical_binding_kind = WeatherHistoricalBindingKind::ExactStation;

@@ -9,6 +9,7 @@ use std::{
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
+    config::WeatherVerticalBindingsConfig,
     domain::{
         data_plane::{CryptoPriceReport, DecisionClock, DecisionSource, DomainObservation},
         market::{
@@ -713,7 +714,10 @@ fn linkage_tier0_matches_tier1() {
 
     // Cross-check against the full layered resolver: it must reach the exact
     // same subject Tier 0 produced directly.
-    let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
+    let resolver = LayeredResolver::deterministic(
+        WeatherStationRegistry::default(),
+        &WeatherVerticalBindingsConfig::default(),
+    );
     let resolution = resolver.resolve(&meta, Utc::now()).expect("resolve");
     assert_eq!(resolution.resolver_tier, ResolverTier::Tier0Slug);
     let LinkageOutcome::Resolved(binding) = resolution.outcome else {
@@ -731,7 +735,10 @@ fn linkage_tier0_matches_tier1() {
 
 #[test]
 fn linkage_grounding_rejects_source() {
-    let resolver = LayeredResolver::deterministic(WeatherStationRegistry::default());
+    let resolver = LayeredResolver::deterministic(
+        WeatherStationRegistry::default(),
+        &WeatherVerticalBindingsConfig::default(),
+    );
     let bad = resolver
         .resolve(&metadata("totally-unknown-market-slug"), Utc::now())
         .expect("resolve");

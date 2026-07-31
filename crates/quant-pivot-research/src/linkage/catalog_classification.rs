@@ -61,7 +61,8 @@ impl DomainCatalogClassifier {
             &weather_stations.registry_hash()?,
             weather_vertical_bindings,
         )?;
-        let resolver = LayeredResolver::deterministic(weather_stations.clone());
+        let resolver =
+            LayeredResolver::deterministic(weather_stations.clone(), weather_vertical_bindings);
         Ok(Self {
             resolver,
             weather_stations,
@@ -243,6 +244,21 @@ impl DomainCatalogClassifier {
             ));
         }
         if contract_family != DomainContractFamily::WeatherDailyTemperature {
+            let result = self.resolver.resolve(metadata, market.updated_at)?;
+            let parsed = match result.outcome {
+                LinkageOutcome::Resolved(binding) => {
+                    weather_subject_family(&binding.subject) == Some(contract_family)
+                }
+                LinkageOutcome::Unresolved { .. } => false,
+            };
+            if !parsed {
+                return Ok((
+                    Some(contract_family),
+                    DomainMarketClassificationOutcome::InsufficientEvidence {
+                        reason_code: weather_parse_blocker(contract_family, &text),
+                    },
+                ));
+            }
             if grounded_weather_research_contract(contract_family, &text) {
                 let mature_groups = mature_weather_groups
                     .get(&contract_family)
@@ -259,10 +275,7 @@ impl DomainCatalogClassifier {
             }
             return Ok((
                 Some(contract_family),
-                DomainMarketClassificationOutcome::UnsupportedTemplate {
-                    reason_code:
-                        DomainCapabilityReasonCode::RecognizedWeatherFamilyParserUnavailable,
-                },
+                DomainMarketClassificationOutcome::Supported,
             ));
         }
 
@@ -272,30 +285,107 @@ impl DomainCatalogClassifier {
                 MarketSubject::Weather(subject)
                     if self
                         .weather_stations
-                        .has_historical_calibration(&subject.decision_group.station) =>
+                        .has_daily_truth(&subject.decision_group.station) =>
                 {
                     DomainMarketClassificationOutcome::Supported
                 }
                 MarketSubject::Weather(_) => {
                     DomainMarketClassificationOutcome::InsufficientEvidence {
-                        reason_code:
-                            DomainCapabilityReasonCode::WeatherHistoricalCalibrationUnavailable,
+                        reason_code: DomainCapabilityReasonCode::WeatherDailyTruthUnavailable,
                     }
                 }
-                MarketSubject::Crypto(_) => {
-                    DomainMarketClassificationOutcome::UnsupportedTemplate {
+                MarketSubject::Crypto(_)
+                | MarketSubject::WeatherPrecipitation(_)
+                | MarketSubject::WeatherAqi(_)
+                | MarketSubject::WeatherTornado(_)
+                | MarketSubject::WeatherTropicalCyclone(_)
+                | MarketSubject::WeatherGlobalTemperature(_)
+                | MarketSubject::WeatherSeaIce(_)
+                | MarketSubject::WeatherWindExtreme(_) => {
+                    DomainMarketClassificationOutcome::InsufficientEvidence {
                         reason_code: DomainCapabilityReasonCode::CategorySubjectMismatch,
                     }
                 }
             },
             LinkageOutcome::Unresolved { .. } => {
-                DomainMarketClassificationOutcome::UnsupportedTemplate {
-                    reason_code:
-                        DomainCapabilityReasonCode::WeatherDailyTemperatureTemplateNotGrounded,
+                DomainMarketClassificationOutcome::InsufficientEvidence {
+                    reason_code: DomainCapabilityReasonCode::WeatherTemplateEvidenceIncomplete,
                 }
             }
         };
         Ok((Some(contract_family), outcome))
+    }
+}
+
+const fn weather_subject_family(subject: &MarketSubject) -> Option<DomainContractFamily> {
+    match subject {
+        MarketSubject::Crypto(_) => None,
+        MarketSubject::Weather(_) => Some(DomainContractFamily::WeatherDailyTemperature),
+        MarketSubject::WeatherPrecipitation(_) => Some(DomainContractFamily::WeatherPrecipitation),
+        MarketSubject::WeatherAqi(_) => Some(DomainContractFamily::WeatherAqi),
+        MarketSubject::WeatherTornado(_) => Some(DomainContractFamily::WeatherTornado),
+        MarketSubject::WeatherTropicalCyclone(_) => {
+            Some(DomainContractFamily::WeatherTropicalCyclone)
+        }
+        MarketSubject::WeatherGlobalTemperature(_) => {
+            Some(DomainContractFamily::WeatherGlobalTemperature)
+        }
+        MarketSubject::WeatherSeaIce(_) => Some(DomainContractFamily::WeatherSeaIce),
+        MarketSubject::WeatherWindExtreme(_) => Some(DomainContractFamily::WeatherWindExtreme),
+    }
+}
+
+fn weather_parse_blocker(
+    contract_family: DomainContractFamily,
+    text: &str,
+) -> DomainCapabilityReasonCode {
+    if contract_family == DomainContractFamily::WeatherAqi && !text.contains("daily aqi for pm2.5")
+    {
+        DomainCapabilityReasonCode::WeatherAqiOfficialDailyUnavailable
+    } else if contract_family == DomainContractFamily::WeatherPrecipitation
+        && contains_any(
+            text,
+            &[
+                "metoffice.gov.uk/pub/data/weather/uk/climate/stationdata",
+                "weather.gov/wrh/climate",
+                "data.kma.go.kr/climate",
+            ],
+        )
+    {
+        DomainCapabilityReasonCode::WeatherOfficialSourceUnavailable
+    } else if contract_family == DomainContractFamily::WeatherSeaIce
+        && text.contains("between ")
+        && !text.contains("higher bracket")
+        && !text.contains("lower bracket")
+    {
+        DomainCapabilityReasonCode::WeatherAmbiguousRangeOwnership
+    } else if contract_family == DomainContractFamily::WeatherTornado
+        && text.contains("ncei.noaa.gov/access/monitoring/tornadoes/time-series")
+        && !text.contains("scheduled to be released on")
+    {
+        DomainCapabilityReasonCode::WeatherReleasePolicyUnavailable
+    } else if (contract_family == DomainContractFamily::WeatherGlobalTemperature
+        && text.contains("any month")
+        && text.contains("hottest"))
+        || (contract_family == DomainContractFamily::WeatherTropicalCyclone
+            && contains_any(
+                text,
+                &[
+                    "any storm",
+                    "or more hurricanes",
+                    "first hurricane",
+                    "no hurricane",
+                    "landfall in hawaii",
+                ],
+            ))
+    {
+        DomainCapabilityReasonCode::WeatherAggregationPolicyUnsupported
+    } else if contract_family == DomainContractFamily::WeatherWindExtreme
+        && text.contains("mountwashington.org")
+    {
+        DomainCapabilityReasonCode::WeatherOfficialSourceUnavailable
+    } else {
+        DomainCapabilityReasonCode::WeatherTemplateEvidenceIncomplete
     }
 }
 
@@ -777,7 +867,7 @@ mod tests {
         DomainCatalogClassifier, WeatherStationRegistry, crypto_exclusion_reason,
         detect_weather_contract_family, early_weather_exclusion, grounded_airnow_contract,
         grounded_weather_research_contract, is_crypto_price_contract, is_hko_fractional_temp,
-        weather_exclusion_reason,
+        weather_exclusion_reason, weather_parse_blocker,
     };
 
     fn tags(values: &[&str]) -> BTreeSet<String> {
@@ -829,6 +919,34 @@ mod tests {
             ),
         ] {
             assert_eq!(detect_weather_contract_family(text, &tags), Some(expected));
+        }
+    }
+
+    #[test]
+    fn catalog_templates_have_blockers() {
+        for (family, text, expected) in [
+            (
+                DomainContractFamily::WeatherPrecipitation,
+                "monthly precipitation from weather.gov/wrh/climate?wfo=okx",
+                DomainCapabilityReasonCode::WeatherOfficialSourceUnavailable,
+            ),
+            (
+                DomainContractFamily::WeatherTropicalCyclone,
+                "will any storm make landfall as a category 4 hurricane",
+                DomainCapabilityReasonCode::WeatherAggregationPolicyUnsupported,
+            ),
+            (
+                DomainContractFamily::WeatherGlobalTemperature,
+                "will any month be the hottest on record",
+                DomainCapabilityReasonCode::WeatherAggregationPolicyUnsupported,
+            ),
+            (
+                DomainContractFamily::WeatherWindExtreme,
+                "resolve from mountwashington.org monthly f6",
+                DomainCapabilityReasonCode::WeatherOfficialSourceUnavailable,
+            ),
+        ] {
+            assert_eq!(weather_parse_blocker(family, text), expected);
         }
     }
 
@@ -1029,6 +1147,7 @@ mod tests {
                 longitude: dec!(116.5846),
                 elevation_meters: dec!(35),
                 ghcnh_station_id: None,
+                ghcnd_station_id: None,
                 historical_binding_kind: WeatherHistoricalBindingKind::Unavailable,
             },
         )]))
@@ -1100,7 +1219,7 @@ mod tests {
         assert_eq!(
             classification.outcome,
             DomainMarketClassificationOutcome::InsufficientEvidence {
-                reason_code: DomainCapabilityReasonCode::WeatherHistoricalCalibrationUnavailable,
+                reason_code: DomainCapabilityReasonCode::WeatherDailyTruthUnavailable,
             }
         );
     }

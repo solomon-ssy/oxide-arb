@@ -10,13 +10,15 @@ use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
+use super::quality_gate::QualityGateReportView;
 use crate::{
     domain::{
         pagination::PageRequest,
         ports::FeedbackCandidateFamily,
         quant::{
             DriftReportInfo, FeedbackCycleInfo, FeedbackEvaluationUseInfo, FeedbackQueueSnapshot,
-            FeedbackStageEventInfo, PromotionPermitInfo, PromotionPermitStatus,
+            FeedbackSchedulerStateInfo, FeedbackStageEventInfo, FeedbackTriggerEventInfo,
+            PromotionPermitInfo, PromotionPermitStatus,
         },
     },
     enums::{
@@ -27,13 +29,16 @@ use crate::{
             FeedbackStageEventKind, FeedbackTriggerFamily, QuantRuntimeMode,
         },
     },
+    runtime_config::BuyModelRoute,
     types::{
-        ArtifactUri, CapabilityRegistryHashes, CohortCensorCount, CohortExclusionCount,
-        ContentHash, DatasetCohortCounts, DecisionPolicySnapshotId, DriftReportId,
-        FeedbackCoverageArtifactId, FeedbackCycleId, FeedbackEvaluationUseId, FeedbackStageEventId,
-        ModelVersionId, PolicyBundleGeneration, PolicyIdempotencyKey, PromotionPermitId,
-        ResearchEvaluationTrack, ResearchJobId, ResearchProfileArtifactId, ResearchProfileId,
-        ResearchProfileRef, RoleCode, TrainingDatasetId, UserId,
+        ArtifactUri, AuditEventId, CapabilityRegistryHashes, CohortCensorCount,
+        CohortExclusionCount, ContentHash, DatasetCohortCounts, DecisionPolicySnapshotId,
+        DriftReportId, FeedbackCoverageArtifactId, FeedbackCycleId, FeedbackEvaluationUseId,
+        FeedbackStageEventId, FeedbackTriggerEventId, ModelCandidateManifestId,
+        ModelGovernanceAuditId, ModelVersionId, PolicyActivationId, PolicyBundleGeneration,
+        PolicyIdempotencyKey, PromotionPermitId, ResearchEvaluationTrack, ResearchJobId,
+        ResearchProfileArtifactId, ResearchProfileId, ResearchProfileRef, RoleCode,
+        TrainingDatasetId, UserId, WorkerId,
     },
 };
 
@@ -62,15 +67,33 @@ fn validate_governed_reason(reason: &str) -> Result<(), ValidationError> {
     }
 }
 
-fn validate_runtime_modes(modes: &[QuantRuntimeMode]) -> Result<(), ValidationError> {
-    if !modes.is_empty()
-        && modes.len() <= 3
-        && modes.windows(2).all(|pair| pair[0].rank() < pair[1].rank())
+fn validate_scheduler_reason(reason: &str) -> Result<(), ValidationError> {
+    if !reason.is_empty()
+        && reason.len() <= 128
+        && reason
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
     {
         Ok(())
     } else {
-        Err(ValidationError::new("promotion_runtime_modes"))
+        Err(ValidationError::new("scheduler_reason"))
     }
+}
+
+fn validate_scheduler_note(note: &str) -> Result<(), ValidationError> {
+    if !note.is_empty()
+        && note.len() <= 1_024
+        && note == note.trim()
+        && !note.chars().any(char::is_control)
+    {
+        Ok(())
+    } else {
+        Err(ValidationError::new("scheduler_note"))
+    }
+}
+
+const fn default_permit_ttl_secs() -> u32 {
+    1_800
 }
 
 /// Filters for `GET /research/feedback-cycles`.
@@ -116,6 +139,18 @@ pub struct CancelFeedbackCycleRequest {
     pub reason: String,
 }
 
+/// Pause/resume scheduler CAS request with mandatory operator context.
+#[derive(Debug, Clone, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackSchedulerControlRequest {
+    #[validate(range(min = 0))]
+    pub expected_pause_revision: i64,
+    #[validate(custom(function = "validate_scheduler_reason"))]
+    pub reason_code: String,
+    #[validate(custom(function = "validate_scheduler_note"))]
+    pub note: String,
+}
+
 /// Filters for `GET /research/feedback-promotion-permits`.
 #[derive(Debug, Clone, Deserialize, NormalizePageQuery)]
 pub struct PromotionPermitListQuery {
@@ -132,12 +167,14 @@ pub struct PromotionPermitListQuery {
 #[serde(deny_unknown_fields)]
 pub struct IssuePromotionPermitRequest {
     pub feedback_cycle_id: FeedbackCycleId,
-    #[validate(custom(function = "validate_runtime_modes"))]
-    pub allowed_runtime_modes: Vec<QuantRuntimeMode>,
-    pub expires_at: DateTime<Utc>,
+    #[serde(default = "default_permit_ttl_secs")]
+    #[validate(range(min = 300, max = 3600))]
+    pub ttl_secs: u32,
     pub idempotency_key: PolicyIdempotencyKey,
+    #[validate(custom(function = "validate_scheduler_reason"))]
+    pub reason_code: String,
     #[validate(custom(function = "validate_governed_reason"))]
-    pub reason: String,
+    pub note: String,
 }
 
 /// Base-revision CAS intent for the sole permit lifecycle mutation.
@@ -146,8 +183,45 @@ pub struct IssuePromotionPermitRequest {
 pub struct RevokePromotionPermitRequest {
     #[validate(range(min = 0, max = 0))]
     pub expected_revision: i64,
+    #[validate(custom(function = "validate_scheduler_reason"))]
+    pub reason_code: String,
     #[validate(custom(function = "validate_governed_reason"))]
-    pub reason: String,
+    pub note: String,
+}
+
+/// Authenticated intent to consume one exact permit and atomically change one
+/// model route. Candidate, route, runtime mode, and gate identities are
+/// intentionally absent and remain server-derived.
+#[derive(Debug, Clone, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct ActivateModelRouteRequest {
+    pub promotion_permit_id: PromotionPermitId,
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub expected_policy_generation: PolicyBundleGeneration,
+    #[validate(range(min = 0))]
+    pub expected_runtime_control_revision: i64,
+    pub idempotency_key: PolicyIdempotencyKey,
+    #[validate(custom(function = "validate_scheduler_reason"))]
+    pub reason_code: String,
+    #[validate(custom(function = "validate_governed_reason"))]
+    pub note: String,
+}
+
+/// Authenticated intent to establish the first champion for one server-derived
+/// Pooled, Crypto, or Weather Buy route. Route, profile, model family, and all
+/// evidence remain server-authoritative.
+#[derive(Debug, Clone, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapModelRouteRequest {
+    pub model_version_id: ModelVersionId,
+    pub expected_policy_generation: PolicyBundleGeneration,
+    #[validate(range(min = 0))]
+    pub expected_runtime_control_revision: i64,
+    pub idempotency_key: PolicyIdempotencyKey,
+    #[validate(custom(function = "validate_scheduler_reason"))]
+    pub reason_code: String,
+    #[validate(custom(function = "validate_governed_reason"))]
+    pub note: String,
 }
 
 /// One feedback-cycle row without worker lease ownership.
@@ -155,7 +229,6 @@ pub struct RevokePromotionPermitRequest {
 pub struct FeedbackCycleView {
     pub feedback_cycle_id: FeedbackCycleId,
     pub idempotency_hash: ContentHash,
-    pub trigger_family: FeedbackTriggerFamily,
     pub profile_ref: ResearchProfileRef,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub feedback_policy_hash: ContentHash,
@@ -182,7 +255,6 @@ impl From<FeedbackCycleInfo> for FeedbackCycleView {
         Self {
             feedback_cycle_id: info.feedback_cycle_id,
             idempotency_hash: info.idempotency_hash,
-            trigger_family: info.trigger_family,
             profile_ref: info.profile_ref,
             research_profile_artifact_id: info.research_profile_artifact_id,
             feedback_policy_hash: info.feedback_policy_hash,
@@ -223,6 +295,95 @@ impl FeedbackCycleMutationView {
     }
 }
 
+/// Governed trigger result separating cadence convergence from exact replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackCycleTriggerView {
+    pub cycle: FeedbackCycleView,
+    pub cycle_reused: bool,
+    pub trigger_replayed: bool,
+}
+
+impl FeedbackCycleTriggerView {
+    #[must_use]
+    pub fn new(cycle: FeedbackCycleInfo, cycle_reused: bool, trigger_replayed: bool) -> Self {
+        Self {
+            cycle: cycle.into(),
+            cycle_reused,
+            trigger_replayed,
+        }
+    }
+}
+
+/// Operational projection of one PostgreSQL-authoritative scheduler row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackSchedulerStateView {
+    pub research_profile_id: ResearchProfileId,
+    pub research_profile_artifact_id: ResearchProfileArtifactId,
+    pub profile_hash: ContentHash,
+    pub feedback_policy_hash: ContentHash,
+    pub cadence_secs: i64,
+    pub cooldown_secs: i64,
+    pub next_due_at: DateTime<Utc>,
+    pub last_cycle_id: Option<FeedbackCycleId>,
+    pub last_cutoff: Option<DateTime<Utc>>,
+    pub cooldown_until: Option<DateTime<Utc>>,
+    pub lease_owner: Option<WorkerId>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub attempt: i32,
+    pub retry_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub paused: bool,
+    pub pause_revision: i64,
+    pub pause_reason_code: Option<String>,
+    pub pause_note: Option<String>,
+    pub revision: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<FeedbackSchedulerStateInfo> for FeedbackSchedulerStateView {
+    fn from(info: FeedbackSchedulerStateInfo) -> Self {
+        Self {
+            research_profile_id: info.research_profile_id,
+            research_profile_artifact_id: info.research_profile_artifact_id,
+            profile_hash: info.profile_hash,
+            feedback_policy_hash: info.feedback_policy_hash,
+            cadence_secs: info.cadence_secs,
+            cooldown_secs: info.cooldown_secs,
+            next_due_at: info.next_due_at,
+            last_cycle_id: info.last_cycle_id,
+            last_cutoff: info.last_cutoff,
+            cooldown_until: info.cooldown_until,
+            lease_owner: info.lease_owner,
+            lease_expires_at: info.lease_expires_at,
+            attempt: info.attempt,
+            retry_at: info.retry_at,
+            last_error: info.last_error,
+            paused: info.paused,
+            pause_revision: info.pause_revision,
+            pause_reason_code: info.pause_reason_code,
+            pause_note: info.pause_note,
+            revision: info.revision,
+            created_at: info.created_at,
+            updated_at: info.updated_at,
+        }
+    }
+}
+
+/// List snapshot timestamped by the authoritative `PostgreSQL` clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackSchedulerListView {
+    pub observed_at: DateTime<Utc>,
+    pub items: Vec<FeedbackSchedulerStateView>,
+}
+
+/// One pause/resume mutation and its authoritative observation time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackSchedulerMutationView {
+    pub observed_at: DateTime<Utc>,
+    pub state: FeedbackSchedulerStateView,
+}
+
 /// One promotion permit with status derived at an authoritative database time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PromotionPermitView {
@@ -230,14 +391,20 @@ pub struct PromotionPermitView {
     pub idempotency_key: PolicyIdempotencyKey,
     pub scope_hash: ContentHash,
     pub issuance_hash: ContentHash,
+    pub feedback_cycle_id: FeedbackCycleId,
     pub profile_ref: ResearchProfileRef,
     pub research_profile_artifact_id: ResearchProfileArtifactId,
     pub category: MarketCategory,
     pub expected_policy_generation: PolicyBundleGeneration,
+    pub expected_runtime_control_revision: i64,
     pub expected_decision_policy_snapshot_id: DecisionPolicySnapshotId,
     pub expected_snapshot_hash: ContentHash,
     pub champion_model_version_id: ModelVersionId,
     pub champion_serving_contract_hash: ContentHash,
+    pub candidate_model_version_id: ModelVersionId,
+    pub candidate_manifest_id: ModelCandidateManifestId,
+    pub candidate_manifest_hash: ContentHash,
+    pub promotion_gate_hash: ContentHash,
     pub allowed_runtime_modes: Vec<QuantRuntimeMode>,
     pub non_route_policy_hash: ContentHash,
     pub serving_constraints_hash: ContentHash,
@@ -270,14 +437,20 @@ impl PromotionPermitView {
             idempotency_key: info.idempotency_key,
             scope_hash: info.scope_hash,
             issuance_hash: info.issuance_hash,
+            feedback_cycle_id: info.feedback_cycle_id,
             profile_ref: info.profile_ref,
             research_profile_artifact_id: info.research_profile_artifact_id,
             category: info.category,
             expected_policy_generation: info.expected_policy_generation,
+            expected_runtime_control_revision: info.expected_runtime_control_revision,
             expected_decision_policy_snapshot_id: info.expected_decision_policy_snapshot_id,
             expected_snapshot_hash: info.expected_snapshot_hash,
             champion_model_version_id: info.champion_model_version_id,
             champion_serving_contract_hash: info.champion_serving_contract_hash,
+            candidate_model_version_id: info.candidate_model_version_id,
+            candidate_manifest_id: info.candidate_manifest_id,
+            candidate_manifest_hash: info.candidate_manifest_hash,
+            promotion_gate_hash: info.promotion_gate_hash,
             allowed_runtime_modes: info.allowed_runtime_modes,
             non_route_policy_hash: info.non_route_policy_hash,
             serving_constraints_hash: info.serving_constraints_hash,
@@ -321,6 +494,51 @@ impl PromotionPermitMutationView {
     }
 }
 
+/// Typed receipt for an atomic model-route activation or its exact replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelRouteActivationReceiptView {
+    pub promotion_permit_id: PromotionPermitId,
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub previous_route_generation: PolicyBundleGeneration,
+    pub activated_route_generation: PolicyBundleGeneration,
+    pub previous_model_version_id: ModelVersionId,
+    pub activated_model_version_id: ModelVersionId,
+    pub policy_activation_id: PolicyActivationId,
+    pub model_governance_audit_id: ModelGovernanceAuditId,
+    pub audit_event_id: AuditEventId,
+    pub outbox_event_id: AuditEventId,
+    pub transaction_hash: ContentHash,
+    pub permit_issued_by_user_id: UserId,
+    pub permit_issued_by_username: String,
+    pub permit_issued_by_role: RoleCode,
+    pub activated_by_user_id: UserId,
+    pub activated_by_username: String,
+    pub activated_by_role: RoleCode,
+    pub server_timestamp: DateTime<Utc>,
+    pub execution_authority_unchanged: bool,
+    pub replayed: bool,
+}
+
+/// Typed receipt for a first-champion route bootstrap or exact replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelRouteBootstrapReceiptView {
+    pub route: BuyModelRoute,
+    pub previous_route_generation: PolicyBundleGeneration,
+    pub activated_route_generation: PolicyBundleGeneration,
+    pub activated_model_version_id: ModelVersionId,
+    pub policy_activation_id: PolicyActivationId,
+    pub model_governance_audit_id: ModelGovernanceAuditId,
+    pub audit_event_id: AuditEventId,
+    pub outbox_event_id: AuditEventId,
+    pub transaction_hash: ContentHash,
+    pub activated_by_user_id: UserId,
+    pub activated_by_username: String,
+    pub activated_by_role: RoleCode,
+    pub server_timestamp: DateTime<Utc>,
+    pub execution_authority_unchanged: bool,
+    pub replayed: bool,
+}
+
 /// One immutable stage transition in cycle sequence order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FeedbackStageEventView {
@@ -355,6 +573,37 @@ impl From<FeedbackStageEventInfo> for FeedbackStageEventView {
             occurred_at: info.occurred_at,
             event_hash: info.event_hash,
             created_at: info.created_at,
+        }
+    }
+}
+
+/// One append-only trigger intent; multiple families may converge on one
+/// canonical feedback cycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackTriggerEventView {
+    pub feedback_trigger_event_id: FeedbackTriggerEventId,
+    pub feedback_cycle_id: FeedbackCycleId,
+    pub trigger_family: FeedbackTriggerFamily,
+    pub actor_user_id: Option<UserId>,
+    pub actor_label: String,
+    pub actor_role: Option<RoleCode>,
+    pub reason_code: String,
+    pub event_hash: ContentHash,
+    pub occurred_at: DateTime<Utc>,
+}
+
+impl From<FeedbackTriggerEventInfo> for FeedbackTriggerEventView {
+    fn from(info: FeedbackTriggerEventInfo) -> Self {
+        Self {
+            feedback_trigger_event_id: info.feedback_trigger_event_id,
+            feedback_cycle_id: info.feedback_cycle_id,
+            trigger_family: info.trigger_family,
+            actor_user_id: info.actor_user_id,
+            actor_label: info.actor_label,
+            actor_role: info.actor_role,
+            reason_code: info.reason_code,
+            event_hash: info.event_hash,
+            occurred_at: info.occurred_at,
         }
     }
 }
@@ -519,6 +768,62 @@ pub struct FeedbackCoverageView {
     pub policy_evaluation: FeedbackCohortCountsView,
 }
 
+/// Same-window challenger evidence selected by the terminal Decision stage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackCandidateComparisonView {
+    pub observation_count: u64,
+    pub effect_bps: String,
+    pub simultaneous_lower_bound_bps: String,
+    pub adjusted_p_value: String,
+    pub confidence: String,
+}
+
+/// Production-generation shadow evidence for the selected challenger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackCandidateShadowView {
+    pub observed: u64,
+    pub required: u64,
+    pub observed_window_secs: u64,
+    pub required_window_secs: u64,
+    pub mean_topn_overlap: String,
+    pub minimum_topn_overlap: String,
+    pub any_hard_divergence: bool,
+}
+
+/// Attribution plan summary; artifact hashes remain expandable evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackAttributionSummaryView {
+    pub prior_cycle_use_count: u64,
+    pub prediction_explanation_count: u64,
+    pub decision_counterfactual_count: u64,
+    pub outcome_association_count: u64,
+    pub execution_trajectory_count: u64,
+    pub policy_counterfactual_count: u64,
+    pub use_set_hash: ContentHash,
+    pub produced_set_hash: ContentHash,
+}
+
+/// Exact serving-only route change proposed by one `CandidateReady` decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackRouteDiffView {
+    pub current_route_generation: PolicyBundleGeneration,
+    pub proposed_route_generation: PolicyBundleGeneration,
+    pub champion_model_version_id: ModelVersionId,
+    pub candidate_model_version_id: ModelVersionId,
+    pub execution_authority_unchanged: bool,
+}
+
+/// Operator scorecard for a terminal `CandidateReady` cycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackCandidateReadyView {
+    pub quality_gate: QualityGateReportView,
+    pub comparison: FeedbackCandidateComparisonView,
+    pub shadow: FeedbackCandidateShadowView,
+    pub attribution: FeedbackAttributionSummaryView,
+    pub route_diff: FeedbackRouteDiffView,
+    pub blockers: Vec<String>,
+}
+
 /// Current queue state from the authoritative `PostgreSQL` clock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FeedbackQueueView {
@@ -539,6 +844,20 @@ impl From<FeedbackQueueSnapshot> for FeedbackQueueView {
             oldest_running_at: snapshot.oldest_running_at,
         }
     }
+}
+
+/// PostgreSQL-authoritative truth pipeline coverage at one observation time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackTruthOperationsView {
+    pub observed_at: DateTime<Utc>,
+    pub resolution_unresolved_count: u64,
+    pub resolution_quarantined_count: u64,
+    pub resolution_oldest_unresolved_at: Option<DateTime<Utc>>,
+    pub resolution_verified_through: DateTime<Utc>,
+    pub execution_attempt_unsealed_count: u64,
+    pub execution_attempt_sealed_through: DateTime<Utc>,
+    pub recommendation_rollup_unsealed_count: u64,
+    pub recommendation_rollup_sealed_through: DateTime<Utc>,
 }
 
 /// Verified research-readiness evidence. Missing measurements remain null.
@@ -575,6 +894,7 @@ pub struct FeedbackOverviewView {
     pub revision: i64,
     pub generated_at: DateTime<Utc>,
     pub queue: FeedbackQueueView,
+    pub truth_operations: FeedbackTruthOperationsView,
     pub readiness: Option<FeedbackReadinessView>,
     pub profiles: Vec<FeedbackProfileOverviewView>,
 }
@@ -583,8 +903,10 @@ pub struct FeedbackOverviewView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FeedbackCycleDetailView {
     pub cycle: FeedbackCycleView,
+    pub triggers: Vec<FeedbackTriggerEventView>,
     pub timeline: Vec<FeedbackStageEventView>,
     pub coverage: Option<FeedbackCoverageView>,
+    pub candidate_ready: Option<FeedbackCandidateReadyView>,
     pub drift_reports: Vec<DriftReportView>,
     pub evaluation_uses: Vec<FeedbackEvaluationUseView>,
 }
@@ -597,21 +919,19 @@ mod tests {
     use validator::Validate as _;
 
     use super::{
-        CancelFeedbackCycleRequest, DriftReportListQuery, DriftReportView, FeedbackCycleListQuery,
-        FeedbackReadinessView, IssuePromotionPermitRequest, RevokePromotionPermitRequest,
-        TriggerFeedbackCycleRequest,
+        BootstrapModelRouteRequest, CancelFeedbackCycleRequest, DriftReportListQuery,
+        DriftReportView, FeedbackCycleListQuery, FeedbackReadinessView,
+        IssuePromotionPermitRequest, RevokePromotionPermitRequest, TriggerFeedbackCycleRequest,
     };
     use crate::{
         domain::{
             pagination::{NormalizePageQuery as _, PageRequest, Paginated},
             quant::DriftReportInfo,
         },
-        enums::quant::{
-            FeedbackDriftAssessment, FeedbackDriftKind, FeedbackDriftMetric, QuantRuntimeMode,
-        },
+        enums::quant::{FeedbackDriftAssessment, FeedbackDriftKind, FeedbackDriftMetric},
         types::{
-            ArtifactUri, ContentHash, DriftReportId, FeedbackCycleId, PolicyIdempotencyKey,
-            ResearchProfileId,
+            ArtifactUri, ContentHash, DriftReportId, FeedbackCycleId, ModelVersionId,
+            PolicyBundleGeneration, PolicyIdempotencyKey, ResearchProfileId,
         },
     };
 
@@ -740,26 +1060,39 @@ mod tests {
         );
         let permit = IssuePromotionPermitRequest {
             feedback_cycle_id: FeedbackCycleId::from_v7(),
-            allowed_runtime_modes: vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto],
-            expires_at: at(2),
+            ttl_secs: 1_800,
             idempotency_key: "feedback-permit-0001"
                 .parse::<PolicyIdempotencyKey>()
                 .expect("valid permit idempotency key"),
-            reason: "authorize one exact category route".to_owned(),
+            reason_code: "candidate_approved".to_owned(),
+            note: "authorize one exact category route".to_owned(),
         };
         assert!(permit.validate().is_ok());
-        let mut duplicate_modes = permit.clone();
-        duplicate_modes.allowed_runtime_modes =
-            vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::ReportOnly];
-        assert!(duplicate_modes.validate().is_err());
-        let mut unordered_modes = permit;
-        unordered_modes.allowed_runtime_modes =
-            vec![QuantRuntimeMode::SemiAuto, QuantRuntimeMode::ReportOnly];
-        assert!(unordered_modes.validate().is_err());
+        let mut short_ttl = permit.clone();
+        short_ttl.ttl_secs = 299;
+        assert!(short_ttl.validate().is_err());
+        let mut long_ttl = permit;
+        long_ttl.ttl_secs = 3_601;
+        assert!(long_ttl.validate().is_err());
+        assert!(
+            BootstrapModelRouteRequest {
+                model_version_id: ModelVersionId::from_v7(),
+                expected_policy_generation: PolicyBundleGeneration::FIRST,
+                expected_runtime_control_revision: 0,
+                idempotency_key: "model-bootstrap-0001"
+                    .parse::<PolicyIdempotencyKey>()
+                    .expect("valid bootstrap idempotency key"),
+                reason_code: "initial_champion".to_owned(),
+                note: "establish first report-only category route".to_owned(),
+            }
+            .validate()
+            .is_ok()
+        );
         assert!(
             RevokePromotionPermitRequest {
                 expected_revision: 0,
-                reason: "withdraw exact authority".to_owned(),
+                reason_code: "operator_revoked".to_owned(),
+                note: "withdraw exact authority".to_owned(),
             }
             .validate()
             .is_ok()
@@ -767,7 +1100,8 @@ mod tests {
         assert!(
             RevokePromotionPermitRequest {
                 expected_revision: 1,
-                reason: "withdraw exact authority".to_owned(),
+                reason_code: "operator_revoked".to_owned(),
+                note: "withdraw exact authority".to_owned(),
             }
             .validate()
             .is_err()

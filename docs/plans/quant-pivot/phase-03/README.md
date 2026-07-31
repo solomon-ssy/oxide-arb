@@ -58,7 +58,7 @@ Phase 03 是整个 quant-pivot 的研究平面：市场选择、特征、因子�
 | 3.5 | Historical PIT & Training Dataset | 离线数据 | [`03.5-historical-pit-and-training-dataset.md`](03.5-historical-pit-and-training-dataset.md) |
 | 3.5.1 | Training Dataset Admin API | UI/API 契约 | [`03.5.1-training-dataset-admin-api.md`](03.5.1-training-dataset-admin-api.md) |
 | 3.6 | Trainer, Classical ML & Backtest | **离线训练/回测闭环** | [`03.6-trainer-classical-ml-backtest.md`](03.6-trainer-classical-ml-backtest.md) |
-| 3.7 | Quality Gates & Governance | **离线治理闭环** | [`03.7-quality-gates-and-governance.md`](03.7-quality-gates-and-governance.md) |
+| 3.7 | Quality Gates & Route Governance | **离线证据与 serving-route 治理闭环** | [`03.7-quality-gates-and-governance.md`](03.7-quality-gates-and-governance.md) |
 | 3.8 | Vertical Domain Closed-Loop（Crypto 参考垂直） | **垂直完整闭环** | [`03.8-vertical-domain-closed-loop.md`](03.8-vertical-domain-closed-loop.md) |
 
 > 3.8 合并了垂直领域的**设计真理（D1–D7）+ 工作流（W1–W7）+ 外部数据源选型**为单一权威文档
@@ -79,7 +79,7 @@ flowchart TD
     P33 --> P35
     P35 --> P36["3.6 Trainer, Classical ML & Backtest"]
     P34 --> P36
-    P36 --> P37["3.7 Quality Gates & Governance"]
+    P36 --> P37["3.7 Quality Gates & Route Governance"]
     P34 --> P37
     P34 --> P38["3.8 Vertical Domain Closed-Loop"]
     P35 --> P38
@@ -91,7 +91,8 @@ flowchart TD
 - **在线闭环**（3.1 → 3.2 → 3.3 → 3.4）：`MarketSelection → FeatureVector →
   FactorValue → ModelRun → SignalCandidate`，持久化 ModelRun + ClickHouse 事实。
 - **离线闭环**（3.5 → 3.6 → 3.7）：`Historical PIT → TrainingDataset → Trainer →
-  Backtest → QualityGate → Shadow → Publish/Rollback`。
+  Backtest/CPCV → QualityGate → immutable CandidateManifest → Shadow → governed route
+  activation/config revision rollback`。
 - **垂直闭环**（子phase 3.8，Crypto 参考垂直）：`MarketLinkage → DomainDataSource →
   quant_domain_observation → domain slice 特征/因子 → ModelRouting`。**统一落地于 3.8**
   （3.5/3.6 已交付，垂直在其上加性扩展，不回推 3.2/3.3/3.5/3.6）。
@@ -163,8 +164,8 @@ ml-classical = ["dep:smartcore"]
 | `required_features` → 03.1 selection 全链路编排 | `QuantModelRuntime::required_features()` trait | Phase 04 | 3.4 §10 / 3.8 §6.5 |
 | report-level shadow 完整比较（capital/would-execute/risk envelope delta） | signal/rank 层 `shadow_diff` + metrics | Phase 04 | 3.7 §10 |
 | shadow `exceeds_threshold` operator alert + `quant_shadow_comparison` 表 | normalized comparison + typed `weight_source` | **Phase 3.7 ✅ 已交付** | 3.7 §4 / §10 |
-| `ModelConfig.min_quality_gate_age_secs` load-time deny | schema 字段 + validation | Phase 3.7 | 3.4 §4.2 / 3.7 §4 |
-| `FactorsConfig.factor_weights` 在线 overlay（非 Published） | artifact 内冻结权重 | Phase 3.7 | 3.4 §4.2 / 3.7 §3.6 |
+| quality/gate freshness | `PromotionGateArtifact` 绑定 exact evidence 与 server timestamp；permit/activation 重验 | **Phase 3.7 + 11.9 ✅** | 3.7 §3 / 11.9 |
+| runtime factor-weight overlay | 权重冻结在 content-addressed artifact；变化创建新 model version | **按设计删除** | 3.7 §2 |
 | `ReturnModelSpec::Calibrated` 拟合 + `objective_report` | `Heuristic` + Calibrated 插值应用 | **Phase 3.6 ✅ 已交付** | 3.4 §10 / 3.6 §1.1 |
 | `classical` runtime（smartcore） | factory `RuntimeUnavailable` | **Phase 3.6 ✅ 已交付**（`ml-classical`） | 3.4 §10 |
 | `argmin` 权重优化（grid 主干 + `optimize` 精修） | grid coordinate search | **Phase 3.6 ✅ 已交付**（`optimize`） | 3.6 §1 |

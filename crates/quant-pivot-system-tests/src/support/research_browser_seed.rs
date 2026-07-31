@@ -30,9 +30,9 @@ use quant_pivot_models::{
     types::{
         BacktestReportId, ContentHash, DecisionPolicySnapshotId, EventId, FeatureCell,
         FeatureStaleness, FeatureValue, FeedbackCycleId, MarketId, ModelRunId, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, Probability, ResearchEvaluationTrack, SchemaVersion,
-        TokenId, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, TrainingSampleSources,
-        Usd,
+        ModelTrainingContract, ModelVersionId, Probability, ResearchEvaluationTrack,
+        ResearchProfileArtifact, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId,
+        TrainingSampleSource, TrainingSampleSources, Usd,
         backtest::{
             CategoryMetric, CategoryMetrics, ExpectedVsRealized, PnlCurvePoint, PnlSimulation,
         },
@@ -47,7 +47,8 @@ use quant_pivot_repository::{
     traits::{
         BacktestReportRepository, FeedbackCycleCasOutcome, FeedbackCycleGeneration,
         FeedbackCycleRepository, FeedbackCycleWriteOutcome, FeedbackStageWriteOutcome,
-        ModelRegistryRepository, ModelRunRepository, TrainingDatasetRepository,
+        FeedbackTriggerCommit, FeedbackTriggerWriteOutcome, ModelRegistryRepository,
+        ModelRunRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -106,6 +107,7 @@ struct PersistedDataset {
 struct FeedbackCycleSeed<'a> {
     training: &'a PersistedDataset,
     evaluation: &'a PersistedDataset,
+    cancellation_evaluation: Option<&'a PersistedDataset>,
     champion_model_version_id: ModelVersionId,
     champion_serving_contract_hash: ContentHash,
     observed_at: DateTime<Utc>,
@@ -189,6 +191,20 @@ struct DatasetSeed {
     label_schema_hash: ContentHash,
 }
 
+struct BrowserEvaluationSeed<'a> {
+    db: &'a DatabaseConnection,
+    store: &'a Arc<dyn ArtifactStore>,
+    model_spec_id: ModelSpecId,
+    model_family: ModelFamily,
+    model_spec_definition_hash: ContentHash,
+    factor_serving_plane: &'a FactorServingPlane,
+    decision_policy_snapshot_id: DecisionPolicySnapshotId,
+    runtime_config_hash: ContentHash,
+    observed_at: DateTime<Utc>,
+    feature_schema_hash: ContentHash,
+    label_schema_hash: ContentHash,
+}
+
 #[derive(Clone, Copy)]
 enum BrowserModelTarget {
     Candidate,
@@ -246,10 +262,68 @@ impl BrowserModelSeed<'_> {
                 self.registry.create_model_version(version).await?;
             }
             BrowserModelTarget::Active(_) => {
-                ModelVersionFixture::persist_published(self.db, version).await?;
+                ModelVersionFixture::persist_route_candidate(self.db, version).await?;
             }
         }
         Ok(model_version_id)
+    }
+}
+
+impl BrowserEvaluationSeed<'_> {
+    async fn persist(
+        &self,
+        model_target: BrowserModelTarget,
+    ) -> QuantResult<(PersistedDataset, Option<PersistedDataset>)> {
+        let evaluation = persist_dataset(
+            self.db,
+            self.store,
+            DatasetSeed {
+                scope: "browser-research-evaluation".to_owned(),
+                model_spec_id: self.model_spec_id,
+                model_family: self.model_family,
+                model_spec_definition_hash: self.model_spec_definition_hash,
+                factor_serving_plane: self.factor_serving_plane.clone(),
+                decision_policy_snapshot_id: self.decision_policy_snapshot_id,
+                runtime_config_hash: self.runtime_config_hash,
+                purpose: DatasetPurpose::Evaluation,
+                examples: model_examples(
+                    "evaluation",
+                    self.observed_at - Duration::days(30),
+                    self.factor_serving_plane,
+                )?,
+                feature_schema_hash: self.feature_schema_hash,
+                label_schema_hash: self.label_schema_hash,
+            },
+        )
+        .await?;
+        let cancellation_evaluation = match model_target {
+            BrowserModelTarget::Candidate => None,
+            BrowserModelTarget::Active(_) => Some(
+                persist_dataset(
+                    self.db,
+                    self.store,
+                    DatasetSeed {
+                        scope: "browser-research-cancellation-evaluation".to_owned(),
+                        model_spec_id: self.model_spec_id,
+                        model_family: self.model_family,
+                        model_spec_definition_hash: self.model_spec_definition_hash,
+                        factor_serving_plane: self.factor_serving_plane.clone(),
+                        decision_policy_snapshot_id: self.decision_policy_snapshot_id,
+                        runtime_config_hash: self.runtime_config_hash,
+                        purpose: DatasetPurpose::Evaluation,
+                        examples: model_examples(
+                            "cancellation-evaluation",
+                            self.observed_at - Duration::days(45),
+                            self.factor_serving_plane,
+                        )?,
+                        feature_schema_hash: self.feature_schema_hash,
+                        label_schema_hash: self.label_schema_hash,
+                    },
+                )
+                .await?,
+            ),
+        };
+        Ok((evaluation, cancellation_evaluation))
     }
 }
 
@@ -308,7 +382,7 @@ pub async fn seed_browser_research(
     .await
 }
 
-/// Seed the browser research graph with the exact Published model already
+/// Seed the browser research graph with the exact active-route model already
 /// reserved by the governed-feedback policy fixture.
 pub async fn seed_governed_feedback_research(
     db: &DatabaseConnection,
@@ -418,27 +492,20 @@ async fn seed_research(
         .persist()
         .await?;
     }
-    let evaluation = persist_dataset(
+    let (evaluation, cancellation_evaluation) = BrowserEvaluationSeed {
         db,
         store,
-        DatasetSeed {
-            scope: "browser-research-evaluation".to_owned(),
-            model_spec_id: browser_model_spec_id,
-            model_family: model_spec.model_family,
-            model_spec_definition_hash: browser_model_spec_definition_hash,
-            factor_serving_plane: factor_serving_plane.clone(),
-            decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
-            runtime_config_hash: policy_snapshot_hash,
-            purpose: DatasetPurpose::Evaluation,
-            examples: model_examples(
-                "evaluation",
-                now - Duration::days(30),
-                &factor_serving_plane,
-            )?,
-            feature_schema_hash,
-            label_schema_hash,
-        },
-    )
+        model_spec_id: browser_model_spec_id,
+        model_family: model_spec.model_family,
+        model_spec_definition_hash: browser_model_spec_definition_hash,
+        factor_serving_plane: &factor_serving_plane,
+        decision_policy_snapshot_id: infra.decision_policy_snapshot_id,
+        runtime_config_hash: policy_snapshot_hash,
+        observed_at: now,
+        feature_schema_hash,
+        label_schema_hash,
+    }
+    .persist(model_target)
     .await?;
     let report = seed_backtest_report(
         db,
@@ -457,6 +524,7 @@ async fn seed_research(
     let feedback_cycles = FeedbackCycleSeed {
         training: &training,
         evaluation: &evaluation,
+        cancellation_evaluation: cancellation_evaluation.as_ref(),
         champion_model_version_id: candidate.model_version_id,
         champion_serving_contract_hash: candidate.serving_contract_hash,
         observed_at: now,
@@ -473,20 +541,42 @@ async fn seed_research(
 }
 
 impl FeedbackCycleSeed<'_> {
+    fn candidate_family(
+        &self,
+        profile: &ResearchProfileArtifact,
+        evaluation: &PersistedDataset,
+    ) -> QuantResult<FeedbackCandidateFamily> {
+        let comparison_contract =
+            FeedbackComparisonContract::try_from_policy(&profile.spec.feedback_policy)?;
+        let recipe = FeedbackCandidateRecipe::try_seal(
+            self.training.feedback_request.clone(),
+            self.training.calibration_request()?,
+            CalibrationMethod::Platt,
+            DownsideSource::MfeMae,
+            self.training
+                .feedback_request
+                .source_lineage
+                .decision_policy_snapshot_id,
+        )?;
+        FeedbackCandidateFamily::try_seal(FeedbackCandidateFamilyInput {
+            shared_evaluation: evaluation.feedback_request.clone(),
+            comparison_contract,
+            candidates: vec![recipe],
+        })
+        .map_err(Into::into)
+    }
+
     fn seal_cycle(
         &self,
-        trigger_family: FeedbackTriggerFamily,
         feedback_policy_hash: ContentHash,
         candidate_family: FeedbackCandidateFamily,
     ) -> QuantResult<NewFeedbackCycle> {
+        let evaluation = candidate_family.shared_evaluation();
         NewFeedbackCycle::try_seal(FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
-            trigger_family,
             profile_ref: fixture_profile_ref(),
             feedback_policy_hash,
-            label_cutoff: self.evaluation.feedback_request.source_lineage.pit_cutoff,
-            capability_registry_hashes: self
-                .evaluation
-                .feedback_request
+            label_cutoff: evaluation.source_lineage.pit_cutoff,
+            capability_registry_hashes: evaluation
                 .source_lineage
                 .capability_registry_hashes
                 .clone(),
@@ -501,6 +591,7 @@ impl FeedbackCycleSeed<'_> {
         &self,
         repository: &PgFeedbackCycleRepository,
         cycle: NewFeedbackCycle,
+        trigger_family: FeedbackTriggerFamily,
         actor: &str,
         reason_code: &str,
     ) -> QuantResult<FeedbackCycleInfo> {
@@ -510,6 +601,7 @@ impl FeedbackCycleSeed<'_> {
             event_sequence: 1,
             stage: FeedbackStage::Trigger,
             event_kind: FeedbackStageEventKind::Triggered,
+            trigger_family: Some(trigger_family),
             research_job_id: None,
             actor: Some(actor.to_owned()),
             reason_code: Some(reason_code.to_owned()),
@@ -517,16 +609,18 @@ impl FeedbackCycleSeed<'_> {
             evidence_hash: None,
             occurred_at: self.observed_at,
         })?;
-        let (cycle_outcome, stage_outcome) = repository.record_trigger(cycle, trigger).await?;
-        match (cycle_outcome, stage_outcome) {
-            (
-                FeedbackCycleWriteOutcome::Inserted(persisted),
-                FeedbackStageWriteOutcome::Inserted(_),
-            )
-            | (
-                FeedbackCycleWriteOutcome::AlreadyPresent(persisted),
-                FeedbackStageWriteOutcome::AlreadyPresent(_),
-            ) => Ok(persisted),
+        let commit = repository.record_trigger(cycle, trigger).await?;
+        match commit {
+            FeedbackTriggerCommit {
+                cycle: FeedbackCycleWriteOutcome::Inserted(persisted),
+                stage: FeedbackStageWriteOutcome::Inserted(_),
+                trigger: FeedbackTriggerWriteOutcome::Inserted(_),
+            }
+            | FeedbackTriggerCommit {
+                cycle: FeedbackCycleWriteOutcome::AlreadyPresent(persisted),
+                stage: FeedbackStageWriteOutcome::AlreadyPresent(_),
+                trigger: FeedbackTriggerWriteOutcome::AlreadyPresent(_),
+            } => Ok(persisted),
             _ => Err(ResearchError::DatasetBuild {
                 detail: format!(
                     "browser feedback trigger outcomes are inconsistent for {feedback_cycle_id}"
@@ -547,23 +641,7 @@ impl FeedbackCycleSeed<'_> {
             .map_err(|detail| ResearchError::DatasetBuild {
                 detail: format!("resolve browser feedback profile: {detail}"),
             })?;
-        let comparison_contract =
-            FeedbackComparisonContract::try_from_policy(&profile.spec.feedback_policy)?;
-        let recipe = FeedbackCandidateRecipe::try_seal(
-            self.training.feedback_request.clone(),
-            self.training.calibration_request()?,
-            CalibrationMethod::Platt,
-            DownsideSource::MfeMae,
-            self.training
-                .feedback_request
-                .source_lineage
-                .decision_policy_snapshot_id,
-        )?;
-        let candidate_family = FeedbackCandidateFamily::try_seal(FeedbackCandidateFamilyInput {
-            shared_evaluation: self.evaluation.feedback_request.clone(),
-            comparison_contract,
-            candidates: vec![recipe],
-        })?;
+        let candidate_family = self.candidate_family(&profile, self.evaluation)?;
         let feedback_policy_hash =
             profile
                 .spec
@@ -576,11 +654,8 @@ impl FeedbackCycleSeed<'_> {
         let historical = self
             .persist_trigger(
                 &repository,
-                self.seal_cycle(
-                    FeedbackTriggerFamily::Manual,
-                    feedback_policy_hash,
-                    candidate_family.clone(),
-                )?,
+                self.seal_cycle(feedback_policy_hash, candidate_family)?,
+                FeedbackTriggerFamily::Manual,
                 "browser_fixture",
                 "browser_fixture",
             )
@@ -591,6 +666,7 @@ impl FeedbackCycleSeed<'_> {
             event_sequence: 2,
             stage: FeedbackStage::Coverage,
             event_kind: FeedbackStageEventKind::CancellationRequested,
+            trigger_family: None,
             research_job_id: None,
             actor: Some("browser_fixture".to_owned()),
             reason_code: Some("browser_fixture_cancelled".to_owned()),
@@ -619,14 +695,21 @@ impl FeedbackCycleSeed<'_> {
         let governed_cancellation_cycle_id = match model_target {
             BrowserModelTarget::Candidate => None,
             BrowserModelTarget::Active(_) => {
+                let cancellation_evaluation =
+                    self.cancellation_evaluation
+                        .ok_or_else(|| ResearchError::DatasetBuild {
+                            detail:
+                                "governed browser fixture is missing cancellation evaluation truth"
+                                    .to_owned(),
+                        })?;
                 let scheduled = self
                     .persist_trigger(
                         &repository,
                         self.seal_cycle(
-                            FeedbackTriggerFamily::Scheduled,
                             feedback_policy_hash,
-                            candidate_family,
+                            self.candidate_family(&profile, cancellation_evaluation)?,
                         )?,
+                        FeedbackTriggerFamily::Scheduled,
                         "browser_fixture_scheduler",
                         "browser_fixture_scheduled",
                     )

@@ -482,9 +482,9 @@ mod tests {
     fn report(fill: char, available_minute: u32) -> WeatherObservationReport {
         WeatherObservationReport {
             source_id: DomainSourceId::hko_open_data(),
-            instrument_key: DomainInstrumentKey::hko_rainfall("North District"),
-            subject_key: "North District".to_owned(),
-            report_kind: WeatherObservationReportKind::HkoRainfall,
+            instrument_key: DomainInstrumentKey::hko_daily_rainfall("HKO"),
+            subject_key: "Hong Kong Observatory".to_owned(),
+            report_kind: WeatherObservationReportKind::HkoDailyRainfall,
             variable: WeatherVariable::Precipitation,
             value: dec!(1.2),
             unit: DomainMeasurementUnit::Millimeter,

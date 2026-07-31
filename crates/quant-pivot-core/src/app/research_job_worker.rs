@@ -22,7 +22,10 @@ use std::{
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
+use quant_pivot_error::{
+    QuantError, QuantResult, feedback::FeedbackError, research::ResearchError,
+    storage::StorageError,
+};
 use quant_pivot_models::{
     clickhouse::QuantFeatureParityEventRow,
     config::ResearchJobsConfig,
@@ -32,16 +35,18 @@ use quant_pivot_models::{
             TradePolicyValidationJobParams,
         },
         ports::{
-            BacktestPort, CalibrationArtifactFitPort, CpcvBacktestPort, FeatureParityExecutionPort,
+            BacktestPort, CalibratedModelSealCommand, CalibrationArtifactFitPort, CpcvBacktestPort,
+            FeatureParityExecutionPort, FeedbackAttributionPlanJobParams,
             FeedbackCalibrationJobParams, FeedbackComparisonExecutionPort,
             FeedbackComparisonExecutionResult, FeedbackComparisonJobParams,
             FeedbackCoverageExecutionPort, FeedbackCpcvJobParams, FeedbackDatasetSealJobParams,
             FeedbackDecisionExecutionPort, FeedbackDecisionExecutionResult,
-            FeedbackDecisionJobParams, FeedbackDriftExecutionPort, FeedbackLearningExecutionPort,
-            FeedbackLearningExecutionResult, FeedbackShadowExecutionPort,
-            FeedbackShadowExecutionResult, FeedbackShadowJobParams, FeedbackTrainingJobParams,
-            ModelCalibrationFitOutcome, ModelCalibrationFitPort, ModelTrainingPort,
-            TradePolicyPort, TrainingDatasetPort,
+            FeedbackDecisionJobParams, FeedbackDriftExecutionPort, FeedbackGovernanceExecutionPort,
+            FeedbackLearningExecutionPort, FeedbackLearningExecutionResult,
+            FeedbackShadowExecutionPort, FeedbackShadowExecutionResult, FeedbackShadowJobParams,
+            FeedbackTrainingJobParams, FeedbackTruthFreezeJobParams, FeedbackValidationJobParams,
+            ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+            ModelGovernancePort, ModelTrainingPort, TradePolicyPort, TrainingDatasetPort,
         },
         quant::{
             JobProgressSink, ResearchJobArtifactRef, ResearchJobFinalization, ResearchJobInfo,
@@ -59,10 +64,13 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
     traits::{
-        CalibrationArtifactRepository, FactWriter, FactorRepository, FeatureParityRepository,
+        AttributionArtifactRepository, CalibrationArtifactRepository,
+        ExecutionAttemptOutcomeRepository, FactWriter, FactorRepository, FeatureParityRepository,
         FeatureRepository, FeedbackCohortRepository, FeedbackCycleRepository,
-        ModelRegistryRepository, PolicyRepository, RecommendationReportRepository,
-        ReportRunRepository, ServingEvidenceRepository, TradePolicyRepository,
+        FeedbackSchedulerRepository, MarketSelectionRepository, ModelRegistryRepository,
+        PolicyRepository, PromotionPermitRepository, RecommendationExecutionRollupRepository,
+        RecommendationReportRepository, ReportRunRepository, ResolutionObservationRepository,
+        ServingEvidenceRepository, TradePolicyRepository,
     },
 };
 use tokio::{
@@ -76,8 +84,11 @@ use tracing::{error, info, warn};
 use super::{
     AppContext,
     ports::{
-        backtest::CoreBacktestPort, cpcv_backtest::CoreCpcvBacktestPort,
-        model_training::CoreModelTrainingPort, training_dataset::CoreTrainingDatasetPort,
+        backtest::CoreBacktestPort,
+        cpcv_backtest::CoreCpcvBacktestPort,
+        feedback_mutation::{CoreFeedbackMutationDeps, CoreFeedbackMutationPort},
+        model_training::CoreModelTrainingPort,
+        training_dataset::CoreTrainingDatasetPort,
     },
     research_job::ResearchJobEngine,
     task_id::TaskId,
@@ -88,6 +99,7 @@ use crate::{
     service::{
         durable_feature_parity::{DurableFeatureParityDeps, DurableFeatureParitySource},
         feature_parity_executor::{FeatureParityExecutor, ReportFeatureParityIncidentResponse},
+        feedback_attribution::{FeedbackAttributionDeps, FeedbackAttributionMaterializer},
         feedback_comparison::{
             FeedbackComparisonExecutionDeps, FeedbackComparisonExecutionService,
         },
@@ -101,8 +113,13 @@ use crate::{
         feedback_evaluation::{
             FeedbackEvaluationReservationDeps, FeedbackEvaluationReservationService,
         },
+        feedback_governance::{
+            FeedbackGovernanceExecutionDeps, FeedbackGovernanceExecutionService,
+        },
+        feedback_governance_stage::{FeedbackGovernanceStageAdapter, FeedbackGovernanceStageDeps},
         feedback_learning::{FeedbackLearningExecutionDeps, FeedbackLearningExecutionService},
         feedback_learning_stage::{FeedbackLearningStageAdapter, FeedbackLearningStageDeps},
+        feedback_scheduler::{FeedbackScheduler, FeedbackSchedulerConfig},
         feedback_shadow::{FeedbackShadowExecutionDeps, FeedbackShadowExecutionService},
         feedback_shadow_stage::{FeedbackShadowStageAdapter, FeedbackShadowStageDeps},
         feedback_signal_stage::{FeedbackSignalStageAdapter, FeedbackSignalStageDeps},
@@ -113,7 +130,7 @@ use crate::{
     },
 };
 
-const ALL_KINDS: [ResearchJobKind; 18] = [
+const ALL_KINDS: [ResearchJobKind; 21] = [
     ResearchJobKind::DatasetBuild,
     ResearchJobKind::ModelTrain,
     ResearchJobKind::Backtest,
@@ -123,14 +140,17 @@ const ALL_KINDS: [ResearchJobKind; 18] = [
     ResearchJobKind::FeatureParity,
     ResearchJobKind::TradePolicyFit,
     ResearchJobKind::TradePolicyValidation,
+    ResearchJobKind::FeedbackTruthFreeze,
     ResearchJobKind::FeedbackCoverage,
+    ResearchJobKind::FeedbackAttributionPlan,
     ResearchJobKind::FeedbackDrift,
     ResearchJobKind::FeedbackDatasetSeal,
     ResearchJobKind::FeedbackTraining,
     ResearchJobKind::FeedbackCalibration,
     ResearchJobKind::FeedbackCpcv,
+    ResearchJobKind::FeedbackValidation,
     ResearchJobKind::FeedbackComparison,
-    ResearchJobKind::FeedbackShadowReplay,
+    ResearchJobKind::FeedbackShadow,
     ResearchJobKind::FeedbackDecision,
 ];
 
@@ -145,6 +165,56 @@ struct JobOutcome {
     coverage: Option<DatasetCoverage>,
 }
 
+/// Owns the standalone calibration-job invariant: a successful raw fit is not
+/// terminal until its exact calibrator is sealed into a new immutable model
+/// version through the sole governance authority.
+#[derive(Clone)]
+struct ModelCalibrationJobExecutor {
+    fitter: Arc<dyn ModelCalibrationFitPort>,
+    governance: Arc<dyn ModelGovernancePort>,
+}
+
+impl ModelCalibrationJobExecutor {
+    async fn execute(
+        &self,
+        params: ModelCalibrationFitJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<JobOutcome> {
+        let source_model_id = params.request.model_version_id;
+        let downside_source = params.downside_source;
+        let reason = params.request.reason.clone();
+        let actor = params.actor.clone();
+        let outcome = self.fitter.fit(params, progress, cancel).await?;
+        let result = match outcome {
+            ModelCalibrationFitOutcome::Calibrated { artifact_id, .. } => {
+                let calibrated = self
+                    .governance
+                    .seal_calibrated_model(
+                        &source_model_id,
+                        CalibratedModelSealCommand {
+                            calibrator_ref: artifact_id,
+                            downside_source,
+                            reason,
+                        },
+                        actor,
+                    )
+                    .await?;
+                Some(ResearchJobResultRef {
+                    kind: ResearchJobResultKind::ModelVersion,
+                    id: calibrated.model_version_id.as_uuid(),
+                })
+            }
+            ModelCalibrationFitOutcome::Insufficient { .. } => None,
+        };
+        Ok(JobOutcome {
+            result,
+            artifact: None,
+            coverage: None,
+        })
+    }
+}
+
 /// Dispatches a leased job to the matching offline service.
 #[derive(Clone)]
 struct ResearchJobExecutor {
@@ -153,11 +223,12 @@ struct ResearchJobExecutor {
     backtests: Arc<dyn BacktestPort>,
     cpcv_backtests: Arc<dyn CpcvBacktestPort>,
     bias_tables: Arc<dyn CalibrationArtifactFitPort>,
-    model_calibration_fit: Arc<dyn ModelCalibrationFitPort>,
+    model_calibration: ModelCalibrationJobExecutor,
     feature_parity: Arc<dyn FeatureParityExecutionPort>,
     trade_policies: Arc<dyn TradePolicyPort>,
     feedback_coverage: Arc<dyn FeedbackCoverageExecutionPort>,
     feedback_drift: Arc<dyn FeedbackDriftExecutionPort>,
+    feedback_governance: Arc<dyn FeedbackGovernanceExecutionPort>,
     feedback_learning: Arc<dyn FeedbackLearningExecutionPort>,
     feedback_comparison: Arc<dyn FeedbackComparisonExecutionPort>,
     feedback_shadow: Arc<dyn FeedbackShadowExecutionPort>,
@@ -249,6 +320,46 @@ impl ResearchJobExecutor {
         })
     }
 
+    async fn execute_truth_freeze(
+        &self,
+        params: FeedbackTruthFreezeJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<JobOutcome> {
+        let outcome = self
+            .feedback_governance
+            .freeze_truth(params, progress, cancel)
+            .await?;
+        Ok(JobOutcome {
+            result: Some(ResearchJobResultRef {
+                kind: ResearchJobResultKind::FeedbackTruthFreezeArtifact,
+                id: outcome.artifact_id.as_uuid(),
+            }),
+            artifact: Some(outcome.artifact),
+            coverage: None,
+        })
+    }
+
+    async fn execute_attribution(
+        &self,
+        params: FeedbackAttributionPlanJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<JobOutcome> {
+        let outcome = self
+            .feedback_governance
+            .plan_attribution(params, progress, cancel)
+            .await?;
+        Ok(JobOutcome {
+            result: Some(ResearchJobResultRef {
+                kind: ResearchJobResultKind::FeedbackAttributionPlanArtifact,
+                id: outcome.artifact_id.as_uuid(),
+            }),
+            artifact: Some(outcome.artifact),
+            coverage: None,
+        })
+    }
+
     async fn execute_drift(
         &self,
         params: FeedbackDriftJobParams,
@@ -328,6 +439,26 @@ impl ResearchJobExecutor {
             .map(Self::learning_outcome)
     }
 
+    async fn execute_validation(
+        &self,
+        params: FeedbackValidationJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<JobOutcome> {
+        let outcome = self
+            .feedback_governance
+            .validate_candidates(params, progress, cancel)
+            .await?;
+        Ok(JobOutcome {
+            result: Some(ResearchJobResultRef {
+                kind: ResearchJobResultKind::FeedbackValidationArtifact,
+                id: outcome.artifact_id.as_uuid(),
+            }),
+            artifact: Some(outcome.artifact),
+            coverage: None,
+        })
+    }
+
     fn comparison_outcome(outcome: FeedbackComparisonExecutionResult) -> JobOutcome {
         JobOutcome {
             result: Some(ResearchJobResultRef {
@@ -354,7 +485,7 @@ impl ResearchJobExecutor {
     fn shadow_outcome(outcome: FeedbackShadowExecutionResult) -> JobOutcome {
         JobOutcome {
             result: Some(ResearchJobResultRef {
-                kind: ResearchJobResultKind::FeedbackShadowReplayArtifact,
+                kind: ResearchJobResultKind::FeedbackShadowArtifact,
                 id: outcome.artifact_id.as_uuid(),
             }),
             artifact: Some(outcome.artifact),
@@ -497,24 +628,9 @@ impl ResearchJobExecutor {
                 })
             }
             ResearchJobParams::ModelCalibrationFit(params) => {
-                let outcome = self
-                    .model_calibration_fit
-                    .fit(params, progress, cancel)
-                    .await?;
-                let result = match outcome {
-                    ModelCalibrationFitOutcome::Calibrated { artifact_id, .. } => {
-                        Some(ResearchJobResultRef {
-                            kind: ResearchJobResultKind::CalibrationArtifact,
-                            id: artifact_id.as_uuid(),
-                        })
-                    }
-                    ModelCalibrationFitOutcome::Insufficient { .. } => None,
-                };
-                Ok(JobOutcome {
-                    result,
-                    artifact: None,
-                    coverage: None,
-                })
+                self.model_calibration
+                    .execute(params, progress, cancel)
+                    .await
             }
             ResearchJobParams::FeatureParity(params) => {
                 let view = self
@@ -554,8 +670,14 @@ impl ResearchJobExecutor {
                 self.execute_policy_validation(params, progress, cancel)
                     .await
             }
+            ResearchJobParams::FeedbackTruthFreeze(params) => {
+                self.execute_truth_freeze(params, progress, cancel).await
+            }
             ResearchJobParams::FeedbackCoverage(params) => {
                 self.execute_coverage(params, progress, cancel).await
+            }
+            ResearchJobParams::FeedbackAttributionPlan(params) => {
+                self.execute_attribution(params, progress, cancel).await
             }
             ResearchJobParams::FeedbackDrift(params) => {
                 self.execute_drift(params, progress, cancel).await
@@ -574,11 +696,14 @@ impl ResearchJobExecutor {
             ResearchJobParams::FeedbackCpcv(params) => {
                 self.execute_feedback_cpcv(params, progress, cancel).await
             }
+            ResearchJobParams::FeedbackValidation(params) => {
+                self.execute_validation(params, progress, cancel).await
+            }
             ResearchJobParams::FeedbackComparison(params) => {
                 self.execute_feedback_comparison(*params, progress, cancel)
                     .await
             }
-            ResearchJobParams::FeedbackShadowReplay(params) => {
+            ResearchJobParams::FeedbackShadow(params) => {
                 self.execute_feedback_shadow(*params, progress, cancel)
                     .await
             }
@@ -593,6 +718,7 @@ impl ResearchJobExecutor {
 struct FeedbackExecutionPorts {
     coverage: Arc<dyn FeedbackCoverageExecutionPort>,
     drift: Arc<dyn FeedbackDriftExecutionPort>,
+    governance: Arc<dyn FeedbackGovernanceExecutionPort>,
     learning: Arc<dyn FeedbackLearningExecutionPort>,
     comparison: Arc<dyn FeedbackComparisonExecutionPort>,
     shadow: Arc<dyn FeedbackShadowExecutionPort>,
@@ -625,6 +751,45 @@ impl FeedbackExecutionPorts {
         Self {
             coverage: Arc::clone(&signals) as Arc<dyn FeedbackCoverageExecutionPort>,
             drift: signals as Arc<dyn FeedbackDriftExecutionPort>,
+            governance: Arc::new(FeedbackGovernanceExecutionService::new(
+                FeedbackGovernanceExecutionDeps {
+                    resolutions: Arc::clone(&context.infra.repos.resolution_observation)
+                        as Arc<dyn ResolutionObservationRepository>,
+                    attempts: Arc::clone(&context.infra.repos.execution_attempt_outcome)
+                        as Arc<dyn ExecutionAttemptOutcomeRepository>,
+                    rollups: Arc::clone(&context.infra.repos.recommendation_execution_rollup)
+                        as Arc<dyn RecommendationExecutionRollupRepository>,
+                    attribution: Arc::clone(&context.infra.repos.attribution_artifact)
+                        as Arc<dyn AttributionArtifactRepository>,
+                    attribution_materializer: Arc::new(FeedbackAttributionMaterializer::new(
+                        FeedbackAttributionDeps {
+                            cohorts: Arc::clone(&context.infra.repos.feedback_cohort)
+                                as Arc<dyn FeedbackCohortRepository>,
+                            factors: Arc::clone(&context.research.factor_repo),
+                            features: Arc::clone(&context.research.feature_repo),
+                            models: Arc::clone(&context.research.model_registry_repo),
+                            selections: Arc::clone(&context.research.market_selection_repo)
+                                as Arc<dyn MarketSelectionRepository>,
+                            policies: Arc::clone(&context.infra.repos.runtime_config)
+                                as Arc<dyn PolicyRepository>,
+                            attempts: Arc::clone(&context.infra.repos.execution_attempt_outcome)
+                                as Arc<dyn ExecutionAttemptOutcomeRepository>,
+                            facts: Arc::clone(&context.research.quant_fact_read),
+                            serving_evidence: Arc::new(ChFeatureParityEventRepository::new(
+                                Arc::clone(&context.infra.ch),
+                            ))
+                                as Arc<dyn ServingEvidenceRepository>,
+                            index: Arc::clone(&context.infra.repos.attribution_artifact)
+                                as Arc<dyn AttributionArtifactRepository>,
+                            artifacts: Arc::clone(&context.research.artifact_store),
+                            metrics: Arc::clone(&context.infra.metrics),
+                        },
+                    )),
+                    model_governance: Arc::clone(&context.research.model_governance),
+                    artifacts: Arc::clone(&context.research.artifact_store),
+                    metrics: Arc::clone(&context.infra.metrics),
+                },
+            )),
             learning: Arc::new(FeedbackLearningExecutionService::new(
                 FeedbackLearningExecutionDeps {
                     datasets,
@@ -729,7 +894,10 @@ impl ResearchJobExecutor {
             backtests: backtests as Arc<dyn BacktestPort>,
             cpcv_backtests: cpcv,
             bias_tables: Arc::clone(&context.research.calibration_artifact_fit),
-            model_calibration_fit: calibration_fit,
+            model_calibration: ModelCalibrationJobExecutor {
+                fitter: calibration_fit,
+                governance: Arc::clone(&context.research.model_governance),
+            },
             feature_parity: Arc::new(FeatureParityExecutor::new(
                 Arc::clone(&context.infra.repos.feature_parity) as Arc<dyn FeatureParityRepository>,
                 parity_replay,
@@ -764,6 +932,7 @@ impl ResearchJobExecutor {
             })),
             feedback_coverage: feedback.coverage,
             feedback_drift: feedback.drift,
+            feedback_governance: feedback.governance,
             feedback_learning: feedback.learning,
             feedback_comparison: feedback.comparison,
             feedback_shadow: feedback.shadow,
@@ -788,6 +957,15 @@ impl FeedbackCoordinator {
                 max_recovery_attempts: config.max_recovery_attempts,
             },
         )?);
+        let governance = Arc::new(FeedbackGovernanceStageAdapter::try_new(
+            FeedbackGovernanceStageDeps {
+                cycles: Arc::clone(&cycles),
+                jobs: Arc::clone(&jobs),
+                artifacts: Arc::clone(&context.research.artifact_store),
+                learning: Arc::clone(&learning),
+                max_recovery_attempts: config.max_recovery_attempts,
+            },
+        )?);
         let reservations = Arc::new(FeedbackEvaluationReservationService::new(
             FeedbackEvaluationReservationDeps {
                 cycles: Arc::clone(&cycles),
@@ -803,6 +981,7 @@ impl FeedbackCoordinator {
                     max_recovery_attempts: config.max_recovery_attempts,
                 },
             )?),
+            governance: Arc::clone(&governance),
             learning: Arc::clone(&learning),
             comparison: Arc::new(FeedbackComparisonStageAdapter::try_new(
                 FeedbackComparisonStageDeps {
@@ -812,6 +991,7 @@ impl FeedbackCoordinator {
                     path_sets: Arc::clone(&context.research.backtest_path_set_repo),
                     artifacts: Arc::clone(&context.research.artifact_store),
                     learning_stages: learning,
+                    governance_stages: governance,
                     evaluation_reservations: reservations,
                     max_recovery_attempts: config.max_recovery_attempts,
                 },
@@ -836,6 +1016,14 @@ impl FeedbackCoordinator {
         })) as Arc<dyn FeedbackStagePort>;
         Ok(Self::new(FeedbackCoordinatorDeps {
             cycles,
+            scheduler: Arc::clone(&context.infra.repos.feedback_scheduler)
+                as Arc<dyn FeedbackSchedulerRepository>,
+            resolutions: Arc::clone(&context.infra.repos.resolution_observation)
+                as Arc<dyn ResolutionObservationRepository>,
+            attempts: Arc::clone(&context.infra.repos.execution_attempt_outcome)
+                as Arc<dyn ExecutionAttemptOutcomeRepository>,
+            rollups: Arc::clone(&context.infra.repos.recommendation_execution_rollup)
+                as Arc<dyn RecommendationExecutionRollupRepository>,
             jobs: engine,
             stages,
             metrics: Arc::clone(&context.infra.metrics),
@@ -846,6 +1034,55 @@ impl FeedbackCoordinator {
 }
 
 impl AppContext {
+    fn build_feedback_scheduler(
+        &self,
+        engine: &ResearchJobEngine,
+        config: ResearchJobsConfig,
+    ) -> QuantResult<FeedbackScheduler> {
+        let runtime_config =
+            Arc::clone(&self.infra.repos.runtime_config) as Arc<dyn PolicyRepository>;
+        let bias_tables = Arc::clone(&self.infra.repos.calibration_artifact)
+            as Arc<dyn CalibrationArtifactRepository>;
+        let training_datasets = Arc::new(CoreTrainingDatasetPort::from_research(
+            &self.research,
+            runtime_config,
+            bias_tables,
+            Arc::clone(&self.infra.repos.feedback_cohort) as Arc<dyn FeedbackCohortRepository>,
+            config.max_spine_samples,
+            config.plan_sample_slices,
+            config.plan_sample_markets,
+        ));
+        let mutation = Arc::new(CoreFeedbackMutationPort::new(CoreFeedbackMutationDeps {
+            cycles: Arc::clone(&self.infra.repos.feedback_cycle)
+                as Arc<dyn FeedbackCycleRepository>,
+            scheduler: Arc::clone(&self.infra.repos.feedback_scheduler)
+                as Arc<dyn FeedbackSchedulerRepository>,
+            permits: Arc::clone(&self.infra.repos.promotion_permit)
+                as Arc<dyn PromotionPermitRepository>,
+            permit_service: Arc::clone(&self.governance.promotion_permits),
+            promotion_preflight: Arc::clone(&self.research.promotion_preflight),
+            serving_preimages: Arc::clone(&self.research.serving_preimages),
+            serving_generations: Arc::clone(&self.research.serving_generations),
+            route_governance: Arc::clone(&self.research.model_route_governance),
+            training_datasets,
+            feedback_wake: engine.feedback_wake(),
+            shutdown: self.shutdown.clone(),
+            metrics: Arc::clone(&self.infra.metrics),
+        }));
+        let lease_secs = u64::try_from(config.lease_ttl_secs).map_err(|error| {
+            FeedbackError::InvalidCoordinatorState {
+                detail: format!("feedback scheduler lease does not fit u64 seconds: {error}"),
+            }
+        })?;
+        Ok(FeedbackScheduler::new(
+            Arc::clone(&self.infra.repos.feedback_scheduler)
+                as Arc<dyn FeedbackSchedulerRepository>,
+            mutation,
+            *engine.instance_id(),
+            FeedbackSchedulerConfig::try_new(config.poll_secs, lease_secs)?,
+        ))
+    }
+
     /// Register the one durable research worker/coordinator runtime.
     pub fn register_research_runtime(
         &self,
@@ -855,6 +1092,7 @@ impl AppContext {
         let config = self.config.quant.research_jobs;
         let executor = ResearchJobExecutor::from_context(self, config);
         let coordinator = FeedbackCoordinator::from_context(self, engine.clone(), config)?;
+        let scheduler = self.build_feedback_scheduler(&engine, config)?;
         let metrics = Arc::clone(&self.infra.metrics);
         let worker_engine = engine;
         runner.spawn(TaskId::ResearchJobWorker, move |token| async move {
@@ -862,6 +1100,9 @@ impl AppContext {
         });
         runner.spawn(TaskId::FeedbackCoordinator, move |token| async move {
             coordinator.run(token).await;
+        });
+        runner.spawn(TaskId::FeedbackScheduler, move |token| async move {
+            scheduler.run(token).await;
         });
         Ok(())
     }
@@ -1207,12 +1448,151 @@ async fn finalize(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
-    use quant_pivot_models::{domain::quant::JobProgressSink, types::ResearchJobProgress};
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
+    use quant_pivot_error::{QuantResult, research::ResearchError};
+    use quant_pivot_models::{
+        domain::{
+            api::{
+                FitModelCalibratorRequest, GatePreviewIntent, ModelCalibrationFitPreflightView,
+                QualityGateReportView,
+            },
+            ports::{
+                BootstrapQualityGateEvidence, BootstrapQualityGateInput,
+                CalibratedModelSealCommand, CandidateQualityGateEvidence, GovernanceActor,
+                ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+                ModelGovernancePort,
+            },
+            quant::{JobProgressSink, ModelVersionInfo, NoopProgressSink, ResearchJobResultRef},
+        },
+        enums::quant::{CalibrationMethod, DownsideSource, ResearchJobResultKind},
+        types::{
+            BacktestReportId, CalibrationArtifactId, ContentHash, DecisionPolicySnapshotId,
+            ModelRunId, ModelVersionId, ResearchJobProgress, TrainingDatasetId,
+            model_quality::QualityGateReport,
+        },
+    };
     use tokio::sync::watch;
+    use tokio_util::sync::CancellationToken;
 
-    use super::{ChannelProgressSink, MetricsHub};
+    use super::{ChannelProgressSink, MetricsHub, ModelCalibrationJobExecutor};
+    use crate::service::model_serving_test_support::{model_artifact, model_version};
+
+    struct CalibrationFitFixture {
+        outcome: ModelCalibrationFitOutcome,
+    }
+
+    #[async_trait]
+    impl ModelCalibrationFitPort for CalibrationFitFixture {
+        async fn fit(
+            &self,
+            _params: ModelCalibrationFitJobParams,
+            _progress: Arc<dyn JobProgressSink>,
+            _cancel: CancellationToken,
+        ) -> QuantResult<ModelCalibrationFitOutcome> {
+            Ok(self.outcome)
+        }
+
+        async fn preflight(
+            &self,
+            _model_version_id: &ModelVersionId,
+            _calibration_dataset_id: &TrainingDatasetId,
+        ) -> QuantResult<ModelCalibrationFitPreflightView> {
+            Err(ResearchError::Serialization {
+                detail: "unexpected calibration preflight in job-executor fixture".to_owned(),
+            }
+            .into())
+        }
+    }
+
+    struct ModelGovernanceFixture {
+        calibrated: ModelVersionInfo,
+        sealed: Mutex<Option<(ModelVersionId, CalibratedModelSealCommand, GovernanceActor)>>,
+    }
+
+    impl ModelGovernanceFixture {
+        fn unexpected<T>() -> QuantResult<T> {
+            Err(ResearchError::Serialization {
+                detail: "unexpected quality-gate call in calibration job fixture".to_owned(),
+            }
+            .into())
+        }
+    }
+
+    #[async_trait]
+    impl ModelGovernancePort for ModelGovernanceFixture {
+        async fn preview_gate(
+            &self,
+            _model_version_id: &ModelVersionId,
+            _intent: GatePreviewIntent,
+            _backtest_report_id: Option<&BacktestReportId>,
+        ) -> QuantResult<QualityGateReportView> {
+            Self::unexpected()
+        }
+
+        async fn evaluate_candidate(
+            &self,
+            _model_version_id: &ModelVersionId,
+            _evidence: CandidateQualityGateEvidence,
+            _evaluated_at: DateTime<Utc>,
+        ) -> QuantResult<QualityGateReport> {
+            Self::unexpected()
+        }
+
+        async fn evaluate_bootstrap(
+            &self,
+            _model_version_id: &ModelVersionId,
+            _input: BootstrapQualityGateInput,
+            _evaluated_at: DateTime<Utc>,
+        ) -> QuantResult<BootstrapQualityGateEvidence> {
+            Self::unexpected()
+        }
+
+        async fn seal_calibrated_model(
+            &self,
+            model_version_id: &ModelVersionId,
+            command: CalibratedModelSealCommand,
+            actor: GovernanceActor,
+        ) -> QuantResult<ModelVersionInfo> {
+            *self.sealed.lock().expect("seal observation lock") =
+                Some((*model_version_id, command, actor));
+            Ok(self.calibrated.clone())
+        }
+    }
+
+    fn calibration_params(
+        source_model_id: ModelVersionId,
+        artifact_id: CalibrationArtifactId,
+    ) -> (
+        ModelCalibrationFitJobParams,
+        CalibratedModelSealCommand,
+        GovernanceActor,
+    ) {
+        let actor = GovernanceActor::system();
+        let command = CalibratedModelSealCommand {
+            calibrator_ref: artifact_id,
+            downside_source: DownsideSource::MfeMae,
+            reason: "derive a governed calibrated model".to_owned(),
+        };
+        (
+            ModelCalibrationFitJobParams {
+                model_run_id: ModelRunId::from_v7(),
+                request: FitModelCalibratorRequest {
+                    model_version_id: source_model_id,
+                    calibration_dataset_id: TrainingDatasetId::from_v7(),
+                    method: CalibrationMethod::Platt,
+                    reason: command.reason.clone(),
+                },
+                decision_policy_snapshot_id: DecisionPolicySnapshotId::from_v7(),
+                downside_source: command.downside_source,
+                actor: actor.clone(),
+            },
+            command,
+            actor,
+        )
+    }
 
     #[tokio::test]
     async fn progress_slot_coalesces() {
@@ -1241,6 +1621,89 @@ mod tests {
             metrics.research_progress_coalesced_total.get(),
             1,
             "a consumed slot must not count as a superseded value"
+        );
+    }
+
+    #[tokio::test]
+    async fn calibration_fit_seals_version() {
+        let source_model_id = ModelVersionId::from_v7();
+        let artifact_id = CalibrationArtifactId::from_v7();
+        let (params, expected_command, expected_actor) =
+            calibration_params(source_model_id, artifact_id);
+        let mut calibrated = model_version(&model_artifact(None));
+        calibrated.model_version_id = ModelVersionId::from_v7();
+        let calibrated_model_id = calibrated.model_version_id;
+        let governance = Arc::new(ModelGovernanceFixture {
+            calibrated,
+            sealed: Mutex::new(None),
+        });
+        let executor = ModelCalibrationJobExecutor {
+            fitter: Arc::new(CalibrationFitFixture {
+                outcome: ModelCalibrationFitOutcome::Calibrated {
+                    artifact_id,
+                    sample_count: 128,
+                },
+            }),
+            governance: Arc::clone(&governance) as Arc<dyn ModelGovernancePort>,
+        };
+
+        let outcome = executor
+            .execute(params, Arc::new(NoopProgressSink), CancellationToken::new())
+            .await
+            .expect("successful fit must seal a calibrated model");
+
+        assert_eq!(
+            outcome.result,
+            Some(ResearchJobResultRef {
+                kind: ResearchJobResultKind::ModelVersion,
+                id: calibrated_model_id.as_uuid(),
+            })
+        );
+        assert!(outcome.artifact.is_none());
+        assert!(outcome.coverage.is_none());
+        assert_eq!(
+            governance
+                .sealed
+                .lock()
+                .expect("seal observation lock")
+                .as_ref(),
+            Some(&(source_model_id, expected_command, expected_actor))
+        );
+    }
+
+    #[tokio::test]
+    async fn underpowered_fit_stays_empty() {
+        let source_model_id = ModelVersionId::from_v7();
+        let artifact_id = CalibrationArtifactId::from_v7();
+        let (params, _, _) = calibration_params(source_model_id, artifact_id);
+        let governance = Arc::new(ModelGovernanceFixture {
+            calibrated: model_version(&model_artifact(None)),
+            sealed: Mutex::new(None),
+        });
+        let executor = ModelCalibrationJobExecutor {
+            fitter: Arc::new(CalibrationFitFixture {
+                outcome: ModelCalibrationFitOutcome::Insufficient {
+                    sample_count: 9,
+                    total_sample_count: 10,
+                    minimum_sample_count: 100,
+                    outcome_hash: ContentHash::from_bytes([7; 32]),
+                },
+            }),
+            governance: Arc::clone(&governance) as Arc<dyn ModelGovernancePort>,
+        };
+
+        let outcome = executor
+            .execute(params, Arc::new(NoopProgressSink), CancellationToken::new())
+            .await
+            .expect("underpowered fit is a typed successful computation");
+
+        assert!(outcome.result.is_none());
+        assert!(
+            governance
+                .sealed
+                .lock()
+                .expect("seal observation lock")
+                .is_none()
         );
     }
 }

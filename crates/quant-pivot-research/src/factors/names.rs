@@ -67,18 +67,21 @@ pub const DOMAIN_CRYPTO_STRIKE_PRESSURE: FactorName =
 /// Underlying momentum per unit realized vol (the crypto subject's regime).
 pub const DOMAIN_CRYPTO_BETA_REGIME: FactorName =
     FactorName::from_static("domain_crypto_beta_regime");
-/// Calibrated GEFS member probability of the linked temperature band.
-pub const DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY: FactorName =
-    FactorName::from_static("domain.weather.ensemble_bin_probability");
-/// Dispersion of calibrated GEFS daily member extrema.
-pub const DOMAIN_WEATHER_ENSEMBLE_SPREAD: FactorName =
-    FactorName::from_static("domain.weather.ensemble_spread");
-/// Whole-degree distance of the observed max/min from the decisive band bound.
-pub const DOMAIN_WEATHER_OBSERVED_EXTREME_HEADROOM: FactorName =
-    FactorName::from_static("domain.weather.observed_extreme_headroom");
-/// Empirical AviationWeather-vs-GHCNh daily-extreme proxy basis risk.
-pub const DOMAIN_WEATHER_NOAA_RESOLUTION_BASIS_RISK: FactorName =
-    FactorName::from_static("domain.weather.noaa_resolution_basis_risk");
+/// Governed forecast-member probability of the linked Weather outcome.
+pub const DOMAIN_WEATHER_CONTRACT_PROBABILITY: FactorName =
+    FactorName::from_static("domain.weather.contract_probability");
+/// Dispersion of governed forecast values in the contract comparison unit.
+pub const DOMAIN_WEATHER_FORECAST_DISPERSION: FactorName =
+    FactorName::from_static("domain.weather.forecast_dispersion");
+/// Signed distance of the PIT observation from the nearest decision boundary.
+pub const DOMAIN_WEATHER_BOUNDARY_DISTANCE: FactorName =
+    FactorName::from_static("domain.weather.boundary_distance");
+/// Empirical difference between preliminary and final source projections.
+pub const DOMAIN_WEATHER_SOURCE_BASIS_RISK: FactorName =
+    FactorName::from_static("domain.weather.source_basis_risk");
+/// Binary source-maturity risk: preliminary `1`, final `0`.
+pub const DOMAIN_WEATHER_TRUTH_MATURITY_RISK: FactorName =
+    FactorName::from_static("domain.weather.truth_maturity_risk");
 /// Neg-risk conversion edge (basket vs NO-favorite); neg-risk markets only.
 pub const STRUCT_NEGRISK_CONVERT_EDGE: FactorName =
     FactorName::from_static("struct.negrisk_convert_edge");

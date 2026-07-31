@@ -18,11 +18,12 @@ use quant_pivot_models::{
         },
         pagination::Paginated,
         ports::{
-            BiasTableFitJobParams, JobSubmitContext, ModelCalibrationFitJobParams, ResearchJobPort,
+            BiasTableFitJobParams, GovernanceActor, JobSubmitContext, ModelCalibrationFitJobParams,
+            ResearchJobPort,
         },
         quant::{FeedbackStageJobIdentity, NewResearchJob, ResearchJobInfo},
     },
-    enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
+    enums::quant::{DownsideSource, ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
         BacktestPathSetId, BacktestReportId, DecisionPolicySnapshotId, ModelRunId, ModelSpecId,
         ModelVersionId, ResearchJobError, ResearchJobId, ResearchJobParams, RoleCode,
@@ -214,12 +215,15 @@ impl ResearchJobPort for CoreResearchJobPort {
         &self,
         request: FitModelCalibratorRequest,
         decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        actor: GovernanceActor,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
         let params = ResearchJobParams::ModelCalibrationFit(ModelCalibrationFitJobParams {
             model_run_id: ModelRunId::from_v7(),
             request,
             decision_policy_snapshot_id,
+            downside_source: DownsideSource::default(),
+            actor,
         });
         let job = self.new_job(params, None, Some(decision_policy_snapshot_id), None, &ctx);
         self.enqueue(job).await

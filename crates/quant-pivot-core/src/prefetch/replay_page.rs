@@ -18,15 +18,14 @@ use quant_pivot_models::{
             WeatherForecastPoint, WeatherObservationFact,
         },
         market::{CatalogEventChangeInfo, CatalogMarketChangeInfo},
-        quant::{LinkageOutcome, MarketLinkage, MarketSubject},
+        quant::{LinkageOutcome, MarketLinkage},
     },
     enums::clickhouse::ChCanonicalBookEventType,
     types::{
-        ClobMarketInfoVersion, DomainInstrumentKey, IcaoStation, MarketId,
-        SourceSliceInvalidSession, TokenId,
+        ClobMarketInfoVersion, DomainInstrumentKey, MarketId, SourceSliceInvalidSession, TokenId,
     },
 };
-use quant_pivot_research::pit::BookSnapshotAt;
+use quant_pivot_research::{domain::weather_history_start, pit::BookSnapshotAt};
 use uuid::Uuid;
 
 use super::source_slice::FrozenSourceSlice;
@@ -377,7 +376,7 @@ impl FrozenSourceSlice {
         let catalog = page_catalog(self, &scope);
         let books = page_books(self, &scope);
         let market_facts = page_market_facts(self, &scope, &books.replay_start_by_token);
-        let domain = page_domain_facts(self, &scope, &market_facts.linkages);
+        let domain = page_domain_facts(self, &scope, &market_facts.linkages)?;
         Ok(ReplayPage {
             market_ids: request.market_ids.clone(),
             token_ids: request.token_ids.clone(),
@@ -691,8 +690,8 @@ fn page_domain_facts(
     source: &FrozenSourceSlice,
     scope: &ReplayPageScope<'_>,
     linkages: &[MarketLinkage],
-) -> DomainFactPage {
-    let (instrument_keys, stations) = page_domain_bindings(linkages);
+) -> QuantResult<DomainFactPage> {
+    let (instrument_keys, weather_history) = page_domain_bindings(linkages)?;
     let observations = instrument_keys
         .iter()
         .flat_map(|key| {
@@ -729,30 +728,34 @@ fn page_domain_facts(
         })
         .cloned()
         .collect();
-    let weather_observations = stations
-        .iter()
-        .flat_map(|station| {
+    let weather_observations = weather_history
+        .keys()
+        .flat_map(|subject_key| {
             source
                 .prefetched
                 .weather_observations
-                .get(station)
+                .get(subject_key)
                 .into_iter()
                 .flatten()
         })
         .filter(|row| {
-            row.observed_at >= scope.request.window_start
+            row.observed_at
+                >= weather_history
+                    .get(&row.subject_key)
+                    .copied()
+                    .unwrap_or(scope.request.window_start)
                 && row.observed_at < scope.request.window_end
                 && row.available_at <= scope.request.available_by
         })
         .cloned()
         .collect();
-    let weather_forecasts = stations
-        .iter()
-        .flat_map(|station| {
+    let weather_forecasts = weather_history
+        .keys()
+        .flat_map(|subject_key| {
             source
                 .prefetched
                 .weather_forecasts
-                .get(station)
+                .get(subject_key)
                 .into_iter()
                 .flatten()
         })
@@ -763,19 +766,22 @@ fn page_domain_facts(
         })
         .cloned()
         .collect();
-    DomainFactPage {
+    Ok(DomainFactPage {
         observations,
         crypto_reports,
         weather_observations,
         weather_forecasts,
-    }
+    })
 }
 
-fn page_domain_bindings(
-    linkages: &[MarketLinkage],
-) -> (BTreeSet<DomainInstrumentKey>, BTreeSet<IcaoStation>) {
+type PageDomainBindings = (
+    BTreeSet<DomainInstrumentKey>,
+    HashMap<String, DateTime<Utc>>,
+);
+
+fn page_domain_bindings(linkages: &[MarketLinkage]) -> QuantResult<PageDomainBindings> {
     let mut instrument_keys = BTreeSet::new();
-    let mut stations = BTreeSet::new();
+    let mut weather_history = HashMap::new();
     for linkage in linkages {
         let LinkageOutcome::Resolved(binding) = &linkage.outcome else {
             continue;
@@ -786,11 +792,17 @@ fn page_domain_bindings(
                 .iter()
                 .map(|source| source.instrument_key.clone()),
         );
-        if let MarketSubject::Weather(subject) = &binding.subject {
-            stations.insert(subject.decision_group.station.clone());
+        if let Some(subject_key) = binding.subject.weather_subject_key() {
+            let history_start = weather_history_start(&binding.subject)?;
+            weather_history
+                .entry(subject_key)
+                .and_modify(|current: &mut DateTime<Utc>| {
+                    *current = (*current).min(history_start);
+                })
+                .or_insert(history_start);
         }
     }
-    (instrument_keys, stations)
+    Ok((instrument_keys, weather_history))
 }
 
 #[cfg(test)]

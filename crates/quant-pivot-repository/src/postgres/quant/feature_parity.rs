@@ -67,10 +67,7 @@ use sea_orm::{
 
 use crate::{
     postgres::{error, primitives, query::paginate_mapped},
-    traits::{
-        EnqueueFrozenFeatureParityOutcome, FeatureParityLatchActor, FeatureParityRepository,
-        PublishFeatureParityPermit,
-    },
+    traits::{EnqueueFrozenFeatureParityOutcome, FeatureParityLatchActor, FeatureParityRepository},
 };
 
 pub(super) const LATCH_ADVISORY_LOCK_KEY: i64 = 0x_11_06_50_41;
@@ -1462,85 +1459,6 @@ impl PgFeatureParityRepository {
             ));
         }
         Ok(())
-    }
-}
-
-impl PgFeatureParityRepository {
-    pub(super) async fn resolve_publish_latch_generation(
-        txn: &DatabaseTransaction,
-        permit: PublishFeatureParityPermit,
-        recovery_run_id: &FeatureParityRunId,
-    ) -> Result<FeatureParityStateId, StorageError> {
-        Self::acquire_latch_lock(txn).await?;
-        let current = current_state_on(txn).await?;
-        match permit {
-            PublishFeatureParityPermit::ExistingGeneration(expected_state_id) => {
-                let current = current.ok_or_else(|| {
-                    StorageError::state_conflict(
-                        QUANT_FEATURE_PARITY_STATE,
-                        Option::<&str>::None,
-                        "feature parity latch became uninitialized before model publish",
-                    )
-                })?;
-                if current.state != FeatureParityLatchState::Clear
-                    || current.state_id != expected_state_id
-                {
-                    return Err(StorageError::state_conflict(
-                        QUANT_FEATURE_PARITY_STATE,
-                        Some(&current.state_id),
-                        format!(
-                            "model publish permit {expected_state_id} is stale; current latch state is {} generation {}",
-                            current.state.as_str(),
-                            current.state_id
-                        ),
-                    ));
-                }
-                Ok(current.state_id)
-            }
-            PublishFeatureParityPermit::InitializeFromProof {
-                actor,
-                acting_role,
-                reason,
-            } => {
-                if let Some(current) = current {
-                    return Err(StorageError::state_conflict(
-                        QUANT_FEATURE_PARITY_STATE,
-                        Some(&current.state_id),
-                        "bootstrap publish permit cannot replace an existing parity latch generation",
-                    ));
-                }
-                if actor.trim().is_empty()
-                    || acting_role
-                        .as_ref()
-                        .is_some_and(|role| role.as_str().trim().is_empty())
-                    || reason.trim().is_empty()
-                {
-                    return Err(StorageError::invariant_violation(
-                        Some(QUANT_FEATURE_PARITY_STATE),
-                        "bootstrap publish actor/reason are required and acting_role cannot be blank",
-                    ));
-                }
-                let recovery = require_run_on(txn, recovery_run_id).await?;
-                validate_recovery_run(&recovery)?;
-                validate_bootstrap_recovery(&recovery)?;
-                let state = NewFeatureParityState {
-                    state_id: FeatureParityStateId::from_v7(),
-                    state: FeatureParityLatchState::Clear,
-                    transition: FeatureParityStateTransition::BootstrapProof,
-                    cause_run_id: None,
-                    recovery_run_id: Some(*recovery_run_id),
-                    previous_state_id: None,
-                    actor: Some(actor),
-                    acting_role,
-                    reason,
-                };
-                QuantFeatureParityStateEntity::insert(state.into_active_model())
-                    .exec_with_returning(txn)
-                    .await
-                    .map_err(StorageError::from)
-                    .map(|state| state.state_id)
-            }
-        }
     }
 }
 

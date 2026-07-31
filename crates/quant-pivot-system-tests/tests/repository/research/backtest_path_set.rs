@@ -229,7 +229,10 @@ impl PathSetContract<'_> {
             serde_json::from_value(tampered).expect("decode structurally valid tamper");
         let error = self
             .repo
-            .create(tampered)
+            .commit_cpcv(CpcvPathSetCommit {
+                path_set: tampered,
+                input_hash: content_hash('b'),
+            })
             .await
             .expect_err("repository must reject a caller-forged path-set hash");
         assert!(error.to_string().contains("hash mismatch"));
@@ -269,6 +272,15 @@ pub async fn quant_backtest_set_crud() {
         .await
         .expect("find CPCV run")
         .expect("CPCV run");
+    let model = PgModelRegistryRepository::new(db.clone())
+        .find_model_version(&model_version_id)
+        .await
+        .expect("find CPCV model")
+        .expect("CPCV model");
+    let bindings = model
+        .verified_serving_contract()
+        .expect("verify CPCV serving contract")
+        .bindings();
     let window_start = run.window_start;
 
     let new_path_set = NewBacktestPathSet::try_seal(NewBacktestPathSetInput {
@@ -280,12 +292,12 @@ pub async fn quant_backtest_set_crud() {
         window_start,
         window_end: window_start + ChronoDuration::hours(1),
         subject: CpcvPathSetSubject::new(
-            content_hash('1'),
-            content_hash('2'),
-            content_hash('3'),
-            content_hash('4'),
-            content_hash('5'),
-            content_hash('6'),
+            model.artifact_hash,
+            model.serving_contract_hash,
+            bindings.transform.training_dataset_hash,
+            bindings.dataset.manifest_hash,
+            bindings.dataset.artifact_bytes_hash,
+            bindings.policy_snapshot.snapshot_hash,
         ),
         methodology: CpcvMethodologyBinding::new(
             content_hash('7'),

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 use crate::{
-    enums::quant::{FeedbackStage, FeedbackStageEventKind},
+    enums::quant::{FeedbackStage, FeedbackStageEventKind, FeedbackTriggerFamily},
     types::{ArtifactUri, ContentHash, FeedbackCycleId, FeedbackStageEventId, ResearchJobId},
 };
 
@@ -18,6 +18,7 @@ pub struct Model {
     pub event_sequence: i64,
     pub stage: FeedbackStage,
     pub event_kind: FeedbackStageEventKind,
+    pub trigger_family: Option<FeedbackTriggerFamily>,
     pub research_job_id: Option<ResearchJobId>,
     pub actor: Option<String>,
     pub reason_code: Option<String>,

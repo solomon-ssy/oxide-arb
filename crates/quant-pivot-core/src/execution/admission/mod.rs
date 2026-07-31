@@ -112,8 +112,8 @@ pub struct StateVersion {
 /// Model-governance flags distilled at build time (`#5`, `#23`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionModelState {
-    /// Whether the intent's model version is still `Published`.
-    pub published: bool,
+    /// Whether the current activated route still authorizes the intent model.
+    pub route_bound: bool,
     /// Whether the frozen model artifact's return model is `Calibrated`.
     pub return_model_calibrated: bool,
 }

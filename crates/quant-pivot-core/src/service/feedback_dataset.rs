@@ -15,7 +15,7 @@ use quant_pivot_models::{
         quant::{
             FEEDBACK_COHORT_PAGE_LIMIT, FactorDefinitionInfo, FactorValueInfo, FeatureVectorInfo,
             FeedbackCohortDecision, FeedbackCohortEvidence, FeedbackCohortPageQuery,
-            FeedbackCohortWindow, FeedbackExecutionAttempt, FeedbackRecommendationContext,
+            FeedbackCohortSnapshot, FeedbackCohortWindow, FeedbackRecommendationContext,
             FeedbackResolutionEvidence, JobProgressSink,
         },
     },
@@ -130,6 +130,7 @@ impl FeedbackDatasetService {
             .scan_cohort(
                 FeedbackCohort::ModelLearning,
                 &request.window,
+                request.source_lineage.pit_cutoff,
                 &progress,
                 &cancel,
             )
@@ -335,9 +336,16 @@ impl FeedbackCohortMaterializer {
         &self,
         cohort: FeedbackCohort,
         window: &FeedbackCohortWindow,
+        truth_cutoff: DateTime<Utc>,
         progress: &Arc<dyn JobProgressSink>,
         cancel: &CancellationToken,
     ) -> QuantResult<CohortScan> {
+        let snapshot =
+            FeedbackCohortSnapshot::try_new(window.clone(), truth_cutoff).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!("construct feedback cohort snapshot: {error}"),
+                }
+            })?;
         let mut scan = CohortScan::default();
         let mut after = None;
         loop {
@@ -349,7 +357,7 @@ impl FeedbackCohortMaterializer {
             }
             let query = FeedbackCohortPageQuery::try_new(
                 cohort,
-                window.clone(),
+                snapshot.clone(),
                 after,
                 FEEDBACK_COHORT_PAGE_LIMIT,
             )
@@ -360,13 +368,10 @@ impl FeedbackCohortMaterializer {
             for candidate in page.candidates() {
                 let decision = evaluate_feedback_cohort(
                     cohort,
-                    window,
+                    &snapshot,
                     candidate.context(),
-                    candidate
-                        .execution_attempt()
-                        .unwrap_or(FeedbackExecutionAttempt::NotAttempted),
                     candidate.resolution_outcome(),
-                    candidate.execution_outcome(),
+                    candidate.execution_rollup(),
                 )
                 .map_err(|error| ResearchError::DatasetBuild {
                     detail: format!("classify {cohort} candidate: {error}"),
@@ -391,18 +396,37 @@ impl FeedbackCohortMaterializer {
         &self,
         window: &FeedbackCohortWindow,
         champion_model_version_id: ModelVersionId,
+        truth_cutoff: DateTime<Utc>,
         champion_pit_cutoff: DateTime<Utc>,
         progress: &Arc<dyn JobProgressSink>,
         cancel: &CancellationToken,
     ) -> QuantResult<FeedbackCoverageMaterialization> {
         let mut model = self
-            .scan_cohort(FeedbackCohort::ModelLearning, window, progress, cancel)
+            .scan_cohort(
+                FeedbackCohort::ModelLearning,
+                window,
+                truth_cutoff,
+                progress,
+                cancel,
+            )
             .await?;
         let execution = self
-            .scan_cohort(FeedbackCohort::ExecutionLearning, window, progress, cancel)
+            .scan_cohort(
+                FeedbackCohort::ExecutionLearning,
+                window,
+                truth_cutoff,
+                progress,
+                cancel,
+            )
             .await?;
         let policy = self
-            .scan_cohort(FeedbackCohort::PolicyEvaluation, window, progress, cancel)
+            .scan_cohort(
+                FeedbackCohort::PolicyEvaluation,
+                window,
+                truth_cutoff,
+                progress,
+                cancel,
+            )
             .await?;
 
         let mut mature_labels = model
@@ -411,6 +435,7 @@ impl FeedbackCohortMaterializer {
             .map(|eligible| FeedbackMatureLabel {
                 recommendation_id: eligible.context.recommendation_id(),
                 model_version_id: eligible.context.model_version_id(),
+                decision_at: eligible.context.decision_at(),
                 candidate_available_at: eligible.context.available_at(),
                 label_available_at: eligible.resolution.available_at,
                 outcome_hash: eligible.resolution.outcome_hash,

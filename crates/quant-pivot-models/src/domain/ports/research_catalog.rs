@@ -18,8 +18,8 @@ use crate::{
             BacktestPathSetListQuery, BacktestReportListQuery, ComparisonReportListQuery,
             FactorCollinearitySource, FactorCollinearityView, FactorDefinitionDetailQuery,
             FactorDefinitionDetailView, FactorDefinitionListQuery, ModelDetailQuery,
-            ModelDetailView, ModelPublishedCatalogQuery, ModelSpecListQuery, ModelVersionListQuery,
-            PublishedModelOptionView, TrainingDatasetListQuery,
+            ModelDetailView, ModelRouteCandidateQuery, ModelRouteCandidateView, ModelSpecListQuery,
+            ModelVersionListQuery, TrainingDatasetListQuery,
         },
         pagination::Paginated,
         quant::{
@@ -61,15 +61,12 @@ pub trait ResearchCatalogPort: Send + Sync {
         query: ModelSpecListQuery,
     ) -> QuantResult<Paginated<ModelSpecInfo>>;
 
-    /// The `Published`, side-and-category-eligible candidates for one
-    /// `FieldWidget::ModelVersionSelect` runtime-config field. Unlike every
-    /// other catalog method this is **not**
-    /// paginated: the eligible set is bounded by the governed model registry
-    /// (a human-curated handful of specs), never a market-scale collection.
-    async fn list_published_model_options(
+    /// Side-and-category-eligible immutable artifacts for one governed route
+    /// field. This set is intentionally not paginated.
+    async fn list_model_route_candidates(
         &self,
-        query: ModelPublishedCatalogQuery,
-    ) -> QuantResult<Vec<PublishedModelOptionView>>;
+        query: ModelRouteCandidateQuery,
+    ) -> QuantResult<Vec<ModelRouteCandidateView>>;
 
     /// Page the append-only backtest-report ledger, newest first.
     async fn list_backtest_reports(

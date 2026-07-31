@@ -207,7 +207,9 @@
 
 #### `quant_model_version`
 
-用途：可发布模型版本。
+用途：不可变模型 artifact 版本。`Inactive` / `Shadow` / `Champion` 不是本表生命周期，
+而是按具体 `ModelRouting` route generation 派生的 serving role；本表禁止保存全局可变
+publication truth。
 
 关键列：
 
@@ -215,19 +217,29 @@
 - `model_spec_id uuid not null`
 - `version int not null`
 - `artifact_hash text not null`
+- `serving_contract jsonb not null`（typed `ModelServingContract`）
+- `serving_contract_hash bytea not null`
+- `category_scope qp_market_category null`
 - `research_profile_artifact_id uuid not null`
 - `training_dataset_id uuid null`
+- `trade_policy_artifact_id uuid null`
+- `trade_policy_hash text null`
+- `derivation_kind qp_model_version_derivation_kind not null`
+- `parent_model_version_id uuid null`
+- `calibration_artifact_id uuid null`
+- `derivation_evidence_hash text null`
 - `metrics jsonb not null`（format v1 typed `ModelVersionMetrics`）
 - `training_objective jsonb not null`（format v1 typed `ModelTrainingObjective`）
-- `quality_gate_report jsonb null`（`NULL` 表示尚未评估）
-- `publication_status qp_publication_status not null`
-- `published_at timestamptz null`
-- `retired_at timestamptz null`
 - `created_at timestamptz not null`
 
 唯一约束：
 
 - `(model_spec_id, version)`
+
+质量门、CPCV、calibration、explanation、feature parity 与 comparison evidence 通过
+content-addressed `ModelCandidateManifest` 和最终 `PromotionGateArtifact` 绑定，不能
+回写或重新绑定到既有 model version。首次 route bootstrap、feedback promotion 与
+config revision rollback 由唯一 `ModelRouteGovernanceService` 管理。
 
 #### `quant_model_run`
 
@@ -698,7 +710,7 @@ crates/quant-pivot-models/src/domain/
 - `OrderType`: `Fok`, `Fak`, `Gtc`, `Gtd`
 - `OrderIntentStatus`: `Draft`, `PendingApproval`, `Approved`, `ApprovedByPolicy`, `AdmissionPending`, `AdmissionRejected`, `Submitted`, `PartiallyFilled`, `Filled`, `Rejected`, `Cancelled`, `Failed`, `Expired`, `Invalidated`
 - `TradePolicyStatus`: `Draft`, `Validated`, `Published`, `Retired`
-- `ModelPublicationStatus`: `Draft`, `Candidate`, `Shadow`, `Published`, `Retired`, `Rejected`
+- `ModelVersionDerivationKind`: `Training`, `ReturnCalibration`
 - `DataQualityStatus`: `Fresh`, `Acceptable`, `Degraded`, `Stale`, `Insufficient`
 
 `EntryTrigger`、`EntryOrderPolicy`、`ScaleOutTarget`、`TrailingStopPolicy`、

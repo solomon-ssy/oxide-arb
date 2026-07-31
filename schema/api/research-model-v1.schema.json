@@ -26,7 +26,7 @@
   ],
   "$defs": {
     "CreateModelSpecRequest": {
-      "description": "Inbound body for `POST /research/model-specs`.\n\nA model spec is the **authoring root** of the offline research lifecycle:\nthe operator declares the model family, prediction horizon, and feature /\nlabel schema versions the downstream dataset build and training runs bind\nto. A spec is immutable once created; publication lifecycle belongs only to\ntrained model versions (see `TrainModelRequest` / model-governance).\n\n`model_family` deserializes from its canonical wire label (`\"weighted_factor\"`,\n`\"classical_random_forest\"`, `\"hold_vs_exit_weighted\"`, …); an unknown label\nis rejected at the boundary with `400`.",
+      "description": "Inbound body for `POST /research/model-specs`.\n\nA model spec is the **authoring root** of the offline research lifecycle:\nthe operator declares the model family, prediction horizon, and feature /\nlabel schema versions the downstream dataset build and training runs bind\nto. A spec and every trained model version are immutable; serving role is\nderived only from a governed route generation.\n\n`model_family` deserializes from its canonical wire label (`\"weighted_factor\"`,\n`\"classical_random_forest\"`, `\"hold_vs_exit_weighted\"`, …); an unknown label\nis rejected at the boundary with `400`.",
       "type": "object",
       "properties": {
         "feature_schema_version": {
@@ -259,6 +259,7 @@
           "type": "string",
           "enum": [
             "weighted_factor",
+            "classical_gradient_boosted_trees",
             "classical_random_forest",
             "classical_extra_trees",
             "classical_logistic_regression",

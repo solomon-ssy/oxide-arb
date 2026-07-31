@@ -26,7 +26,7 @@ use crate::{
     postgres::{
         error,
         quant::integrity::{load_dataset, load_model_lineage, verify_replay_dataset},
-        query::{list_fk_desc, paginate_mapped},
+        query::paginate_mapped,
     },
     traits::BacktestReportRepository,
 };
@@ -153,14 +153,14 @@ impl BacktestReportRepository for PgBacktestReportRepository {
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<Vec<BacktestReportInfo>, StorageError> {
-        list_fk_desc::<Entity, _, _, _>(
-            &self.db,
-            Column::ModelVersionId,
-            *model_version_id,
-            Column::CreatedAt,
-            Into::into,
-        )
-        .await
+        Entity::find()
+            .filter(Column::ModelVersionId.eq(*model_version_id))
+            .order_by_desc(Column::CreatedAt)
+            .order_by_desc(Column::BacktestReportId)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
     }
 
     async fn page(

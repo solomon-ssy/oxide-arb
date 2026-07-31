@@ -1,6 +1,5 @@
 //! Model registry persistence system contracts.
 
-use chrono::Utc;
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
@@ -11,25 +10,16 @@ use quant_pivot_models::{
             TrainingDatasetInfo,
         },
     },
-    entities::{
-        quant_model_spec::Entity as ModelSpecEntity,
-        quant_model_version::{
-            ActiveModel as ModelVersionActiveModel, Entity as ModelVersionEntity,
-        },
-    },
+    entities::quant_model_spec::Entity as ModelSpecEntity,
     enums::{
         common::MarketCategory,
         model::ModelFamily,
-        quant::{ModelRunKind, ModelRunStatus, PublicationStatus},
+        quant::{ModelRunKind, ModelRunStatus},
     },
     types::{
         CRYPTO_PRICE_15M_HORIZON_SECS, ContentHash, FactorDefinitionId, ModelInputContract,
         ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, POOLED_1H_HORIZON_SECS,
-        TrainingDatasetId, WEATHER_FORECAST_24H_HORIZON_SECS,
-        model_metrics::ModelVersionMetrics,
-        model_quality::{
-            GateIntent, GateSubject, QUALITY_GATE_REPORT_FORMAT_VERSION, QualityGateReport,
-        },
+        TrainingDatasetId, WEATHER_FORECAST_24H_HORIZON_SECS, model_metrics::ModelVersionMetrics,
         model_training::ModelTrainingObjective,
     },
 };
@@ -453,33 +443,6 @@ impl TrainingCommitFixture {
         ))
         .await
         .expect("training run for invalid candidate");
-        let published_id = ModelVersionId::from_v7();
-        let mut published = new_training_version(
-            &self.db,
-            self.spec.model_spec_id,
-            self.dataset.training_dataset_id,
-            published_id,
-            '5',
-        )
-        .await;
-        published.publication_status = PublicationStatus::Published;
-        assert!(matches!(
-            registry
-                .commit_training_model_version(&run_id, published)
-                .await,
-            Err(StorageError::InvariantViolation {
-                entity: Some(entity::QUANT_MODEL_VERSION),
-                ..
-            })
-        ));
-        assert!(
-            registry
-                .find_model_version(&published_id)
-                .await
-                .expect("load invalid candidate")
-                .is_none()
-        );
-
         let missing_dataset_id = ModelVersionId::from_v7();
         let mut missing_dataset = new_training_version(
             &self.db,
@@ -698,7 +661,6 @@ pub async fn find_page_versions_spec() {
     let page = repo
         .page_versions(ModelVersionListQuery {
             model_spec_id: None,
-            publication_status: None,
             from: None,
             to: None,
             page: PageRequest { page: 1, size: 50 },
@@ -782,25 +744,6 @@ impl ModelVersionBoundaryFixture {
 
     async fn reject_insert_drift(&self) {
         let repo = PgModelRegistryRepository::new(self.db.clone());
-        let mut published = new_version(&self.db, self.version.model_spec_id, 'l').await;
-        let published_id = published.model_version_id;
-        published.publication_status = PublicationStatus::Published;
-        published.published_at = Some(Utc::now());
-        assert!(matches!(
-            repo.create_model_version(published).await,
-            Err(StorageError::InvariantViolation {
-                entity: Some(entity::QUANT_MODEL_VERSION),
-                ..
-            })
-        ));
-        assert!(
-            repo.find_model_version(&published_id)
-                .await
-                .expect("load rejected direct-publish version")
-                .is_none(),
-            "a forged Published insert must leave no model-version row"
-        );
-
         let mut projection_drift = new_version(&self.db, self.version.model_spec_id, 'm').await;
         let projection_drift_id = projection_drift.model_version_id;
         projection_drift.category_scope = Some(MarketCategory::Crypto);
@@ -818,61 +761,6 @@ impl ModelVersionBoundaryFixture {
                 .is_none(),
             "contract/scalar drift must leave no model-version row"
         );
-
-        let mut raw_published = new_version(&self.db, self.version.model_spec_id, 'n').await;
-        let raw_published_id = raw_published.model_version_id;
-        raw_published.version = 2;
-        let mut active: ModelVersionActiveModel = raw_published
-            .try_into()
-            .expect("prepare valid raw Candidate row");
-        active.publication_status = ActiveValue::Set(PublicationStatus::Published);
-        active.published_at = ActiveValue::Set(Some(Utc::now()));
-        let error = ModelVersionEntity::insert(active)
-            .exec(&self.db)
-            .await
-            .expect_err("database trigger must reject raw Published insertion");
-        assert!(
-            error
-                .to_string()
-                .contains("must be inserted as an ungated Candidate")
-        );
-        assert!(
-            repo.find_model_version(&raw_published_id)
-                .await
-                .expect("load rejected raw Published version")
-                .is_none(),
-            "a raw forged Published insert must leave no model-version row"
-        );
-
-        let other_candidate = new_version(&self.db, self.version.model_spec_id, 'o').await;
-        ModelVersionFixture::persist_published(&self.db, other_candidate)
-            .await
-            .expect("initialize a clear latch from another model's exact proof");
-        let raw_update = Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            "UPDATE quant_model_version
-             SET publication_status = 'published'::qp_publication_status,
-                 published_at = statement_timestamp()
-             WHERE model_version_id = $1",
-            [self.version.model_version_id.into()],
-        );
-        let error = self
-            .db
-            .execute_raw(raw_update)
-            .await
-            .expect_err("another model's clear latch/proof must not authorize raw publication");
-        assert!(
-            error
-                .to_string()
-                .contains("requires an exact passed full parity proof and clear latch")
-        );
-        let unchanged = repo
-            .find_model_version(&self.version.model_version_id)
-            .await
-            .expect("reload raw-update target")
-            .expect("raw-update target remains present");
-        assert_eq!(unchanged.publication_status, PublicationStatus::Candidate);
-        assert!(unchanged.published_at.is_none());
     }
 
     async fn reject_contract_mutation(&self) {
@@ -957,25 +845,6 @@ impl ModelVersionBoundaryFixture {
                 "the DB constraint must reject {detail}"
             );
         }
-
-        let wrong_subject = QualityGateReport {
-            format_version: QUALITY_GATE_REPORT_FORMAT_VERSION,
-            subject: GateSubject::ModelVersion(ModelVersionId::from_v7()),
-            intent: GateIntent::Publish,
-            evaluated_at: Utc::now(),
-            gates: Vec::new(),
-            hard_failures: Vec::new(),
-            soft_warnings: Vec::new(),
-            passed: true,
-            report_hash: content_hash('q'),
-        };
-        assert!(
-            PgModelRegistryRepository::new(self.db.clone())
-                .set_quality_gate_report(&model_version_id, wrong_subject)
-                .await
-                .is_err(),
-            "quality-gate subject id must match the owning model version"
-        );
     }
 }
 
@@ -987,7 +856,7 @@ pub async fn model_version_rejects_boundary() {
     fixture.reject_json_contracts().await;
 }
 
-pub async fn published_artifacts_coexist_explicit() {
+pub async fn immutable_artifacts_coexist() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgModelRegistryRepository::new(db.clone());
@@ -1000,24 +869,27 @@ pub async fn published_artifacts_coexist_explicit() {
         .expect("model spec");
 
     let first = new_version(&db, spec.model_spec_id, 'e').await;
-    ModelVersionFixture::persist_published(&db, first)
+    ModelVersionFixture::persist_route_candidate(&db, first)
         .await
-        .expect("publish first artifact through exact parity proof");
+        .expect("persist first route candidate with exact parity proof");
     let second = new_version(&db, spec.model_spec_id, 'f').await;
-    ModelVersionFixture::persist_published(&db, second)
+    ModelVersionFixture::persist_route_candidate(&db, second)
         .await
-        .expect("publish second artifact through exact parity proof");
+        .expect("persist second route candidate with exact parity proof");
 
-    assert_eq!(
-        repo.list_published_for_spec(&spec.model_spec_id)
-            .await
-            .expect("published artifacts")
-            .len(),
-        2
-    );
+    let page = repo
+        .page_versions(ModelVersionListQuery {
+            model_spec_id: Some(spec.model_spec_id),
+            from: None,
+            to: None,
+            page: PageRequest::new(1, 10),
+        })
+        .await
+        .expect("immutable artifacts");
+    assert_eq!(page.total, 2);
 }
 
-pub async fn published_picker_catalog_filters() {
+pub async fn route_candidate_catalog_filters() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let repo = PgModelRegistryRepository::new(db.clone());
@@ -1051,27 +923,27 @@ pub async fn published_picker_catalog_filters() {
         .expect("sell spec");
 
     let generic_buy = new_version(&db, pooled_buy_spec.model_spec_id, 'g').await;
-    let generic_buy = ModelVersionFixture::persist_published(&db, generic_buy)
+    let generic_buy = ModelVersionFixture::persist_route_candidate(&db, generic_buy)
         .await
-        .expect("publish generic buy through exact parity proof");
+        .expect("persist generic buy route candidate");
 
     let crypto_buy = new_version(&db, crypto_buy_spec.model_spec_id, 'h').await;
-    let crypto_buy = ModelVersionFixture::persist_published(&db, crypto_buy)
+    let crypto_buy = ModelVersionFixture::persist_route_candidate(&db, crypto_buy)
         .await
-        .expect("publish crypto buy through exact parity proof");
+        .expect("persist crypto buy route candidate");
 
     let weather_buy = new_version(&db, weather_buy_spec.model_spec_id, 'i').await;
-    ModelVersionFixture::persist_published(&db, weather_buy)
+    ModelVersionFixture::persist_route_candidate(&db, weather_buy)
         .await
-        .expect("publish weather buy through exact parity proof");
+        .expect("persist weather buy route candidate");
 
     let sell = new_version(&db, sell_spec.model_spec_id, 'j').await;
-    let sell = ModelVersionFixture::persist_published(&db, sell)
+    let sell = ModelVersionFixture::persist_route_candidate(&db, sell)
         .await
-        .expect("publish sell through exact parity proof");
+        .expect("persist sell route candidate");
 
     let crypto_catalog = repo
-        .list_published_catalog(ModelPickerSide::Buy, Some(MarketCategory::Crypto))
+        .list_model_catalog(ModelPickerSide::Buy, Some(MarketCategory::Crypto))
         .await
         .expect("crypto catalog");
     assert_eq!(crypto_catalog.len(), 1);
@@ -1093,7 +965,7 @@ pub async fn published_picker_catalog_filters() {
     );
 
     let sell_catalog = repo
-        .list_published_catalog(ModelPickerSide::Sell, None)
+        .list_model_catalog(ModelPickerSide::Sell, None)
         .await
         .expect("sell catalog");
     assert_eq!(sell_catalog.len(), 1);

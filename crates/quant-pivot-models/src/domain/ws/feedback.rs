@@ -35,9 +35,9 @@ impl TryFrom<&FeedbackOutboxEntry> for ResearchFeedbackEvent {
         Ok(Self {
             revision: entry.revision,
             subject_kind: ResearchFeedbackSubjectKind::FeedbackCycle,
-            subject_id: entry.event.feedback_cycle_id,
+            subject_id: entry.source.feedback_cycle_id(),
             profile_id: entry.profile_id.clone(),
-            occurred_at: entry.event.occurred_at,
+            occurred_at: entry.source.occurred_at(),
         })
     }
 }

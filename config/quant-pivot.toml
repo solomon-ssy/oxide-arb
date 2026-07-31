@@ -255,6 +255,16 @@ calibration_years = 2
 # hard limit, so this also bounds worst-case GHCNh memory pressure.
 max_concurrency = 4
 
+[domain_sources.ghcnd]
+enabled = true
+base_url = "https://www.ncei.noaa.gov/pub/data/ghcn/daily"
+request_timeout_ms = 120000
+refresh_secs = 86400
+lookback_years = 2
+# Purpose: bounded station-file downloads/decodes. Each response has a 32MiB
+# hard limit; the worker never loads more than this many files concurrently.
+max_concurrency = 4
+
 [domain_sources.gefs]
 enabled = true
 bucket_url = "https://noaa-gefs-pds.s3.amazonaws.com"
@@ -268,7 +278,8 @@ max_concurrency = 8
 enabled = true
 base_url = "https://data.weather.gov.hk/weatherAPI/opendata"
 request_timeout_ms = 10000
-rainfall_poll_secs = 300
+daily_rainfall_poll_secs = 86400
+daily_rainfall_lookback_days = 62
 daily_temperature_poll_secs = 1800
 daily_temperature_lookback_months = 24
 
@@ -284,9 +295,12 @@ correction_lookback_hours = 72
 enabled = true
 spc_base_url = "https://www.spc.noaa.gov/climo/reports"
 ncei_csv_base_url = "https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles"
+ncei_time_series_base_url = "https://www.ncei.noaa.gov/access/monitoring/tornadoes/time-series"
 request_timeout_ms = 120000
 spc_poll_secs = 600
 ncei_refresh_secs = 2678400
+ncei_time_series_poll_secs = 300
+ncei_backfill_years = 2
 
 [domain_sources.nhc]
 enabled = true
@@ -299,13 +313,16 @@ best_track_refresh_secs = 31536000
 [domain_sources.nasa_gistemp]
 enabled = true
 csv_url = "https://data.giss.nasa.gov/gistemp/tabledata_v4/GLB.Ts+dSST.csv"
+annual_url = "https://data.giss.nasa.gov/gistemp/graphs/graph_data/Global_Mean_Estimates_based_on_Land_and_Ocean_Data/graph.txt"
 request_timeout_ms = 30000
 refresh_secs = 2678400
 
 [domain_sources.nsidc_sea_ice]
 enabled = true
-north_csv_url = "https://noaadata.apps.nsidc.org/NOAA/G02135/north/daily/data/N_seaice_extent_daily_v4.0.csv"
-south_csv_url = "https://noaadata.apps.nsidc.org/NOAA/G02135/south/daily/data/S_seaice_extent_daily_v4.0.csv"
+north_daily_csv_url = "https://noaadata.apps.nsidc.org/NOAA/G02135/north/daily/data/N_seaice_extent_daily_v4.0.csv"
+south_daily_csv_url = "https://noaadata.apps.nsidc.org/NOAA/G02135/south/daily/data/S_seaice_extent_daily_v4.0.csv"
+north_monthly_base_url = "https://noaadata.apps.nsidc.org/NOAA/G02135/north/monthly/data"
+south_monthly_base_url = "https://noaadata.apps.nsidc.org/NOAA/G02135/south/monthly/data"
 request_timeout_ms = 120000
 refresh_secs = 86400
 
@@ -317,7 +334,11 @@ poll_secs = 300
 lookback_observations = 24
 
 [[domain_sources.weather_vertical_bindings.hko_rainfall]]
-place = "North District"
+site_key = "Hong Kong Observatory"
+station_key = "HKO"
+daily_csv_url = "https://data.weather.gov.hk/weatherAPI/cis/csvfile/HKO/ALL/daily_HKO_RF_ALL.csv"
+latitude = "22.301944"
+longitude = "114.174167"
 timezone = "Asia/Hong_Kong"
 
 [[domain_sources.weather_vertical_bindings.hko_daily_temperature]]
@@ -355,10 +376,20 @@ longitude = "-74.036218"
 timezone = "America/New_York"
 
 [[domain_sources.weather_vertical_bindings.tornado_regions]]
+region_id = "united_states"
+timezone = "America/New_York"
+
+[domain_sources.weather_vertical_bindings.tornado_regions.scope]
+kind = "united_states"
+
+[[domain_sources.weather_vertical_bindings.tornado_regions]]
 region_id = "oklahoma"
+timezone = "America/Chicago"
+
+[domain_sources.weather_vertical_bindings.tornado_regions.scope]
+kind = "state"
 spc_state_code = "OK"
 ncei_state_name = "OKLAHOMA"
-timezone = "America/Chicago"
 
 [[domain_sources.weather_vertical_bindings.nhc_historical_storms]]
 basin = "atlantic"

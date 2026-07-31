@@ -1133,6 +1133,100 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
+        name: "uq_quant_attribution_artifact_hash",
+        table: "quant_attribution_artifact",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "artifact_hash",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_attribution_available",
+        table: "quant_attribution_artifact",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "available_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "source_feedback_cycle_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "artifact_hash",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_attribution_intent_kind",
+        table: "quant_attribution_artifact",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "order_intent_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "artifact_kind",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some("(order_intent_id IS NOT NULL)"),
+    },
+    IndexSpec {
+        name: "uq_quant_model_candidate_manifest_hash",
+        table: "quant_model_candidate_manifest",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "manifest_hash",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "uq_quant_model_candidate_cycle_recipe",
+        table: "quant_model_candidate_manifest",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "feedback_cycle_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "candidate_recipe_hash",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_model_candidate_version",
+        table: "quant_model_candidate_manifest",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "model_version_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
+                direction: IndexDirection::Desc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
         name: "uq_quant_feedback_cycle_idempotency",
         table: "quant_feedback_cycle",
         method: IndexMethod::BTree,
@@ -1169,6 +1263,23 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
+        name: "uq_quant_feedback_cycle_profile_cutoff",
+        table: "quant_feedback_cycle",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[
+            IndexColumnSpec {
+                name: "research_profile_artifact_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "label_cutoff",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
         name: "idx_quant_feedback_cycle_claim",
         table: "quant_feedback_cycle",
         method: IndexMethod::BTree,
@@ -1188,6 +1299,39 @@ const INDEXES: &[IndexSpec] = &[
             },
         ],
         predicate: Some("(status IN ('queued', 'running'))"),
+    },
+    IndexSpec {
+        name: "idx_quant_feedback_scheduler_due",
+        table: "quant_feedback_scheduler_state",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "paused",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "next_due_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "retry_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "cooldown_until",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "lease_expires_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "research_profile_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some("(paused = false)"),
     },
     IndexSpec {
         name: "idx_quant_feedback_event_outbox_pending",
@@ -1312,6 +1456,38 @@ const INDEXES: &[IndexSpec] = &[
             direction: IndexDirection::Asc,
         }],
         predicate: Some("(research_job_id IS NOT NULL)"),
+    },
+    IndexSpec {
+        name: "uq_quant_feedback_trigger_hash",
+        table: "quant_feedback_trigger_event",
+        method: IndexMethod::BTree,
+        unique: true,
+        columns: &[IndexColumnSpec {
+            name: "event_hash",
+            direction: IndexDirection::Asc,
+        }],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_feedback_trigger_timeline",
+        table: "quant_feedback_trigger_event",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "feedback_cycle_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "occurred_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "feedback_trigger_event_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
     },
     IndexSpec {
         name: "uq_quant_drift_report_cycle_metric",
@@ -1867,17 +2043,6 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_model_version_status",
-        table: "quant_model_version",
-        method: IndexMethod::BTree,
-        unique: false,
-        columns: &[IndexColumnSpec {
-            name: "publication_status",
-            direction: IndexDirection::Asc,
-        }],
-        predicate: None,
-    },
-    IndexSpec {
         name: "idx_quant_model_version_parent",
         table: "quant_model_version",
         method: IndexMethod::BTree,
@@ -2054,6 +2219,127 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
+        name: "idx_quant_execution_attempt_outcome_recommendation",
+        table: "quant_execution_attempt_outcome",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "recommendation_id",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "available_at",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_execution_attempt_task_due",
+        table: "quant_execution_attempt_reconciliation_task",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "status",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "ready_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "next_attempt_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "lease_expires_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "order_intent_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some("status <> 'completed'::qp_outcome_reconciliation_task_status"),
+    },
+    IndexSpec {
+        name: "idx_quant_execution_rollup_task_due",
+        table: "quant_execution_rollup_reconciliation_task",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "status",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "ready_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "next_attempt_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "lease_expires_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "recommendation_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some("status <> 'completed'::qp_outcome_reconciliation_task_status"),
+    },
+    IndexSpec {
+        name: "idx_quant_resolution_outcome_task_due",
+        table: "quant_resolution_outcome_reconciliation_task",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "status",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "ready_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "next_attempt_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "lease_expires_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "recommendation_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: Some("status <> 'completed'::qp_outcome_reconciliation_task_status"),
+    },
+    IndexSpec {
+        name: "idx_quant_execution_rollup_available",
+        table: "quant_recommendation_execution_rollup",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "available_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "recommendation_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
         name: "idx_quant_recommendation_status_valid_until",
         table: "quant_recommendation",
         method: IndexMethod::BTree,
@@ -2109,8 +2395,8 @@ const INDEXES: &[IndexSpec] = &[
         predicate: None,
     },
     IndexSpec {
-        name: "idx_quant_recommendation_execution_outcome_available",
-        table: "quant_recommendation_execution_outcome",
+        name: "idx_quant_execution_attempt_outcome_available",
+        table: "quant_execution_attempt_outcome",
         method: IndexMethod::BTree,
         unique: false,
         columns: &[
@@ -2137,6 +2423,48 @@ const INDEXES: &[IndexSpec] = &[
             },
             IndexColumnSpec {
                 name: "recommendation_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_resolution_inbox_available",
+        table: "quant_resolution_observation_inbox",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "available_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "market_id",
+                direction: IndexDirection::Asc,
+            },
+        ],
+        predicate: None,
+    },
+    IndexSpec {
+        name: "idx_quant_resolution_projection_due",
+        table: "quant_resolution_observation_projection",
+        method: IndexMethod::BTree,
+        unique: false,
+        columns: &[
+            IndexColumnSpec {
+                name: "status",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "next_attempt_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "lease_expires_at",
+                direction: IndexDirection::Asc,
+            },
+            IndexColumnSpec {
+                name: "created_at",
                 direction: IndexDirection::Asc,
             },
         ],
@@ -3346,7 +3674,15 @@ pub async fn apply(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
         if let Some(predicate) = spec.predicate {
             statement.and_where(v1::index_predicate(predicate)?);
         }
-        manager.create_index(statement.clone()).await?;
+        manager
+            .create_index(statement.clone())
+            .await
+            .map_err(|error| {
+                DbErr::Custom(format!(
+                    "create index `{}` on `{}` failed: {error}",
+                    spec.name, spec.table
+                ))
+            })?;
     }
     Ok(())
 }

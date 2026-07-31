@@ -1,8 +1,8 @@
 //! Model-version quality-gate preview HTTP contract.
 //!
-//! `GET /research/models/{id}/quality-gate` runs the publish gate as a read-only
+//! `GET /research/models/{id}/quality-gate` runs the candidate gate as a read-only
 //! dry-run (no persistence, no state change) and returns the full per-gate
-//! scorecard so an operator can judge publish readiness *before* acting.
+//! scorecard so an operator can judge route-activation readiness before acting.
 //!
 //! The gate itself lives in `quant-pivot-research`; `quant-pivot-core` maps its
 //! `QualityGateReport` onto these wire types (research → models mapping is done
@@ -13,7 +13,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::BacktestReportId;
+use crate::types::{BacktestReportId, model_quality::QualityGateReport};
 
 /// Which model lifecycle transition a preview evaluates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -21,9 +21,9 @@ use crate::types::BacktestReportId;
 pub enum GatePreviewIntent {
     /// Candidate registration readiness (coverage + leakage + backtest metrics).
     Candidate,
-    /// Publish readiness (adds shadow overlap stability).
+    /// Champion route-activation readiness (adds shadow overlap stability).
     #[default]
-    Publish,
+    RouteActivation,
     /// Auto-execution readiness (adds liquidity-exit feasibility).
     AutoExecution,
 }
@@ -44,7 +44,7 @@ pub struct QualityGatePreviewQuery {
 /// `gate` / `class` / `status` are stable `snake_case` wire strings (`sample_count`,
 /// `hard`, `pass`, …) so new gate ids flow through without a wire-schema bump;
 /// the SPA keys its labels off `gate` and colors off `status`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GateOutcomeView {
     /// Gate identity wire name (e.g. `"sample_count"`, `"shadow_overlap_stability"`).
     pub gate: String,
@@ -61,9 +61,9 @@ pub struct GateOutcomeView {
 }
 
 /// Read-only quality-gate evaluation for one model version.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QualityGateReportView {
-    /// Transition that was evaluated (`"candidate"` | `"publish"` | `"auto_execution"`).
+    /// Transition evaluated (`candidate`, `route_activation`, or `auto_execution`).
     pub intent: String,
     /// When the dry-run ran.
     pub evaluated_at: DateTime<Utc>,
@@ -73,4 +73,27 @@ pub struct QualityGateReportView {
     pub gates: Vec<GateOutcomeView>,
     /// Content hash over the decision projection.
     pub report_hash: String,
+}
+
+impl From<&QualityGateReport> for QualityGateReportView {
+    fn from(report: &QualityGateReport) -> Self {
+        Self {
+            intent: report.intent.wire_name().to_owned(),
+            evaluated_at: report.evaluated_at,
+            passed: report.passed,
+            gates: report
+                .gates
+                .iter()
+                .map(|outcome| GateOutcomeView {
+                    gate: outcome.gate.wire_name().to_owned(),
+                    class: outcome.class.wire_name().to_owned(),
+                    status: outcome.status.wire_name().to_owned(),
+                    observed: outcome.observed.clone(),
+                    threshold: outcome.threshold.clone(),
+                    detail: outcome.detail.clone(),
+                })
+                .collect(),
+            report_hash: report.report_hash.to_string(),
+        }
+    }
 }

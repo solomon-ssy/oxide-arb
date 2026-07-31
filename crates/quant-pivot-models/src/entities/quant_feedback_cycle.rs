@@ -6,7 +6,7 @@ use sea_orm::entity::prelude::*;
 use super::research_profile_artifact;
 use crate::{
     domain::{ports::FeedbackCandidateFamily, quant::FeedbackCycleKey},
-    enums::quant::{FeedbackCycleStatus, FeedbackDecision, FeedbackTriggerFamily},
+    enums::quant::{FeedbackCycleStatus, FeedbackDecision},
     types::{
         CapabilityRegistryHashes, ContentHash, FeedbackCycleId, ModelVersionId,
         ResearchProfileArtifactId, ResearchProfileRef, WorkerId,
@@ -22,7 +22,6 @@ pub struct Model {
     pub idempotency_hash: ContentHash,
     #[sea_orm(column_type = "JsonBinary")]
     pub idempotency_key: FeedbackCycleKey,
-    pub trigger_family: FeedbackTriggerFamily,
     #[sea_orm(column_type = "JsonBinary")]
     pub profile_ref: ResearchProfileRef,
     pub research_profile_artifact_id: ResearchProfileArtifactId,

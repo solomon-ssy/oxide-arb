@@ -27,8 +27,8 @@ pub enum ModelPickerSide {
 /// A model spec is the **authoring root** of the offline research lifecycle:
 /// the operator declares the model family, prediction horizon, and feature /
 /// label schema versions the downstream dataset build and training runs bind
-/// to. A spec is immutable once created; publication lifecycle belongs only to
-/// trained model versions (see `TrainModelRequest` / model-governance).
+/// to. A spec and every trained model version are immutable; serving role is
+/// derived only from a governed route generation.
 ///
 /// `model_family` deserializes from its canonical wire label (`"weighted_factor"`,
 /// `"classical_random_forest"`, `"hold_vs_exit_weighted"`, …); an unknown label
@@ -117,12 +117,12 @@ pub struct ModelSpecListQuery {
     pub page: PageRequest,
 }
 
-/// Filter for `GET /research/models/published-catalog`.
+/// Filter for `GET /research/models/route-candidates`.
 ///
 /// The category/side-aware picker source for every `FieldWidget::ModelVersionSelect`
 /// field.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ModelPublishedCatalogQuery {
+pub struct ModelRouteCandidateQuery {
     /// Restrict to versions whose artifact declares this category or `None`.
     /// Absent = no category filter (used by the generic pointer fields).
     pub category: Option<MarketCategory>,
@@ -130,9 +130,9 @@ pub struct ModelPublishedCatalogQuery {
     pub side: ModelPickerSide,
 }
 
-/// One `Published` model version offered by the governed picker widget.
+/// One immutable model artifact offered to the governed route picker.
 #[derive(Debug, Clone, Serialize)]
-pub struct PublishedModelOptionView {
+pub struct ModelRouteCandidateView {
     pub model_version_id: ModelVersionId,
     pub model_spec_id: ModelSpecId,
     pub spec_name: String,
@@ -141,7 +141,6 @@ pub struct PublishedModelOptionView {
     pub model_family: ModelFamily,
     /// The artifact's own declared scope (`None` = generic cross-category).
     pub category_scope: Option<MarketCategory>,
-    pub published_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]

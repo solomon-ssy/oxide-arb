@@ -81,7 +81,7 @@ use quant_pivot_models::{
         quant::{
             DatasetPurpose, DownsideSource, EntryConditionState, ExecutionWalletKind,
             FeatureParityLatchState, FeatureParityStateTransition, ModelRunKind, OutcomeSide,
-            PublicationStatus, RecommendationReportStatus, ReportKind,
+            RecommendationReportStatus, ReportKind,
         },
         rbac::ResourceType,
     },
@@ -1294,8 +1294,6 @@ async fn build_model_runner(
         noop_factor_writer(),
         Arc::new(ComputeExecutor::new().expect("test compute executor")),
     ));
-    let model_registry_repo =
-        Arc::new(PgModelRegistryRepository::new(db.clone())) as Arc<dyn ModelRegistryRepository>;
     let evidence_scope =
         PublishedTradePolicyFixture::evidence_scope().expect("report serving evidence scope");
     let serving_generations = ModelServingRegistryFixture {
@@ -1312,7 +1310,6 @@ async fn build_model_runner(
     .expect("report serving generation");
     Arc::new(ModelRunner::new(ModelRunnerDeps {
         model_run_repo: Arc::new(PgModelRunRepository::new(db.clone())),
-        model_registry_repo,
         shadow_comparison_repo: Arc::new(PgShadowComparisonRepository::new(db.clone())),
         serving_generations,
         factor_pipeline,
@@ -1995,7 +1992,7 @@ async fn publish_pooled_model(input: &PooledModelFixture<'_>) {
     let category_scope = bindings.model.category_scope;
     let bound_profile_ref = bindings.model.profile_ref.clone();
     let training_dataset_id = bindings.dataset.manifest.training_dataset_id;
-    ModelVersionFixture::persist_published(
+    ModelVersionFixture::persist_route_candidate(
         input.db,
         NewModelVersion {
             model_version_id: input.model_version_id,
@@ -2008,14 +2005,9 @@ async fn publish_pooled_model(input: &PooledModelFixture<'_>) {
             training_dataset_id: Some(training_dataset_id),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
-            publish_path_set_id: None,
             derivation: NewModelVersion::training_derivation(),
             metrics: ModelVersionMetrics::not_measured("pooled control fixture"),
             training_objective: ModelTrainingObjective::hand_authored("pooled control fixture"),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Candidate,
-            published_at: None,
-            retired_at: None,
         },
     )
     .await
@@ -2175,14 +2167,9 @@ async fn persist_source_model(
             training_dataset_id: Some(source_training_dataset_id),
             trade_policy_artifact_id: source_trade_policy.map(|binding| binding.0),
             trade_policy_hash: source_trade_policy.map(|binding| binding.1),
-            publish_path_set_id: None,
             derivation: NewModelVersion::training_derivation(),
             metrics: metrics.clone(),
             training_objective: objective.clone(),
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Candidate,
-            published_at: None,
-            retired_at: None,
         })
         .await
         .expect("persist source model version");
@@ -2250,7 +2237,7 @@ async fn persist_calibrated_model(
         .map(|binding| (binding.artifact_id, binding.content_hash));
     let metrics = ModelVersionMetrics::not_measured("test fixture");
     let objective = ModelTrainingObjective::hand_authored("test fixture");
-    ModelVersionFixture::persist_published(
+    ModelVersionFixture::persist_route_candidate(
         input.db,
         NewModelVersion {
             model_version_id: *input.model_version_id,
@@ -2263,17 +2250,12 @@ async fn persist_calibrated_model(
             training_dataset_id: Some(training_dataset_id),
             trade_policy_artifact_id: trade_policy_binding.map(|binding| binding.0),
             trade_policy_hash: trade_policy_binding.map(|binding| binding.1),
-            publish_path_set_id: None,
             derivation: ModelVersionDerivation::ReturnCalibration {
                 parent_model_version_id: source_model_version_id,
                 calibration_artifact_id: calibration_id,
             },
             metrics,
             training_objective: objective,
-            quality_gate_report: None,
-            publication_status: PublicationStatus::Candidate,
-            published_at: None,
-            retired_at: None,
         },
     )
     .await

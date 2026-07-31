@@ -4,14 +4,15 @@ use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 
-use super::promotion_permit::ModelRoutePromotionRecord;
+use super::{
+    model_route_bootstrap::ModelRouteBootstrapRecord, promotion_permit::ModelRoutePromotionRecord,
+};
 use crate::{
     entities::quant_model_governance_audit,
-    enums::quant::{ModelGovernanceAction, PublicationStatus},
+    enums::quant::ModelGovernanceAction,
     types::{
-        AuditEventId, BacktestPathSetId, CalibrationArtifactId, ContentHash, FeatureParityStateId,
-        ModelGovernanceAuditId, ModelVersionId, Probability, PromotionPermitId, RoleCode,
-        TrainingDatasetId, UserId,
+        AuditEventId, CalibrationArtifactId, ContentHash, ModelGovernanceAuditId, ModelVersionId,
+        PromotionPermitId, RoleCode, TrainingDatasetId, UserId,
     },
 };
 
@@ -23,27 +24,13 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(deny_unknown_fields, tag = "action", rename_all = "snake_case")]
 pub enum ModelGovernanceAuditDetail {
-    Retire {
-        retired_version_id: ModelVersionId,
-        artifact_hash: ContentHash,
-    },
-    BindPublishPathSet {
-        previous_path_set_id: Option<BacktestPathSetId>,
-        path_set_id: BacktestPathSetId,
-        path_set_hash: ContentHash,
-    },
-    Publish {
-        artifact_hash: ContentHash,
-        gate_report_hash: ContentHash,
-        shadow_samples: u64,
-        shadow_mean_overlap: Probability,
-        feature_parity_state_id: FeatureParityStateId,
-        required_shadow_window_secs: i64,
+    BootstrapRoute {
+        record: Box<ModelRouteBootstrapRecord>,
     },
     PromoteRoute {
         record: Box<ModelRoutePromotionRecord>,
     },
-    BindCalibration {
+    SealCalibration {
         source_version_id: ModelVersionId,
         source_artifact_hash: ContentHash,
         calibrated_version_id: ModelVersionId,
@@ -64,8 +51,6 @@ pub struct ModelGovernanceAuditInfo {
     pub actor_username: String,
     pub actor_role: Option<RoleCode>,
     pub reason: String,
-    pub before_status: PublicationStatus,
-    pub after_status: PublicationStatus,
     pub detail: ModelGovernanceAuditDetail,
     pub audit_event_id: AuditEventId,
     pub created_at: DateTime<Utc>,
@@ -83,8 +68,6 @@ impl ModelGovernanceAuditInfo {
             && self.actor_username == audit.actor_username
             && self.actor_role == audit.actor_role
             && self.reason == audit.reason
-            && self.before_status == audit.before_status
-            && self.after_status == audit.after_status
             && self.detail == audit.detail
             && self.audit_event_id == audit.audit_event_id
     }
@@ -102,8 +85,6 @@ info_from_model!(
         actor_username,
         actor_role,
         reason,
-        before_status,
-        after_status,
         detail,
         audit_event_id,
         created_at,
@@ -122,8 +103,6 @@ pub struct NewModelGovernanceAudit {
     pub actor_username: String,
     pub actor_role: Option<RoleCode>,
     pub reason: String,
-    pub before_status: PublicationStatus,
-    pub after_status: PublicationStatus,
     pub detail: ModelGovernanceAuditDetail,
     pub audit_event_id: AuditEventId,
 }
@@ -143,8 +122,6 @@ pub struct NewRoutePromotionAudit {
     pub actor_username: String,
     pub actor_role: Option<RoleCode>,
     pub reason: String,
-    pub before_status: PublicationStatus,
-    pub after_status: PublicationStatus,
     pub detail: ModelGovernanceAuditDetail,
     pub audit_event_id: AuditEventId,
     pub promotion_permit_id: PromotionPermitId,
@@ -164,9 +141,12 @@ mod tests {
         assert!(serde_json::from_value::<ModelGovernanceAuditDetail>(unknown_action).is_err());
 
         let unknown_field = serde_json::json!({
-            "action": "retire",
-            "retired_version_id": "01900000-0000-7000-8000-000000000000",
-            "artifact_hash": format!("blake3:{}", "0".repeat(64)),
+            "action": "seal_calibration",
+            "source_version_id": "01900000-0000-7000-8000-000000000000",
+            "source_artifact_hash": format!("blake3:{}", "0".repeat(64)),
+            "calibrated_version_id": "01900000-0000-7000-8000-000000000001",
+            "calibrated_artifact_hash": format!("blake3:{}", "1".repeat(64)),
+            "calibrator_id": "01900000-0000-7000-8000-000000000002",
             "unexpected": true
         });
         assert!(serde_json::from_value::<ModelGovernanceAuditDetail>(unknown_field).is_err());

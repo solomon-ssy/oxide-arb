@@ -8,14 +8,10 @@ use super::{
     quant_trade_policy_artifact, quant_training_dataset, research_profile_artifact,
 };
 use crate::{
-    enums::{
-        common::MarketCategory,
-        quant::{ModelVersionDerivationKind, PublicationStatus},
-    },
+    enums::{common::MarketCategory, quant::ModelVersionDerivationKind},
     types::{
-        BacktestPathSetId, CalibrationArtifactId, ContentHash, ModelSpecId, ModelVersionId,
-        ResearchProfileArtifactId, TradePolicyArtifactId, TrainingDatasetId,
-        model_metrics::ModelVersionMetrics, model_quality::QualityGateReport,
+        CalibrationArtifactId, ContentHash, ModelSpecId, ModelVersionId, ResearchProfileArtifactId,
+        TradePolicyArtifactId, TrainingDatasetId, model_metrics::ModelVersionMetrics,
         model_serving::ModelServingContract, model_training::ModelTrainingObjective,
     },
 };
@@ -41,7 +37,6 @@ pub struct Model {
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
     pub trade_policy_hash: Option<ContentHash>,
-    pub publish_path_set_id: Option<BacktestPathSetId>,
     pub derivation_kind: ModelVersionDerivationKind,
     pub parent_model_version_id: Option<ModelVersionId>,
     pub calibration_artifact_id: Option<CalibrationArtifactId>,
@@ -50,11 +45,6 @@ pub struct Model {
     pub metrics: ModelVersionMetrics,
     #[sea_orm(column_type = "JsonBinary")]
     pub training_objective: ModelTrainingObjective,
-    #[sea_orm(column_type = "JsonBinary", nullable)]
-    pub quality_gate_report: Option<QualityGateReport>,
-    pub publication_status: PublicationStatus,
-    pub published_at: Option<DateTime<Utc>>,
-    pub retired_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 
     #[sea_orm(

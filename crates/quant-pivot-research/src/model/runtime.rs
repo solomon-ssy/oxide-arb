@@ -224,7 +224,7 @@ pub struct ModelRuntimeOutput {
 /// Unified inference entry point. Business layers depend only on this trait.
 #[async_trait]
 pub trait QuantModelRuntime: Send + Sync {
-    /// The published model version this runtime serves.
+    /// The immutable model version this runtime serves.
     fn model_version_id(&self) -> ModelVersionId;
 
     /// The model family.

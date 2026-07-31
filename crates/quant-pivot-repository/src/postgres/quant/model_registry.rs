@@ -1,6 +1,5 @@
 //! Postgres-backed model registry repository.
 
-use chrono::Utc;
 use quant_pivot_error::storage::{
     StorageError,
     entity::{
@@ -13,19 +12,16 @@ use quant_pivot_models::{
         api::{ModelPickerSide, ModelSpecListQuery, ModelVersionListQuery},
         pagination::{PageRequest, PageWindow, Paginated},
         quant::{
-            CalibrationArtifactPayload, ModelGovernanceAuditDetail, ModelGovernanceAuditInfo,
-            ModelSpecInfo, ModelVersionInfo, ModelVersionParityEvidence, NewModelSpec,
-            NewModelVersion, PublishedModelCatalogInfo,
+            CalibrationArtifactPayload, ModelCatalogInfo, ModelSpecInfo, ModelVersionInfo,
+            ModelVersionParityEvidence, NewModelSpec, NewModelVersion,
         },
     },
     entities::{
-        quant_backtest_path_set::Entity as QuantBacktestPathSetEntity,
         quant_calibration_artifact::Entity as QuantCalibrationArtifactEntity,
         quant_feature_parity_run::Entity as QuantFeatureParityRunEntity,
         quant_feature_parity_subject::{
             Column as QuantFeatureParitySubjectColumn, Entity as QuantFeatureParitySubjectEntity,
         },
-        quant_model_governance_audit::Entity as QuantModelGovernanceAuditEntity,
         quant_model_run::{
             Column as QuantModelRunColumn, Entity as QuantModelRunEntity,
             Model as QuantModelRunModel,
@@ -43,33 +39,28 @@ use quant_pivot_models::{
         model::ModelFamily,
         quant::{
             CalibrationKind, DatasetPurpose, FeatureParityRunKind, FeatureParityRunStatus,
-            ModelGovernanceAction, ModelRunErrorCode, ModelRunKind, ModelRunStatus,
-            ParitySubjectKind, PublicationStatus, TrainingDatasetStatus,
+            ModelRunErrorCode, ModelRunKind, ModelRunStatus, ParitySubjectKind,
+            TrainingDatasetStatus,
         },
     },
     types::{
-        BacktestPathSetId, ContentHash, FactorDefinitionId, FeatureParityRunId, ModelRunId,
-        ModelSpecId, ModelVersionId, model_lineage::ModelVersionDerivation,
-        model_quality::QualityGateReport, model_spec::ModelSpecDefinition,
+        ContentHash, FactorDefinitionId, FeatureParityRunId, ModelRunId, ModelSpecId,
+        ModelVersionId, model_lineage::ModelVersionDerivation, model_spec::ModelSpecDefinition,
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
-    DatabaseTransaction, EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder,
-    QuerySelect, RelationTrait, Select, TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Select,
+    TransactionTrait,
     sea_query::{Expr, ExprTrait, extension::postgres::PgBinOper},
 };
 
 use crate::{
     postgres::{
         error, primitives,
-        quant::feature_parity::PgFeatureParityRepository,
         query::{paginate_into_model, paginate_mapped},
     },
-    traits::{
-        BindPublishPathSetCommit, ModelRegistryRepository, PublishModelVersionCommit,
-        PublishModelVersionResult,
-    },
+    traits::ModelRegistryRepository,
 };
 /// Postgres-backed model registry repository.
 pub struct PgModelRegistryRepository {
@@ -101,17 +92,12 @@ fn select_version_with_family() -> Select<Entity> {
             QuantModelVersionColumn::TrainingDatasetId,
             QuantModelVersionColumn::TradePolicyArtifactId,
             QuantModelVersionColumn::TradePolicyHash,
-            QuantModelVersionColumn::PublishPathSetId,
             QuantModelVersionColumn::DerivationKind,
             QuantModelVersionColumn::ParentModelVersionId,
             QuantModelVersionColumn::CalibrationArtifactId,
             QuantModelVersionColumn::DerivationEvidenceHash,
             QuantModelVersionColumn::Metrics,
             QuantModelVersionColumn::TrainingObjective,
-            QuantModelVersionColumn::QualityGateReport,
-            QuantModelVersionColumn::PublicationStatus,
-            QuantModelVersionColumn::PublishedAt,
-            QuantModelVersionColumn::RetiredAt,
             QuantModelVersionColumn::CreatedAt,
         ])
         .expr_as(
@@ -215,23 +201,7 @@ impl PgModelRegistryRepository {
         Self::require_version_info(db, &model_version_id).await
     }
 
-    fn validate_new_candidate(version: &NewModelVersion) -> Result<(), StorageError> {
-        let is_clean_candidate = version.publication_status == PublicationStatus::Candidate
-            && version.publish_path_set_id.is_none()
-            && version.quality_gate_report.is_none()
-            && version.published_at.is_none()
-            && version.retired_at.is_none();
-        if !is_clean_candidate {
-            return Err(StorageError::invariant_violation(
-                Some(QUANT_MODEL_VERSION),
-                "every model version must be inserted as an ungated Candidate",
-            ));
-        }
-        Ok(())
-    }
-
     fn validate_training_version(version: &NewModelVersion) -> Result<(), StorageError> {
-        Self::validate_new_candidate(version)?;
         if version.derivation != ModelVersionDerivation::Training {
             return Err(StorageError::invariant_violation(
                 Some(QUANT_MODEL_VERSION),
@@ -285,16 +255,11 @@ impl PgModelRegistryRepository {
             && stored.training_dataset_id == request.training_dataset_id
             && stored.trade_policy_artifact_id == request.trade_policy_artifact_id
             && stored.trade_policy_hash == request.trade_policy_hash
-            && stored.publish_path_set_id == request.publish_path_set_id
             && stored
                 .verified_derivation()
                 .is_ok_and(|derivation| derivation == request.derivation)
             && stored.metrics == request.metrics
             && stored.training_objective == request.training_objective
-            && stored.quality_gate_report == request.quality_gate_report
-            && stored.publication_status == request.publication_status
-            && stored.published_at == request.published_at
-            && stored.retired_at == request.retired_at
     }
 
     async fn validate_training_dataset(
@@ -429,17 +394,12 @@ impl PgModelRegistryRepository {
             && actual.training_dataset_id == expected.training_dataset_id
             && actual.trade_policy_artifact_id == expected.trade_policy_artifact_id
             && actual.trade_policy_hash == expected.trade_policy_hash
-            && actual.publish_path_set_id == expected.publish_path_set_id
             && actual.derivation_kind == expected.derivation_kind
             && actual.parent_model_version_id == expected.parent_model_version_id
             && actual.calibration_artifact_id == expected.calibration_artifact_id
             && actual.derivation_evidence_hash == expected.derivation_evidence_hash
             && actual.metrics == expected.metrics
             && actual.training_objective == expected.training_objective
-            && actual.quality_gate_report == expected.quality_gate_report
-            && actual.publication_status == expected.publication_status
-            && actual.published_at == expected.published_at
-            && actual.retired_at == expected.retired_at
             && actual.created_at == expected.created_at
     }
 
@@ -602,18 +562,6 @@ impl PgModelRegistryRepository {
                 ),
             });
         }
-        if version.publication_status != PublicationStatus::Candidate
-            || version.publish_path_set_id.is_some()
-            || version.quality_gate_report.is_some()
-            || version.published_at.is_some()
-            || version.retired_at.is_some()
-        {
-            return Err(StorageError::InvariantViolation {
-                entity: Some(QUANT_MODEL_VERSION),
-                detail: "a derived model version must start as an ungated Candidate".to_owned(),
-            });
-        }
-
         match &version.derivation {
             ModelVersionDerivation::Training => {}
             ModelVersionDerivation::ReturnCalibration {
@@ -712,7 +660,6 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         &self,
         version: NewModelVersion,
     ) -> Result<ModelVersionInfo, StorageError> {
-        Self::validate_new_candidate(&version)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let info = Self::insert_model_version(&txn, version).await?;
         txn.commit().await.map_err(StorageError::from)?;
@@ -903,11 +850,6 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             )
             .add_option(
                 query
-                    .publication_status
-                    .map(|status| QuantModelVersionColumn::PublicationStatus.eq(status)),
-            )
-            .add_option(
-                query
                     .from
                     .map(|from| QuantModelVersionColumn::CreatedAt.gte(from)),
             )
@@ -979,11 +921,11 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         Ok(Paginated::new(items, page.total, page.page, page.size))
     }
 
-    async fn list_published_catalog(
+    async fn list_model_catalog(
         &self,
         side: ModelPickerSide,
         category: Option<MarketCategory>,
-    ) -> Result<Vec<PublishedModelCatalogInfo>, StorageError> {
+    ) -> Result<Vec<ModelCatalogInfo>, StorageError> {
         let family = match side {
             ModelPickerSide::Buy => Column::ModelFamily.ne(ModelFamily::HoldVsExitWeighted),
             ModelPickerSide::Sell => Column::ModelFamily.eq(ModelFamily::HoldVsExitWeighted),
@@ -999,253 +941,15 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             .column(QuantModelVersionColumn::ArtifactHash)
             .column_as(Column::ModelFamily, "model_family")
             .column(QuantModelVersionColumn::CategoryScope)
-            .column(QuantModelVersionColumn::PublishedAt)
             .join(JoinType::InnerJoin, Relation::ModelSpec.def())
-            .filter(QuantModelVersionColumn::PublicationStatus.eq(PublicationStatus::Published))
             .filter(family)
             .filter(Condition::all().add_option(category))
             .order_by_asc(Column::Name)
             .order_by_desc(QuantModelVersionColumn::Version)
-            .into_model::<PublishedModelCatalogInfo>()
+            .into_model::<ModelCatalogInfo>()
             .all(&self.db)
             .await
             .map_err(StorageError::from)
-    }
-
-    async fn list_published_for_spec(
-        &self,
-        model_spec_id: &ModelSpecId,
-    ) -> Result<Vec<ModelVersionInfo>, StorageError> {
-        let rows = select_version_with_family()
-            .filter(QuantModelVersionColumn::ModelSpecId.eq(*model_spec_id))
-            .filter(QuantModelVersionColumn::PublicationStatus.eq(PublicationStatus::Published))
-            .order_by_desc(QuantModelVersionColumn::PublishedAt)
-            .into_model::<ModelVersionInfo>()
-            .all(&self.db)
-            .await
-            .map_err(StorageError::from)?;
-        rows.into_iter().map(verify_model_version_info).collect()
-    }
-
-    async fn retire_model_version(
-        &self,
-        model_version_id: &ModelVersionId,
-    ) -> Result<ModelVersionInfo, StorageError> {
-        let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let info =
-            Self::update_model_version_status(&txn, model_version_id, PublicationStatus::Retired)
-                .await?;
-        txn.commit().await.map_err(StorageError::from)?;
-        Ok(info)
-    }
-
-    async fn publish_model_version(
-        &self,
-        commit: PublishModelVersionCommit<'_>,
-    ) -> Result<PublishModelVersionResult, StorageError> {
-        let PublishModelVersionCommit {
-            model_spec_id,
-            model_version_id,
-            feature_parity_permit,
-            feature_parity_run_id,
-        } = commit;
-        let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let feature_parity_state_id = PgFeatureParityRepository::resolve_publish_latch_generation(
-            &txn,
-            feature_parity_permit,
-            feature_parity_run_id,
-        )
-        .await?;
-        // Serialize concurrent publishes for the same spec.
-        let Some(_spec) = QuantModelSpecEntity::find_by_id(*model_spec_id)
-            .lock_exclusive()
-            .one(&txn)
-            .await
-            .map_err(StorageError::from)?
-        else {
-            return Err(StorageError::not_found(QUANT_MODEL_SPEC, model_spec_id));
-        };
-        let Some(target) = Entity::find_by_id(*model_version_id)
-            .lock_exclusive()
-            .one(&txn)
-            .await
-            .map_err(StorageError::from)?
-        else {
-            return Err(StorageError::not_found(
-                QUANT_MODEL_VERSION,
-                model_version_id,
-            ));
-        };
-        verify_model_version_row(&target)?;
-        if target.model_spec_id != *model_spec_id {
-            return Err(StorageError::state_conflict(
-                QUANT_MODEL_VERSION,
-                Some(model_version_id),
-                "model version does not belong to the locked model spec",
-            ));
-        }
-        Self::verify_parity_permit(&txn, feature_parity_run_id, &target).await?;
-
-        let published =
-            Self::update_model_version_status(&txn, model_version_id, PublicationStatus::Published)
-                .await?;
-        txn.commit().await.map_err(StorageError::from)?;
-        Ok(PublishModelVersionResult {
-            published,
-            feature_parity_state_id,
-        })
-    }
-
-    async fn promote_model_to_shadow(
-        &self,
-        model_version_id: &ModelVersionId,
-    ) -> Result<ModelVersionInfo, StorageError> {
-        let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let info =
-            Self::update_model_version_status(&txn, model_version_id, PublicationStatus::Shadow)
-                .await?;
-        txn.commit().await.map_err(StorageError::from)?;
-        Ok(info)
-    }
-
-    async fn set_quality_gate_report(
-        &self,
-        model_version_id: &ModelVersionId,
-        quality_gate_report: QualityGateReport,
-    ) -> Result<ModelVersionInfo, StorageError> {
-        let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = Entity::find_by_id(*model_version_id)
-            .lock_exclusive()
-            .one(&txn)
-            .await
-            .map_err(StorageError::from)?
-        else {
-            return Err(StorageError::not_found(
-                QUANT_MODEL_VERSION,
-                model_version_id,
-            ));
-        };
-        verify_model_version_row(&row)?;
-        let mut active = row.into_active_model();
-        active.quality_gate_report = ActiveValue::Set(Some(quality_gate_report));
-        active.update(&txn).await.map_err(StorageError::from)?;
-        let info = Self::require_version_info(&txn, model_version_id).await?;
-        txn.commit().await.map_err(StorageError::from)?;
-        Ok(info)
-    }
-
-    async fn set_publish_path(
-        &self,
-        model_version_id: &ModelVersionId,
-        publish_path_set_id: Option<BacktestPathSetId>,
-    ) -> Result<ModelVersionInfo, StorageError> {
-        let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = Entity::find_by_id(*model_version_id)
-            .lock_exclusive()
-            .one(&txn)
-            .await
-            .map_err(StorageError::from)?
-        else {
-            return Err(StorageError::not_found(
-                QUANT_MODEL_VERSION,
-                model_version_id,
-            ));
-        };
-        verify_model_version_row(&row)?;
-        let mut active = row.into_active_model();
-        active.publish_path_set_id = ActiveValue::Set(publish_path_set_id);
-        active.update(&txn).await.map_err(StorageError::from)?;
-        let info = Self::require_version_info(&txn, model_version_id).await?;
-        txn.commit().await.map_err(StorageError::from)?;
-        Ok(info)
-    }
-
-    async fn commit_publish_path_binding(
-        &self,
-        commit: BindPublishPathSetCommit,
-    ) -> Result<ModelVersionInfo, StorageError> {
-        let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let Some(row) = Entity::find_by_id(commit.model_version_id)
-            .lock_exclusive()
-            .one(&txn)
-            .await
-            .map_err(StorageError::from)?
-        else {
-            return Err(StorageError::not_found(
-                QUANT_MODEL_VERSION,
-                commit.model_version_id,
-            ));
-        };
-        verify_model_version_row(&row)?;
-        let path_set = QuantBacktestPathSetEntity::find_by_id(commit.path_set_id)
-            .lock_shared()
-            .one(&txn)
-            .await
-            .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::not_found("quant_backtest_path_set", commit.path_set_id)
-            })?;
-        let audit_valid = commit.audit.model_version_id == Some(commit.model_version_id)
-            && commit.audit.training_dataset_id == row.training_dataset_id
-            && commit.audit.action == ModelGovernanceAction::BindPublishPathSet
-            && commit.audit.before_status == row.publication_status
-            && commit.audit.after_status == row.publication_status
-            && matches!(
-                &commit.audit.detail,
-                ModelGovernanceAuditDetail::BindPublishPathSet {
-                    previous_path_set_id,
-                    path_set_id,
-                    path_set_hash,
-                } if previous_path_set_id == &commit.expected_path_set_id
-                    && path_set_id == &commit.path_set_id
-                    && path_set_hash == &path_set.path_set_hash
-            )
-            && path_set.model_version_id == commit.model_version_id;
-        if !audit_valid {
-            return Err(StorageError::invariant_violation(
-                Some("quant_model_governance_audit"),
-                "publish-path commit audit does not exactly bind model, path set, and previous value",
-            ));
-        }
-        if row.publish_path_set_id == Some(commit.path_set_id) {
-            let stored = QuantModelGovernanceAuditEntity::find_by_id(commit.audit.audit_id)
-                .one(&txn)
-                .await
-                .map_err(StorageError::from)?
-                .map(ModelGovernanceAuditInfo::from)
-                .filter(|stored| stored.matches_new(&commit.audit))
-                .ok_or_else(|| {
-                    StorageError::state_conflict(
-                        "quant_model_governance_audit",
-                        Some(&commit.audit.audit_id),
-                        "publish path is already bound without its exact audit",
-                    )
-                })?;
-            drop(stored);
-            let info = Self::require_version_info(&txn, &commit.model_version_id).await?;
-            txn.commit().await.map_err(StorageError::from)?;
-            return Ok(info);
-        }
-        if row.publish_path_set_id != commit.expected_path_set_id {
-            return Err(StorageError::state_conflict(
-                QUANT_MODEL_VERSION,
-                Some(&commit.model_version_id),
-                format!(
-                    "publish path CAS expected {:?}, found {:?}",
-                    commit.expected_path_set_id, row.publish_path_set_id
-                ),
-            ));
-        }
-        let mut active = row.into_active_model();
-        active.publish_path_set_id = ActiveValue::Set(Some(commit.path_set_id));
-        active.update(&txn).await.map_err(StorageError::from)?;
-        QuantModelGovernanceAuditEntity::insert(commit.audit.into_active_model())
-            .exec(&txn)
-            .await
-            .map_err(StorageError::from)?;
-        let info = Self::require_version_info(&txn, &commit.model_version_id).await?;
-        txn.commit().await.map_err(StorageError::from)?;
-        Ok(info)
     }
 }
 
@@ -1379,55 +1083,6 @@ impl PgModelRegistryRepository {
     }
 }
 
-impl PgModelRegistryRepository {
-    /// Transition a version's publication status under an existing connection/txn.
-    /// Always `SELECT … FOR UPDATE`s the version row before mutating.
-    async fn update_model_version_status(
-        db: &impl ConnectionTrait,
-        model_version_id: &ModelVersionId,
-        next: PublicationStatus,
-    ) -> Result<ModelVersionInfo, StorageError> {
-        let Some(row) = Entity::find_by_id(*model_version_id)
-            .lock_exclusive()
-            .one(db)
-            .await
-            .map_err(StorageError::from)?
-        else {
-            return Err(StorageError::not_found(
-                QUANT_MODEL_VERSION,
-                model_version_id,
-            ));
-        };
-        verify_model_version_row(&row)?;
-        let from = row.publication_status;
-        if !from.allows_transition_to(next) {
-            return Err(StorageError::illegal_transition(
-                QUANT_MODEL_VERSION,
-                Some(model_version_id),
-                from,
-                next,
-            ));
-        }
-        if from == next {
-            return Self::require_version_info(db, model_version_id).await;
-        }
-        let mut active = row.into_active_model();
-        active.publication_status = ActiveValue::Set(next);
-        match next {
-            PublicationStatus::Published => {
-                active.published_at = ActiveValue::Set(Some(Utc::now()));
-                active.retired_at = ActiveValue::Set(None);
-            }
-            PublicationStatus::Retired => {
-                active.retired_at = ActiveValue::Set(Some(Utc::now()));
-            }
-            _ => {}
-        }
-        active.update(db).await.map_err(StorageError::from)?;
-        Self::require_version_info(db, model_version_id).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1456,14 +1111,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn published_model_catalog_projection() -> Result<(), StorageError> {
+    async fn model_catalog_projection() -> Result<(), StorageError> {
         let db = MockDatabase::new(DbBackend::Postgres)
             .append_query_results([Vec::<BTreeMap<String, Value>>::new()])
             .into_connection();
         let repository = PgModelRegistryRepository::new(db.clone());
 
         let catalog = repository
-            .list_published_catalog(ModelPickerSide::Buy, Some(MarketCategory::Crypto))
+            .list_model_catalog(ModelPickerSide::Buy, Some(MarketCategory::Crypto))
             .await?;
 
         assert!(catalog.is_empty());

@@ -8,7 +8,10 @@ use quant_pivot_error::{QuantError, QuantResult, feedback::FeedbackError, storag
 use quant_pivot_models::{
     domain::{
         api::{
-            CancelFeedbackCycleRequest, FeedbackCycleMutationView, IssuePromotionPermitRequest,
+            ActivateModelRouteRequest, BootstrapModelRouteRequest, CancelFeedbackCycleRequest,
+            FeedbackCycleMutationView, FeedbackCycleTriggerView, FeedbackSchedulerControlRequest,
+            FeedbackSchedulerMutationView, FeedbackSchedulerStateView, IssuePromotionPermitRequest,
+            ModelRouteActivationReceiptView, ModelRouteBootstrapReceiptView,
             PromotionPermitListQuery, PromotionPermitMutationView, PromotionPermitView,
             RevokePromotionPermitRequest, TriggerFeedbackCycleRequest,
         },
@@ -18,14 +21,20 @@ use quant_pivot_models::{
             FeedbackComparisonContract, FeedbackDatasetBuildRequest, FeedbackMutationPort,
         },
         quant::{
-            FeedbackCohortWindow, FeedbackCycleActor, FeedbackCycleKey, FeedbackCycleKeyInput,
-            GovernedFeedbackCancellation, GovernedFeedbackTrigger, IssuePromotionPermit,
-            NewFeedbackCycle, PromotionPermitActor, RevokePromotionPermit,
+            BootstrapModelRoute, FeedbackCohortWindow, FeedbackCycleActor, FeedbackCycleKey,
+            FeedbackCycleKeyInput, FeedbackSchedulerClaim, FeedbackSchedulerControl,
+            FeedbackSchedulerSuccess, FeedbackStageEventInput, GovernedFeedbackCancellation,
+            GovernedFeedbackTrigger, IssuePromotionPermit, ModelGovernanceAuditDetail,
+            NewFeedbackCycle, NewFeedbackSchedulerState, NewFeedbackStageEvent, PromoteModelRoute,
+            PromotionPermitActor, PromotionPermitInfo, RevokePromotionPermit,
         },
     },
     enums::{
         common::MarketCategory,
-        quant::{CalibrationMethod, DatasetPurpose, DownsideSource, FeedbackTriggerFamily},
+        quant::{
+            CalibrationMethod, DatasetPurpose, DownsideSource, FeedbackStage,
+            FeedbackStageEventKind, FeedbackTriggerFamily,
+        },
     },
     hashing::CanonicalDigest,
     runtime_config::BuyModelRoute,
@@ -37,16 +46,20 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     FeedbackCycleCasOutcome, FeedbackCycleRepository, FeedbackCycleWriteOutcome,
-    FeedbackStageWriteOutcome, PromotionPermitIssueOutcome, PromotionPermitRepository,
-    PromotionPermitRevokeOutcome,
+    FeedbackSchedulerRepository, FeedbackStageWriteOutcome, FeedbackTriggerCommit,
+    FeedbackTriggerWriteOutcome, ModelRouteBootstrapCommit, ModelRouteBootstrapOutcome,
+    ModelRoutePromotionCommit, ModelRoutePromotionOutcome, PromotionPermitIssueOutcome,
+    PromotionPermitRepository, PromotionPermitRevokeOutcome,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::training_dataset::{CoreTrainingDatasetPort, FeedbackSourceFreeze};
 use crate::{
     governance::PromotionPermitService,
+    observability::metrics_hub::MetricsHub,
     service::{
         feedback_coordinator::{FeedbackCoordinatorWake, FeedbackTimeline},
+        model_route_governance::ModelRouteGovernanceService,
         model_serving_generation::ModelServingGenerationStore,
         model_serving_preimage::ModelServingPreimageService,
         promotion_preflight::{PromotionPreflightDraft, PromotionPreflightService},
@@ -61,14 +74,17 @@ const FEEDBACK_DATASET_PLAN_VERSION: u32 = 1;
 /// Complete dependencies for the governed feedback mutation port.
 pub struct CoreFeedbackMutationDeps {
     pub cycles: Arc<dyn FeedbackCycleRepository>,
+    pub scheduler: Arc<dyn FeedbackSchedulerRepository>,
     pub permits: Arc<dyn PromotionPermitRepository>,
     pub permit_service: Arc<PromotionPermitService>,
     pub promotion_preflight: Arc<PromotionPreflightService>,
     pub serving_preimages: Arc<ModelServingPreimageService>,
     pub serving_generations: Arc<ModelServingGenerationStore>,
+    pub route_governance: Arc<ModelRouteGovernanceService>,
     pub training_datasets: Arc<CoreTrainingDatasetPort>,
     pub feedback_wake: FeedbackCoordinatorWake,
     pub shutdown: CancellationToken,
+    pub metrics: Arc<MetricsHub>,
 }
 
 /// Core owner of manual-cycle freezing and governed permit orchestration.
@@ -100,6 +116,31 @@ impl FeedbackCycleFreezePlan {
         database_now: DateTime<Utc>,
     ) -> QuantResult<Self> {
         let label_cutoff = Self::cadence_cutoff(database_now, profile)?;
+        Self::derive_at_cutoff(
+            profile,
+            model_spec_id,
+            model_spec_definition_hash,
+            decision_policy_snapshot_id,
+            runtime_config_hash,
+            label_cutoff,
+        )
+    }
+
+    /// Derive one frozen cohort plan for an already persisted cadence cutoff.
+    pub fn derive_at_cutoff(
+        profile: &ResearchProfileArtifact,
+        model_spec_id: ModelSpecId,
+        model_spec_definition_hash: ContentHash,
+        decision_policy_snapshot_id: DecisionPolicySnapshotId,
+        runtime_config_hash: ContentHash,
+        label_cutoff: DateTime<Utc>,
+    ) -> QuantResult<Self> {
+        if Self::cadence_cutoff(label_cutoff, profile)? != label_cutoff {
+            return Err(FeedbackError::InvalidCycleIdentity {
+                detail: "feedback label cutoff is not aligned to the profile cadence".to_owned(),
+            }
+            .into());
+        }
         let evaluation_days = i64::from(profile.spec.feedback_policy.evaluation_window_days);
         let fit_days = i64::from(profile.spec.fit_span_days);
         let target_horizon = Self::seconds(
@@ -274,6 +315,108 @@ impl CoreFeedbackMutationPort {
         .into()
     }
 
+    fn activation_receipt(
+        commit: ModelRoutePromotionCommit,
+        permit: PromotionPermitInfo,
+    ) -> QuantResult<ModelRouteActivationReceiptView> {
+        let activated_by_user_id = commit.activation.activated_by_user_id.ok_or_else(|| {
+            FeedbackError::PromotionTransactionConflict {
+                detail: "model-route activation has no authenticated user identity".to_owned(),
+            }
+        })?;
+        let activated_by_role = commit.audit.actor_role.clone().ok_or_else(|| {
+            FeedbackError::PromotionTransactionConflict {
+                detail: "model-route activation audit has no acting role".to_owned(),
+            }
+        })?;
+        let model_governance_audit_id =
+            commit.activation.model_governance_audit_id.ok_or_else(|| {
+                FeedbackError::PromotionTransactionConflict {
+                    detail: "model-route activation has no model governance audit".to_owned(),
+                }
+            })?;
+        let promotion_permit_id = commit.activation.promotion_permit_id.ok_or_else(|| {
+            FeedbackError::PromotionTransactionConflict {
+                detail: "model-route activation has no promotion permit identity".to_owned(),
+            }
+        })?;
+        Ok(ModelRouteActivationReceiptView {
+            promotion_permit_id,
+            feedback_cycle_id: match &commit.audit.detail {
+                ModelGovernanceAuditDetail::PromoteRoute { record } => {
+                    record.preflight().feedback_cycle_id()
+                }
+                _ => {
+                    return Err(FeedbackError::PromotionTransactionConflict {
+                        detail: "model-route activation lost its typed transaction record"
+                            .to_owned(),
+                    }
+                    .into());
+                }
+            },
+            previous_route_generation: commit.activation.expected_bundle_generation,
+            activated_route_generation: commit.activation.bundle_generation,
+            previous_model_version_id: permit.champion_model_version_id,
+            activated_model_version_id: commit.audit.model_version_id.ok_or_else(|| {
+                FeedbackError::PromotionTransactionConflict {
+                    detail: "model-route activation audit has no candidate model".to_owned(),
+                }
+            })?,
+            policy_activation_id: commit.activation.policy_activation_id,
+            model_governance_audit_id,
+            audit_event_id: commit.activation.audit_event_id,
+            outbox_event_id: commit.activation.audit_event_id,
+            transaction_hash: commit.transaction_hash,
+            permit_issued_by_user_id: permit.issued_by_user_id,
+            permit_issued_by_username: permit.issued_by_username,
+            permit_issued_by_role: permit.issued_by_role,
+            activated_by_user_id,
+            activated_by_username: commit.activation.activated_by_label,
+            activated_by_role,
+            server_timestamp: commit.activation.activated_at,
+            execution_authority_unchanged: true,
+            replayed: commit.outcome == ModelRoutePromotionOutcome::ExactReplay,
+        })
+    }
+
+    fn bootstrap_receipt(
+        commit: ModelRouteBootstrapCommit,
+    ) -> QuantResult<ModelRouteBootstrapReceiptView> {
+        let activated_by_user_id = commit.activation.activated_by_user_id.ok_or_else(|| {
+            FeedbackError::BootstrapTransactionConflict {
+                detail: "model-route bootstrap has no authenticated user identity".to_owned(),
+            }
+        })?;
+        let activated_by_role = commit.audit.actor_role.clone().ok_or_else(|| {
+            FeedbackError::BootstrapTransactionConflict {
+                detail: "model-route bootstrap audit has no acting role".to_owned(),
+            }
+        })?;
+        let ModelGovernanceAuditDetail::BootstrapRoute { record } = &commit.audit.detail else {
+            return Err(FeedbackError::BootstrapTransactionConflict {
+                detail: "model-route bootstrap lost its typed transaction record".to_owned(),
+            }
+            .into());
+        };
+        Ok(ModelRouteBootstrapReceiptView {
+            route: record.route().route,
+            previous_route_generation: commit.activation.expected_bundle_generation,
+            activated_route_generation: commit.activation.bundle_generation,
+            activated_model_version_id: record.route().model_version_id,
+            policy_activation_id: commit.activation.policy_activation_id,
+            model_governance_audit_id: commit.audit.audit_id,
+            audit_event_id: commit.activation.audit_event_id,
+            outbox_event_id: commit.activation.audit_event_id,
+            transaction_hash: commit.transaction_hash,
+            activated_by_user_id,
+            activated_by_username: commit.activation.activated_by_label,
+            activated_by_role,
+            server_timestamp: commit.activation.activated_at,
+            execution_authority_unchanged: true,
+            replayed: commit.outcome == ModelRouteBootstrapOutcome::ExactReplay,
+        })
+    }
+
     fn resolve_profile_route(
         profile_id: &ResearchProfileId,
     ) -> QuantResult<(ResearchProfileArtifact, BuyModelRoute)> {
@@ -333,7 +476,7 @@ impl CoreFeedbackMutationPort {
         &self,
         profile: &ResearchProfileArtifact,
         route: BuyModelRoute,
-        database_now: DateTime<Utc>,
+        label_cutoff: DateTime<Utc>,
     ) -> QuantResult<NewFeedbackCycle> {
         let serving = self
             .deps
@@ -359,13 +502,13 @@ impl CoreFeedbackMutationPort {
         }
         let model_spec = preimage.model_spec();
         let policy = preimage.policy_snapshot();
-        let plan = FeedbackCycleFreezePlan::derive(
+        let plan = FeedbackCycleFreezePlan::derive_at_cutoff(
             profile,
             model_spec.model_spec_id,
             model_spec.definition_hash,
             policy.decision_policy_snapshot_id,
             policy.snapshot_hash,
-            database_now,
+            label_cutoff,
         )?;
         let source_lineage = self
             .deps
@@ -428,7 +571,6 @@ impl CoreFeedbackMutationPort {
                     detail: error.to_string(),
                 })?;
         NewFeedbackCycle::try_seal(FeedbackCycleKey::try_new(FeedbackCycleKeyInput {
-            trigger_family: FeedbackTriggerFamily::Manual,
             profile_ref: profile.profile_ref.clone(),
             feedback_policy_hash,
             label_cutoff: plan.label_cutoff(),
@@ -440,20 +582,94 @@ impl CoreFeedbackMutationPort {
         .map_err(Into::into)
     }
 
-    fn trigger_view(
-        outcome: (FeedbackCycleWriteOutcome, FeedbackStageWriteOutcome),
-    ) -> QuantResult<FeedbackCycleMutationView> {
-        match outcome {
-            (
-                FeedbackCycleWriteOutcome::Inserted(cycle),
-                FeedbackStageWriteOutcome::Inserted(_),
-            ) => Ok(FeedbackCycleMutationView::new(cycle, false)),
-            (
-                FeedbackCycleWriteOutcome::AlreadyPresent(cycle),
-                FeedbackStageWriteOutcome::AlreadyPresent(_),
-            ) => Ok(FeedbackCycleMutationView::new(cycle, true)),
+    /// Reconcile every governed built-in profile into durable scheduler state.
+    pub(crate) async fn sync_scheduler_profiles(&self) -> QuantResult<()> {
+        let database_now = self.deps.cycles.database_time().await?;
+        for profile in builtin_research_profiles().map_err(Self::invalid)? {
+            self.deps
+                .scheduler
+                .sync_state(NewFeedbackSchedulerState::try_new(&profile, database_now)?)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Freeze and persist one leased scheduled occurrence without granting any
+    /// permit or mutating a serving route.
+    pub(crate) async fn materialize_scheduled(
+        &self,
+        claim: &FeedbackSchedulerClaim,
+    ) -> QuantResult<FeedbackSchedulerSuccess> {
+        let (profile, route) = Self::resolve_profile_route(&claim.state.research_profile_id)?;
+        let expected = NewFeedbackSchedulerState::try_new(&profile, claim.claimed_at)?;
+        if !claim.state.matches_profile(&expected) {
+            return Err(StorageError::state_conflict(
+                "quant_feedback_scheduler_state",
+                Some(&claim.state.research_profile_id),
+                "claimed scheduler profile differs from the governed built-in profile",
+            )
+            .into());
+        }
+        let cycle =
+            Box::pin(self.freeze_feedback_cycle(&profile, route, claim.state.next_due_at)).await?;
+        let occurred_at = self.deps.cycles.database_time().await?;
+        let trigger = NewFeedbackStageEvent::try_seal(FeedbackStageEventInput {
+            feedback_cycle_id: cycle.feedback_cycle_id(),
+            event_sequence: 1,
+            stage: FeedbackStage::Trigger,
+            event_kind: FeedbackStageEventKind::Triggered,
+            trigger_family: Some(FeedbackTriggerFamily::Scheduled),
+            research_job_id: None,
+            actor: Some("feedback_scheduler".to_owned()),
+            reason_code: Some("scheduled_cadence".to_owned()),
+            evidence_uri: None,
+            evidence_hash: None,
+            occurred_at,
+        })?;
+        let commit = self.deps.cycles.record_trigger(cycle, trigger).await?;
+        let (FeedbackTriggerCommit {
+            cycle: FeedbackCycleWriteOutcome::Inserted(stored),
+            stage: FeedbackStageWriteOutcome::Inserted(_),
+            trigger: FeedbackTriggerWriteOutcome::Inserted(_),
+        }
+        | FeedbackTriggerCommit {
+            cycle: FeedbackCycleWriteOutcome::AlreadyPresent(stored),
+            stage: FeedbackStageWriteOutcome::AlreadyPresent(_),
+            trigger:
+                FeedbackTriggerWriteOutcome::Inserted(_)
+                | FeedbackTriggerWriteOutcome::AlreadyPresent(_),
+        }) = commit
+        else {
+            return Err(Self::invalid(
+                "scheduled trigger returned inconsistent cycle, lifecycle, or provenance outcomes",
+            ));
+        };
+        self.deps.feedback_wake.wake();
+        Ok(FeedbackSchedulerSuccess {
+            feedback_cycle_id: stored.feedback_cycle_id,
+            label_cutoff: stored.label_cutoff,
+        })
+    }
+
+    fn trigger_view(commit: FeedbackTriggerCommit) -> QuantResult<FeedbackCycleTriggerView> {
+        match commit {
+            FeedbackTriggerCommit {
+                cycle: FeedbackCycleWriteOutcome::Inserted(cycle),
+                stage: FeedbackStageWriteOutcome::Inserted(_),
+                trigger: FeedbackTriggerWriteOutcome::Inserted(_),
+            } => Ok(FeedbackCycleTriggerView::new(cycle, false, false)),
+            FeedbackTriggerCommit {
+                cycle: FeedbackCycleWriteOutcome::AlreadyPresent(cycle),
+                stage: FeedbackStageWriteOutcome::AlreadyPresent(_),
+                trigger: FeedbackTriggerWriteOutcome::Inserted(_),
+            } => Ok(FeedbackCycleTriggerView::new(cycle, true, false)),
+            FeedbackTriggerCommit {
+                cycle: FeedbackCycleWriteOutcome::AlreadyPresent(cycle),
+                stage: FeedbackStageWriteOutcome::AlreadyPresent(_),
+                trigger: FeedbackTriggerWriteOutcome::AlreadyPresent(_),
+            } => Ok(FeedbackCycleTriggerView::new(cycle, true, true)),
             _ => Err(Self::invalid(
-                "governed trigger returned inconsistent cycle/event idempotency outcomes",
+                "governed trigger returned inconsistent cycle, lifecycle, or provenance outcomes",
             )),
         }
     }
@@ -482,10 +698,15 @@ impl FeedbackMutationPort for CoreFeedbackMutationPort {
         &self,
         request: TriggerFeedbackCycleRequest,
         actor: FeedbackCycleActor,
-    ) -> QuantResult<FeedbackCycleMutationView> {
+    ) -> QuantResult<FeedbackCycleTriggerView> {
         let (profile, route) = Self::resolve_profile_route(&request.profile_id)?;
         let database_now = self.deps.cycles.database_time().await?;
-        let cycle = Box::pin(self.freeze_feedback_cycle(&profile, route, database_now)).await?;
+        self.deps
+            .scheduler
+            .sync_state(NewFeedbackSchedulerState::try_new(&profile, database_now)?)
+            .await?;
+        let label_cutoff = FeedbackCycleFreezePlan::cadence_cutoff(database_now, &profile)?;
+        let cycle = Box::pin(self.freeze_feedback_cycle(&profile, route, label_cutoff)).await?;
         let result = self
             .deps
             .cycles
@@ -529,6 +750,30 @@ impl FeedbackMutationPort for CoreFeedbackMutationPort {
         Self::cancel_view(result)
     }
 
+    async fn control_scheduler(
+        &self,
+        profile_id: ResearchProfileId,
+        pause: bool,
+        request: FeedbackSchedulerControlRequest,
+    ) -> QuantResult<FeedbackSchedulerMutationView> {
+        let state = self
+            .deps
+            .scheduler
+            .apply_control(FeedbackSchedulerControl {
+                research_profile_id: profile_id,
+                expected_pause_revision: request.expected_pause_revision,
+                pause,
+                reason_code: request.reason_code,
+                note: request.note,
+            })
+            .await?;
+        let observed_at = self.deps.cycles.database_time().await?;
+        Ok(FeedbackSchedulerMutationView {
+            observed_at,
+            state: FeedbackSchedulerStateView::from(state),
+        })
+    }
+
     async fn list_permits(
         &self,
         query: PromotionPermitListQuery,
@@ -556,10 +801,10 @@ impl FeedbackMutationPort for CoreFeedbackMutationPort {
             .promotion_preflight
             .prepare_issue(PromotionPreflightDraft {
                 feedback_cycle_id: request.feedback_cycle_id,
-                allowed_runtime_modes: request.allowed_runtime_modes,
-                expires_at: request.expires_at,
+                ttl_secs: request.ttl_secs,
             })
             .await?;
+        let reason = format!("{}: {}", request.reason_code, request.note);
         let outcome = self
             .deps
             .permit_service
@@ -571,7 +816,7 @@ impl FeedbackMutationPort for CoreFeedbackMutationPort {
                 idempotency_key: request.idempotency_key,
                 scope: plan.preflight().scope().clone(),
                 preflight_hash: plan.preflight().preflight_hash(),
-                reason: request.reason,
+                reason,
             })
             .await?;
         let observed_at = self.deps.cycles.database_time().await?;
@@ -601,7 +846,7 @@ impl FeedbackMutationPort for CoreFeedbackMutationPort {
                     user_id: actor.user_id,
                     acting_role: actor.acting_role,
                 },
-                reason: request.reason,
+                reason: format!("{}: {}", request.reason_code, request.note),
             })
             .await?;
         let observed_at = self.deps.cycles.database_time().await?;
@@ -613,6 +858,91 @@ impl FeedbackMutationPort for CoreFeedbackMutationPort {
                 PromotionPermitMutationView::try_new(permit, observed_at, true).map_err(Into::into)
             }
         }
+    }
+
+    async fn activate_route(
+        &self,
+        request: ActivateModelRouteRequest,
+        actor: FeedbackCycleActor,
+    ) -> QuantResult<ModelRouteActivationReceiptView> {
+        let permit_id = request.promotion_permit_id;
+        let permit = self.deps.permits.load(&permit_id).await?;
+        let commit = match Box::pin(self.deps.route_governance.activate(PromoteModelRoute {
+            promotion_permit_id: permit_id,
+            feedback_cycle_id: request.feedback_cycle_id,
+            expected_policy_generation: request.expected_policy_generation,
+            expected_runtime_control_revision: request.expected_runtime_control_revision,
+            idempotency_key: request.idempotency_key,
+            actor: PromotionPermitActor {
+                user_id: actor.user_id,
+                acting_role: actor.acting_role,
+            },
+            reason_code: request.reason_code,
+            note: request.note,
+        }))
+        .await
+        {
+            Ok(commit) => commit,
+            Err(error) => {
+                let layer = match &error {
+                    QuantError::Feedback(FeedbackError::PromotionPermitConflict { .. }) => "permit",
+                    QuantError::Feedback(FeedbackError::InvalidPromotionPreflight { .. }) => {
+                        "preflight"
+                    }
+                    QuantError::Feedback(FeedbackError::PromotionTransactionConflict {
+                        ..
+                    }) => "route",
+                    _ => "other",
+                };
+                self.deps
+                    .metrics
+                    .record_route_governance_conflict("promotion", layer);
+                return Err(error);
+            }
+        };
+        Self::activation_receipt(commit, permit)
+    }
+
+    async fn bootstrap_route(
+        &self,
+        request: BootstrapModelRouteRequest,
+        actor: FeedbackCycleActor,
+    ) -> QuantResult<ModelRouteBootstrapReceiptView> {
+        let commit = match Box::pin(self.deps.route_governance.bootstrap(BootstrapModelRoute {
+            model_version_id: request.model_version_id,
+            expected_policy_generation: request.expected_policy_generation,
+            expected_runtime_control_revision: request.expected_runtime_control_revision,
+            idempotency_key: request.idempotency_key,
+            actor: PromotionPermitActor {
+                user_id: actor.user_id,
+                acting_role: actor.acting_role,
+            },
+            reason_code: request.reason_code,
+            note: request.note,
+        }))
+        .await
+        {
+            Ok(commit) => commit,
+            Err(error) => {
+                let layer = match &error {
+                    QuantError::Feedback(FeedbackError::InvalidBootstrapPreflight { .. }) => {
+                        "preflight"
+                    }
+                    QuantError::Feedback(FeedbackError::BootstrapTransactionConflict {
+                        ..
+                    }) => "route",
+                    QuantError::Feedback(FeedbackError::ModelRouteConvergenceConflict {
+                        ..
+                    }) => "convergence",
+                    _ => "other",
+                };
+                self.deps
+                    .metrics
+                    .record_route_governance_conflict("bootstrap", layer);
+                return Err(error);
+            }
+        };
+        Self::bootstrap_receipt(commit)
     }
 }
 

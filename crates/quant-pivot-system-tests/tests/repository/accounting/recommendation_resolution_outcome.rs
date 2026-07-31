@@ -5,7 +5,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{MarketResolutionFactInput, MarketResolutionRow},
     domain::quant::{
-        InsertResolutionOutcomeResult, RecommendationResolutionOutcomeInfo,
+        InsertResolutionOutcomeResult, OutcomeTaskSettlement, RecommendationResolutionOutcomeInfo,
         RecommendationResolutionOutcomePageQuery,
     },
     entities::quant_recommendation_resolution_outcome::{
@@ -15,7 +15,7 @@ use quant_pivot_models::{
     enums::market::MarketStatus,
     types::{
         ContentHash, EvmBlockHash, EvmTransactionHash, MarketId, PayoutRatio, RecommendationId,
-        TokenId,
+        TokenId, WorkerId,
     },
 };
 use quant_pivot_repository::{
@@ -381,26 +381,37 @@ pub async fn reconciliation_candidates_terminal_aware() {
     );
     assert!(
         repository
-            .list_reconciliation_candidates(old_cutoff, None, 10)
+            .claim_reconciliation(old_cutoff, WorkerId::from_v7(), 60, 10)
             .await
             .expect("scan resolution candidates before recommendation visibility")
             .is_empty()
     );
 
+    let first_worker = WorkerId::from_v7();
     let first_page = repository
-        .list_reconciliation_candidates(cutoff, None, 1)
+        .claim_reconciliation(cutoff, first_worker, 60, 1)
         .await
         .expect("first resolution reconciliation candidate");
     assert_eq!(first_page.len(), 1);
-    assert_eq!(first_page[0].recommendation_id, ids[0].recommendation);
-    assert_eq!(first_page[0].market_id, MarketId::new(&ids[0].market));
+    assert_eq!(
+        first_page[0].candidate.recommendation_id,
+        ids[0].recommendation
+    );
+    assert_eq!(
+        first_page[0].candidate.market_id,
+        MarketId::new(&ids[0].market)
+    );
 
+    let second_worker = WorkerId::from_v7();
     let second_page = repository
-        .list_reconciliation_candidates(cutoff, Some(ids[0].recommendation), 1)
+        .claim_reconciliation(cutoff, second_worker, 60, 1)
         .await
         .expect("second resolution reconciliation candidate");
     assert_eq!(second_page.len(), 1);
-    assert_eq!(second_page[0].recommendation_id, ids[1].recommendation);
+    assert_eq!(
+        second_page[0].candidate.recommendation_id,
+        ids[1].recommendation
+    );
 
     let fact = resolution_fact(
         &ids[0],
@@ -413,18 +424,30 @@ pub async fn reconciliation_candidates_terminal_aware() {
         .reconcile_fact(&ids[0].recommendation, &fact)
         .await
         .expect("seal first resolution outcome");
-    let remaining = repository
-        .list_reconciliation_candidates(cutoff, None, 10)
+    repository
+        .settle_reconciliation(
+            ids[0].recommendation,
+            first_worker,
+            OutcomeTaskSettlement::Completed,
+        )
         .await
-        .expect("remaining resolution reconciliation candidates");
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].recommendation_id, ids[1].recommendation);
-    assert!(
-        remaining
-            .iter()
-            .all(|candidate| candidate.recommendation_id != ids[2].recommendation),
-        "active markets must not be presented as mature resolution candidates"
-    );
+        .expect("complete first durable resolution task");
+    repository
+        .settle_reconciliation(
+            ids[1].recommendation,
+            second_worker,
+            OutcomeTaskSettlement::RetryAfter {
+                delay_secs: 60,
+                error: "canonical fact pending".to_owned(),
+            },
+        )
+        .await
+        .expect("durably defer second resolution task");
+    let no_active_market = repository
+        .claim_reconciliation(cutoff, WorkerId::from_v7(), 60, 10)
+        .await
+        .expect("active markets remain outside the durable resolution queue");
+    assert!(no_active_market.is_empty());
 }
 
 async fn rewrite_availability_fixture(

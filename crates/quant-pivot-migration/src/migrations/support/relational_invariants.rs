@@ -279,9 +279,13 @@ const PROMOTION_PERMIT_CHECK: &str = r"CHECK (
         )
     )
     AND expected_policy_generation > 0
+    AND expected_runtime_control_revision >= 0
     AND profile_hash ~ '^blake3:[0-9a-f]{64}$'::text
     AND expected_snapshot_hash ~ '^blake3:[0-9a-f]{64}$'::text
     AND champion_serving_contract_hash ~ '^blake3:[0-9a-f]{64}$'::text
+    AND candidate_model_version_id <> champion_model_version_id
+    AND candidate_manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text
+    AND promotion_gate_hash ~ '^blake3:[0-9a-f]{64}$'::text
     AND non_route_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text
     AND serving_constraints_hash ~ '^blake3:[0-9a-f]{64}$'::text
     AND preflight_hash ~ '^blake3:[0-9a-f]{64}$'::text
@@ -420,11 +424,98 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "UNIQUE (model_run_id, feature_vector_id, factor_definition_id)",
     },
     ConstraintSpec {
+        name: "ck_quant_attribution_artifact",
+        table: "quant_attribution_artifact",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text AND octet_length(artifact_uri) BETWEEN 1 AND 4096 AND artifact_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text AND source_cutoff <= available_at AND available_at = created_at AND (((artifact_kind = ANY (ARRAY['prediction_explanation'::qp_attribution_artifact_kind, 'decision_counterfactual'::qp_attribution_artifact_kind])) AND model_version_id IS NOT NULL AND recommendation_id IS NOT NULL AND order_intent_id IS NULL) OR ((artifact_kind = 'outcome_association'::qp_attribution_artifact_kind) AND model_version_id IS NOT NULL AND recommendation_id IS NULL AND order_intent_id IS NULL) OR ((artifact_kind = ANY (ARRAY['execution_trajectory'::qp_attribution_artifact_kind, 'policy_counterfactual_outcome'::qp_attribution_artifact_kind])) AND model_version_id IS NULL AND recommendation_id IS NOT NULL AND order_intent_id IS NOT NULL))))",
+    },
+    ConstraintSpec {
+        name: "uq_quant_order_intent_recommendation",
+        table: "quant_order_intent",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (order_intent_id, recommendation_id)",
+    },
+    ConstraintSpec {
+        name: "fk_quant_attribution_cycle",
+        table: "quant_attribution_artifact",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (source_feedback_cycle_id) REFERENCES public.quant_feedback_cycle(feedback_cycle_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_attribution_model",
+        table: "quant_attribution_artifact",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (model_version_id) REFERENCES public.quant_model_version(model_version_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_attribution_recommendation",
+        table: "quant_attribution_artifact",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (recommendation_id) REFERENCES public.quant_recommendation(recommendation_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_attribution_intent",
+        table: "quant_attribution_artifact",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (order_intent_id, recommendation_id) REFERENCES public.quant_order_intent(order_intent_id, recommendation_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "ck_quant_model_candidate_manifest",
+        table: "quant_model_candidate_manifest",
+        kind: ConstraintKind::Check,
+        definition: concat!(
+            "CHECK ((candidate_recipe_hash ~ '^blake3:[0-9a-f]{64}$'::text ",
+            "AND promotion_gate_hash ~ '^blake3:[0-9a-f]{64}$'::text ",
+            "AND manifest_hash ~ '^blake3:[0-9a-f]{64}$'::text ",
+            "AND jsonb_typeof(document) = 'object'::text ",
+            "AND (document ->> 'format_version'::text)::integer = 3 ",
+            "AND (document ->> 'feedback_cycle_id'::text)::uuid = feedback_cycle_id ",
+            "AND document ->> 'candidate_recipe_hash'::text = candidate_recipe_hash ",
+            "AND (document ->> 'model_version_id'::text)::uuid = model_version_id ",
+            "AND document ->> 'model_artifact_hash'::text ~ '^blake3:[0-9a-f]{64}$'::text ",
+            "AND document ->> 'serving_contract_hash'::text ~ '^blake3:[0-9a-f]{64}$'::text ",
+            "AND document ->> 'training_dataset_hash'::text ~ '^blake3:[0-9a-f]{64}$'::text ",
+            "AND document ->> 'feature_schema_hash'::text ~ '^blake3:[0-9a-f]{64}$'::text ",
+            "AND document ->> 'input_transform_hash'::text ~ '^blake3:[0-9a-f]{64}$'::text ",
+            "AND document ->> 'cpcv_path_set_hash'::text ~ '^blake3:[0-9a-f]{64}$'::text ",
+            "AND document ->> 'feedback_policy_hash'::text ~ '^blake3:[0-9a-f]{64}$'::text ",
+            "AND document ->> 'decision_policy_snapshot_hash'::text ~ '^blake3:[0-9a-f]{64}$'::text ",
+            "AND jsonb_typeof(document -> 'promotion_gate'::text) = 'object'::text ",
+            "AND (document -> 'promotion_gate'::text ->> 'format_version'::text)::integer = 1 ",
+            "AND document -> 'promotion_gate'::text ->> 'promotion_gate_hash'::text = promotion_gate_hash ",
+            "AND (document -> 'promotion_gate'::text ->> 'feedback_cycle_id'::text)::uuid = feedback_cycle_id ",
+            "AND document -> 'promotion_gate'::text ->> 'candidate_recipe_hash'::text = candidate_recipe_hash ",
+            "AND (document -> 'promotion_gate'::text ->> 'candidate_model_version_id'::text)::uuid = model_version_id ",
+            "AND document -> 'promotion_gate'::text -> 'profile_ref'::text = document -> 'profile_ref'::text ",
+            "AND document -> 'promotion_gate'::text ->> 'category'::text = document ->> 'category'::text ",
+            "AND document -> 'promotion_gate'::text ->> 'feedback_policy_hash'::text = document ->> 'feedback_policy_hash'::text ",
+            "AND document -> 'promotion_gate'::text ->> 'decision_policy_snapshot_hash'::text = document ->> 'decision_policy_snapshot_hash'::text))"
+        ),
+    },
+    ConstraintSpec {
+        name: "uq_quant_model_candidate_permit_binding",
+        table: "quant_model_candidate_manifest",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (manifest_id, model_version_id, manifest_hash, promotion_gate_hash)",
+    },
+    ConstraintSpec {
+        name: "fk_quant_model_candidate_cycle",
+        table: "quant_model_candidate_manifest",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (feedback_cycle_id) REFERENCES public.quant_feedback_cycle(feedback_cycle_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_model_candidate_version",
+        table: "quant_model_candidate_manifest",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (model_version_id) REFERENCES public.quant_model_version(model_version_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
         name: "ck_quant_feedback_cycle_identity",
         table: "quant_feedback_cycle",
         kind: ConstraintKind::Check,
         definition: concat!(
-            "CHECK ((jsonb_typeof(idempotency_key) = 'object'::text AND idempotency_key ?& ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family'::text] AND (idempotency_key - ARRAY['format_version'::text, 'trigger_family'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family'::text]) = '{}'::jsonb AND (idempotency_key ->> 'format_version'::text)::integer = 1 AND idempotency_key ->> 'trigger_family'::text = trigger_family::text AND idempotency_key -> 'profile_ref'::text = profile_ref AND idempotency_key ->> 'feedback_policy_hash'::text = feedback_policy_hash AND (idempotency_key ->> 'label_cutoff'::text)::timestamp with time zone = label_cutoff AND idempotency_key -> 'capability_registry_hashes'::text = capability_registry_hashes AND (idempotency_key ->> 'champion_model_version_id'::text)::uuid = champion_model_version_id AND idempotency_key ->> 'champion_serving_contract_hash'::text = champion_serving_contract_hash AND idempotency_key -> 'candidate_family'::text = candidate_family AND jsonb_typeof(candidate_family) = 'object'::text AND candidate_family ?& ARRAY['format_version'::text, 'candidate_family_hash'::text, 'shared_evaluation'::text, 'comparison_contract'::text, 'candidates'::text] AND (candidate_family - ARRAY['format_version'::text, 'candidate_family_hash'::text, 'shared_evaluation'::text, 'comparison_contract'::text, 'candidates'::text]) = '{}'::jsonb AND (candidate_family ->> 'format_version'::text)::integer = 1 AND candidate_family ->> 'candidate_family_hash'::text = candidate_family_hash",
+            "CHECK ((jsonb_typeof(idempotency_key) = 'object'::text AND idempotency_key ?& ARRAY['format_version'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family'::text] AND (idempotency_key - ARRAY['format_version'::text, 'profile_ref'::text, 'feedback_policy_hash'::text, 'label_cutoff'::text, 'capability_registry_hashes'::text, 'champion_model_version_id'::text, 'champion_serving_contract_hash'::text, 'candidate_family'::text]) = '{}'::jsonb AND (idempotency_key ->> 'format_version'::text)::integer = 1 AND idempotency_key -> 'profile_ref'::text = profile_ref AND idempotency_key ->> 'feedback_policy_hash'::text = feedback_policy_hash AND (idempotency_key ->> 'label_cutoff'::text)::timestamp with time zone = label_cutoff AND idempotency_key -> 'capability_registry_hashes'::text = capability_registry_hashes AND (idempotency_key ->> 'champion_model_version_id'::text)::uuid = champion_model_version_id AND idempotency_key ->> 'champion_serving_contract_hash'::text = champion_serving_contract_hash AND idempotency_key -> 'candidate_family'::text = candidate_family AND jsonb_typeof(candidate_family) = 'object'::text AND candidate_family ?& ARRAY['format_version'::text, 'candidate_family_hash'::text, 'shared_evaluation'::text, 'comparison_contract'::text, 'candidates'::text] AND (candidate_family - ARRAY['format_version'::text, 'candidate_family_hash'::text, 'shared_evaluation'::text, 'comparison_contract'::text, 'candidates'::text]) = '{}'::jsonb AND (candidate_family ->> 'format_version'::text)::integer = 1 AND candidate_family ->> 'candidate_family_hash'::text = candidate_family_hash",
             " AND jsonb_typeof(candidate_family -> 'comparison_contract'::text) = 'object'::text AND (candidate_family -> 'comparison_contract'::text) ?& ARRAY['format_version'::text, 'comparison_contract_hash'::text, 'statistic'::text, 'alternative'::text, 'resampling'::text, 'stepdown'::text, 'p_value'::text, 'ties'::text, 'generator'::text, 'minimum_observations'::text, 'bootstrap_repetitions'::text, 'block_length'::text, 'bootstrap_seed'::text, 'minimum_effect_bps'::text, 'confidence'::text, 'effect_precision_dp'::text] AND ((candidate_family -> 'comparison_contract'::text) - ARRAY['format_version'::text, 'comparison_contract_hash'::text, 'statistic'::text, 'alternative'::text, 'resampling'::text, 'stepdown'::text, 'p_value'::text, 'ties'::text, 'generator'::text, 'minimum_observations'::text, 'bootstrap_repetitions'::text, 'block_length'::text, 'bootstrap_seed'::text, 'minimum_effect_bps'::text, 'confidence'::text, 'effect_precision_dp'::text]) = '{}'::jsonb",
             " AND (candidate_family -> 'comparison_contract'::text ->> 'format_version'::text)::integer = 1 AND candidate_family -> 'comparison_contract'::text ->> 'comparison_contract_hash'::text ~ '^blake3:[0-9a-f]{64}$'::text AND candidate_family -> 'comparison_contract'::text ->> 'statistic'::text = 'mean_decision_tick_net_return_bps'::text AND candidate_family -> 'comparison_contract'::text ->> 'alternative'::text = 'candidate_greater_than_champion'::text AND candidate_family -> 'comparison_contract'::text ->> 'resampling'::text = 'circular_fixed_block'::text AND candidate_family -> 'comparison_contract'::text ->> 'stepdown'::text = 'romano_wolf_basic'::text AND candidate_family -> 'comparison_contract'::text ->> 'p_value'::text = 'plus_one_greater_or_equal'::text AND candidate_family -> 'comparison_contract'::text ->> 'ties'::text = 'equal_statistic_group'::text AND candidate_family -> 'comparison_contract'::text ->> 'generator'::text = 'blake3_counter_rejection_v1'::text",
             " AND (candidate_family -> 'comparison_contract'::text ->> 'minimum_observations'::text)::numeric > 0 AND (candidate_family -> 'comparison_contract'::text ->> 'bootstrap_repetitions'::text)::numeric >= 1000 AND (candidate_family -> 'comparison_contract'::text ->> 'block_length'::text)::numeric BETWEEN 1 AND (candidate_family -> 'comparison_contract'::text ->> 'minimum_observations'::text)::numeric AND (candidate_family -> 'comparison_contract'::text ->> 'bootstrap_seed'::text)::numeric BETWEEN 0 AND 18446744073709551615 AND (candidate_family -> 'comparison_contract'::text ->> 'minimum_effect_bps'::text)::numeric > 0 AND (candidate_family -> 'comparison_contract'::text ->> 'confidence'::text)::numeric > 0 AND (candidate_family -> 'comparison_contract'::text ->> 'confidence'::text)::numeric < 1 AND (candidate_family -> 'comparison_contract'::text ->> 'effect_precision_dp'::text)::integer = 12",
@@ -468,6 +559,24 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "FOREIGN KEY (champion_model_version_id) REFERENCES public.quant_model_version(model_version_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
+        name: "ck_quant_feedback_scheduler_state",
+        table: "quant_feedback_scheduler_state",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((research_profile_id ~ '^[a-z0-9_]+$'::text AND profile_hash ~ '^blake3:[0-9a-f]{64}$'::text AND feedback_policy_hash ~ '^blake3:[0-9a-f]{64}$'::text AND cadence_secs > 0 AND cooldown_secs >= cadence_secs AND next_due_at > 'epoch'::timestamp with time zone AND attempt >= 0 AND pause_revision >= 0 AND revision >= 0 AND ((lease_owner IS NULL) = (lease_expires_at IS NULL)) AND ((last_cycle_id IS NULL) = (last_cutoff IS NULL)) AND ((retry_at IS NULL) = (last_error IS NULL)) AND (last_error IS NULL OR (octet_length(last_error) >= 1 AND octet_length(last_error) <= 4096 AND btrim(last_error) <> ''::text)) AND (((paused = false) AND pause_reason_code IS NULL AND pause_note IS NULL) OR ((paused = true) AND pause_reason_code ~ '^[a-z][a-z0-9_]{0,127}$'::text AND octet_length(pause_note) >= 1 AND octet_length(pause_note) <= 1024 AND btrim(pause_note) <> ''::text)) AND updated_at >= created_at))",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_scheduler_profile",
+        table: "quant_feedback_scheduler_state",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (research_profile_artifact_id) REFERENCES public.research_profile_artifact(research_profile_artifact_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_scheduler_cycle",
+        table: "quant_feedback_scheduler_state",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (last_cycle_id) REFERENCES public.quant_feedback_cycle(feedback_cycle_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
         name: "ck_quant_research_job_feedback_lineage",
         table: "quant_research_job",
         kind: ConstraintKind::Check,
@@ -501,7 +610,7 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "ck_quant_feedback_stage_event",
         table: "quant_feedback_stage_event",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((event_sequence > 0 AND occurred_at <= created_at AND event_hash ~ '^blake3:[0-9a-f]{64}$'::text AND ((evidence_uri IS NULL AND evidence_hash IS NULL) OR (evidence_uri IS NOT NULL AND evidence_hash IS NOT NULL AND octet_length(evidence_uri) >= 1 AND octet_length(evidence_uri) <= 4096 AND evidence_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text AND evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((actor IS NULL) OR (octet_length(actor) >= 1 AND octet_length(actor) <= 256 AND actor = btrim(actor) AND actor !~ '[[:cntrl:]]'::text)) AND ((reason_code IS NULL) OR (reason_code ~ '^[a-z][a-z0-9_.]{0,127}$'::text)) AND (((event_kind = 'triggered'::qp_feedback_stage_event_kind) AND stage = 'trigger'::qp_feedback_stage AND research_job_id IS NULL AND actor IS NOT NULL AND reason_code IS NOT NULL) OR ((event_kind = 'cancellation_requested'::qp_feedback_stage_event_kind) AND stage <> 'trigger'::qp_feedback_stage AND actor IS NOT NULL AND reason_code IS NOT NULL) OR ((event_kind = ANY (ARRAY['job_linked'::qp_feedback_stage_event_kind, 'started'::qp_feedback_stage_event_kind])) AND stage <> 'trigger'::qp_feedback_stage AND research_job_id IS NOT NULL AND actor IS NULL AND reason_code IS NULL) OR ((event_kind = 'succeeded'::qp_feedback_stage_event_kind) AND stage <> 'trigger'::qp_feedback_stage AND research_job_id IS NOT NULL AND actor IS NULL AND reason_code IS NULL AND evidence_uri IS NOT NULL) OR ((event_kind = ANY (ARRAY['failed'::qp_feedback_stage_event_kind, 'cancelled'::qp_feedback_stage_event_kind, 'lease_recovered'::qp_feedback_stage_event_kind])) AND stage <> 'trigger'::qp_feedback_stage AND research_job_id IS NOT NULL AND actor IS NULL AND reason_code IS NOT NULL))))",
+        definition: "CHECK ((event_sequence > 0 AND occurred_at <= created_at AND event_hash ~ '^blake3:[0-9a-f]{64}$'::text AND ((evidence_uri IS NULL AND evidence_hash IS NULL) OR (evidence_uri IS NOT NULL AND evidence_hash IS NOT NULL AND octet_length(evidence_uri) >= 1 AND octet_length(evidence_uri) <= 4096 AND evidence_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text AND evidence_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND ((actor IS NULL) OR (octet_length(actor) >= 1 AND octet_length(actor) <= 256 AND actor = btrim(actor) AND actor !~ '[[:cntrl:]]'::text)) AND ((reason_code IS NULL) OR (reason_code ~ '^[a-z][a-z0-9_.]{0,127}$'::text)) AND (((event_kind = 'triggered'::qp_feedback_stage_event_kind) AND stage = 'trigger'::qp_feedback_stage AND trigger_family IS NOT NULL AND research_job_id IS NULL AND actor IS NOT NULL AND reason_code IS NOT NULL) OR ((event_kind = 'cancellation_requested'::qp_feedback_stage_event_kind) AND stage <> 'trigger'::qp_feedback_stage AND trigger_family IS NULL AND actor IS NOT NULL AND reason_code IS NOT NULL) OR ((event_kind = ANY (ARRAY['job_linked'::qp_feedback_stage_event_kind, 'started'::qp_feedback_stage_event_kind])) AND stage <> 'trigger'::qp_feedback_stage AND trigger_family IS NULL AND research_job_id IS NOT NULL AND actor IS NULL AND reason_code IS NULL) OR ((event_kind = 'succeeded'::qp_feedback_stage_event_kind) AND stage <> 'trigger'::qp_feedback_stage AND trigger_family IS NULL AND research_job_id IS NOT NULL AND actor IS NULL AND reason_code IS NULL AND evidence_uri IS NOT NULL) OR ((event_kind = ANY (ARRAY['failed'::qp_feedback_stage_event_kind, 'cancelled'::qp_feedback_stage_event_kind, 'lease_recovered'::qp_feedback_stage_event_kind])) AND stage <> 'trigger'::qp_feedback_stage AND trigger_family IS NULL AND research_job_id IS NOT NULL AND actor IS NULL AND reason_code IS NOT NULL))))",
     },
     ConstraintSpec {
         name: "fk_quant_feedback_stage_cycle",
@@ -516,10 +625,28 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "FOREIGN KEY (research_job_id, feedback_cycle_id, stage) REFERENCES public.quant_research_job(job_id, feedback_cycle_id, feedback_stage) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
+        name: "ck_quant_feedback_trigger_event",
+        table: "quant_feedback_trigger_event",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((event_hash ~ '^blake3:[0-9a-f]{64}$'::text AND occurred_at = created_at AND octet_length(actor_label) BETWEEN 1 AND 256 AND actor_label = btrim(actor_label) AND actor_label !~ '[[:cntrl:]]'::text AND reason_code ~ '^[a-z][a-z0-9_]{0,127}$'::text AND ((actor_user_id IS NULL AND actor_role IS NULL) OR (actor_user_id IS NOT NULL AND actor_role ~ '^[a-z][a-z0-9_]{0,63}$'::text))))",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_trigger_cycle",
+        table: "quant_feedback_trigger_event",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (feedback_cycle_id) REFERENCES public.quant_feedback_cycle(feedback_cycle_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_trigger_actor",
+        table: "quant_feedback_trigger_event",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (actor_user_id) REFERENCES public.user(id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
         name: "ck_quant_feedback_event_outbox",
         table: "quant_feedback_event_outbox",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((revision > 0 AND publish_attempts >= 0 AND created_at <= updated_at AND ((claim_owner IS NULL) = (lease_expires_at IS NULL)) AND (published_at IS NULL OR (published_at >= created_at AND claim_owner IS NULL AND lease_expires_at IS NULL AND last_error IS NULL)) AND (last_error IS NULL OR (octet_length(last_error) >= 1 AND octet_length(last_error) <= 2048 AND last_error = btrim(last_error) AND last_error !~ '[[:cntrl:]]'::text))))",
+        definition: "CHECK ((revision > 0 AND publish_attempts >= 0 AND created_at <= updated_at AND ((feedback_stage_event_id IS NULL) <> (feedback_trigger_event_id IS NULL)) AND ((claim_owner IS NULL) = (lease_expires_at IS NULL)) AND (published_at IS NULL OR (published_at >= created_at AND claim_owner IS NULL AND lease_expires_at IS NULL AND last_error IS NULL)) AND (last_error IS NULL OR (octet_length(last_error) >= 1 AND octet_length(last_error) <= 2048 AND last_error = btrim(last_error) AND last_error !~ '[[:cntrl:]]'::text))))",
     },
     ConstraintSpec {
         name: "ck_quant_feedback_promotion_permit",
@@ -534,6 +661,12 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "FOREIGN KEY (research_profile_artifact_id) REFERENCES public.research_profile_artifact(research_profile_artifact_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
+        name: "fk_quant_feedback_permit_cycle",
+        table: "quant_feedback_promotion_permit",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (feedback_cycle_id) REFERENCES public.quant_feedback_cycle(feedback_cycle_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
         name: "fk_quant_feedback_permit_snapshot",
         table: "quant_feedback_promotion_permit",
         kind: ConstraintKind::ForeignKey,
@@ -544,6 +677,18 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         table: "quant_feedback_promotion_permit",
         kind: ConstraintKind::ForeignKey,
         definition: "FOREIGN KEY (champion_model_version_id) REFERENCES public.quant_model_version(model_version_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_permit_candidate",
+        table: "quant_feedback_promotion_permit",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (candidate_model_version_id) REFERENCES public.quant_model_version(model_version_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "fk_quant_feedback_permit_manifest",
+        table: "quant_feedback_promotion_permit",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (candidate_manifest_id, candidate_model_version_id, candidate_manifest_hash, promotion_gate_hash) REFERENCES public.quant_model_candidate_manifest(manifest_id, model_version_id, manifest_hash, promotion_gate_hash) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
         name: "fk_quant_feedback_permit_issuer",
@@ -654,22 +799,28 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "CHECK (((jsonb_typeof(detail) = 'object'::text) AND (pg_column_size(detail) <= 65536)))",
     },
     ConstraintSpec {
-        name: "ck_policy_activation_model_promotion",
+        name: "ck_policy_activation_model_governance",
         table: "policy_activation",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((((activation_kind = 'model_promotion'::qp_policy_activation_kind) AND (promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (model_governance_audit_id IS NOT NULL)) OR ((activation_kind <> 'model_promotion'::qp_policy_activation_kind) AND (promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NULL))))",
+        definition: "CHECK ((((activation_kind = 'model_promotion'::qp_policy_activation_kind) AND (promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (model_governance_audit_id IS NOT NULL)) OR ((activation_kind = 'model_bootstrap'::qp_policy_activation_kind) AND (promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NOT NULL)) OR ((activation_kind <> ALL (ARRAY['model_promotion'::qp_policy_activation_kind, 'model_bootstrap'::qp_policy_activation_kind])) AND (promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NULL))))",
     },
     ConstraintSpec {
-        name: "ck_policy_activation_audit_promotion",
+        name: "ck_policy_activation_audit_model_governance",
         table: "policy_activation_audit",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((((promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NULL)) OR ((promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (model_governance_audit_id IS NOT NULL))))",
+        definition: "CHECK ((((promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NULL)) OR ((promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NOT NULL)) OR ((promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (model_governance_audit_id IS NOT NULL))))",
     },
     ConstraintSpec {
-        name: "ck_policy_activation_outbox_promotion",
+        name: "ck_policy_activation_outbox_model_governance",
         table: "policy_activation_event_outbox",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((((promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NULL)) OR ((promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (model_governance_audit_id IS NOT NULL))))",
+        definition: "CHECK ((((promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NULL)) OR ((promotion_permit_id IS NULL) AND (promotion_transaction_hash IS NULL) AND (model_governance_audit_id IS NOT NULL)) OR ((promotion_permit_id IS NOT NULL) AND (promotion_transaction_hash IS NOT NULL) AND (model_governance_audit_id IS NOT NULL))))",
+    },
+    ConstraintSpec {
+        name: "uq_policy_activation_model_governance",
+        table: "policy_activation",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (policy_activation_id, model_governance_audit_id)",
     },
     ConstraintSpec {
         name: "uq_policy_activation_promotion_binding",
@@ -700,6 +851,24 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         table: "policy_activation",
         kind: ConstraintKind::ForeignKey,
         definition: "FOREIGN KEY (model_governance_audit_id, promotion_permit_id, promotion_transaction_hash) REFERENCES quant_model_governance_audit(audit_id, promotion_permit_id, promotion_transaction_hash)",
+    },
+    ConstraintSpec {
+        name: "fk_policy_activation_model_governance_audit",
+        table: "policy_activation",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (model_governance_audit_id) REFERENCES quant_model_governance_audit(audit_id)",
+    },
+    ConstraintSpec {
+        name: "fk_policy_activation_audit_model_governance",
+        table: "policy_activation_audit",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (policy_activation_id, model_governance_audit_id) REFERENCES policy_activation(policy_activation_id, model_governance_audit_id)",
+    },
+    ConstraintSpec {
+        name: "fk_policy_activation_outbox_model_governance",
+        table: "policy_activation_event_outbox",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (policy_activation_id, model_governance_audit_id) REFERENCES policy_activation(policy_activation_id, model_governance_audit_id)",
     },
     ConstraintSpec {
         name: "ck_quant_model_governance_audit_detail_action",
@@ -738,16 +907,10 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "CHECK (((char_length(btrim(created_by_label)) >= 1) AND (char_length(btrim(created_by_label)) <= 256) AND ((created_by_role IS NULL) OR ((char_length(btrim(created_by_role)) >= 1) AND (char_length(btrim(created_by_role)) <= 128))) AND (char_length(btrim(reason)) >= 1) AND (char_length(btrim(reason)) <= 2048)))",
     },
     ConstraintSpec {
-        name: "ck_quant_model_version_quality_gate_report",
-        table: "quant_model_version",
-        kind: ConstraintKind::Check,
-        definition: "CHECK (((quality_gate_report IS NULL) OR ((jsonb_typeof(quality_gate_report) = 'object'::text) AND (((quality_gate_report ->> 'format_version'::text))::integer = 1) AND ((quality_gate_report -> 'subject'::text) ->> 'kind'::text) = 'model_version'::text AND ((((quality_gate_report -> 'subject'::text) ->> 'id'::text))::uuid = model_version_id) AND (jsonb_typeof((quality_gate_report -> 'gates'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'hard_failures'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'soft_warnings'::text)) = 'array'::text) AND (jsonb_typeof((quality_gate_report -> 'passed'::text)) = 'boolean'::text) AND ((quality_gate_report ->> 'report_hash'::text) ~ '^blake3:[0-9a-f]{64}$'::text))))",
-    },
-    ConstraintSpec {
         name: "ck_quant_model_version_serving_contract",
         table: "quant_model_version",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((jsonb_typeof(serving_contract) = 'object'::text) AND (serving_contract ?& ARRAY['contract_version'::text, 'contract_hash'::text, 'bindings'::text]) AND ((serving_contract - ARRAY['contract_version'::text, 'contract_hash'::text, 'bindings'::text]) = '{}'::jsonb) AND (jsonb_typeof((serving_contract -> 'contract_version'::text)) = 'number'::text) AND (((serving_contract ->> 'contract_version'::text))::numeric = 2::numeric) AND (jsonb_typeof((serving_contract -> 'contract_hash'::text)) = 'string'::text) AND (jsonb_typeof((serving_contract -> 'bindings'::text)) = 'object'::text) AND (octet_length(serving_contract_hash) = 32) AND ((serving_contract ->> 'contract_hash'::text) = ('blake3:'::text || encode(serving_contract_hash, 'hex'::text)))))",
+        definition: "CHECK (((jsonb_typeof(serving_contract) = 'object'::text) AND (serving_contract ?& ARRAY['contract_version'::text, 'contract_hash'::text, 'bindings'::text]) AND ((serving_contract - ARRAY['contract_version'::text, 'contract_hash'::text, 'bindings'::text]) = '{}'::jsonb) AND (jsonb_typeof((serving_contract -> 'contract_version'::text)) = 'number'::text) AND (((serving_contract ->> 'contract_version'::text))::numeric = 3::numeric) AND (jsonb_typeof((serving_contract -> 'contract_hash'::text)) = 'string'::text) AND (jsonb_typeof((serving_contract -> 'bindings'::text)) = 'object'::text) AND (octet_length(serving_contract_hash) = 32) AND ((serving_contract ->> 'contract_hash'::text) = ('blake3:'::text || encode(serving_contract_hash, 'hex'::text)))))",
     },
     ConstraintSpec {
         name: "ck_quant_model_version_training_objective",
@@ -774,6 +937,12 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "UNIQUE (recommendation_id, market_id, token_id)",
     },
     ConstraintSpec {
+        name: "ck_quant_recommendation_status_timeline",
+        table: "quant_recommendation",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((created_at <= status_changed_at) AND (valid_from <= valid_until))",
+    },
+    ConstraintSpec {
         name: "uq_quant_order_intent_execution_outcome_lineage",
         table: "quant_order_intent",
         kind: ConstraintKind::Unique,
@@ -798,64 +967,106 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         definition: "UNIQUE (position_id, order_intent_id, execution_account_id, market_id, token_id)",
     },
     ConstraintSpec {
-        name: "uq_quant_recommendation_execution_outcome_intent",
-        table: "quant_recommendation_execution_outcome",
-        kind: ConstraintKind::Unique,
-        definition: "UNIQUE (order_intent_id)",
-    },
-    ConstraintSpec {
-        name: "uq_quant_recommendation_execution_outcome_entry_order",
-        table: "quant_recommendation_execution_outcome",
+        name: "uq_quant_execution_attempt_outcome_entry_order",
+        table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::Unique,
         definition: "UNIQUE (entry_execution_order_id)",
     },
     ConstraintSpec {
-        name: "uq_quant_recommendation_execution_outcome_entry_reconciliation",
-        table: "quant_recommendation_execution_outcome",
+        name: "uq_quant_execution_attempt_outcome_entry_reconciliation",
+        table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::Unique,
         definition: "UNIQUE (entry_reconciliation_id)",
     },
     ConstraintSpec {
-        name: "uq_quant_recommendation_execution_outcome_position",
-        table: "quant_recommendation_execution_outcome",
+        name: "uq_quant_execution_attempt_outcome_position",
+        table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::Unique,
         definition: "UNIQUE (position_id)",
     },
     ConstraintSpec {
-        name: "fk_quant_recommendation_execution_outcome_recommendation_identity",
-        table: "quant_recommendation_execution_outcome",
+        name: "uq_quant_execution_attempt_outcome_hash",
+        table: "quant_execution_attempt_outcome",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (order_intent_id, outcome_hash)",
+    },
+    ConstraintSpec {
+        name: "fk_quant_execution_attempt_outcome_recommendation_identity",
+        table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::ForeignKey,
         definition: "FOREIGN KEY (recommendation_id, market_id, token_id) REFERENCES public.quant_recommendation(recommendation_id, market_id, token_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
-        name: "fk_quant_recommendation_execution_outcome_intent_lineage",
-        table: "quant_recommendation_execution_outcome",
+        name: "fk_quant_execution_attempt_outcome_intent_lineage",
+        table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::ForeignKey,
         definition: "FOREIGN KEY (order_intent_id, recommendation_id, execution_account_id, runtime_mode) REFERENCES public.quant_order_intent(order_intent_id, recommendation_id, execution_account_id, runtime_mode) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
-        name: "fk_quant_recommendation_execution_outcome_entry_order_lineage",
-        table: "quant_recommendation_execution_outcome",
+        name: "fk_quant_execution_attempt_outcome_entry_order_lineage",
+        table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::ForeignKey,
         definition: "FOREIGN KEY (entry_execution_order_id, order_intent_id, market_id, token_id) REFERENCES public.quant_execution_order(execution_order_id, order_intent_id, market_id, token_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
-        name: "fk_quant_recommendation_execution_outcome_entry_reconciliation_lineage",
-        table: "quant_recommendation_execution_outcome",
+        name: "fk_quant_execution_attempt_outcome_entry_reconciliation_lineage",
+        table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::ForeignKey,
         definition: "FOREIGN KEY (entry_reconciliation_id, entry_execution_order_id, order_intent_id) REFERENCES public.quant_reconciliation(reconciliation_id, execution_order_id, order_intent_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
-        name: "fk_quant_recommendation_execution_outcome_position_lineage",
-        table: "quant_recommendation_execution_outcome",
+        name: "fk_quant_execution_attempt_outcome_position_lineage",
+        table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::ForeignKey,
         definition: "FOREIGN KEY (position_id, order_intent_id, execution_account_id, market_id, token_id) REFERENCES public.quant_position(position_id, order_intent_id, execution_account_id, market_id, token_id) ON UPDATE NO ACTION ON DELETE NO ACTION",
     },
     ConstraintSpec {
-        name: "ck_quant_recommendation_execution_outcome_contract",
-        table: "quant_recommendation_execution_outcome",
+        name: "ck_quant_execution_attempt_outcome_contract",
+        table: "quant_execution_attempt_outcome",
         kind: ConstraintKind::Check,
-        definition: "CHECK (((char_length(market_id) > 0) AND (char_length(token_id) > 0) AND (runtime_mode = ANY (ARRAY['semi_auto'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode])) AND (requested_shares > (0)::numeric) AND (filled_shares >= (0)::numeric) AND (filled_shares <= requested_shares) AND ((entry_avg_price IS NULL) OR ((entry_avg_price >= (0)::numeric) AND (entry_avg_price <= (1)::numeric))) AND ((exit_avg_price IS NULL) OR ((exit_avg_price >= (0)::numeric) AND (exit_avg_price <= (1)::numeric))) AND ((entry_fee_usd IS NULL) OR (entry_fee_usd >= (0)::numeric)) AND ((exit_fee_usd IS NULL) OR (exit_fee_usd >= (0)::numeric)) AND ((settlement_payout_usd IS NULL) OR (settlement_payout_usd >= (0)::numeric)) AND ((max_adverse_excursion_bps IS NULL) OR (max_adverse_excursion_bps <= (0)::numeric)) AND ((max_favorable_excursion_bps IS NULL) OR (max_favorable_excursion_bps >= (0)::numeric)) AND (terminal_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND (execution_fact_schema_version > 0) AND (source_checkpoint_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (execution_fact_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (outcome_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((terminal_state = 'unfilled'::qp_recommendation_execution_terminal_state) AND (filled_shares = (0)::numeric) AND (no_fill_reason IS NOT NULL) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state])) AND (position_id IS NULL) AND (entry_avg_price IS NULL) AND (entry_filled_at IS NULL) AND (position_terminal_state IS NULL) AND (exit_reason IS NULL) AND (exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL) AND (settlement_payout_usd IS NULL) AND (realized_pnl_usd IS NULL) AND (max_adverse_excursion_bps IS NULL) AND (max_favorable_excursion_bps IS NULL)) OR ((terminal_state = ANY (ARRAY['partially_filled'::qp_recommendation_execution_terminal_state, 'fully_filled'::qp_recommendation_execution_terminal_state])) AND (no_fill_reason IS NULL) AND (position_id IS NOT NULL) AND (entry_avg_price IS NOT NULL) AND (entry_filled_at IS NOT NULL) AND (entry_filled_at <= terminal_at) AND (position_terminal_state = ANY (ARRAY['closed'::qp_position_ledger_state, 'settled'::qp_position_ledger_state])) AND (realized_pnl_usd IS NOT NULL) AND (((terminal_state = 'partially_filled'::qp_recommendation_execution_terminal_state) AND (filled_shares > (0)::numeric) AND (filled_shares < requested_shares) AND (entry_order_state = 'partially_filled'::qp_execution_order_state)) OR ((terminal_state = 'fully_filled'::qp_recommendation_execution_terminal_state) AND (filled_shares = requested_shares) AND (entry_order_state = 'filled'::qp_execution_order_state))) AND (((position_terminal_state = 'closed'::qp_position_ledger_state) AND (exit_reason IS NOT NULL) AND (exit_reason <> 'resolution_redeem'::qp_exit_reason) AND (exit_filled_shares = filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at = terminal_at) AND (settlement_payout_usd IS NULL)) OR ((position_terminal_state = 'settled'::qp_position_ledger_state) AND (exit_reason = 'resolution_redeem'::qp_exit_reason) AND (settlement_payout_usd IS NOT NULL) AND (((exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL)) OR ((exit_filled_shares > (0)::numeric) AND (exit_filled_shares < filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at IS NOT NULL) AND (exit_at <= terminal_at)))))))))",
+        definition: "CHECK (((char_length(market_id) > 0) AND (char_length(token_id) > 0) AND (runtime_mode = ANY (ARRAY['semi_auto'::qp_quant_runtime_mode, 'auto_execution'::qp_quant_runtime_mode])) AND (requested_shares > (0)::numeric) AND (filled_shares >= (0)::numeric) AND (filled_shares <= requested_shares) AND ((entry_avg_price IS NULL) OR ((entry_avg_price >= (0)::numeric) AND (entry_avg_price <= (1)::numeric))) AND ((exit_avg_price IS NULL) OR ((exit_avg_price >= (0)::numeric) AND (exit_avg_price <= (1)::numeric))) AND ((entry_fee_usd IS NULL) OR (entry_fee_usd >= (0)::numeric)) AND ((exit_fee_usd IS NULL) OR (exit_fee_usd >= (0)::numeric)) AND ((settlement_payout_usd IS NULL) OR (settlement_payout_usd >= (0)::numeric)) AND (terminal_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND (execution_fact_schema_version > 0) AND (source_checkpoint_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (execution_fact_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (outcome_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (((terminal_state = 'unfilled'::qp_execution_attempt_terminal_state) AND (filled_shares = (0)::numeric) AND (no_fill_reason IS NOT NULL) AND (entry_order_state = ANY (ARRAY['cancelled'::qp_execution_order_state, 'failed'::qp_execution_order_state])) AND (position_id IS NULL) AND (entry_avg_price IS NULL) AND (entry_filled_at IS NULL) AND (position_terminal_state IS NULL) AND (exit_reason IS NULL) AND (exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL) AND (settlement_payout_usd IS NULL) AND (realized_pnl_usd IS NULL)) OR ((terminal_state = ANY (ARRAY['partially_filled'::qp_execution_attempt_terminal_state, 'fully_filled'::qp_execution_attempt_terminal_state])) AND (no_fill_reason IS NULL) AND (position_id IS NOT NULL) AND (entry_avg_price IS NOT NULL) AND (entry_filled_at IS NOT NULL) AND (entry_filled_at <= terminal_at) AND (position_terminal_state = ANY (ARRAY['closed'::qp_position_ledger_state, 'settled'::qp_position_ledger_state])) AND (realized_pnl_usd IS NOT NULL) AND (((terminal_state = 'partially_filled'::qp_execution_attempt_terminal_state) AND (filled_shares > (0)::numeric) AND (filled_shares < requested_shares) AND (entry_order_state = 'partially_filled'::qp_execution_order_state)) OR ((terminal_state = 'fully_filled'::qp_execution_attempt_terminal_state) AND (filled_shares = requested_shares) AND (entry_order_state = 'filled'::qp_execution_order_state))) AND (((position_terminal_state = 'closed'::qp_position_ledger_state) AND (exit_reason IS NOT NULL) AND (exit_reason <> 'resolution_redeem'::qp_exit_reason) AND (exit_filled_shares = filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at = terminal_at) AND (settlement_payout_usd IS NULL)) OR ((position_terminal_state = 'settled'::qp_position_ledger_state) AND (exit_reason = 'resolution_redeem'::qp_exit_reason) AND (settlement_payout_usd IS NOT NULL) AND (((exit_filled_shares IS NULL) AND (exit_avg_price IS NULL) AND (exit_fee_usd IS NULL) AND (exit_at IS NULL)) OR ((exit_filled_shares > (0)::numeric) AND (exit_filled_shares < filled_shares) AND (exit_avg_price IS NOT NULL) AND (exit_at IS NOT NULL) AND (exit_at <= terminal_at)))))))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_execution_attempt_task_contract",
+        table: "quant_execution_attempt_reconciliation_task",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((attempt_count >= 0) AND (ready_at <= created_at) AND (created_at <= updated_at) AND ((last_error IS NULL) OR (char_length(btrim(last_error)) BETWEEN 1 AND 4096)) AND (((status = 'pending'::qp_outcome_reconciliation_task_status) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at IS NULL) AND (last_error IS NULL) AND (completed_at IS NULL)) OR ((status = 'delivering'::qp_outcome_reconciliation_task_status) AND (claim_owner IS NOT NULL) AND (lease_expires_at > updated_at) AND (next_attempt_at IS NULL) AND (completed_at IS NULL)) OR ((status = 'retrying'::qp_outcome_reconciliation_task_status) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at > updated_at) AND (last_error IS NOT NULL) AND (completed_at IS NULL)) OR ((status = 'completed'::qp_outcome_reconciliation_task_status) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at IS NULL) AND (last_error IS NULL) AND (completed_at IS NOT NULL) AND (completed_at <= updated_at))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_execution_rollup_task_contract",
+        table: "quant_execution_rollup_reconciliation_task",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((attempt_count >= 0) AND (ready_at <= created_at) AND (created_at <= updated_at) AND ((last_error IS NULL) OR (char_length(btrim(last_error)) BETWEEN 1 AND 4096)) AND (((status = 'pending'::qp_outcome_reconciliation_task_status) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at IS NULL) AND (last_error IS NULL) AND (completed_at IS NULL)) OR ((status = 'delivering'::qp_outcome_reconciliation_task_status) AND (claim_owner IS NOT NULL) AND (lease_expires_at > updated_at) AND (next_attempt_at IS NULL) AND (completed_at IS NULL)) OR ((status = 'retrying'::qp_outcome_reconciliation_task_status) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at > updated_at) AND (last_error IS NOT NULL) AND (completed_at IS NULL)) OR ((status = 'completed'::qp_outcome_reconciliation_task_status) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at IS NULL) AND (last_error IS NULL) AND (completed_at IS NOT NULL) AND (completed_at <= updated_at))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_resolution_outcome_task_contract",
+        table: "quant_resolution_outcome_reconciliation_task",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((attempt_count >= 0) AND (ready_at <= created_at) AND (created_at <= updated_at) AND ((last_error IS NULL) OR (char_length(btrim(last_error)) BETWEEN 1 AND 4096)) AND (((status = 'pending'::qp_outcome_reconciliation_task_status) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at IS NULL) AND (last_error IS NULL) AND (completed_at IS NULL)) OR ((status = 'delivering'::qp_outcome_reconciliation_task_status) AND (claim_owner IS NOT NULL) AND (lease_expires_at > updated_at) AND (next_attempt_at IS NULL) AND (completed_at IS NULL)) OR ((status = 'retrying'::qp_outcome_reconciliation_task_status) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at > updated_at) AND (last_error IS NOT NULL) AND (completed_at IS NULL)) OR ((status = 'completed'::qp_outcome_reconciliation_task_status) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at IS NULL) AND (last_error IS NULL) AND (completed_at IS NOT NULL) AND (completed_at <= updated_at))))",
+    },
+    ConstraintSpec {
+        name: "ck_quant_execution_rollup_contract",
+        table: "quant_recommendation_execution_rollup",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((intent_count >= 0) AND (attempt_count >= 0) AND (attempt_count <= intent_count) AND (unfilled_attempt_count >= 0) AND (partially_filled_attempt_count >= 0) AND (fully_filled_attempt_count >= 0) AND ((unfilled_attempt_count + partially_filled_attempt_count + fully_filled_attempt_count) = attempt_count) AND (total_requested_shares >= (0)::numeric) AND (total_filled_shares >= (0)::numeric) AND (total_filled_shares <= total_requested_shares) AND ((total_entry_fee_usd IS NULL) OR (total_entry_fee_usd >= (0)::numeric)) AND ((total_exit_fee_usd IS NULL) OR (total_exit_fee_usd >= (0)::numeric)) AND ((total_settlement_payout_usd IS NULL) OR (total_settlement_payout_usd >= (0)::numeric)) AND (((attempt_count = 0) AND (first_attempt_terminal_at IS NULL) AND (last_attempt_terminal_at IS NULL)) OR ((attempt_count > 0) AND (first_attempt_terminal_at IS NOT NULL) AND (last_attempt_terminal_at IS NOT NULL) AND (first_attempt_terminal_at <= last_attempt_terminal_at) AND (last_attempt_terminal_at <= terminal_at))) AND (terminal_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND (attempt_set_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (rollup_hash ~ '^blake3:[0-9a-f]{64}$'::text))",
+    },
+    ConstraintSpec {
+        name: "uq_quant_execution_rollup_attempt_intent",
+        table: "quant_recommendation_execution_rollup_attempt",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (order_intent_id)",
+    },
+    ConstraintSpec {
+        name: "fk_quant_execution_rollup_attempt_hash",
+        table: "quant_recommendation_execution_rollup_attempt",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (order_intent_id, attempt_outcome_hash) REFERENCES public.quant_execution_attempt_outcome(order_intent_id, outcome_hash) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "ck_quant_execution_rollup_attempt_contract",
+        table: "quant_recommendation_execution_rollup_attempt",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((sequence >= 0) AND (terminal_at <= created_at) AND (attempt_outcome_hash ~ '^blake3:[0-9a-f]{64}$'::text))",
     },
     ConstraintSpec {
         name: "fk_quant_recommendation_resolution_outcome_identity",
@@ -868,6 +1079,54 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         table: "quant_recommendation_resolution_outcome",
         kind: ConstraintKind::Check,
         definition: "CHECK (((char_length(market_id) > 0) AND (char_length(token_id) > 0) AND (resolved_at <= source_observed_at) AND (source_observed_at <= available_at) AND (available_at <= created_at) AND (resolution_fact_log_index >= 0) AND (resolution_fact_schema_version > 0) AND (source_checkpoint_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (resolution_fact_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (outcome_hash ~ '^blake3:[0-9a-f]{64}$'::text) AND (token_payout_ratio >= (0)::numeric) AND (token_payout_ratio <= (1)::numeric) AND (((resolution_kind = 'winner_take_all'::qp_recommendation_resolution_kind) AND (token_payout_ratio = ANY (ARRAY[(0)::numeric, (1)::numeric]))) OR ((resolution_kind = 'split_payout'::qp_recommendation_resolution_kind) AND (token_payout_ratio > (0)::numeric) AND (token_payout_ratio < (1)::numeric)))))",
+    },
+    ConstraintSpec {
+        name: "uq_quant_resolution_inbox_checkpoint",
+        table: "quant_resolution_observation_inbox",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (source_checkpoint_hash)",
+    },
+    ConstraintSpec {
+        name: "uq_quant_resolution_inbox_raw_payload",
+        table: "quant_resolution_observation_inbox",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (raw_payload_hash)",
+    },
+    ConstraintSpec {
+        name: "uq_quant_resolution_inbox_source_event",
+        table: "quant_resolution_observation_inbox",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (transaction_hash, log_index)",
+    },
+    ConstraintSpec {
+        name: "uq_quant_resolution_inbox_lineage",
+        table: "quant_resolution_observation_inbox",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (resolution_observation_id, source_checkpoint_hash)",
+    },
+    ConstraintSpec {
+        name: "ck_quant_resolution_inbox_contract",
+        table: "quant_resolution_observation_inbox",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((source_id = 'polymarket_ctf_resolution') AND (instrument_key = 'POLYMARKET_CTF:137:CONDITION_RESOLUTION') AND (char_length(market_id) > 0) AND (char_length(btrim(question_id)) > 0) AND (denominator ~ '^(0|[1-9][0-9]*)$') AND (denominator <> '0') AND (yes_numerator ~ '^(0|[1-9][0-9]*)$') AND (no_numerator ~ '^(0|[1-9][0-9]*)$') AND (yes_payout_ratio >= 0) AND (yes_payout_ratio <= 1) AND (no_payout_ratio >= 0) AND (no_payout_ratio <= 1) AND ((yes_payout_ratio + no_payout_ratio) = 1) AND (block_number > 0) AND (log_index >= 0) AND (provider_revision = block_hash) AND (resolved_at <= available_at) AND (available_at = created_at) AND (source_checkpoint_hash ~ '^blake3:[0-9a-f]{64}$') AND (raw_payload_hash ~ '^blake3:[0-9a-f]{64}$') AND (raw_uri LIKE 'polygon://resolution/%'))",
+    },
+    ConstraintSpec {
+        name: "uq_quant_resolution_projection_checkpoint",
+        table: "quant_resolution_observation_projection",
+        kind: ConstraintKind::Unique,
+        definition: "UNIQUE (source_checkpoint_hash)",
+    },
+    ConstraintSpec {
+        name: "fk_quant_resolution_projection_lineage",
+        table: "quant_resolution_observation_projection",
+        kind: ConstraintKind::ForeignKey,
+        definition: "FOREIGN KEY (resolution_observation_id, source_checkpoint_hash) REFERENCES public.quant_resolution_observation_inbox(resolution_observation_id, source_checkpoint_hash) ON UPDATE NO ACTION ON DELETE NO ACTION",
+    },
+    ConstraintSpec {
+        name: "ck_quant_resolution_projection_contract",
+        table: "quant_resolution_observation_projection",
+        kind: ConstraintKind::Check,
+        definition: "CHECK ((attempt_count >= 0) AND ((last_error IS NULL) OR (char_length(btrim(last_error)) BETWEEN 1 AND 4096)) AND (((status = 'pending_mapping'::qp_resolution_projection_status) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at IS NOT NULL) AND (last_error IS NULL) AND (canonical_fact_hash IS NULL) AND (verified_at IS NULL)) OR ((status = 'delivering'::qp_resolution_projection_status) AND (claim_owner IS NOT NULL) AND (lease_expires_at IS NOT NULL) AND (next_attempt_at IS NULL) AND (canonical_fact_hash IS NULL) AND (verified_at IS NULL)) OR ((status = ANY (ARRAY['retrying'::qp_resolution_projection_status, 'quarantined'::qp_resolution_projection_status])) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at IS NOT NULL) AND (last_error IS NOT NULL) AND (canonical_fact_hash IS NULL) AND (verified_at IS NULL)) OR ((status = 'failed'::qp_resolution_projection_status) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at IS NULL) AND (last_error IS NOT NULL) AND (canonical_fact_hash IS NULL) AND (verified_at IS NULL)) OR ((status = 'verified'::qp_resolution_projection_status) AND (claim_owner IS NULL) AND (lease_expires_at IS NULL) AND (next_attempt_at IS NULL) AND (last_error IS NULL) AND (canonical_fact_hash ~ '^blake3:[0-9a-f]{64}$') AND (verified_at IS NOT NULL))))",
     },
     ConstraintSpec {
         name: "quant_recommendation_report_capital_base_usd_check",
@@ -1221,13 +1480,61 @@ const CONSTRAINTS: &[ConstraintSpec] = &[
         name: "ck_quant_research_job_result_reference",
         table: "quant_research_job",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((((result_kind IS NULL) = (result_ref IS NULL)) AND ((status = 'succeeded'::qp_research_job_status) OR ((result_kind IS NULL) AND (result_ref IS NULL))) AND ((result_kind IS NULL) OR ((kind = 'dataset_build'::qp_research_job_kind) AND (result_kind = 'training_dataset'::qp_research_job_result_kind)) OR ((kind = 'model_train'::qp_research_job_kind) AND (result_kind = 'model_version'::qp_research_job_result_kind)) OR ((kind = 'backtest'::qp_research_job_kind) AND (result_kind = 'backtest_report'::qp_research_job_result_kind)) OR ((kind = 'cpcv_backtest'::qp_research_job_kind) AND (result_kind = 'backtest_path_set'::qp_research_job_result_kind)) OR ((kind = ANY (ARRAY['bias_table_fit'::qp_research_job_kind, 'model_calibration_fit'::qp_research_job_kind])) AND (result_kind = 'calibration_artifact'::qp_research_job_result_kind)) OR ((kind = 'feature_parity'::qp_research_job_kind) AND (result_kind = 'feature_parity_run'::qp_research_job_result_kind)) OR ((kind = 'feedback_coverage'::qp_research_job_kind) AND (result_kind = 'feedback_coverage_artifact'::qp_research_job_result_kind)) OR ((kind = 'feedback_drift'::qp_research_job_kind) AND (result_kind = 'feedback_drift_artifact'::qp_research_job_result_kind)) OR ((kind = ANY (ARRAY['feedback_dataset_seal'::qp_research_job_kind, 'feedback_training'::qp_research_job_kind, 'feedback_calibration'::qp_research_job_kind, 'feedback_cpcv'::qp_research_job_kind])) AND (result_kind = 'feedback_learning_stage_artifact'::qp_research_job_result_kind)) OR ((kind = 'feedback_comparison'::qp_research_job_kind) AND (result_kind = 'feedback_comparison_artifact'::qp_research_job_result_kind)) OR ((kind = 'feedback_shadow_replay'::qp_research_job_kind) AND (result_kind = 'feedback_shadow_replay_artifact'::qp_research_job_result_kind)) OR ((kind = 'feedback_decision'::qp_research_job_kind) AND (result_kind = 'feedback_decision_artifact'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_fit'::qp_research_job_kind) AND (result_kind = 'trade_policy_artifact'::qp_research_job_result_kind)) OR ((kind = 'trade_policy_validation'::qp_research_job_kind) AND (result_kind = 'trade_policy_validation_run'::qp_research_job_result_kind)))))",
+        definition: concat!(
+            "CHECK ((((result_kind IS NULL) = (result_ref IS NULL)) ",
+            "AND ((status = 'succeeded'::qp_research_job_status) OR ((result_kind IS NULL) AND (result_ref IS NULL))) ",
+            "AND ((result_kind IS NULL) ",
+            "OR ((kind = 'dataset_build'::qp_research_job_kind) AND (result_kind = 'training_dataset'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'model_train'::qp_research_job_kind) AND (result_kind = 'model_version'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'backtest'::qp_research_job_kind) AND (result_kind = 'backtest_report'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'cpcv_backtest'::qp_research_job_kind) AND (result_kind = 'backtest_path_set'::qp_research_job_result_kind)) ",
+            "OR ((kind = ANY (ARRAY['bias_table_fit'::qp_research_job_kind, 'model_calibration_fit'::qp_research_job_kind])) AND (result_kind = 'calibration_artifact'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'feature_parity'::qp_research_job_kind) AND (result_kind = 'feature_parity_run'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'feedback_truth_freeze'::qp_research_job_kind) AND (result_kind = 'feedback_truth_freeze_artifact'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'feedback_coverage'::qp_research_job_kind) AND (result_kind = 'feedback_coverage_artifact'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'feedback_attribution_plan'::qp_research_job_kind) AND (result_kind = 'feedback_attribution_plan_artifact'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'feedback_drift'::qp_research_job_kind) AND (result_kind = 'feedback_drift_artifact'::qp_research_job_result_kind)) ",
+            "OR ((kind = ANY (ARRAY['feedback_dataset_seal'::qp_research_job_kind, 'feedback_training'::qp_research_job_kind, 'feedback_calibration'::qp_research_job_kind, 'feedback_cpcv'::qp_research_job_kind])) AND (result_kind = 'feedback_learning_stage_artifact'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'feedback_validation'::qp_research_job_kind) AND (result_kind = 'feedback_validation_artifact'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'feedback_comparison'::qp_research_job_kind) AND (result_kind = 'feedback_comparison_artifact'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'feedback_shadow'::qp_research_job_kind) AND (result_kind = 'feedback_shadow_artifact'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'feedback_decision'::qp_research_job_kind) AND (result_kind = 'feedback_decision_artifact'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'trade_policy_fit'::qp_research_job_kind) AND (result_kind = 'trade_policy_artifact'::qp_research_job_result_kind)) ",
+            "OR ((kind = 'trade_policy_validation'::qp_research_job_kind) AND (result_kind = 'trade_policy_validation_run'::qp_research_job_result_kind)))))"
+        ),
     },
     ConstraintSpec {
         name: "ck_quant_research_job_artifact_reference",
         table: "quant_research_job",
         kind: ConstraintKind::Check,
-        definition: "CHECK ((((result_artifact_uri IS NULL) = (result_artifact_hash IS NULL)) AND ((result_artifact_uri IS NULL) OR ((octet_length(result_artifact_uri) >= 1) AND (octet_length(result_artifact_uri) <= 4096) AND (result_artifact_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text))) AND ((result_artifact_hash IS NULL) OR (result_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text)) AND (((result_kind = ANY (ARRAY['feedback_coverage_artifact'::qp_research_job_result_kind, 'feedback_drift_artifact'::qp_research_job_result_kind, 'feedback_learning_stage_artifact'::qp_research_job_result_kind, 'feedback_comparison_artifact'::qp_research_job_result_kind, 'feedback_shadow_replay_artifact'::qp_research_job_result_kind, 'feedback_decision_artifact'::qp_research_job_result_kind])) AND (result_artifact_uri IS NOT NULL)) OR ((result_kind <> ALL (ARRAY['feedback_coverage_artifact'::qp_research_job_result_kind, 'feedback_drift_artifact'::qp_research_job_result_kind, 'feedback_learning_stage_artifact'::qp_research_job_result_kind, 'feedback_comparison_artifact'::qp_research_job_result_kind, 'feedback_shadow_replay_artifact'::qp_research_job_result_kind, 'feedback_decision_artifact'::qp_research_job_result_kind])) AND (result_artifact_uri IS NULL)) OR ((result_kind IS NULL) AND (result_artifact_uri IS NULL)))))",
+        definition: concat!(
+            "CHECK ((((result_artifact_uri IS NULL) = (result_artifact_hash IS NULL)) ",
+            "AND ((result_artifact_uri IS NULL) OR ((octet_length(result_artifact_uri) >= 1) AND (octet_length(result_artifact_uri) <= 4096) AND (result_artifact_uri ~ '^[a-z][a-z0-9+.-]*://.+$'::text))) ",
+            "AND ((result_artifact_hash IS NULL) OR (result_artifact_hash ~ '^blake3:[0-9a-f]{64}$'::text)) ",
+            "AND (((result_kind = ANY (ARRAY[",
+            "'feedback_truth_freeze_artifact'::qp_research_job_result_kind, ",
+            "'feedback_coverage_artifact'::qp_research_job_result_kind, ",
+            "'feedback_attribution_plan_artifact'::qp_research_job_result_kind, ",
+            "'feedback_drift_artifact'::qp_research_job_result_kind, ",
+            "'feedback_learning_stage_artifact'::qp_research_job_result_kind, ",
+            "'feedback_validation_artifact'::qp_research_job_result_kind, ",
+            "'feedback_comparison_artifact'::qp_research_job_result_kind, ",
+            "'feedback_shadow_artifact'::qp_research_job_result_kind, ",
+            "'feedback_decision_artifact'::qp_research_job_result_kind",
+            "])) AND (result_artifact_uri IS NOT NULL)) ",
+            "OR ((result_kind <> ALL (ARRAY[",
+            "'feedback_truth_freeze_artifact'::qp_research_job_result_kind, ",
+            "'feedback_coverage_artifact'::qp_research_job_result_kind, ",
+            "'feedback_attribution_plan_artifact'::qp_research_job_result_kind, ",
+            "'feedback_drift_artifact'::qp_research_job_result_kind, ",
+            "'feedback_learning_stage_artifact'::qp_research_job_result_kind, ",
+            "'feedback_validation_artifact'::qp_research_job_result_kind, ",
+            "'feedback_comparison_artifact'::qp_research_job_result_kind, ",
+            "'feedback_shadow_artifact'::qp_research_job_result_kind, ",
+            "'feedback_decision_artifact'::qp_research_job_result_kind",
+            "])) AND (result_artifact_uri IS NULL)) ",
+            "OR ((result_kind IS NULL) AND (result_artifact_uri IS NULL)))))"
+        ),
     },
     ConstraintSpec {
         name: "ck_quant_research_job_acting_role",
@@ -1938,9 +2245,17 @@ mod tests {
         assert!(parent_lineage.contains("(parent_job_id, feedback_cycle_id, feedback_stage)"));
         assert!(parent_lineage.contains("(job_id, feedback_cycle_id, feedback_stage)"));
         let job_result = constraint("ck_quant_research_job_result_reference").definition;
-        assert!(job_result.contains(
-            "(kind = 'feedback_decision'::qp_research_job_kind) AND (result_kind = 'feedback_decision_artifact'::qp_research_job_result_kind)"
-        ));
+        for binding in [
+            "(kind = 'feedback_truth_freeze'::qp_research_job_kind) AND (result_kind = 'feedback_truth_freeze_artifact'::qp_research_job_result_kind)",
+            "(kind = 'feedback_attribution_plan'::qp_research_job_kind) AND (result_kind = 'feedback_attribution_plan_artifact'::qp_research_job_result_kind)",
+            "(kind = 'feedback_validation'::qp_research_job_kind) AND (result_kind = 'feedback_validation_artifact'::qp_research_job_result_kind)",
+            "(kind = 'feedback_decision'::qp_research_job_kind) AND (result_kind = 'feedback_decision_artifact'::qp_research_job_result_kind)",
+        ] {
+            assert!(
+                job_result.contains(binding),
+                "missing research-job result binding {binding}"
+            );
+        }
         let job_artifact = constraint("ck_quant_research_job_artifact_reference").definition;
         for binding in [
             "(result_artifact_uri IS NULL) = (result_artifact_hash IS NULL)",
@@ -1948,11 +2263,14 @@ mod tests {
             "octet_length(result_artifact_uri) <= 4096",
             "^[a-z][a-z0-9+.-]*://.+$",
             "^blake3:[0-9a-f]{64}$",
+            "feedback_truth_freeze_artifact",
             "feedback_coverage_artifact",
+            "feedback_attribution_plan_artifact",
             "feedback_drift_artifact",
             "feedback_learning_stage_artifact",
+            "feedback_validation_artifact",
             "feedback_comparison_artifact",
-            "feedback_shadow_replay_artifact",
+            "feedback_shadow_artifact",
             "feedback_decision_artifact",
         ] {
             assert!(
@@ -1988,6 +2306,11 @@ mod tests {
         let outbox = constraint("ck_quant_feedback_event_outbox").definition;
         assert!(outbox.contains("octet_length(last_error) >= 1"));
         assert!(outbox.contains("octet_length(last_error) <= 2048"));
+        assert!(
+            outbox.contains(
+                "(feedback_stage_event_id IS NULL) <> (feedback_trigger_event_id IS NULL)"
+            )
+        );
         assert!(!outbox.contains("octet_length(last_error) BETWEEN"));
 
         let job = constraint("ck_quant_research_job_artifact_reference").definition;

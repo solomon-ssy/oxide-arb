@@ -2,7 +2,9 @@
 
 use sea_orm::entity::prelude::*;
 
-use super::sea_orm_active_enums::{QpFeedbackStage, QpFeedbackStageEventKind};
+use super::sea_orm_active_enums::{
+    QpFeedbackStage, QpFeedbackStageEventKind, QpFeedbackTriggerFamily,
+};
 
 #[sea_orm::model]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -14,6 +16,7 @@ pub struct Model {
     pub event_sequence: i64,
     pub stage: QpFeedbackStage,
     pub event_kind: QpFeedbackStageEventKind,
+    pub trigger_family: Option<QpFeedbackTriggerFamily>,
     pub research_job_id: Option<Uuid>,
     pub actor: Option<String>,
     pub reason_code: Option<String>,
